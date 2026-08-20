@@ -145,6 +145,7 @@ fn epistemic_projection(
     identity: IdentityConstitutionV1,
     state_digest: Digest,
     revision: u64,
+    turn_id: Id128,
 ) -> ae_epistemic_state::EpistemicProjectionV1 {
     let binding = EpistemicSourceBindingV1::new(
         ScopeRef {
@@ -153,7 +154,7 @@ fn epistemic_projection(
             relation_token: Some([3; 16]),
             session_token: [4; 16],
         },
-        TURN_ID,
+        turn_id,
         state_digest,
         revision,
         identity,
@@ -181,7 +182,7 @@ fn epistemic_projection(
     compile_epistemic_projection_v1(&EpistemicProjectionInputV1::new(
         binding,
         CausalRef {
-            turn_id: TURN_ID,
+            turn_id,
             action_id: Some(ACTION_ID),
             delivery_id: None,
             claim_id: Some([81; 16]),
@@ -345,7 +346,8 @@ fn pre_output_update(
         8,
     )
     .expect("soma classification ingress");
-    let epistemic = epistemic_projection(identity, source_state_digest, revision);
+    let epistemic =
+        epistemic_projection(identity, source_state_digest, revision, transition.turn_id);
 
     let update = PreOutputProjectionUpdateV1::new(
         revision,
@@ -448,6 +450,27 @@ fn deliberately_nonmatching_typed_input() -> R7PreOutputProjectionInputV1 {
     let update = pre_output_update(constitution.clone(), &binding, None, None, None, None);
     R7PreOutputProjectionInputV1::new(identity_capsule(constitution), update)
         .expect("valid typed identity")
+}
+
+#[allow(dead_code)]
+pub(crate) fn matching_pre_output_input(
+    revision: u64,
+    state_after: Digest,
+    turn_id: Id128,
+    scope_digest: Digest,
+    turn_binding: Digest,
+) -> R7PreOutputProjectionInputV1 {
+    let constitution = identity(41);
+    let binding = FixtureSemanticBinding {
+        revision,
+        state_after,
+        turn_id,
+        scope_digest,
+        turn_binding,
+    };
+    let update = pre_output_update(constitution.clone(), &binding, None, None, None, None);
+    R7PreOutputProjectionInputV1::new(identity_capsule(constitution), update)
+        .expect("production-bound typed input")
 }
 
 fn closed_stimulus(base_revision: u64, positive: i64) -> CanonicalEvent {

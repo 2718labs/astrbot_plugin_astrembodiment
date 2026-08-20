@@ -18,7 +18,7 @@ use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph, Synapse,
     EDGE_CAPACITY, NEURON_SLOTS,
 };
-use ae_store::{ClaimOutcome, GenesisCommit, Store, StoreError};
+use ae_store::{ClaimOutcome, GenesisCommit, StatefulCommit, Store, StoreError};
 use std::path::Path;
 use thiserror::Error;
 
@@ -50,6 +50,8 @@ pub enum RuntimeError {
     Closed,
     #[error("invalid neural state")]
     InvalidNeuralState,
+    #[error("R7 transition error: {0}")]
+    R7(#[from] r7::RuntimeError),
 }
 
 #[derive(Debug)]
@@ -60,6 +62,23 @@ pub struct ApplyDecision {
     /// True when this exact event had already been applied; the state was not
     /// changed and the returned receipt is the originally committed one.
     pub deduplicated: bool,
+}
+
+/// Result of the one supported production R7 semantic transition. Its receipt
+/// is always the root canonical receipt that was committed to SQLite. An exact
+/// retry returns no second one-shot wire.
+pub struct UserStimulusDecisionV1 {
+    pub contract: ActionContract,
+    pub receipt: TransitionReceipt,
+    pub revision: u64,
+    pub deduplicated: bool,
+    private_projection_wire: Option<r7::PrivateProjectionPayloadWireV1>,
+}
+
+impl UserStimulusDecisionV1 {
+    pub fn into_private_projection_wire(self) -> Option<r7::PrivateProjectionPayloadWireV1> {
+        self.private_projection_wire
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -92,10 +111,6 @@ struct HotBrain {
 pub struct AstrRuntime {
     store: Store,
     hot: Option<HotBrain>,
-    // This is deliberately independent of the durable G0 store.  R7 owns its
-    // typed semantic transaction and opaque wire; the legacy shell cannot
-    // construct, inspect, or mutate that transaction directly.
-    r7_runtime: r7::AstrRuntime,
 }
 
 fn fixed_zero_vector() -> InvariantResiduals {
@@ -362,12 +377,58 @@ fn decode_hot_state_v1(
     Ok((field, graph))
 }
 
+fn canonical_event_from_r7(
+    event: &ae_contracts::r7::CanonicalEvent,
+) -> Result<CanonicalEvent, r7::RuntimeError> {
+    let ae_contracts::r7::CanonicalEvent::UserStimulus(stimulus) = event else {
+        return Err(r7::RuntimeError::UnsupportedEvent);
+    };
+    Ok(CanonicalEvent::UserStimulus(ae_contracts::UserStimulus {
+        event_id: stimulus.event_id,
+        scope: ScopeRef {
+            bot_token: stimulus.scope.bot_token,
+            persona_token: stimulus.scope.persona_token,
+            relation_token: stimulus.scope.relation_token,
+            session_token: stimulus.scope.session_token,
+        },
+        causal: ae_contracts::CausalRef {
+            turn_id: stimulus.causal.turn_id,
+            action_id: stimulus.causal.action_id,
+            delivery_id: stimulus.causal.delivery_id,
+            claim_id: stimulus.causal.claim_id,
+            base_revision: stimulus.causal.base_revision,
+        },
+        observed_at_ms: stimulus.observed_at_ms,
+        evidence: ae_contracts::SemanticEstimate {
+            schema_version: stimulus.evidence.schema_version,
+            dimensions: ae_contracts::EvidenceVector {
+                positive: stimulus.evidence.dimensions.positive,
+                affiliation: stimulus.evidence.dimensions.affiliation,
+                harm: stimulus.evidence.dimensions.harm,
+                boundary: stimulus.evidence.dimensions.boundary,
+                repair: stimulus.evidence.dimensions.repair,
+                repetition: stimulus.evidence.dimensions.repetition,
+                new_information: stimulus.evidence.dimensions.new_information,
+                constraint_instability: stimulus.evidence.dimensions.constraint_instability,
+                epistemic_conflict: stimulus.evidence.dimensions.epistemic_conflict,
+                self_responsibility: stimulus.evidence.dimensions.self_responsibility,
+                other_responsibility: stimulus.evidence.dimensions.other_responsibility,
+                hostility: stimulus.evidence.dimensions.hostility,
+                publicness: stimulus.evidence.dimensions.publicness,
+                engagement: stimulus.evidence.dimensions.engagement,
+                rejection: stimulus.evidence.dimensions.rejection,
+            },
+            estimator_confidence: stimulus.evidence.estimator_confidence,
+            estimator_digest: stimulus.evidence.estimator_digest,
+        },
+    }))
+}
+
 impl AstrRuntime {
     pub fn open(path: &Path) -> Result<Self, RuntimeError> {
         Ok(Self {
             store: Store::open(path)?,
             hot: None,
-            r7_runtime: r7::AstrRuntime::scaffold(),
         })
     }
 
@@ -379,9 +440,156 @@ impl AstrRuntime {
         &mut self,
         event: &ae_contracts::r7::CanonicalEvent,
         input: &r7::R7PreOutputProjectionInputV1,
-    ) -> Result<r7::RuntimeDecision, r7::RuntimeError> {
-        self.r7_runtime
-            .apply_user_stimulus_with_private_projection_wire_v1(event, input)
+    ) -> Result<UserStimulusDecisionV1, RuntimeError> {
+        let root_event = canonical_event_from_r7(event)?;
+        let CanonicalEvent::UserStimulus(stimulus) = &root_event else {
+            unreachable!("the R7 conversion admits only user stimuli");
+        };
+        let scope = stimulus.scope.clone();
+        let (
+            hot_bot_token,
+            hot_persona_token,
+            persona_scope,
+            hot_revision,
+            formula_digest,
+            manifest_digest,
+            initial_snapshot_digest,
+            field,
+            graph,
+        ) = {
+            let hot = self.hot_for(&scope)?;
+            (
+                hot.bot_token,
+                hot.persona_token,
+                hot.persona_scope,
+                hot.revision,
+                hot.formula_digest,
+                hot.identity.manifest_digest,
+                hot.initial_snapshot_digest,
+                hot.field.clone(),
+                hot.graph.clone(),
+            )
+        };
+        if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
+            return Err(RuntimeError::GenesisManifestMismatch);
+        }
+
+        let event_bytes = wire::encode_event(&root_event);
+        let event_digest = wire::event_digest(&root_event);
+        let contract =
+            noop_action_contract(&manifest_digest, &event_digest, stimulus.causal.turn_id);
+        if let Some(row) = self.store.lookup_event(&persona_scope, &event_digest)? {
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            return Ok(UserStimulusDecisionV1 {
+                contract,
+                receipt,
+                revision: row.revision,
+                deduplicated: true,
+                private_projection_wire: None,
+            });
+        }
+        if stimulus.causal.base_revision != hot_revision {
+            return Err(RuntimeError::StaleCausalBase {
+                expected: hot_revision,
+                actual: stimulus.causal.base_revision,
+            });
+        }
+
+        let prepared = r7::prepare_production_user_stimulus_transition_v1(
+            event,
+            &field,
+            &graph,
+            hot_revision,
+        )?;
+        let next_revision = hot_revision
+            .checked_add(1)
+            .ok_or(r7::RuntimeError::RevisionOverflow)?;
+        let state_before = state_digest(&field, &formula_digest);
+        let state_after = state_digest(&prepared.next_field, &formula_digest);
+        if state_before == state_after {
+            return Err(r7::RuntimeError::NativeStateUnchanged.into());
+        }
+        let graph_after = graph_digest(&graph);
+        let authority_digest = authority_projection_digest(&root_event);
+        let projection_scope = wire::scope_digest(&scope);
+        let wire = r7::compile_and_validate_production_private_projection_wire_v1(
+            event,
+            next_revision,
+            state_after,
+            projection_scope,
+            event_digest,
+            authority_digest,
+            input,
+        )?;
+        let state_bytes = encode_hot_state_v1(&formula_digest, &prepared.next_field, &graph);
+        let _ = decode_hot_state_v1(&state_bytes, &formula_digest, &state_after, &graph_after)?;
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest,
+            scope_digest: persona_scope,
+            event_digest,
+            authority_digest,
+            base_revision: hot_revision,
+            next_revision,
+            state_before,
+            state_after,
+            graph_after,
+            action_contract: Some(wire::action_contract_digest(&contract)),
+            active_nodes: prepared.active_nodes,
+            active_edges: graph.edges.len() as u32,
+            residuals: fixed_zero_vector(),
+            status: CommitStatus::Committed,
+        };
+        let chain_seed = self
+            .store
+            .last_chain_digest(&persona_scope)?
+            .unwrap_or(initial_snapshot_digest);
+        let commit = StatefulCommit {
+            journal: CommitEnvelope {
+                event_kind: wire::event_kind_name(&root_event).to_owned(),
+                event_bytes,
+                receipt: receipt.clone(),
+                chain_seed,
+                delta_bytes: vec![],
+            },
+            state_bytes,
+        };
+
+        match self.store.commit_stateful_journal(&commit) {
+            Ok((revision, _row)) => {
+                if let Some(hot) = self.hot.as_mut() {
+                    hot.field = prepared.next_field;
+                    hot.graph = graph;
+                    hot.revision = revision;
+                }
+                Ok(UserStimulusDecisionV1 {
+                    contract,
+                    receipt,
+                    revision,
+                    deduplicated: false,
+                    private_projection_wire: Some(wire),
+                })
+            }
+            Err(StoreError::DuplicateEvent(revision)) => {
+                let row = self
+                    .store
+                    .lookup_event(&persona_scope, &event_digest)?
+                    .ok_or(RuntimeError::RetryWait)?;
+                let receipt = row
+                    .decode_receipt()
+                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+                Ok(UserStimulusDecisionV1 {
+                    contract,
+                    receipt,
+                    revision,
+                    deduplicated: true,
+                    private_projection_wire: None,
+                })
+            }
+            Err(other) => Err(RuntimeError::Store(other)),
+        }
     }
 
     // ------------------------------------------------------------- genesis
@@ -527,16 +735,48 @@ impl AstrRuntime {
         let revision = self.store.current_revision(&persona_scope)?;
         let snapshot = self
             .store
-            .read_snapshot(&persona_scope, 0)?
+            .read_latest_snapshot(&persona_scope, revision)?
             .ok_or(RuntimeError::InvalidNeuralState)?;
-        if snapshot.state_digest != committed.receipt.initial_snapshot_digest {
+        if snapshot.revision > revision {
             return Err(RuntimeError::InvalidNeuralState);
+        }
+        let rows = self.store.read_journal(&persona_scope)?;
+        let (expected_state_digest, expected_graph_digest) = if snapshot.revision == 0 {
+            (
+                committed.receipt.initial_snapshot_digest,
+                committed.receipt.graph_digest,
+            )
+        } else {
+            let row = rows
+                .iter()
+                .find(|row| row.revision == snapshot.revision)
+                .ok_or(RuntimeError::InvalidNeuralState)?;
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if receipt.formula_digest != committed.receipt.formula_digest
+                || receipt.next_revision != snapshot.revision
+            {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+            (receipt.state_after, receipt.graph_after)
+        };
+        if snapshot.state_digest != expected_state_digest {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        for row in rows.iter().filter(|row| row.revision > snapshot.revision) {
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if receipt.state_before != receipt.state_after {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
         }
         let (field, graph) = decode_hot_state_v1(
             &snapshot.state_bytes,
             &committed.receipt.formula_digest,
-            &committed.receipt.initial_snapshot_digest,
-            &committed.receipt.graph_digest,
+            &expected_state_digest,
+            &expected_graph_digest,
         )?;
         self.hot = Some(HotBrain {
             bot_token,
@@ -793,24 +1033,39 @@ impl AstrRuntime {
             .ok_or(RuntimeError::PersonaGenesisRequired)?;
         let persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
         let rows = self.store.read_journal(&persona_scope)?;
-        Ok(ae_continuum::verify_replay(
-            committed.receipt.initial_snapshot_digest,
-            &rows,
-        ))
+        let report = ae_continuum::verify_replay(committed.receipt.initial_snapshot_digest, &rows);
+        if !report.ok || report.final_revision != self.store.current_revision(&persona_scope)? {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        for row in &rows {
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if receipt.formula_digest != committed.receipt.formula_digest {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+            let snapshot = self.store.read_snapshot(&persona_scope, row.revision)?;
+            if receipt.state_before != receipt.state_after || snapshot.is_some() {
+                let snapshot = snapshot.ok_or(RuntimeError::InvalidNeuralState)?;
+                if snapshot.state_digest != receipt.state_after {
+                    return Err(RuntimeError::InvalidNeuralState);
+                }
+                let _ = decode_hot_state_v1(
+                    &snapshot.state_bytes,
+                    &committed.receipt.formula_digest,
+                    &receipt.state_after,
+                    &receipt.graph_after,
+                )?;
+            }
+        }
+        Ok(report)
     }
 
-    /// Drain the writer: snapshot the current state, checkpoint WAL and close
-    /// the store. Later calls fail with Closed.
+    /// Drain the writer: drop the hot cache, checkpoint WAL and close the
+    /// store. Semantic state was already committed atomically with its journal
+    /// row, so close never writes an independent state truth.
     pub fn flush_and_close(&mut self) -> Result<(), RuntimeError> {
-        if let Some(hot) = self.hot.take() {
-            let state = state_digest(&hot.field, &hot.formula_digest);
-            self.store.write_snapshot(
-                &hot.persona_scope,
-                hot.revision,
-                &state,
-                &encode_hot_state_v1(&hot.formula_digest, &hot.field, &hot.graph),
-            )?;
-        }
+        self.hot = None;
         self.store.flush()?;
         Ok(())
     }

@@ -288,6 +288,14 @@ impl RuntimeDecision {
     }
 }
 
+/// A pure candidate prepared from the production runtime's durable HotBrain.
+/// It contains no mutable runtime state and must be committed by the outer
+/// `ae_runtime::AstrRuntime` only after its projection wire is validated.
+pub(crate) struct PreparedProductionUserStimulusTransitionV1 {
+    pub(crate) next_field: NeuralField,
+    pub(crate) active_nodes: u32,
+}
+
 struct PreparedSemanticTransitionV1 {
     next_field: NeuralField,
     next_revision: u64,
@@ -620,6 +628,9 @@ fn native_action_contract(
 }
 
 impl AstrRuntime {
+    /// Constructs an isolated, non-durable fixture harness for Rust-only
+    /// Host/projection tests. Production `ae_runtime::AstrRuntime` never owns
+    /// or delegates semantic state to this scaffold.
     pub fn scaffold() -> Self {
         Self {
             field: NeuralField::zeroed(),
@@ -1084,6 +1095,149 @@ impl AstrRuntime {
         }
         Ok(())
     }
+}
+
+pub(crate) fn prepare_production_user_stimulus_transition_v1(
+    event: &CanonicalEvent,
+    field: &NeuralField,
+    graph: &SparseGraph,
+    revision: u64,
+) -> Result<PreparedProductionUserStimulusTransitionV1, RuntimeError> {
+    if !field.validate() {
+        return Err(RuntimeError::InvalidNeuralField);
+    }
+    if !graph.validate() {
+        return Err(RuntimeError::InvalidSparseGraph);
+    }
+    let stimulus = match event {
+        CanonicalEvent::UserStimulus(stimulus) => stimulus,
+        _ => return Err(RuntimeError::UnsupportedEvent),
+    };
+    validate_user_stimulus(stimulus, revision)?;
+    let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
+    if load.active_nodes.is_empty() || load.regional_loads.is_empty() {
+        return Err(RuntimeError::InvalidSemanticEstimate);
+    }
+
+    let mut next_field = field.clone();
+    for (position, node) in load.active_nodes.iter().enumerate() {
+        let regional_load = load.regional_loads[position % load.regional_loads.len()]
+            .checked_mul(stimulus.evidence.estimator_confidence)
+            .ok_or(RuntimeError::InvalidSemanticEstimate)?;
+        let index = *node as usize;
+        next_field.potential[index] = next_field.potential[index].saturating_add(regional_load);
+        next_field.excitation[index] = next_field.excitation[index].saturating_add(regional_load);
+    }
+    if !next_field.validate() {
+        return Err(RuntimeError::InvalidNeuralField);
+    }
+    Ok(PreparedProductionUserStimulusTransitionV1 {
+        next_field,
+        active_nodes: u32::try_from(load.active_nodes.len())
+            .map_err(|_| RuntimeError::InvalidNeuralField)?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_and_validate_production_private_projection_wire_v1(
+    event: &CanonicalEvent,
+    next_revision: u64,
+    state_after: [u8; 32],
+    scope_digest: [u8; 32],
+    event_digest: [u8; 32],
+    authority_digest: [u8; 32],
+    input: &R7PreOutputProjectionInputV1,
+) -> Result<PrivateProjectionPayloadWireV1, RuntimeError> {
+    let stimulus = match event {
+        CanonicalEvent::UserStimulus(stimulus) => stimulus,
+        _ => return Err(RuntimeError::UnsupportedEvent),
+    };
+    let turn_id = stimulus.causal.turn_id;
+    let projection_turn_binding = committed_semantic_projection_turn_binding(
+        next_revision,
+        &state_after,
+        &turn_id,
+        &scope_digest,
+        &event_digest,
+        &authority_digest,
+    );
+    let binding = R7SemanticProjectionBindingV1::new(
+        next_revision,
+        state_after,
+        turn_id,
+        scope_digest,
+        event_digest,
+        authority_digest,
+        projection_turn_binding,
+    );
+    let wire = compile_atomic_pre_output_wire_v1(&binding, input)
+        .map_err(|_| RuntimeError::PrivateProjectionWireUnavailable)?;
+    validate_projection_wire_v1(
+        next_revision,
+        &state_after,
+        &turn_id,
+        &scope_digest,
+        &event_digest,
+        &authority_digest,
+        &projection_turn_binding,
+        &wire,
+    )?;
+    Ok(wire)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_projection_wire_v1(
+    next_revision: u64,
+    state_after: &[u8; 32],
+    turn_id: &[u8; 16],
+    scope_digest: &[u8; 32],
+    event_digest: &[u8; 32],
+    authority_digest: &[u8; 32],
+    projection_turn_binding: &[u8; 32],
+    wire: &PrivateProjectionPayloadWireV1,
+) -> Result<(), RuntimeError> {
+    wire.validate_live_canonical_v1()
+        .map_err(|error| match error {
+            PrivateProjectionPayloadWireErrorV1::AlreadyConsumed => {
+                RuntimeError::PrivateProjectionWireAlreadyConsumed
+            }
+            _ => RuntimeError::PrivateProjectionWireUnavailable,
+        })?;
+    let metadata = wire.binding_metadata();
+    if metadata.revision() != next_revision {
+        return Err(RuntimeError::PrivateProjectionWireBindingMismatch { field: "revision" });
+    }
+    for (field, actual, expected) in [
+        ("turn_id", metadata.turn_id().as_slice(), turn_id.as_slice()),
+        (
+            "turn_binding",
+            metadata.turn_binding().as_slice(),
+            projection_turn_binding.as_slice(),
+        ),
+        (
+            "source_state_digest",
+            metadata.source_state_digest().as_slice(),
+            state_after.as_slice(),
+        ),
+    ] {
+        if actual != expected {
+            return Err(RuntimeError::PrivateProjectionWireBindingMismatch { field });
+        }
+    }
+    let expected_turn_binding = committed_semantic_projection_turn_binding(
+        next_revision,
+        state_after,
+        turn_id,
+        scope_digest,
+        event_digest,
+        authority_digest,
+    );
+    if metadata.turn_binding() != &expected_turn_binding {
+        return Err(RuntimeError::PrivateProjectionWireBindingMismatch {
+            field: "scope_event_authority_binding",
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

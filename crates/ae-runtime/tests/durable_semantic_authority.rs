@@ -1,7 +1,11 @@
+use ae_attention::r7::assemble_load;
+use ae_authority::authority_projection_digest;
+use ae_contracts::r7 as r7_contracts;
 use ae_contracts::{
-    wire, AllostaticSetpoints, EpistemicPriors, ExpressionPhenotype, GenesisManifestProposal,
-    GenesisReceipt, GenesisStatus, PersonaGenesisRequest, PersonaScopeRef, PersonaSelectionKind,
-    PersonaSourceRef, PersonalityVector, ScopeRef, SocialPriors,
+    wire, AllostaticSetpoints, CanonicalEvent, CausalRef, EpistemicPriors, EvidenceVector,
+    ExpressionPhenotype, GenesisManifestProposal, GenesisReceipt, GenesisStatus,
+    PersonaGenesisRequest, PersonaScopeRef, PersonaSelectionKind, PersonaSourceRef,
+    PersonalityVector, ScopeRef, SemanticEstimate, SocialPriors, UserStimulus,
 };
 use ae_fixed::Fixed;
 use ae_genesis::{derive_identity, genesis_scope_key, GenesisPrior};
@@ -13,6 +17,9 @@ use ae_runtime::AstrRuntime;
 use ae_store::{ClaimOutcome, GenesisCommit, Store};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[path = "user_stimulus_state_transition.rs"]
+mod r7_projection_fixture;
 
 const CANONICAL_HOT_STATE_MAGIC_V1: [u8; 8] = *b"AEHOTST\0";
 const CANONICAL_HOT_STATE_SCHEMA_V1: u16 = 1;
@@ -448,6 +455,266 @@ fn assert_rejected(label: &str, bytes: Vec<u8>) {
         runtime.current_revision(&fixture.scope).is_err(),
         "{label} bytes must not bind HotBrain"
     );
+}
+
+fn root_event_from_r7(event: &r7_contracts::CanonicalEvent) -> CanonicalEvent {
+    let r7_contracts::CanonicalEvent::UserStimulus(stimulus) = event else {
+        panic!("fixture must contain a user stimulus");
+    };
+    CanonicalEvent::UserStimulus(UserStimulus {
+        event_id: stimulus.event_id,
+        scope: ScopeRef {
+            bot_token: stimulus.scope.bot_token,
+            persona_token: stimulus.scope.persona_token,
+            relation_token: stimulus.scope.relation_token,
+            session_token: stimulus.scope.session_token,
+        },
+        causal: CausalRef {
+            turn_id: stimulus.causal.turn_id,
+            action_id: stimulus.causal.action_id,
+            delivery_id: stimulus.causal.delivery_id,
+            claim_id: stimulus.causal.claim_id,
+            base_revision: stimulus.causal.base_revision,
+        },
+        observed_at_ms: stimulus.observed_at_ms,
+        evidence: SemanticEstimate {
+            schema_version: stimulus.evidence.schema_version,
+            dimensions: EvidenceVector {
+                positive: stimulus.evidence.dimensions.positive,
+                affiliation: stimulus.evidence.dimensions.affiliation,
+                harm: stimulus.evidence.dimensions.harm,
+                boundary: stimulus.evidence.dimensions.boundary,
+                repair: stimulus.evidence.dimensions.repair,
+                repetition: stimulus.evidence.dimensions.repetition,
+                new_information: stimulus.evidence.dimensions.new_information,
+                constraint_instability: stimulus.evidence.dimensions.constraint_instability,
+                epistemic_conflict: stimulus.evidence.dimensions.epistemic_conflict,
+                self_responsibility: stimulus.evidence.dimensions.self_responsibility,
+                other_responsibility: stimulus.evidence.dimensions.other_responsibility,
+                hostility: stimulus.evidence.dimensions.hostility,
+                publicness: stimulus.evidence.dimensions.publicness,
+                engagement: stimulus.evidence.dimensions.engagement,
+                rejection: stimulus.evidence.dimensions.rejection,
+            },
+            estimator_confidence: stimulus.evidence.estimator_confidence,
+            estimator_digest: stimulus.evidence.estimator_digest,
+        },
+    })
+}
+
+fn production_projection_turn_binding(
+    next_revision: u64,
+    state_after: &[u8; 32],
+    turn_id: &[u8; 16],
+    scope_digest: &[u8; 32],
+    event_digest: &[u8; 32],
+    authority_digest: &[u8; 32],
+) -> [u8; 32] {
+    let revision = next_revision.to_be_bytes();
+    r7_contracts::wire::domain_hash(
+        b"astr-embodiment/r7/committed-semantic-transition-binding-v1",
+        &[
+            &revision,
+            state_after,
+            turn_id,
+            scope_digest,
+            event_digest,
+            authority_digest,
+        ],
+    )
+}
+
+fn apply_stimulus_to_field(
+    mut field: NeuralField,
+    event: &r7_contracts::CanonicalEvent,
+) -> NeuralField {
+    let r7_contracts::CanonicalEvent::UserStimulus(stimulus) = event else {
+        panic!("fixture must contain a user stimulus");
+    };
+    let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
+    for (position, node) in load.active_nodes.iter().enumerate() {
+        let regional_load = load.regional_loads[position % load.regional_loads.len()]
+            .checked_mul(stimulus.evidence.estimator_confidence)
+            .expect("bounded fixture estimate");
+        let index = *node as usize;
+        field.potential[index] = field.potential[index].saturating_add(regional_load);
+        field.excitation[index] = field.excitation[index].saturating_add(regional_load);
+    }
+    field
+}
+
+fn expected_production_next_field(
+    request: &PersonaGenesisRequest,
+    event: &r7_contracts::CanonicalEvent,
+) -> NeuralField {
+    let identity = derive_identity(request, &GenesisPrior::default()).expect("derive genesis");
+    let (field, _) = initial_state_from_manifest(
+        &identity.manifest,
+        &request.formula_digest,
+        &identity.development_seed_digest,
+    );
+    apply_stimulus_to_field(field, event)
+}
+
+#[test]
+fn production_runtime_commit_uses_store_authority_and_no_outer_r7_state() {
+    let request = request(71);
+    let scope = ScopeRef {
+        bot_token: request.source.scope.bot_token,
+        persona_token: request.source.scope.persona_token,
+        relation_token: Some([74; 16]),
+        session_token: [75; 16],
+    };
+    let event = r7_contracts::CanonicalEvent::UserStimulus(r7_contracts::UserStimulus {
+        event_id: [76; 16],
+        scope: r7_contracts::ScopeRef {
+            bot_token: scope.bot_token,
+            persona_token: scope.persona_token,
+            relation_token: scope.relation_token,
+            session_token: scope.session_token,
+        },
+        causal: r7_contracts::CausalRef {
+            turn_id: [77; 16],
+            action_id: None,
+            delivery_id: None,
+            claim_id: None,
+            base_revision: 0,
+        },
+        observed_at_ms: request.observed_at_ms,
+        evidence: r7_contracts::SemanticEstimate {
+            schema_version: 1,
+            dimensions: r7_contracts::EvidenceVector {
+                positive: Fixed::from_raw(700_000),
+                affiliation: Fixed::from_raw(600_000),
+                harm: Fixed::from_raw(100_000),
+                boundary: Fixed::from_raw(200_000),
+                repair: Fixed::from_raw(400_000),
+                repetition: Fixed::from_raw(100_000),
+                new_information: Fixed::from_raw(500_000),
+                constraint_instability: Fixed::from_raw(100_000),
+                epistemic_conflict: Fixed::from_raw(300_000),
+                self_responsibility: Fixed::from_raw(300_000),
+                other_responsibility: Fixed::from_raw(200_000),
+                hostility: Fixed::from_raw(100_000),
+                publicness: Fixed::from_raw(100_000),
+                engagement: Fixed::from_raw(600_000),
+                rejection: Fixed::from_raw(100_000),
+            },
+            estimator_confidence: Fixed::from_raw(800_000),
+            estimator_digest: [78; 32],
+        },
+    });
+    let root_event = root_event_from_r7(&event);
+    let next_field = expected_production_next_field(&request, &event);
+    let state_after = state_digest(&next_field, &request.formula_digest);
+    let full_scope_digest = wire::scope_digest(&scope);
+    let event_digest = wire::event_digest(&root_event);
+    let authority_digest = authority_projection_digest(&root_event);
+    let turn_binding = production_projection_turn_binding(
+        1,
+        &state_after,
+        &[77; 16],
+        &full_scope_digest,
+        &event_digest,
+        &authority_digest,
+    );
+    let input = r7_projection_fixture::matching_pre_output_input(
+        1,
+        state_after,
+        [77; 16],
+        full_scope_digest,
+        turn_binding,
+    );
+    let database = unique_database("production-authority");
+    let mut runtime = AstrRuntime::open(&database).expect("open runtime");
+    runtime.ensure_genesis(&request).expect("commit genesis");
+
+    let decision = runtime
+        .apply_user_stimulus_with_private_projection_wire_v1(&event, &input)
+        .expect("production runtime must commit the prepared transition");
+    assert_eq!(decision.receipt.event_digest, event_digest);
+    assert_eq!(
+        decision.receipt.scope_digest,
+        wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None)
+    );
+    assert_eq!(decision.receipt.state_after, state_after);
+    assert_eq!(runtime.current_revision(&scope).expect("hot revision"), 1);
+
+    runtime
+        .flush_and_close()
+        .expect("close without an extra snapshot write");
+    drop(runtime);
+
+    let mut reopened = AstrRuntime::open(&database).expect("reopen runtime");
+    assert_eq!(
+        reopened
+            .current_revision(&scope)
+            .expect("hydrate committed state"),
+        1
+    );
+
+    let mut second_event = event.clone();
+    let r7_contracts::CanonicalEvent::UserStimulus(second_stimulus) = &mut second_event else {
+        panic!("fixture must contain a user stimulus");
+    };
+    second_stimulus.event_id = [79; 16];
+    second_stimulus.causal.turn_id = [80; 16];
+    second_stimulus.causal.base_revision = 1;
+    let second_root_event = root_event_from_r7(&second_event);
+    let second_field = apply_stimulus_to_field(next_field, &second_event);
+    let second_state_after = state_digest(&second_field, &request.formula_digest);
+    let second_event_digest = wire::event_digest(&second_root_event);
+    let second_authority_digest = authority_projection_digest(&second_root_event);
+    let second_turn_binding = production_projection_turn_binding(
+        2,
+        &second_state_after,
+        &[80; 16],
+        &full_scope_digest,
+        &second_event_digest,
+        &second_authority_digest,
+    );
+    let second_input = r7_projection_fixture::matching_pre_output_input(
+        2,
+        second_state_after,
+        [80; 16],
+        full_scope_digest,
+        second_turn_binding,
+    );
+    let second_decision = reopened
+        .apply_user_stimulus_with_private_projection_wire_v1(&second_event, &second_input)
+        .expect("reopened runtime must prepare from its committed semantic snapshot");
+    assert_eq!(second_decision.revision, 2);
+    assert_eq!(second_decision.receipt.state_after, second_state_after);
+    assert_eq!(
+        reopened
+            .current_revision(&scope)
+            .expect("second hot revision"),
+        2
+    );
+    let replay = reopened
+        .verify_replay(&scope.bot_token, &scope.persona_token)
+        .expect("semantic Store history replays at the durable revision");
+    assert!(replay.ok);
+    assert_eq!(replay.final_revision, 2);
+
+    let retry = reopened
+        .apply_user_stimulus_with_private_projection_wire_v1(&event, &input)
+        .expect("exact event is deduplicated before stale or projection work");
+    assert_eq!(retry.receipt.event_digest, event_digest);
+
+    let store = Store::open(&database).expect("open durable authority");
+    let persona_scope = wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+    assert_eq!(
+        store
+            .current_revision(&persona_scope)
+            .expect("durable revision"),
+        2
+    );
+    let snapshot = store
+        .read_snapshot(&persona_scope, 2)
+        .expect("read durable semantic snapshot")
+        .expect("semantic commit writes its snapshot atomically");
+    assert_eq!(snapshot.state_digest, second_state_after);
 }
 
 #[test]
