@@ -715,24 +715,93 @@ fn production_runtime_commit_uses_store_authority_and_no_outer_r7_state() {
         .expect("reopened runtime must prepare from its committed semantic snapshot");
     assert_eq!(second_decision.revision, 2);
     assert_eq!(second_decision.receipt.state_after, second_state_after);
+
+    let public_g0_base = reopened
+        .current_revision(&scope)
+        .expect("read the public ordinary-G0 revision after semantic divergence");
+    let mut third_event = second_event.clone();
+    let r7_contracts::CanonicalEvent::UserStimulus(third_stimulus) = &mut third_event else {
+        panic!("fixture must contain a user stimulus");
+    };
+    third_stimulus.event_id = [81; 16];
+    third_stimulus.causal.turn_id = [82; 16];
+    third_stimulus.causal.base_revision = second_decision.revision;
+    let third_root_event = root_event_from_r7(&third_event);
+    let third_field = apply_stimulus_to_field(second_field, &third_event);
+    let third_state_after = state_digest(&third_field, &request.formula_digest);
+    let third_event_digest = wire::event_digest(&third_root_event);
+    let third_authority_digest = authority_projection_digest(&third_root_event);
+    let third_turn_binding = production_projection_turn_binding(
+        3,
+        &third_state_after,
+        &[82; 16],
+        &full_scope_digest,
+        &third_event_digest,
+        &third_authority_digest,
+    );
+    let third_input = r7_projection_fixture::matching_pre_output_input(
+        3,
+        third_state_after,
+        [82; 16],
+        full_scope_digest,
+        third_turn_binding,
+    );
+    let third_decision = reopened
+        .apply_user_stimulus_with_private_projection_wire_v1(&third_event, &third_input)
+        .expect("R7 uses the explicit semantic revision rather than public G0 revision");
+    assert_eq!(third_decision.revision, 3);
+    assert!(third_decision.into_private_projection_wire().is_some());
+
+    let mut legacy_after_semantic = root_event.clone();
+    let CanonicalEvent::UserStimulus(legacy_stimulus) = &mut legacy_after_semantic else {
+        panic!("fixture must contain a root user stimulus");
+    };
+    legacy_stimulus.event_id = [83; 16];
+    legacy_stimulus.causal.turn_id = [84; 16];
+    legacy_stimulus.causal.base_revision = public_g0_base;
+    let legacy_after = reopened
+        .apply_event(&scope, &legacy_after_semantic)
+        .expect("ordinary G0 accepts the causal base returned by current_revision");
+    assert_eq!(legacy_after.revision, 2);
     assert_eq!(
         reopened
             .current_revision(&scope)
-            .expect("second hot revision"),
+            .expect("public G0 revision remains the legacy lane"),
         2
     );
-    let replay = reopened
-        .verify_replay(&scope.bot_token, &scope.persona_token)
-        .expect("semantic Store history replays at the durable revision");
-    assert!(replay.ok);
-    assert_eq!(replay.final_revision, 2);
 
-    let retry = reopened
+    reopened
+        .flush_and_close()
+        .expect("close divergent durable lanes");
+    drop(reopened);
+
+    let mut final_reopen = AstrRuntime::open(&database).expect("reopen divergent durable lanes");
+    assert_eq!(
+        final_reopen
+            .current_revision(&scope)
+            .expect("public G0 revision after reopen"),
+        2
+    );
+    let inspect = final_reopen
+        .inspect(&scope.bot_token, &scope.persona_token)
+        .expect("inspect selects the semantic authority lane once it exists");
+    assert_eq!(inspect.revision, 3);
+    let replay = final_reopen
+        .verify_replay(&scope.bot_token, &scope.persona_token)
+        .expect("replay selects the semantic authority lane once it exists");
+    assert!(replay.ok);
+    assert_eq!(replay.final_revision, 3);
+
+    let retry = final_reopen
         .apply_user_stimulus_with_private_projection_wire_v1(&event, &input)
         .expect("exact event is deduplicated before stale or projection work");
     assert!(retry.deduplicated);
     assert_eq!(retry.receipt.event_digest, event_digest);
     assert!(retry.into_private_projection_wire().is_none());
+    let legacy_retry = final_reopen
+        .apply_event(&scope, &legacy_after_semantic)
+        .expect("exact legacy G0 retry remains idempotent");
+    assert!(legacy_retry.deduplicated);
 
     let store = Store::open(&database).expect("open durable authority");
     let canonical_event_bytes = wire::encode_event(&root_event);
@@ -752,26 +821,26 @@ fn production_runtime_commit_uses_store_authority_and_no_outer_r7_state() {
         store
             .current_revision(&legacy_persona_scope)
             .expect("legacy G0 revision"),
-        1
+        2
     );
     assert_eq!(
         store
             .current_revision(&semantic_persona_scope)
             .expect("semantic durable revision"),
-        2
+        3
     );
     assert!(
         store
-            .read_snapshot(&legacy_persona_scope, 1)
+            .read_snapshot(&legacy_persona_scope, 2)
             .expect("read legacy G0 snapshot")
             .is_none(),
         "the legacy no-op must not alias a semantic snapshot"
     );
     let snapshot = store
-        .read_snapshot(&semantic_persona_scope, 2)
+        .read_snapshot(&semantic_persona_scope, 3)
         .expect("read durable semantic snapshot")
         .expect("semantic commit writes its snapshot atomically");
-    assert_eq!(snapshot.state_digest, second_state_after);
+    assert_eq!(snapshot.state_digest, third_state_after);
 }
 
 #[test]

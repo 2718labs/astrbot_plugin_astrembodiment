@@ -112,7 +112,7 @@ struct HotBrain {
     field: NeuralField,
     graph: SparseGraph,
     initial_snapshot_digest: Digest,
-    revision: u64,
+    semantic_revision: u64,
 }
 
 pub struct AstrRuntime {
@@ -461,8 +461,8 @@ impl AstrRuntime {
         let (
             hot_bot_token,
             hot_persona_token,
-            persona_scope,
-            hot_revision,
+            semantic_persona_scope,
+            semantic_revision,
             formula_digest,
             manifest_digest,
             initial_snapshot_digest,
@@ -474,7 +474,7 @@ impl AstrRuntime {
                 hot.bot_token,
                 hot.persona_token,
                 hot.persona_scope,
-                hot.revision,
+                hot.semantic_revision,
                 hot.formula_digest,
                 hot.identity.manifest_digest,
                 hot.initial_snapshot_digest,
@@ -490,7 +490,10 @@ impl AstrRuntime {
         let event_digest = wire::event_digest(&root_event);
         let contract =
             noop_action_contract(&manifest_digest, &event_digest, stimulus.causal.turn_id);
-        if let Some(row) = self.store.lookup_event(&persona_scope, &event_digest)? {
+        if let Some(row) = self
+            .store
+            .lookup_event(&semantic_persona_scope, &event_digest)?
+        {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
@@ -502,9 +505,9 @@ impl AstrRuntime {
                 private_projection_wire: None,
             });
         }
-        if stimulus.causal.base_revision != hot_revision {
+        if stimulus.causal.base_revision != semantic_revision {
             return Err(RuntimeError::StaleCausalBase {
-                expected: hot_revision,
+                expected: semantic_revision,
                 actual: stimulus.causal.base_revision,
             });
         }
@@ -513,9 +516,9 @@ impl AstrRuntime {
             event,
             &field,
             &graph,
-            hot_revision,
+            semantic_revision,
         )?;
-        let next_revision = hot_revision
+        let next_revision = semantic_revision
             .checked_add(1)
             .ok_or(r7::RuntimeError::RevisionOverflow)?;
         let state_before = state_digest(&field, &formula_digest);
@@ -540,10 +543,10 @@ impl AstrRuntime {
         let receipt = TransitionReceipt {
             schema_version: 1,
             formula_digest,
-            scope_digest: persona_scope,
+            scope_digest: semantic_persona_scope,
             event_digest,
             authority_digest,
-            base_revision: hot_revision,
+            base_revision: semantic_revision,
             next_revision,
             state_before,
             state_after,
@@ -556,7 +559,7 @@ impl AstrRuntime {
         };
         let chain_seed = self
             .store
-            .last_chain_digest(&persona_scope)?
+            .last_chain_digest(&semantic_persona_scope)?
             .unwrap_or(initial_snapshot_digest);
         let commit = StatefulCommit {
             journal: CommitEnvelope {
@@ -574,7 +577,7 @@ impl AstrRuntime {
                 if let Some(hot) = self.hot.as_mut() {
                     hot.field = prepared.next_field;
                     hot.graph = graph;
-                    hot.revision = revision;
+                    hot.semantic_revision = revision;
                 }
                 Ok(UserStimulusDecisionV1 {
                     contract,
@@ -587,7 +590,7 @@ impl AstrRuntime {
             Err(StoreError::DuplicateEvent(revision)) => {
                 let row = self
                     .store
-                    .lookup_event(&persona_scope, &event_digest)?
+                    .lookup_event(&semantic_persona_scope, &event_digest)?
                     .ok_or(RuntimeError::RetryWait)?;
                 let receipt = row
                     .decode_receipt()
@@ -714,7 +717,7 @@ impl AstrRuntime {
                             field,
                             graph,
                             initial_snapshot_digest,
-                            revision: 0,
+                            semantic_revision: 0,
                         });
                         Ok(receipt)
                     }
@@ -751,17 +754,17 @@ impl AstrRuntime {
         let legacy_persona_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
         let persona_scope = r7_semantic_persona_scope(&bot_token, &persona_token);
         let legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
-        let revision = self.store.current_revision(&persona_scope)?;
-        let snapshot = if revision == 0 {
+        let semantic_revision = self.store.current_revision(&persona_scope)?;
+        let snapshot = if semantic_revision == 0 {
             self.store
                 .read_snapshot(&legacy_persona_scope, 0)?
                 .ok_or(RuntimeError::InvalidNeuralState)?
         } else {
             self.store
-                .read_latest_snapshot(&persona_scope, revision)?
+                .read_latest_snapshot(&persona_scope, semantic_revision)?
                 .ok_or(RuntimeError::InvalidNeuralState)?
         };
-        if snapshot.revision > revision {
+        if snapshot.revision > semantic_revision {
             return Err(RuntimeError::InvalidNeuralState);
         }
         let rows = self.store.read_journal(&persona_scope)?;
@@ -813,7 +816,7 @@ impl AstrRuntime {
             field,
             graph,
             initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
-            revision,
+            semantic_revision,
         });
         Ok(())
     }
@@ -1004,6 +1007,8 @@ impl AstrRuntime {
 
     // ------------------------------------------------------------ observatory
 
+    /// Inspect the semantic authority lane when it has committed work;
+    /// otherwise preserve the legacy G0 lane's observatory view.
     pub fn inspect(
         &mut self,
         bot_token: &Id128,
@@ -1066,6 +1071,8 @@ impl AstrRuntime {
         Ok(bound)
     }
 
+    /// Verify the semantic authority chain when it exists; otherwise verify
+    /// the legacy G0 chain for compatibility before the first R7 transition.
     pub fn verify_replay(
         &mut self,
         bot_token: &Id128,
@@ -1124,13 +1131,12 @@ impl AstrRuntime {
         matches!(self.store.count_leases(), Err(StoreError::Closed))
     }
 
+    /// Return the public ordinary-G0 causal revision. The production R7
+    /// ingress intentionally uses `HotBrain::semantic_revision` internally,
+    /// so its private semantic lane never leaks into a G0 causal base.
     pub fn current_revision(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
         let hot = self.hot_for(scope)?;
-        Ok(if hot.revision == 0 {
-            hot.legacy_revision
-        } else {
-            hot.revision
-        })
+        Ok(hot.legacy_revision)
     }
 }
 
