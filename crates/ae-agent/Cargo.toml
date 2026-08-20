@@ -1,0 +1,11 @@
+[package]
+name = "ae-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-fixed.workspace = true
+ae-contracts.workspace = true
+ae-renorm.workspace = true
+serde.workspace = true

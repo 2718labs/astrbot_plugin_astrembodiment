@@ -1,0 +1,49 @@
+{
+  "runtime_envelope": {
+    "description": "运行资源档位",
+    "hint": "只影响运行时资源包络，不改变身份公式或行为。",
+    "type": "string",
+    "options": ["auto", "reference-2c2g-v1", "compat-1c1g-v1"],
+    "labels": ["自动", "参考资源档位（2 核 2G）", "兼容资源档位（1 核 1G）"],
+    "default": "auto"
+  },
+  "native_data_dir": {
+    "description": "原生核心数据目录",
+    "hint": "可填写绝对路径；留空时使用 AstrBot 为插件分配的数据目录。插件会在该目录内创建 astrembodiment.sqlite3。",
+    "type": "string",
+    "default": ""
+  },
+  "observatory_enabled": {
+    "description": "启用只读诊断",
+    "hint": "只记录不含消息正文的运行状态信息。",
+    "type": "bool",
+    "default": true
+  },
+  "proactive_enabled": {
+    "description": "允许提出主动联系建议",
+    "hint": "实际发送仍由 AstrBot 和用户控制；MVP 默认关闭。",
+    "type": "bool",
+    "default": false
+  },
+  "model_settings": {
+    "description": "模型辅助设置",
+    "type": "object",
+    "items": {
+      "assistant_provider_id": {
+        "description": "辅助模型 Provider",
+        "hint": "非空时强制使用该 Provider；留空时使用当前会话模型。",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      }
+    },
+    "default": {}
+  },
+  "seed_code": {
+    "description": "SeedCode（身份种子）",
+    "hint": "系统生成，仅用于查看；生成后自动保存，重载插件后仍可见。",
+    "type": "text",
+    "default": "",
+    "readonly": true
+  }
+}

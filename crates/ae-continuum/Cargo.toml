@@ -1,0 +1,10 @@
+[package]
+name = "ae-continuum"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-contracts.workspace = true
+serde.workspace = true
+blake3.workspace = true

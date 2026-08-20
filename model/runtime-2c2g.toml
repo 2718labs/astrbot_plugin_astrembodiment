@@ -1,0 +1,8 @@
+envelope_id = "reference-2c2g-v1"
+worker_threads = 2
+sqlite_cache_mib = 32
+hot_relation_capacity = 256
+trace_capacity = 1024
+maintenance_slice_micros = 20000
+rollout_parallelism = 2
+webui_refresh_millis = 1500

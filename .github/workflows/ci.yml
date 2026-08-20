@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-release-checks:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate configuration schema
+        run: >-
+           python -c "import json; from pathlib import Path; schema=json.loads(Path('_conf_schema.json').read_text(encoding='utf-8')); expected={'runtime_envelope','native_data_dir','observatory_enabled','proactive_enabled','model_settings','seed_code'}; missing=expected-schema.keys(); assert not missing, f'missing schema keys: {sorted(missing)}'"
+      - name: Validate marketplace metadata fields
+        run: >-
+           python -c "from pathlib import Path; text=Path('metadata.yaml').read_text(encoding='utf-8'); q=chr(34); required=('name: astrbot_plugin_astrembodiment', f'version: {q}1.0.0-rc1{q}', f'astrbot_version: {q}>=4.16,<5{q}', 'support_platforms:', '  - aiocqhttp'); missing=[item for item in required if item not in text]; assert not missing, f'missing metadata fields: {missing}'"
+      - name: Compile Python sources
+        run: python -m py_compile main.py astr_embodiment/__init__.py astr_embodiment/bridge.py

@@ -1,0 +1,8 @@
+envelope_id = "compat-1c1g-v1"
+worker_threads = 1
+sqlite_cache_mib = 8
+hot_relation_capacity = 48
+trace_capacity = 128
+maintenance_slice_micros = 5000
+rollout_parallelism = 1
+webui_refresh_millis = 7000

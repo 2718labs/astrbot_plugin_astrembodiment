@@ -1,0 +1,14 @@
+[package]
+name = "ae-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+ae-fixed.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

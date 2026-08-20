@@ -1,0 +1,54 @@
+matrix_id = "aster-authority-v1"
+coordinates = [
+  "bond",
+  "reciprocity",
+  "friction_repetition",
+  "friction_instability",
+  "boundary_violation",
+  "scar",
+  "repair",
+  "fallibility",
+  "fair_correction",
+  "humiliation",
+  "false_accusation",
+  "outreach_rejection",
+]
+
+[user_observed]
+allow = ["bond", "reciprocity", "friction_repetition", "friction_instability", "boundary_violation", "scar", "humiliation", "outreach_rejection"]
+
+[explicit_feedback]
+allow = ["bond", "reciprocity", "friction_repetition", "friction_instability", "boundary_violation", "scar", "repair", "humiliation", "outreach_rejection"]
+
+[platform_observed]
+allow = []
+
+[verifier_result]
+allow = ["boundary_violation", "repair", "fallibility", "fair_correction", "humiliation", "false_accusation"]
+
+[self_action]
+allow = []
+eligibility_only = true
+
+[self_critique]
+allow = []
+
+[time_advance]
+allow = []
+
+[admin_action]
+allow = [
+  "bond",
+  "reciprocity",
+  "friction_repetition",
+  "friction_instability",
+  "boundary_violation",
+  "scar",
+  "repair",
+  "fallibility",
+  "fair_correction",
+  "humiliation",
+  "false_accusation",
+  "outreach_rejection",
+]
+requires_explicit_operation = true

@@ -1,0 +1,18 @@
+[package]
+name = "ae-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-fixed.workspace = true
+ae-contracts.workspace = true
+ae-genesis.workspace = true
+ae-authority.workspace = true
+ae-attention.workspace = true
+ae-neurofield.workspace = true
+ae-renorm.workspace = true
+ae-agent.workspace = true
+ae-continuum.workspace = true
+ae-store.workspace = true
+thiserror.workspace = true

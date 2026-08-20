@@ -1,0 +1,70 @@
+formula_id = "aster-ccn-v1"
+formula_version = 1
+fixed_scale = 1000000
+neuron_slots = 16384
+node_dof = 8
+initial_edge_target = 262144
+edge_capacity = 524288
+attention_heads = 4
+action_candidates = 6
+rollout_steps = 8
+
+[multiscale]
+levels = [16384, 2048, 256, 32]
+rg_tolerance = 5000
+
+[integrator]
+method = "discrete-gradient-port-hamiltonian"
+max_iterations = 8
+energy_tolerance = 2500
+state_tolerance = 1000
+
+[eligibility]
+decay_per_second = 995000
+learning_rate = 2500
+ttl_seconds = 7200
+
+[structure]
+prune_threshold = 120000
+grow_threshold = 780000
+quarantine_threshold = 900000
+max_structural_changes_per_commit = 256
+
+[residual]
+coordinates = [
+  "bond",
+  "reciprocity",
+  "friction_repetition",
+  "friction_instability",
+  "boundary_violation",
+  "scar",
+  "repair",
+  "fallibility",
+  "fair_correction",
+  "humiliation",
+  "false_accusation",
+  "outreach_rejection",
+]
+
+[personality.defaults]
+baseline_warmth = 520000
+baseline_patience = 650000
+sensitivity = 500000
+irritability = 350000
+composure = 620000
+epistemic_pride = 480000
+epistemic_openness = 650000
+boundary_strength = 600000
+forgiveness = 550000
+attachment_propensity = 420000
+expression_drive = 500000
+curiosity = 600000
+
+[action_objective]
+task = 1000000
+epistemic = 900000
+boundary = 800000
+repair = 750000
+continuity = 600000
+uncertainty_cost = 850000
+load_cost = 500000

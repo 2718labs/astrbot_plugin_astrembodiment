@@ -1,0 +1,5 @@
+# AstrBot supplies the host API.
+# Native Windows and Linux extensions are bundled in this archive and are
+# imported directly from the plugin directory. Keep this file dependency-free:
+# AstrBot installs requirements through its shared online pip environment, so
+# a wheel stored beside the plugin cannot be declared here portably.

@@ -1,0 +1,62 @@
+operator_bank_id = "aster-operators-v1"
+local_fiber_dim = 4
+
+[[operator]]
+id = 0
+name = "local_excitation"
+kind = "excitatory"
+rank = 2
+
+[[operator]]
+id = 1
+name = "local_inhibition"
+kind = "inhibitory"
+rank = 2
+
+[[operator]]
+id = 2
+name = "salience_broadcast"
+kind = "modulatory"
+rank = 1
+
+[[operator]]
+id = 3
+name = "epistemic_conflict"
+kind = "modulatory"
+rank = 2
+
+[[operator]]
+id = 4
+name = "social_approach"
+kind = "modulatory"
+rank = 1
+
+[[operator]]
+id = 5
+name = "boundary_suppression"
+kind = "inhibitory"
+rank = 2
+
+[[operator]]
+id = 6
+name = "repair_coupling"
+kind = "modulatory"
+rank = 1
+
+[[operator]]
+id = 7
+name = "global_broadcast"
+kind = "workspace"
+rank = 2
+
+[[operator]]
+id = 8
+name = "interoceptive_feedback"
+kind = "feedback"
+rank = 2
+
+[[operator]]
+id = 9
+name = "action_feedback"
+kind = "feedback"
+rank = 1

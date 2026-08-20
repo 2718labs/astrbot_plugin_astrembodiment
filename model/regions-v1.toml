@@ -1,0 +1,64 @@
+layout_id = "aster-regions-v1"
+
+[[region]]
+id = 0
+name = "interoception_allostasis"
+start = 0
+count = 2048
+reserve = 256
+
+[[region]]
+id = 1
+name = "affective_valuation"
+start = 2048
+count = 2048
+reserve = 256
+
+[[region]]
+id = 2
+name = "salience"
+start = 4096
+count = 1024
+reserve = 128
+
+[[region]]
+id = 3
+name = "epistemic_fallibility"
+start = 5120
+count = 2048
+reserve = 256
+
+[[region]]
+id = 4
+name = "social_boundary"
+start = 7168
+count = 2048
+reserve = 256
+
+[[region]]
+id = 5
+name = "temper_inhibitory"
+start = 9216
+count = 1024
+reserve = 128
+
+[[region]]
+id = 6
+name = "world_model_imagination"
+start = 10240
+count = 4096
+reserve = 512
+
+[[region]]
+id = 7
+name = "global_workspace"
+start = 14336
+count = 1024
+reserve = 128
+
+[[region]]
+id = 8
+name = "action_expression"
+start = 15360
+count = 1024
+reserve = 128

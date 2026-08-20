@@ -1,0 +1,14 @@
+[package]
+name = "ae-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-contracts.workspace = true
+ae-continuum.workspace = true
+ae-genesis.workspace = true
+ae-fixed.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true

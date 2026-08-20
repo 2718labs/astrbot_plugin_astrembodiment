@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.14.1,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "astrembodiment-core"
+version = "1.0.0"
+description = "Rust-native ASTER-CCN runtime for AstrEmbodiment"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-or-later" }
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+]
+
+[tool.maturin]
+manifest-path = "crates/ae-pyo3/Cargo.toml"
+python-source = "python"
+module-name = "astrembodiment_core._native"
+bindings = "pyo3"
+strip = true
