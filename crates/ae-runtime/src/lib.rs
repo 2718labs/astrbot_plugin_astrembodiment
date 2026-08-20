@@ -808,7 +808,10 @@ impl AstrRuntime {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.formula_digest != committed.receipt.formula_digest
+            if row.revision != snapshot.revision
+                || row.base_revision != receipt.base_revision
+                || receipt.formula_digest != committed.receipt.formula_digest
+                || receipt.scope_digest != persona_scope
                 || receipt.next_revision != snapshot.revision
             {
                 return Err(RuntimeError::InvalidNeuralState);
@@ -822,7 +825,12 @@ impl AstrRuntime {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.state_before != receipt.state_after {
+            if row.revision != receipt.next_revision
+                || row.base_revision != receipt.base_revision
+                || receipt.scope_digest != persona_scope
+                || receipt.formula_digest != committed.receipt.formula_digest
+                || receipt.state_before != receipt.state_after
+            {
                 return Err(RuntimeError::InvalidNeuralState);
             }
         }
@@ -1092,7 +1100,11 @@ impl AstrRuntime {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.formula_digest != formula_digest || receipt.scope_digest != persona_scope {
+            if row.revision != receipt.next_revision
+                || row.base_revision != receipt.base_revision
+                || receipt.formula_digest != formula_digest
+                || receipt.scope_digest != persona_scope
+            {
                 return Err(RuntimeError::InvalidNeuralState);
             }
             let snapshot = self.store.read_snapshot(&persona_scope, row.revision)?;

@@ -574,7 +574,7 @@ macro_rules! durable_semantic_authority_test_contents {
         }
 
         #[test]
-        fn production_runtime_commit_uses_store_authority_and_no_outer_r7_state() {
+        fn hydrate_replay_close_preserves_committed_semantic_state() {
             let request = request(71);
             let scope = ScopeRef {
                 bot_token: request.source.scope.bot_token,
