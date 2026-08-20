@@ -23,6 +23,8 @@ mod r7_projection_fixture;
 
 const CANONICAL_HOT_STATE_MAGIC_V1: [u8; 8] = *b"AEHOTST\0";
 const CANONICAL_HOT_STATE_SCHEMA_V1: u16 = 1;
+const R7_SEMANTIC_PERSONA_SCOPE_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/runtime/r7-semantic-persona-scope-v1";
 
 static NEXT_DATABASE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -105,6 +107,12 @@ fn scope_for(request: &PersonaGenesisRequest) -> ScopeRef {
         relation_token: None,
         session_token: [0; 16],
     }
+}
+
+fn semantic_persona_scope(scope: &ScopeRef) -> [u8; 32] {
+    let root_persona_scope =
+        wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+    wire::domain_hash(R7_SEMANTIC_PERSONA_SCOPE_DOMAIN_V1, &[&root_persona_scope])
 }
 
 fn unique_database(name: &str) -> PathBuf {
@@ -607,6 +615,9 @@ fn production_runtime_commit_uses_store_authority_and_no_outer_r7_state() {
     let root_event = root_event_from_r7(&event);
     let next_field = expected_production_next_field(&request, &event);
     let state_after = state_digest(&next_field, &request.formula_digest);
+    let legacy_persona_scope =
+        wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+    let semantic_persona_scope = semantic_persona_scope(&scope);
     let full_scope_digest = wire::scope_digest(&scope);
     let event_digest = wire::event_digest(&root_event);
     let authority_digest = authority_projection_digest(&root_event);
@@ -629,16 +640,35 @@ fn production_runtime_commit_uses_store_authority_and_no_outer_r7_state() {
     let mut runtime = AstrRuntime::open(&database).expect("open runtime");
     runtime.ensure_genesis(&request).expect("commit genesis");
 
+    let legacy = runtime
+        .apply_event(&scope, &root_event)
+        .expect("legacy G0 accepts the exact root user stimulus first");
+    assert!(!legacy.deduplicated);
+    assert_eq!(legacy.receipt.scope_digest, legacy_persona_scope);
+    assert_eq!(legacy.receipt.event_digest, event_digest);
+    assert_eq!(
+        runtime
+            .current_revision(&scope)
+            .expect("legacy current revision remains visible before R7 starts"),
+        1
+    );
+
     let decision = runtime
         .apply_user_stimulus_with_private_projection_wire_v1(&event, &input)
-        .expect("production runtime must commit the prepared transition");
-    assert_eq!(decision.receipt.event_digest, event_digest);
-    assert_eq!(
-        decision.receipt.scope_digest,
-        wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None)
+        .expect("R7 must not deduplicate a legacy G0 no-op record");
+    assert!(
+        !decision.deduplicated,
+        "R7 must commit its stateful semantic transition after a legacy G0 record"
     );
+    assert_eq!(decision.receipt.event_digest, event_digest);
+    assert_eq!(decision.receipt.scope_digest, semantic_persona_scope);
+    assert_ne!(decision.receipt.scope_digest, legacy.receipt.scope_digest);
     assert_eq!(decision.receipt.state_after, state_after);
     assert_eq!(runtime.current_revision(&scope).expect("hot revision"), 1);
+    assert!(
+        decision.into_private_projection_wire().is_some(),
+        "the first stateful R7 commit returns its opaque private wire"
+    );
 
     runtime
         .flush_and_close()
@@ -700,21 +730,188 @@ fn production_runtime_commit_uses_store_authority_and_no_outer_r7_state() {
     let retry = reopened
         .apply_user_stimulus_with_private_projection_wire_v1(&event, &input)
         .expect("exact event is deduplicated before stale or projection work");
+    assert!(retry.deduplicated);
     assert_eq!(retry.receipt.event_digest, event_digest);
+    assert!(retry.into_private_projection_wire().is_none());
 
     let store = Store::open(&database).expect("open durable authority");
-    let persona_scope = wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+    let canonical_event_bytes = wire::encode_event(&root_event);
+    let legacy_row = store
+        .lookup_event(&legacy_persona_scope, &event_digest)
+        .expect("read legacy G0 row")
+        .expect("legacy G0 row");
+    let semantic_row = store
+        .lookup_event(&semantic_persona_scope, &event_digest)
+        .expect("read semantic R7 row")
+        .expect("semantic R7 row");
+    assert_eq!(legacy_row.event_bytes, canonical_event_bytes);
+    assert_eq!(semantic_row.event_bytes, canonical_event_bytes);
+    assert_eq!(legacy_row.event_digest, event_digest);
+    assert_eq!(semantic_row.event_digest, event_digest);
     assert_eq!(
         store
-            .current_revision(&persona_scope)
-            .expect("durable revision"),
+            .current_revision(&legacy_persona_scope)
+            .expect("legacy G0 revision"),
+        1
+    );
+    assert_eq!(
+        store
+            .current_revision(&semantic_persona_scope)
+            .expect("semantic durable revision"),
         2
     );
+    assert!(
+        store
+            .read_snapshot(&legacy_persona_scope, 1)
+            .expect("read legacy G0 snapshot")
+            .is_none(),
+        "the legacy no-op must not alias a semantic snapshot"
+    );
     let snapshot = store
-        .read_snapshot(&persona_scope, 2)
+        .read_snapshot(&semantic_persona_scope, 2)
         .expect("read durable semantic snapshot")
         .expect("semantic commit writes its snapshot atomically");
     assert_eq!(snapshot.state_digest, second_state_after);
+}
+
+#[test]
+fn r7_and_legacy_user_stimulus_do_not_substitute_each_other_in_reverse_order() {
+    let request = request(91);
+    let scope = ScopeRef {
+        bot_token: request.source.scope.bot_token,
+        persona_token: request.source.scope.persona_token,
+        relation_token: Some([94; 16]),
+        session_token: [95; 16],
+    };
+    let event = r7_contracts::CanonicalEvent::UserStimulus(r7_contracts::UserStimulus {
+        event_id: [96; 16],
+        scope: r7_contracts::ScopeRef {
+            bot_token: scope.bot_token,
+            persona_token: scope.persona_token,
+            relation_token: scope.relation_token,
+            session_token: scope.session_token,
+        },
+        causal: r7_contracts::CausalRef {
+            turn_id: [97; 16],
+            action_id: None,
+            delivery_id: None,
+            claim_id: None,
+            base_revision: 0,
+        },
+        observed_at_ms: request.observed_at_ms,
+        evidence: r7_contracts::SemanticEstimate {
+            schema_version: 1,
+            dimensions: r7_contracts::EvidenceVector {
+                positive: Fixed::from_raw(700_000),
+                affiliation: Fixed::from_raw(600_000),
+                harm: Fixed::from_raw(100_000),
+                boundary: Fixed::from_raw(200_000),
+                repair: Fixed::from_raw(400_000),
+                repetition: Fixed::from_raw(100_000),
+                new_information: Fixed::from_raw(500_000),
+                constraint_instability: Fixed::from_raw(100_000),
+                epistemic_conflict: Fixed::from_raw(300_000),
+                self_responsibility: Fixed::from_raw(300_000),
+                other_responsibility: Fixed::from_raw(200_000),
+                hostility: Fixed::from_raw(100_000),
+                publicness: Fixed::from_raw(100_000),
+                engagement: Fixed::from_raw(600_000),
+                rejection: Fixed::from_raw(100_000),
+            },
+            estimator_confidence: Fixed::from_raw(800_000),
+            estimator_digest: [98; 32],
+        },
+    });
+    let root_event = root_event_from_r7(&event);
+    let next_field = expected_production_next_field(&request, &event);
+    let state_after = state_digest(&next_field, &request.formula_digest);
+    let legacy_persona_scope =
+        wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+    let semantic_persona_scope = semantic_persona_scope(&scope);
+    let full_scope_digest = wire::scope_digest(&scope);
+    let event_digest = wire::event_digest(&root_event);
+    let authority_digest = authority_projection_digest(&root_event);
+    let turn_binding = production_projection_turn_binding(
+        1,
+        &state_after,
+        &[97; 16],
+        &full_scope_digest,
+        &event_digest,
+        &authority_digest,
+    );
+    let input = r7_projection_fixture::matching_pre_output_input(
+        1,
+        state_after,
+        [97; 16],
+        full_scope_digest,
+        turn_binding,
+    );
+    let database = unique_database("production-authority-reverse-order");
+    let mut runtime = AstrRuntime::open(&database).expect("open runtime");
+    runtime.ensure_genesis(&request).expect("commit genesis");
+
+    let semantic = runtime
+        .apply_user_stimulus_with_private_projection_wire_v1(&event, &input)
+        .expect("R7 commits the first semantic transition");
+    assert!(!semantic.deduplicated);
+    assert_eq!(semantic.receipt.scope_digest, semantic_persona_scope);
+    assert!(semantic.into_private_projection_wire().is_some());
+
+    let legacy = runtime
+        .apply_event(&scope, &root_event)
+        .expect("legacy G0 remains independently commit-able after R7");
+    assert!(!legacy.deduplicated);
+    assert_eq!(legacy.receipt.scope_digest, legacy_persona_scope);
+    assert_eq!(legacy.receipt.event_digest, event_digest);
+    assert_eq!(
+        runtime
+            .current_revision(&scope)
+            .expect("semantic current revision"),
+        1
+    );
+
+    runtime.flush_and_close().expect("close both durable lanes");
+    drop(runtime);
+
+    let mut reopened = AstrRuntime::open(&database).expect("reopen runtime");
+    assert_eq!(
+        reopened
+            .current_revision(&scope)
+            .expect("rebind R7 semantic lane"),
+        1
+    );
+    let replay = reopened
+        .verify_replay(&scope.bot_token, &scope.persona_token)
+        .expect("replay selects the semantic lane once it exists");
+    assert!(replay.ok);
+    assert_eq!(replay.checked, 1);
+
+    let retry = reopened
+        .apply_user_stimulus_with_private_projection_wire_v1(&event, &input)
+        .expect("exact R7 retry remains idempotent");
+    assert!(retry.deduplicated);
+    assert!(retry.into_private_projection_wire().is_none());
+
+    let legacy_retry = reopened
+        .apply_event(&scope, &root_event)
+        .expect("exact legacy retry remains idempotent");
+    assert!(legacy_retry.deduplicated);
+
+    let store = Store::open(&database).expect("open durable lanes");
+    assert_eq!(store.current_revision(&legacy_persona_scope).unwrap(), 1);
+    assert_eq!(store.current_revision(&semantic_persona_scope).unwrap(), 1);
+    assert!(store
+        .read_snapshot(&legacy_persona_scope, 1)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        store
+            .read_snapshot(&semantic_persona_scope, 1)
+            .unwrap()
+            .expect("semantic snapshot")
+            .state_digest,
+        state_after
+    );
 }
 
 #[test]

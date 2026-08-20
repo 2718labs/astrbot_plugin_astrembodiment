@@ -29,6 +29,8 @@ const CANONICAL_HOT_STATE_MAGIC_V1: [u8; 8] = *b"AEHOTST\0";
 const CANONICAL_HOT_STATE_SCHEMA_V1: u16 = 1;
 const CANONICAL_HOT_STATE_VECTOR_COUNT: usize = 8;
 const SYNAPSE_WIRE_BYTES: usize = 16;
+const R7_SEMANTIC_PERSONA_SCOPE_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/runtime/r7-semantic-persona-scope-v1";
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -99,6 +101,11 @@ pub struct InspectReport {
 struct HotBrain {
     bot_token: Id128,
     persona_token: Id128,
+    /// Legacy G0 events retain the root persona revision lane for compatibility.
+    legacy_persona_scope: Digest,
+    legacy_revision: u64,
+    /// The R7 semantic transition is deliberately separate from the G0 no-op
+    /// lane, while its event bytes and event digest stay root canonical.
     persona_scope: Digest,
     identity: ae_genesis::GenesisIdentity,
     formula_digest: Digest,
@@ -115,6 +122,11 @@ pub struct AstrRuntime {
 
 fn fixed_zero_vector() -> InvariantResiduals {
     InvariantResiduals::default()
+}
+
+fn r7_semantic_persona_scope(bot_token: &Id128, persona_token: &Id128) -> Digest {
+    let root_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+    wire::domain_hash(R7_SEMANTIC_PERSONA_SCOPE_DOMAIN_V1, &[&root_persona_scope])
 }
 
 struct HotStateCursor<'a> {
@@ -687,10 +699,15 @@ impl AstrRuntime {
                         self.hot = Some(HotBrain {
                             bot_token: effective.source.scope.bot_token,
                             persona_token: effective.source.scope.persona_token,
-                            persona_scope: wire::persona_scope_digest(
+                            legacy_persona_scope: wire::persona_scope_digest(
                                 &effective.source.scope.bot_token,
                                 &effective.source.scope.persona_token,
                                 None,
+                            ),
+                            legacy_revision: 0,
+                            persona_scope: r7_semantic_persona_scope(
+                                &effective.source.scope.bot_token,
+                                &effective.source.scope.persona_token,
                             ),
                             identity,
                             formula_digest: effective.formula_digest,
@@ -731,12 +748,19 @@ impl AstrRuntime {
             incarnation_id: committed.receipt.incarnation_id,
             development_seed_digest: committed.receipt.development_seed_digest,
         };
-        let persona_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
+        let legacy_persona_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
+        let persona_scope = r7_semantic_persona_scope(&bot_token, &persona_token);
+        let legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
         let revision = self.store.current_revision(&persona_scope)?;
-        let snapshot = self
-            .store
-            .read_latest_snapshot(&persona_scope, revision)?
-            .ok_or(RuntimeError::InvalidNeuralState)?;
+        let snapshot = if revision == 0 {
+            self.store
+                .read_snapshot(&legacy_persona_scope, 0)?
+                .ok_or(RuntimeError::InvalidNeuralState)?
+        } else {
+            self.store
+                .read_latest_snapshot(&persona_scope, revision)?
+                .ok_or(RuntimeError::InvalidNeuralState)?
+        };
         if snapshot.revision > revision {
             return Err(RuntimeError::InvalidNeuralState);
         }
@@ -781,6 +805,8 @@ impl AstrRuntime {
         self.hot = Some(HotBrain {
             bot_token,
             persona_token,
+            legacy_persona_scope,
+            legacy_revision,
             persona_scope,
             identity,
             formula_digest: committed.receipt.formula_digest,
@@ -840,8 +866,8 @@ impl AstrRuntime {
         let (
             hot_bot_token,
             hot_persona_token,
-            persona_scope,
-            hot_revision,
+            legacy_persona_scope,
+            legacy_revision,
             formula_digest,
             manifest_digest,
             initial_snapshot_digest,
@@ -854,8 +880,8 @@ impl AstrRuntime {
             (
                 hot.bot_token,
                 hot.persona_token,
-                hot.persona_scope,
-                hot.revision,
+                hot.legacy_persona_scope,
+                hot.legacy_revision,
                 hot.formula_digest,
                 hot.identity.manifest_digest,
                 hot.initial_snapshot_digest,
@@ -883,7 +909,10 @@ impl AstrRuntime {
 
         // Idempotency: an event that was already applied is never applied
         // twice; the original receipt is returned unchanged.
-        if let Some(row) = self.store.lookup_event(&persona_scope, &event_digest)? {
+        if let Some(row) = self
+            .store
+            .lookup_event(&legacy_persona_scope, &event_digest)?
+        {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
@@ -898,12 +927,12 @@ impl AstrRuntime {
         let causal_base = match event {
             CanonicalEvent::UserStimulus(e) => e.causal.base_revision,
             CanonicalEvent::DeliveryOutcome(e) => e.causal.base_revision,
-            CanonicalEvent::TimeAdvance(_) => hot_revision,
+            CanonicalEvent::TimeAdvance(_) => legacy_revision,
             _ => unreachable!(),
         };
-        if causal_base != hot_revision {
+        if causal_base != legacy_revision {
             return Err(RuntimeError::StaleCausalBase {
-                expected: hot_revision,
+                expected: legacy_revision,
                 actual: causal_base,
             });
         }
@@ -912,11 +941,11 @@ impl AstrRuntime {
         let receipt = TransitionReceipt {
             schema_version: 1,
             formula_digest,
-            scope_digest: persona_scope,
+            scope_digest: legacy_persona_scope,
             event_digest,
             authority_digest,
-            base_revision: hot_revision,
-            next_revision: hot_revision + 1,
+            base_revision: legacy_revision,
+            next_revision: legacy_revision + 1,
             state_before,
             state_after: state_before,
             graph_after,
@@ -932,7 +961,7 @@ impl AstrRuntime {
         // event; ``Ok(None)`` is not evidence that Genesis is missing.
         let chain_seed = self
             .store
-            .last_chain_digest(&persona_scope)?
+            .last_chain_digest(&legacy_persona_scope)?
             .unwrap_or(initial_snapshot_digest);
         let envelope = CommitEnvelope {
             event_kind: wire::event_kind_name(event).to_string(),
@@ -945,7 +974,7 @@ impl AstrRuntime {
         match self.store.commit_journal(&envelope) {
             Ok((revision, _row)) => {
                 if let Some(hot) = self.hot.as_mut() {
-                    hot.revision = revision;
+                    hot.legacy_revision = revision;
                 }
                 Ok(ApplyDecision {
                     contract,
@@ -957,7 +986,7 @@ impl AstrRuntime {
             Err(StoreError::DuplicateEvent(revision)) => {
                 let row = self
                     .store
-                    .lookup_event(&persona_scope, &event_digest)?
+                    .lookup_event(&legacy_persona_scope, &event_digest)?
                     .ok_or(RuntimeError::RetryWait)?;
                 let receipt = row
                     .decode_receipt()
@@ -984,8 +1013,23 @@ impl AstrRuntime {
             .store
             .lookup_bound_genesis(bot_token, persona_token)?
             .map(|committed| {
-                let persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-                let revision = self.store.current_revision(&persona_scope).unwrap_or(0);
+                let legacy_persona_scope =
+                    wire::persona_scope_digest(bot_token, persona_token, None);
+                let semantic_persona_scope = r7_semantic_persona_scope(bot_token, persona_token);
+                let semantic_revision = self
+                    .store
+                    .current_revision(&semantic_persona_scope)
+                    .unwrap_or(0);
+                let (persona_scope, revision) = if semantic_revision == 0 {
+                    (
+                        legacy_persona_scope,
+                        self.store
+                            .current_revision(&legacy_persona_scope)
+                            .unwrap_or(0),
+                    )
+                } else {
+                    (semantic_persona_scope, semantic_revision)
+                };
                 let last_chain = self.store.last_chain_digest(&persona_scope).unwrap_or(None);
                 let journal_count = self.store.count_journal().unwrap_or(0);
                 InspectReport {
@@ -1031,7 +1075,13 @@ impl AstrRuntime {
             .store
             .lookup_bound_genesis(bot_token, persona_token)?
             .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        let persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+        let semantic_persona_scope = r7_semantic_persona_scope(bot_token, persona_token);
+        let persona_scope = if self.store.current_revision(&semantic_persona_scope)? == 0 {
+            legacy_persona_scope
+        } else {
+            semantic_persona_scope
+        };
         let rows = self.store.read_journal(&persona_scope)?;
         let report = ae_continuum::verify_replay(committed.receipt.initial_snapshot_digest, &rows);
         if !report.ok || report.final_revision != self.store.current_revision(&persona_scope)? {
@@ -1076,7 +1126,11 @@ impl AstrRuntime {
 
     pub fn current_revision(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
         let hot = self.hot_for(scope)?;
-        Ok(hot.revision)
+        Ok(if hot.revision == 0 {
+            hot.legacy_revision
+        } else {
+            hot.revision
+        })
     }
 }
 
