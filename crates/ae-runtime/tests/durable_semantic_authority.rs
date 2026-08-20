@@ -109,6 +109,10 @@ fn unique_database(name: &str) -> PathBuf {
 }
 
 fn fixture(name: &str) -> Fixture {
+    fixture_with_first_row_offset(name, 0)
+}
+
+fn fixture_with_first_row_offset(name: &str, first_row_offset: u32) -> Fixture {
     let request = request(41);
     let identity = derive_identity(&request, &GenesisPrior::default()).expect("identity");
     let formula_digest = request.formula_digest;
@@ -151,6 +155,7 @@ fn fixture(name: &str) -> Fixture {
     ];
     graph.row_offsets[1..].fill(graph.edges.len() as u32);
     graph.row_offsets[1] = 1;
+    graph.row_offsets[0] = first_row_offset;
     assert!(field.validate());
     assert!(graph.validate());
 
@@ -493,6 +498,16 @@ fn canonical_hot_state_rejects_truncation_counts_invalid_graph_formula_and_trail
         [fixture.layout.row_value_offset + 8..fixture.layout.row_value_offset + 12]
         .copy_from_slice(&1u32.to_le_bytes());
     assert_rejected("non-monotonic-row-offsets", non_monotonic_offsets);
+
+    let malformed_first_row_offset = fixture_with_first_row_offset("nonzero-first-row-offset", 1);
+    let mut malformed_runtime =
+        AstrRuntime::open(&malformed_first_row_offset.database).expect("open malformed runtime");
+    assert!(
+        malformed_runtime
+            .current_revision(&malformed_first_row_offset.scope)
+            .is_err(),
+        "nonzero first row offset bytes must not bind HotBrain"
+    );
 
     let mut target_out_of_bounds = fixture.state_bytes.clone();
     target_out_of_bounds[fixture.layout.edge_value_offset..fixture.layout.edge_value_offset + 4]

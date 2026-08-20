@@ -331,6 +331,7 @@ fn decode_hot_state_v1(
         });
     }
     if !cursor.is_at_eof()
+        || row_offsets.first().copied() != Some(0)
         || !row_offsets.windows(2).all(|pair| pair[0] <= pair[1])
         || row_offsets
             .iter()
