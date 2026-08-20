@@ -1,902 +1,1959 @@
 #![forbid(unsafe_code)]
 
-//! AstrRuntime: the G0 vertical slice orchestrator.
-//!
-//! ensure_genesis -> deterministic no-op apply_event -> SQLite commit ->
-//! replay verification. Python cannot reach any of this state directly; the
-//! PyO3 surface exposes only coarse calls.
+mod private_projection_wire;
+mod r7_atomic_projection;
 
-use ae_agent::noop_action_contract;
-use ae_authority::authority_projection_digest;
-use ae_continuum::{CommitEnvelope, ReplayReport};
+use crate::r7_atomic_projection::{
+    compile_atomic_pre_output_wire_v1, R7SemanticProjectionBindingV1,
+};
+use ae_agent::scaffold_contract;
+use ae_attention::assemble_load;
 use ae_contracts::{
-    wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisReceipt, GenesisStatus,
-    Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
+    wire, ActionContract, CanonicalEvent, CommitStatus, EvidenceVector, InvariantResiduals,
+    ScopeRef, SourceAuthority, TransitionReceipt, UserStimulus,
 };
-use ae_neurofield::{
-    graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
-};
-use ae_store::{ClaimOutcome, GenesisCommit, Store, StoreError};
-use std::path::Path;
+use ae_fixed::Fixed;
+use ae_neurofield::{NeuralField, SparseGraph, NEURON_SLOTS};
+use ae_renorm::empty_workspace;
+use std::collections::BTreeMap;
+use std::fmt;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+pub use ae_contracts::{
+    AstrBotPublicSignalV1, AstrBotToolDispositionV1, AstrBotToolIngressV1, AstrBotToolOutcomeV1,
+    DeliveryKnowledgeV1, HostEffectDispositionV1, HostEffectV1, HostIngressKindV1, HostIngressV1,
+    HostSettlementStatusV1, HostSettlementV1, PublicTextV1,
+};
+pub use private_projection_wire::{
+    PrivateProjectionPayloadWireErrorV1, PrivateProjectionPayloadWireV1,
+};
+pub use r7_atomic_projection::{
+    BoundedProjectionReferencesV1, NativeProjectionPayloadIngressV1,
+    NativeProjectionPayloadProducerErrorV1, NativeProjectionPayloadProducerInputV1,
+    NativeProjectionPayloadProducerV1, NativeProjectionUpdateV1, OrganismRuntimeErrorV1,
+    PreOutputProjectionUpdateV1, R7PreOutputProjectionInputV1,
+};
+
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum RuntimeError {
-    #[error("storage error: {0}")]
-    Store(#[from] StoreError),
-    #[error("genesis error: {0}")]
-    Genesis(#[from] ae_genesis::GenesisError),
-    #[error("persona genesis is required before production events")]
-    PersonaGenesisRequired,
-    #[error("event persona does not match the bound incarnation")]
-    GenesisManifestMismatch,
-    #[error("event causal base revision {actual} does not match committed revision {expected}")]
-    StaleCausalBase { expected: u64, actual: u64 },
-    #[error("event kind {0} is not supported by the G0 no-op lane")]
-    UnsupportedEvent(&'static str),
-    #[error("genesis lease is in flight; retry after backoff")]
-    RetryWait,
-    #[error("runtime is closed")]
-    Closed,
-    #[error("invalid neural state")]
-    InvalidNeuralState,
+    #[error("invalid neural field")]
+    InvalidNeuralField,
+    #[error("invalid sparse graph")]
+    InvalidSparseGraph,
+    #[error("event kind not yet supported by scaffold")]
+    UnsupportedEvent,
+    #[error("invalid user stimulus")]
+    InvalidUserStimulus,
+    #[error("user stimulus base revision mismatch")]
+    UserStimulusBaseRevisionMismatch,
+    #[error("invalid semantic estimate")]
+    InvalidSemanticEstimate,
+    #[error("native semantic transition did not change state")]
+    NativeStateUnchanged,
+    #[error("native semantic transition formula identity mismatch")]
+    NativeFormulaDigestMismatch,
+    #[error("runtime revision overflow")]
+    RevisionOverflow,
+    #[error("private projection wire compilation was refused")]
+    PrivateProjectionWireUnavailable,
+    #[error("private projection wire was already consumed")]
+    PrivateProjectionWireAlreadyConsumed,
+    #[error("private projection wire does not bind the prepared semantic transition: {field}")]
+    PrivateProjectionWireBindingMismatch { field: &'static str },
+    #[error("invalid host ingress")]
+    InvalidHostIngress,
+    #[error("host base revision mismatch")]
+    HostBaseRevisionMismatch,
+    #[error("host process epoch mismatch")]
+    HostProcessEpochMismatch,
+    #[error("invalid host settlement")]
+    InvalidHostSettlement,
+    #[error("invalid host public effect")]
+    InvalidHostPublicEffect,
+    #[error("host effect registry full")]
+    HostEffectRegistryFull,
+    #[error("invalid astrbot tool ingress")]
+    InvalidAstrBotToolIngress,
+    #[error("invalid astrbot tool outcome")]
+    InvalidAstrBotToolOutcome,
+    #[error("astrbot tool process epoch mismatch")]
+    AstrBotToolProcessEpochMismatch,
+    #[error("astrbot tool base revision mismatch")]
+    AstrBotToolBaseRevisionMismatch,
+    #[error("astrbot tool invocation identity conflict")]
+    AstrBotToolIdentityConflict,
+    #[error("astrbot tool invocation expired")]
+    AstrBotToolInvocationExpired,
+    #[error("astrbot tool registry full")]
+    AstrBotToolRegistryFull,
 }
 
-#[derive(Debug)]
-pub struct ApplyDecision {
-    pub contract: ActionContract,
-    pub receipt: TransitionReceipt,
-    pub revision: u64,
-    /// True when this exact event had already been applied; the state was not
-    /// changed and the returned receipt is the originally committed one.
-    pub deduplicated: bool,
+const NATIVE_PUBLIC_EFFECT_TRIGGER_V1: &str = "[[AE_NATIVE_PUBLIC_EFFECT_V1]]";
+const NATIVE_PUBLIC_EFFECT_TEXT_V1: &str = "AstrEmbodiment native public-effect v1.";
+const NATIVE_PUBLIC_EFFECT_TTL_MS: u64 = 30_000;
+const MAX_ISSUED_HOST_EFFECTS_V1: usize = 1_024;
+const ASTRBOT_TOOL_TTL_MS: u64 = 30_000;
+const MAX_ASTRBOT_TOOL_RECORDS_V1: usize = 1_024;
+const NATIVE_SEMANTIC_FORMULA_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/native-semantic-transition-formula-v1";
+const NATIVE_SEMANTIC_STATE_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semantic-neural-field-v1";
+const NATIVE_SEMANTIC_GRAPH_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semantic-sparse-graph-v1";
+const NATIVE_SEMANTIC_SCOPE_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semantic-scope-v1";
+const NATIVE_SEMANTIC_OPTION_ID_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semantic-option-id-v1";
+const NATIVE_SEMANTIC_EVENT_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semantic-user-stimulus-v1";
+const NATIVE_SEMANTIC_AUTHORITY_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semantic-authority-v1";
+const NATIVE_SEMANTIC_ACTION_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semantic-action-v1";
+const NATIVE_SEMANTIC_CONTRACT_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/native-semantic-action-contract-v1";
+const NATIVE_SEMANTIC_ACTION_TTL_MS: u64 = 30_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IssuedHostEffectV1 {
+    disposition: HostEffectDispositionV1,
+    effect_id: [u8; 32],
+    action_id: [u8; 32],
+    process_epoch_id: [u8; 16],
+    adapter_type: String,
+    adapter_id_binding: [u8; 32],
+    scope_binding: [u8; 32],
+    session_binding: [u8; 32],
+    turn_binding: [u8; 32],
+    expires_at_ms: u64,
+    settlement: Option<(HostSettlementStatusV1, DeliveryKnowledgeV1)>,
 }
 
-#[derive(Clone, Debug)]
-pub struct InspectReport {
-    pub bound: bool,
-    pub bot_token: Id128,
-    pub persona_token: Id128,
-    pub seed_code: String,
-    pub seed_code_short: String,
-    pub incarnation_id: String,
-    pub revision: u64,
-    pub initial_snapshot_digest: Digest,
-    pub last_chain_digest: Option<Digest>,
-    pub journal_count: u64,
-    pub observatory_genesis_unavailable: bool,
+impl IssuedHostEffectV1 {
+    fn from_effect(effect: &HostEffectV1) -> Self {
+        Self {
+            disposition: effect.disposition,
+            effect_id: effect.effect_id,
+            action_id: effect.action_id,
+            process_epoch_id: effect.process_epoch_id,
+            adapter_type: effect.adapter_type.clone(),
+            adapter_id_binding: effect.adapter_id_binding,
+            scope_binding: effect.scope_binding,
+            session_binding: effect.session_binding,
+            turn_binding: effect.turn_binding,
+            expires_at_ms: effect.expires_at_ms,
+            settlement: None,
+        }
+    }
+
+    fn matches_effect(&self, effect: &HostEffectV1) -> bool {
+        self.disposition == effect.disposition
+            && self.effect_id == effect.effect_id
+            && self.action_id == effect.action_id
+            && self.process_epoch_id == effect.process_epoch_id
+            && self.adapter_type == effect.adapter_type
+            && self.adapter_id_binding == effect.adapter_id_binding
+            && self.scope_binding == effect.scope_binding
+            && self.session_binding == effect.session_binding
+            && self.turn_binding == effect.turn_binding
+            && self.expires_at_ms == effect.expires_at_ms
+    }
+
+    fn matches_settlement(&self, settlement: &HostSettlementV1) -> bool {
+        self.effect_id == settlement.effect_id
+            && self.action_id == settlement.action_id
+            && self.process_epoch_id == settlement.process_epoch_id
+            && self.adapter_type == settlement.adapter_type
+            && self.adapter_id_binding == settlement.adapter_id_binding
+            && self.scope_binding == settlement.scope_binding
+            && self.session_binding == settlement.session_binding
+            && self.turn_binding == settlement.turn_binding
+    }
+
+    fn record_settlement(
+        &mut self,
+        status: HostSettlementStatusV1,
+        delivery: DeliveryKnowledgeV1,
+    ) -> Result<(), RuntimeError> {
+        let next = (status, delivery);
+        match self.settlement {
+            None => self.settlement = Some(next),
+            Some(previous) if previous == next => {}
+            Some(_) if status == HostSettlementStatusV1::DuplicateSuppressed => {
+                self.settlement = Some(next)
+            }
+            Some(_) => return Err(RuntimeError::InvalidHostSettlement),
+        }
+        Ok(())
+    }
 }
 
-struct HotBrain {
-    bot_token: Id128,
-    persona_token: Id128,
-    persona_scope: Digest,
-    identity: ae_genesis::GenesisIdentity,
-    formula_digest: Digest,
-    field: NeuralField,
-    graph: SparseGraph,
-    initial_snapshot_digest: Digest,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AstrBotToolRegistryRecordV1 {
+    outcome_id: [u8; 32],
+    invocation_id: [u8; 32],
+    process_epoch_id: [u8; 32],
+    adapter_binding: [u8; 32],
+    session_binding: [u8; 32],
+    turn_binding: [u8; 32],
+    event_binding: [u8; 32],
     revision: u64,
+    expires_at_ms: u64,
+    disposition: AstrBotToolDispositionV1,
+    public_signal: Option<AstrBotPublicSignalV1>,
+}
+
+impl AstrBotToolRegistryRecordV1 {
+    fn from_outcome(outcome: &AstrBotToolOutcomeV1, expires_at_ms: u64) -> Self {
+        Self {
+            outcome_id: outcome.outcome_id,
+            invocation_id: outcome.invocation_id,
+            process_epoch_id: outcome.process_epoch_id,
+            adapter_binding: outcome.adapter_binding,
+            session_binding: outcome.session_binding,
+            turn_binding: outcome.turn_binding,
+            event_binding: outcome.event_binding,
+            revision: outcome.revision,
+            expires_at_ms,
+            disposition: outcome.disposition,
+            public_signal: outcome.public_signal,
+        }
+    }
+
+    fn matches_ingress(&self, ingress: &AstrBotToolIngressV1) -> bool {
+        self.invocation_id == ingress.invocation_id
+            && self.process_epoch_id == ingress.process_epoch_id
+            && self.adapter_binding == ingress.adapter_binding
+            && self.session_binding == ingress.session_binding
+            && self.turn_binding == ingress.turn_binding
+            && self.event_binding == ingress.event_binding
+    }
+
+    fn outcome(&self) -> AstrBotToolOutcomeV1 {
+        AstrBotToolOutcomeV1 {
+            schema_version: 1,
+            outcome_id: self.outcome_id,
+            invocation_id: self.invocation_id,
+            process_epoch_id: self.process_epoch_id,
+            adapter_binding: self.adapter_binding,
+            session_binding: self.session_binding,
+            turn_binding: self.turn_binding,
+            event_binding: self.event_binding,
+            revision: self.revision,
+            disposition: self.disposition,
+            public_signal: self.public_signal,
+        }
+    }
 }
 
 pub struct AstrRuntime {
-    store: Store,
-    hot: Option<HotBrain>,
+    pub field: NeuralField,
+    pub graph: SparseGraph,
+    pub revision: u64,
+    pub formula_digest: [u8; 32],
+    host_process_epoch: Option<[u8; 16]>,
+    last_host_settlement: Option<HostSettlementV1>,
+    issued_host_effects: BTreeMap<[u8; 32], IssuedHostEffectV1>,
+    astrbot_tool_process_epoch: Option<[u8; 32]>,
+    astrbot_tool_registry: BTreeMap<[u8; 32], AstrBotToolRegistryRecordV1>,
 }
 
-fn fixed_zero_vector() -> InvariantResiduals {
-    InvariantResiduals::default()
+impl fmt::Debug for AstrRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AstrRuntime")
+            .field("revision", &self.revision)
+            .field("formula_digest", &self.formula_digest)
+            .field(
+                "host_process_epoch_bound",
+                &self.host_process_epoch.is_some(),
+            )
+            .field("issued_host_effect_count", &self.issued_host_effects.len())
+            .field(
+                "astrbot_tool_process_epoch_bound",
+                &self.astrbot_tool_process_epoch.is_some(),
+            )
+            .field(
+                "astrbot_tool_registry_count",
+                &self.astrbot_tool_registry.len(),
+            )
+            .finish()
+    }
+}
+
+pub struct RuntimeDecision {
+    pub contract: ae_contracts::ActionContract,
+    pub receipt: TransitionReceipt,
+    private_projection_wire: PrivateProjectionPayloadWireV1,
+}
+
+impl RuntimeDecision {
+    /// Transfers the exactly-bound one-shot private projection capability only
+    /// after the runtime has atomically committed its matching semantic state.
+    pub fn into_private_projection_wire(self) -> PrivateProjectionPayloadWireV1 {
+        self.private_projection_wire
+    }
+}
+
+struct PreparedSemanticTransitionV1 {
+    next_field: NeuralField,
+    next_revision: u64,
+    state_after: [u8; 32],
+    turn_id: [u8; 16],
+    scope_digest: [u8; 32],
+    event_digest: [u8; 32],
+    authority_digest: [u8; 32],
+    projection_turn_binding: [u8; 32],
+    projection_binding: R7SemanticProjectionBindingV1,
+    contract: ActionContract,
+    receipt: TransitionReceipt,
+}
+
+fn committed_semantic_projection_turn_binding(
+    next_revision: u64,
+    state_after: &[u8; 32],
+    turn_id: &[u8; 16],
+    scope_digest: &[u8; 32],
+    event_digest: &[u8; 32],
+    authority_digest: &[u8; 32],
+) -> [u8; 32] {
+    let revision = next_revision.to_be_bytes();
+    wire::domain_hash(
+        b"astr-embodiment/r7/committed-semantic-transition-binding-v1",
+        &[
+            &revision,
+            state_after,
+            turn_id,
+            scope_digest,
+            event_digest,
+            authority_digest,
+        ],
+    )
+}
+
+fn all_zero_128(value: &[u8; 16]) -> bool {
+    value.iter().all(|byte| *byte == 0)
+}
+
+fn all_zero_digest(value: &[u8; 32]) -> bool {
+    value.iter().all(|byte| *byte == 0)
+}
+
+fn native_formula_digest() -> [u8; 32] {
+    wire::domain_hash(
+        NATIVE_SEMANTIC_FORMULA_DOMAIN_V1,
+        &[
+            b"input:canonical-user-stimulus-v1",
+            b"validation:closed-typed-estimate-v1",
+            b"attention:positive-harm-epistemic-conflict-boundary-v1",
+            b"state:potential-and-excitation-regional-load-times-confidence-v1",
+            b"contract:scaffold-identity-bound-to-transition-v1",
+            b"receipt:canonical-domain-hashes-v1",
+        ],
+    )
+}
+
+fn evidence_values(evidence: &EvidenceVector) -> [Fixed; 15] {
+    [
+        evidence.positive,
+        evidence.affiliation,
+        evidence.harm,
+        evidence.boundary,
+        evidence.repair,
+        evidence.repetition,
+        evidence.new_information,
+        evidence.constraint_instability,
+        evidence.epistemic_conflict,
+        evidence.self_responsibility,
+        evidence.other_responsibility,
+        evidence.hostility,
+        evidence.publicness,
+        evidence.engagement,
+        evidence.rejection,
+    ]
+}
+
+fn fixed_values_digest(domain: &[u8], values: &[Fixed]) -> [u8; 32] {
+    let mut encoded = Vec::with_capacity(values.len().saturating_mul(std::mem::size_of::<i64>()));
+    for value in values {
+        encoded.extend_from_slice(&value.raw().to_be_bytes());
+    }
+    wire::domain_hash(domain, &[&encoded])
+}
+
+fn neural_field_digest(field: &NeuralField) -> [u8; 32] {
+    let potential = fixed_values_digest(
+        b"astr-embodiment/neural-field/potential-v1",
+        &field.potential,
+    );
+    let excitation = fixed_values_digest(
+        b"astr-embodiment/neural-field/excitation-v1",
+        &field.excitation,
+    );
+    let inhibition = fixed_values_digest(
+        b"astr-embodiment/neural-field/inhibition-v1",
+        &field.inhibition,
+    );
+    let adaptation = fixed_values_digest(
+        b"astr-embodiment/neural-field/adaptation-v1",
+        &field.adaptation,
+    );
+    let precision = fixed_values_digest(
+        b"astr-embodiment/neural-field/precision-v1",
+        &field.precision,
+    );
+    let prediction_error = fixed_values_digest(
+        b"astr-embodiment/neural-field/prediction-error-v1",
+        &field.prediction_error,
+    );
+    let eligibility = fixed_values_digest(
+        b"astr-embodiment/neural-field/eligibility-v1",
+        &field.eligibility,
+    );
+    let metabolic_reserve = fixed_values_digest(
+        b"astr-embodiment/neural-field/metabolic-reserve-v1",
+        &field.metabolic_reserve,
+    );
+    wire::domain_hash(
+        NATIVE_SEMANTIC_STATE_DOMAIN_V1,
+        &[
+            &potential,
+            &excitation,
+            &inhibition,
+            &adaptation,
+            &precision,
+            &prediction_error,
+            &eligibility,
+            &metabolic_reserve,
+        ],
+    )
+}
+
+fn sparse_graph_digest(graph: &SparseGraph) -> [u8; 32] {
+    let mut row_offsets = Vec::with_capacity(graph.row_offsets.len().saturating_mul(4));
+    for offset in &graph.row_offsets {
+        row_offsets.extend_from_slice(&offset.to_be_bytes());
+    }
+    let mut edges = Vec::with_capacity(graph.edges.len().saturating_mul(16));
+    for edge in &graph.edges {
+        edges.extend_from_slice(&edge.target.to_be_bytes());
+        edges.extend_from_slice(&edge.weight.to_be_bytes());
+        edges.extend_from_slice(&edge.eligibility.to_be_bytes());
+        edges.extend_from_slice(&edge.stability.to_be_bytes());
+        edges.extend_from_slice(&edge.last_used_epoch.to_be_bytes());
+        edges.push(edge.operator_id);
+        edges.push(edge.delay_class);
+        edges.extend_from_slice(&edge.flags.to_be_bytes());
+    }
+    wire::domain_hash(NATIVE_SEMANTIC_GRAPH_DOMAIN_V1, &[&row_offsets, &edges])
+}
+
+fn option_id_digest(value: Option<[u8; 16]>) -> [u8; 32] {
+    match value {
+        None => wire::domain_hash(NATIVE_SEMANTIC_OPTION_ID_DOMAIN_V1, &[b"none"]),
+        Some(id) => wire::domain_hash(NATIVE_SEMANTIC_OPTION_ID_DOMAIN_V1, &[b"some", &id]),
+    }
+}
+
+fn scope_digest(scope: &ScopeRef) -> [u8; 32] {
+    let relation = option_id_digest(scope.relation_token);
+    wire::domain_hash(
+        NATIVE_SEMANTIC_SCOPE_DOMAIN_V1,
+        &[
+            &scope.bot_token,
+            &scope.persona_token,
+            &relation,
+            &scope.session_token,
+        ],
+    )
+}
+
+fn semantic_estimate_digest(
+    evidence: &EvidenceVector,
+    confidence: Fixed,
+    digest: &[u8; 32],
+) -> [u8; 32] {
+    let dimensions = fixed_values_digest(
+        b"astr-embodiment/native-semantic-evidence-vector-v1",
+        &evidence_values(evidence),
+    );
+    let confidence = confidence.raw().to_be_bytes();
+    wire::domain_hash(
+        b"astr-embodiment/native-semantic-estimate-v1",
+        &[&dimensions, &confidence, digest],
+    )
+}
+
+fn user_stimulus_digest(stimulus: &UserStimulus, scope: &[u8; 32]) -> [u8; 32] {
+    let action_id = option_id_digest(stimulus.causal.action_id);
+    let delivery_id = option_id_digest(stimulus.causal.delivery_id);
+    let claim_id = option_id_digest(stimulus.causal.claim_id);
+    let observed_at_ms = stimulus.observed_at_ms.to_be_bytes();
+    let base_revision = stimulus.causal.base_revision.to_be_bytes();
+    let schema_version = stimulus.evidence.schema_version.to_be_bytes();
+    let estimate = semantic_estimate_digest(
+        &stimulus.evidence.dimensions,
+        stimulus.evidence.estimator_confidence,
+        &stimulus.evidence.estimator_digest,
+    );
+    wire::domain_hash(
+        NATIVE_SEMANTIC_EVENT_DOMAIN_V1,
+        &[
+            &stimulus.event_id,
+            scope,
+            &stimulus.causal.turn_id,
+            &action_id,
+            &delivery_id,
+            &claim_id,
+            &observed_at_ms,
+            &base_revision,
+            &schema_version,
+            &estimate,
+        ],
+    )
+}
+
+fn authority_name(authority: SourceAuthority) -> &'static [u8] {
+    match authority {
+        SourceAuthority::UserObserved => b"user_observed",
+        SourceAuthority::ExplicitFeedback => b"explicit_feedback",
+        SourceAuthority::PlatformObserved => b"platform_observed",
+        SourceAuthority::VerifierResult => b"verifier_result",
+        SourceAuthority::SelfAction => b"self_action",
+        SourceAuthority::SelfCritique => b"self_critique",
+        SourceAuthority::TimeAdvance => b"time_advance",
+        SourceAuthority::AdminAction => b"admin_action",
+    }
+}
+
+fn action_contract_digest(contract: &ActionContract) -> [u8; 32] {
+    let continuous = fixed_values_digest(
+        b"astr-embodiment/native-semantic-action-vector-v1",
+        &[
+            contract.continuous.answer,
+            contract.continuous.verify,
+            contract.continuous.acknowledge_error,
+            contract.continuous.repair,
+            contract.continuous.ask_evidence,
+            contract.continuous.set_boundary,
+            contract.continuous.withdraw,
+            contract.continuous.proactive_reach,
+            contract.continuous.warmth,
+            contract.continuous.directness,
+            contract.continuous.verbosity,
+            contract.continuous.confidence_ceiling,
+        ],
+    );
+    let flags = [
+        u8::from(contract.must_verify),
+        u8::from(contract.must_acknowledge_error),
+        u8::from(contract.must_correct_claim),
+        u8::from(contract.may_set_boundary),
+        u8::from(contract.may_withdraw),
+        u8::from(contract.must_not_seek_reassurance),
+    ];
+    let expires_at_ms = contract.expires_at_ms.to_be_bytes();
+    wire::domain_hash(
+        NATIVE_SEMANTIC_CONTRACT_DOMAIN_V1,
+        &[
+            &contract.action_id,
+            &contract.turn_id,
+            &continuous,
+            &flags,
+            &expires_at_ms,
+        ],
+    )
+}
+
+fn validate_user_stimulus(stimulus: &UserStimulus, revision: u64) -> Result<(), RuntimeError> {
+    if all_zero_128(&stimulus.event_id)
+        || all_zero_128(&stimulus.scope.bot_token)
+        || all_zero_128(&stimulus.scope.persona_token)
+        || all_zero_128(&stimulus.scope.session_token)
+        || all_zero_128(&stimulus.causal.turn_id)
+        || stimulus.observed_at_ms == 0
+        || [
+            stimulus.scope.relation_token,
+            stimulus.causal.action_id,
+            stimulus.causal.delivery_id,
+            stimulus.causal.claim_id,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|id| all_zero_128(&id))
+    {
+        return Err(RuntimeError::InvalidUserStimulus);
+    }
+    if stimulus.causal.base_revision != revision {
+        return Err(RuntimeError::UserStimulusBaseRevisionMismatch);
+    }
+    let evidence = &stimulus.evidence;
+    let dimensions = evidence_values(&evidence.dimensions);
+    if evidence.schema_version != 1
+        || all_zero_digest(&evidence.estimator_digest)
+        || evidence.estimator_confidence <= Fixed::ZERO
+        || evidence.estimator_confidence > Fixed::ONE
+        || dimensions
+            .into_iter()
+            .any(|value| value < Fixed::ZERO || value > Fixed::ONE)
+        || dimensions.into_iter().all(|value| value == Fixed::ZERO)
+    {
+        return Err(RuntimeError::InvalidSemanticEstimate);
+    }
+    Ok(())
+}
+
+fn native_action_contract(
+    stimulus: &UserStimulus,
+    scope: &[u8; 32],
+    event: &[u8; 32],
+    authority: &[u8; 32],
+    state_after: &[u8; 32],
+) -> Result<ActionContract, RuntimeError> {
+    let action_digest = wire::domain_hash(
+        NATIVE_SEMANTIC_ACTION_DOMAIN_V1,
+        &[scope, event, authority, state_after],
+    );
+    let mut action_id = [0; 16];
+    action_id.copy_from_slice(&action_digest[..16]);
+    let expires_at_ms = stimulus
+        .observed_at_ms
+        .checked_add(NATIVE_SEMANTIC_ACTION_TTL_MS)
+        .ok_or(RuntimeError::InvalidUserStimulus)?;
+    let mut contract = scaffold_contract(&empty_workspace(), stimulus.causal.turn_id);
+    contract.action_id = action_id;
+    contract.expires_at_ms = expires_at_ms;
+    Ok(contract)
 }
 
 impl AstrRuntime {
-    pub fn open(path: &Path) -> Result<Self, RuntimeError> {
-        Ok(Self {
-            store: Store::open(path)?,
-            hot: None,
+    pub fn scaffold() -> Self {
+        Self {
+            field: NeuralField::zeroed(),
+            graph: SparseGraph {
+                row_offsets: vec![0; NEURON_SLOTS + 1],
+                edges: Vec::new(),
+            },
+            revision: 0,
+            formula_digest: native_formula_digest(),
+            host_process_epoch: None,
+            last_host_settlement: None,
+            issued_host_effects: BTreeMap::new(),
+            astrbot_tool_process_epoch: None,
+            astrbot_tool_registry: BTreeMap::new(),
+        }
+    }
+
+    pub fn current_revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn last_host_settlement(&self) -> Option<&HostSettlementV1> {
+        self.last_host_settlement.as_ref()
+    }
+
+    fn prune_completed_issued_effects(&mut self, observed_at_ms: u64) {
+        self.issued_host_effects.retain(|_, record| {
+            record.settlement.is_none() || record.expires_at_ms >= observed_at_ms
+        });
+    }
+
+    fn register_issued_effect(&mut self, effect: &HostEffectV1) -> Result<(), RuntimeError> {
+        if let Some(existing) = self.issued_host_effects.get(&effect.effect_id) {
+            return if existing.matches_effect(effect) {
+                Ok(())
+            } else {
+                Err(RuntimeError::InvalidHostPublicEffect)
+            };
+        }
+        if self.issued_host_effects.len() >= MAX_ISSUED_HOST_EFFECTS_V1 {
+            return Err(RuntimeError::HostEffectRegistryFull);
+        }
+        self.issued_host_effects
+            .insert(effect.effect_id, IssuedHostEffectV1::from_effect(effect));
+        Ok(())
+    }
+
+    pub fn apply_astrbot_tool_v1(
+        &mut self,
+        ingress: AstrBotToolIngressV1,
+    ) -> Result<AstrBotToolOutcomeV1, RuntimeError> {
+        if let Some(record) = self.astrbot_tool_registry.get(&ingress.invocation_id) {
+            if ingress.validate_shape().is_err() || !record.matches_ingress(&ingress) {
+                return Err(RuntimeError::AstrBotToolIdentityConflict);
+            }
+        } else {
+            ingress
+                .validate_shape()
+                .map_err(|_| RuntimeError::InvalidAstrBotToolIngress)?;
+        }
+
+        if let Some(epoch) = self.astrbot_tool_process_epoch {
+            if epoch != ingress.process_epoch_id {
+                return Err(RuntimeError::AstrBotToolProcessEpochMismatch);
+            }
+        }
+
+        if let Some(record) = self.astrbot_tool_registry.get(&ingress.invocation_id) {
+            if ingress.observed_at_ms >= record.expires_at_ms {
+                self.astrbot_tool_registry.remove(&ingress.invocation_id);
+                return Err(RuntimeError::AstrBotToolInvocationExpired);
+            }
+            let outcome = record.outcome();
+            outcome
+                .validate_shape()
+                .map_err(|_| RuntimeError::InvalidAstrBotToolOutcome)?;
+            return Ok(outcome);
+        }
+
+        if ingress.base_revision != self.revision {
+            return Err(RuntimeError::AstrBotToolBaseRevisionMismatch);
+        }
+
+        self.astrbot_tool_registry
+            .retain(|_, record| record.expires_at_ms > ingress.observed_at_ms);
+        if self.astrbot_tool_registry.len() >= MAX_ASTRBOT_TOOL_RECORDS_V1 {
+            return Err(RuntimeError::AstrBotToolRegistryFull);
+        }
+
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(RuntimeError::InvalidAstrBotToolOutcome)?;
+        let (disposition, public_signal) =
+            if ingress.current_event_text == NATIVE_PUBLIC_EFFECT_TRIGGER_V1 {
+                (
+                    AstrBotToolDispositionV1::PublicSignal,
+                    Some(AstrBotPublicSignalV1::Observed),
+                )
+            } else {
+                (AstrBotToolDispositionV1::Silence, None)
+            };
+        let outcome =
+            AstrBotToolOutcomeV1::for_ingress(&ingress, next_revision, disposition, public_signal)
+                .map_err(|_| RuntimeError::InvalidAstrBotToolOutcome)?;
+        let expires_at_ms = ingress
+            .observed_at_ms
+            .checked_add(ASTRBOT_TOOL_TTL_MS)
+            .ok_or(RuntimeError::InvalidAstrBotToolIngress)?;
+
+        self.astrbot_tool_registry.insert(
+            ingress.invocation_id,
+            AstrBotToolRegistryRecordV1::from_outcome(&outcome, expires_at_ms),
+        );
+        if self.astrbot_tool_process_epoch.is_none() {
+            self.astrbot_tool_process_epoch = Some(ingress.process_epoch_id);
+        }
+        self.revision = next_revision;
+        Ok(outcome)
+    }
+
+    pub fn apply_host_ingress_v1(
+        &mut self,
+        ingress: HostIngressV1,
+    ) -> Result<Option<HostEffectV1>, RuntimeError> {
+        ingress
+            .validate_shape()
+            .map_err(|_| RuntimeError::InvalidHostIngress)?;
+        if ingress.base_revision != self.revision {
+            return Err(RuntimeError::HostBaseRevisionMismatch);
+        }
+
+        match ingress.kind {
+            HostIngressKindV1::CurrentEvent => {
+                if let Some(epoch) = self.host_process_epoch {
+                    if epoch != ingress.process_epoch_id {
+                        return Err(RuntimeError::HostProcessEpochMismatch);
+                    }
+                }
+                let next_revision = self
+                    .revision
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidHostPublicEffect)?;
+                let revision = next_revision.to_le_bytes();
+                let effect = if ingress.current_event_text.as_deref()
+                    == Some(NATIVE_PUBLIC_EFFECT_TRIGGER_V1)
+                {
+                    let action_id = wire::domain_hash(
+                        b"astr-embodiment/native-public-action-v1",
+                        &[
+                            &ingress.process_epoch_id,
+                            &ingress.adapter_id_binding,
+                            &ingress.scope_binding,
+                            &ingress.session_binding,
+                            &ingress.turn_binding,
+                            &ingress.event_id,
+                        ],
+                    );
+                    let authority_evidence_digest = wire::domain_hash(
+                        b"astr-embodiment/explicit-public-trigger-authority-v1",
+                        &[&action_id, &ingress.event_id],
+                    );
+                    let policy_evidence_digest = wire::domain_hash(
+                        b"astr-embodiment/fixed-public-text-policy-v1",
+                        &[&action_id, NATIVE_PUBLIC_EFFECT_TEXT_V1.as_bytes()],
+                    );
+                    let expires_at_ms = ingress
+                        .observed_at_ms
+                        .checked_add(NATIVE_PUBLIC_EFFECT_TTL_MS)
+                        .ok_or(RuntimeError::InvalidHostPublicEffect)?;
+                    HostEffectV1::public_for_ingress_v1(
+                        &ingress,
+                        action_id,
+                        NATIVE_PUBLIC_EFFECT_TEXT_V1.to_owned(),
+                        authority_evidence_digest,
+                        policy_evidence_digest,
+                        expires_at_ms,
+                    )
+                    .map_err(|_| RuntimeError::InvalidHostPublicEffect)?
+                } else {
+                    let action_id = wire::domain_hash(
+                        b"astr-embodiment/host-silence-action-v1",
+                        &[&ingress.ingress_id, &ingress.turn_binding, &revision],
+                    );
+                    HostEffectV1::silence_for_ingress(&ingress, action_id)
+                };
+                effect
+                    .validate_shape()
+                    .map_err(|_| RuntimeError::InvalidHostPublicEffect)?;
+                self.prune_completed_issued_effects(ingress.observed_at_ms);
+                self.register_issued_effect(&effect)?;
+                if self.host_process_epoch.is_none() {
+                    self.host_process_epoch = Some(ingress.process_epoch_id);
+                }
+                self.revision = next_revision;
+                Ok(Some(effect))
+            }
+            HostIngressKindV1::EffectSettlement => {
+                if self.host_process_epoch != Some(ingress.process_epoch_id) {
+                    return Err(RuntimeError::HostProcessEpochMismatch);
+                }
+                let settlement = ingress
+                    .settlement
+                    .ok_or(RuntimeError::InvalidHostSettlement)?;
+                let issued = self
+                    .issued_host_effects
+                    .get_mut(&settlement.effect_id)
+                    .ok_or(RuntimeError::InvalidHostSettlement)?;
+                if !issued.matches_settlement(&settlement) {
+                    return Err(RuntimeError::InvalidHostSettlement);
+                }
+                issued.record_settlement(settlement.status, settlement.delivery)?;
+                self.last_host_settlement = Some(settlement);
+                self.revision = self
+                    .revision
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidHostSettlement)?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Evaluates a closed user stimulus and atomically compiles its exact
+    /// private projection capability. The runtime never accepts a callback,
+    /// byte buffer, custom sealer, or caller-supplied wire; it validates the
+    /// canonical live wire before making its sole state/revision commit.
+    ///
+    /// ```compile_fail
+    /// use ae_contracts::CanonicalEvent;
+    /// use ae_runtime::{AstrRuntime, R7PreOutputProjectionInputV1};
+    ///
+    /// fn bypass(
+    ///     runtime: &mut AstrRuntime,
+    ///     event: &CanonicalEvent,
+    ///     input: &R7PreOutputProjectionInputV1,
+    /// ) {
+    ///     let _ = runtime.apply_user_stimulus_with_private_projection_wire_v1(
+    ///         event,
+    ///         |_prepared_transition| input,
+    ///     );
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use ae_contracts::CanonicalEvent;
+    /// use ae_runtime::{AstrRuntime, PrivateProjectionPayloadWireV1};
+    ///
+    /// fn bypass(
+    ///     runtime: &mut AstrRuntime,
+    ///     event: &CanonicalEvent,
+    ///     wire: PrivateProjectionPayloadWireV1,
+    /// ) {
+    ///     let _ = runtime.apply_user_stimulus_with_private_projection_wire_v1(event, &wire);
+    /// }
+    /// ```
+    pub fn apply_user_stimulus_with_private_projection_wire_v1(
+        &mut self,
+        event: &CanonicalEvent,
+        input: &R7PreOutputProjectionInputV1,
+    ) -> Result<RuntimeDecision, RuntimeError> {
+        let candidate = self.prepare_user_stimulus_transition_v1(event)?;
+        let wire = compile_atomic_pre_output_wire_v1(&candidate.projection_binding, input)
+            .map_err(|_| RuntimeError::PrivateProjectionWireUnavailable)?;
+        self.commit_prepared_projection_wire_v1(candidate, wire)
+    }
+
+    fn commit_prepared_projection_wire_v1(
+        &mut self,
+        candidate: PreparedSemanticTransitionV1,
+        wire: PrivateProjectionPayloadWireV1,
+    ) -> Result<RuntimeDecision, RuntimeError> {
+        self.validate_prepared_projection_wire_v1(&candidate, &wire)?;
+        let PreparedSemanticTransitionV1 {
+            next_field,
+            next_revision,
+            contract,
+            receipt,
+            ..
+        } = candidate;
+        self.field = next_field;
+        self.revision = next_revision;
+        Ok(RuntimeDecision {
+            contract,
+            receipt,
+            private_projection_wire: wire,
         })
     }
 
-    // ------------------------------------------------------------- genesis
-
-    /// Claim (or join) the durable Genesis lease, project the Manifest, build
-    /// the deterministic initial state and atomically commit the birth.
-    /// Concurrent callers converge on one committed receipt; a failure never
-    /// creates a default brain.
-    pub fn ensure_genesis(
-        &mut self,
-        request: &PersonaGenesisRequest,
-    ) -> Result<GenesisReceipt, RuntimeError> {
-        let scope_key = ae_genesis::genesis_scope_key(
-            &request.source.scope.bot_token,
-            &request.source.scope.persona_token,
-            &request.source.source_digest,
-            &request.formula_digest,
-        );
-
-        match self
-            .store
-            .claim_lease(&scope_key, Some(request.incarnation_nonce))?
-        {
-            ClaimOutcome::Committed => {
-                let committed = self
-                    .store
-                    .lookup_committed_genesis(&scope_key)?
-                    .ok_or(RuntimeError::RetryWait)?;
-                self.bind_hot(
-                    committed.source.scope.bot_token,
-                    committed.source.scope.persona_token,
-                )?;
-                Ok(committed.receipt)
-            }
-            ClaimOutcome::InFlight => Err(RuntimeError::RetryWait),
-            ClaimOutcome::Claimed { lease_epoch, nonce } => {
-                // The persisted birth nonce wins: retries replay the original
-                // birth transaction instead of starting a second one.
-                let mut effective = request.clone();
-                effective.incarnation_nonce = nonce;
-
-                let identity =
-                    ae_genesis::derive_identity(&effective, &ae_genesis::GenesisPrior::default())?;
-                let (field, graph) = initial_state_from_manifest(
-                    &identity.manifest,
-                    &effective.formula_digest,
-                    &identity.development_seed_digest,
-                );
-                if !field.validate() || !graph.validate() {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                let initial_snapshot_digest = state_digest(&field, &effective.formula_digest);
-                let graph_digest = graph_digest(&graph);
-
-                let receipt = GenesisReceipt {
-                    schema_version: 1,
-                    seed_code_digest: identity.seed_code_digest,
-                    manifest_digest: identity.manifest_digest,
-                    incarnation_id: identity.incarnation_id,
-                    formula_digest: effective.formula_digest,
-                    persona_source_digest: effective.source.source_digest,
-                    compiler_protocol_digest: effective.proposal.compiler_protocol_digest,
-                    compiler_model_digest: effective.proposal.compiler_model_digest,
-                    development_seed_digest: identity.development_seed_digest,
-                    initial_snapshot_digest,
-                    graph_digest,
-                    equilibrium_residual: ae_fixed::Fixed::ZERO,
-                    energy_residual: ae_fixed::Fixed::ZERO,
-                    capacity_residual: ae_fixed::Fixed::ZERO,
-                    sample_fit_residual: ae_fixed::Fixed::ZERO,
-                    status: GenesisStatus::Committed,
-                };
-
-                let commit = GenesisCommit {
-                    scope_key,
-                    lease_epoch,
-                    nonce_digest: nonce,
-                    manifest: identity.manifest.clone(),
-                    manifest_body: wire::encode_manifest_body(&identity.manifest),
-                    seed_code_digest: identity.seed_code_digest,
-                    incarnation_id: identity.incarnation_id,
-                    formula_digest: effective.formula_digest,
-                    source: effective.source.clone(),
-                    compiler_protocol_digest: effective.proposal.compiler_protocol_digest,
-                    compiler_model_digest: effective.proposal.compiler_model_digest,
-                    compiled_at_ms: effective.observed_at_ms,
-                    receipt: receipt.clone(),
-                    initial_snapshot_digest,
-                    state_bytes: self.encode_state(&field, &graph),
-                    graph_digest,
-                };
-
-                match self.store.commit_genesis(&commit) {
-                    Ok(()) => {
-                        self.hot = Some(HotBrain {
-                            bot_token: effective.source.scope.bot_token,
-                            persona_token: effective.source.scope.persona_token,
-                            persona_scope: wire::persona_scope_digest(
-                                &effective.source.scope.bot_token,
-                                &effective.source.scope.persona_token,
-                                None,
-                            ),
-                            identity,
-                            formula_digest: effective.formula_digest,
-                            field,
-                            graph,
-                            initial_snapshot_digest,
-                            revision: 0,
-                        });
-                        Ok(receipt)
-                    }
-                    Err(StoreError::LeaseConflict) => {
-                        // A concurrent writer closed the lease first: join it.
-                        let committed = self
-                            .store
-                            .lookup_committed_genesis(&scope_key)?
-                            .ok_or(RuntimeError::RetryWait)?;
-                        self.bind_hot(
-                            committed.source.scope.bot_token,
-                            committed.source.scope.persona_token,
-                        )?;
-                        Ok(committed.receipt)
-                    }
-                    Err(other) => Err(RuntimeError::Store(other)),
-                }
-            }
-        }
-    }
-
-    fn encode_state(&self, field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
-        // G0 snapshot bytes: the canonical fixed-layout field encoding plus
-        // the graph body; nothing else is needed to re-derive every digest.
-        let mut body = Vec::with_capacity(16_384 * 8 * 8 + 65_540);
-        for values in [
-            &field.potential,
-            &field.excitation,
-            &field.inhibition,
-            &field.adaptation,
-            &field.precision,
-            &field.prediction_error,
-            &field.eligibility,
-            &field.metabolic_reserve,
-        ] {
-            body.extend_from_slice(&(values.len() as u32).to_le_bytes());
-            for value in values {
-                body.extend_from_slice(&value.encode());
-            }
-        }
-        body.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
-        for offset in &graph.row_offsets {
-            body.extend_from_slice(&offset.to_le_bytes());
-        }
-        body.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
-        body
-    }
-
-    fn bind_hot(&mut self, bot_token: Id128, persona_token: Id128) -> Result<(), RuntimeError> {
-        let committed = self
-            .store
-            .lookup_bound_genesis(&bot_token, &persona_token)?
-            .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        let (field, graph) = initial_state_from_manifest(
-            &committed.manifest,
-            &committed.receipt.formula_digest,
-            &committed.receipt.development_seed_digest,
-        );
-        let identity = ae_genesis::GenesisIdentity {
-            manifest: committed.manifest,
-            manifest_digest: committed.receipt.manifest_digest,
-            seed_code_digest: committed.receipt.seed_code_digest,
-            incarnation_id: committed.receipt.incarnation_id,
-            development_seed_digest: committed.receipt.development_seed_digest,
-        };
-        let persona_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
-        let revision = self.store.current_revision(&persona_scope)?;
-        self.hot = Some(HotBrain {
-            bot_token,
-            persona_token,
-            persona_scope,
-            identity,
-            formula_digest: committed.receipt.formula_digest,
-            field,
-            graph,
-            initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
-            revision,
-        });
-        Ok(())
-    }
-
-    fn hot_for(&mut self, scope: &ScopeRef) -> Result<&mut HotBrain, RuntimeError> {
-        let matches = self
-            .hot
-            .as_ref()
-            .map(|hot| hot.bot_token == scope.bot_token && hot.persona_token == scope.persona_token)
-            .unwrap_or(false);
-        if !matches {
-            self.bind_hot(scope.bot_token, scope.persona_token)?;
-        }
-        self.hot
-            .as_mut()
-            .ok_or(RuntimeError::PersonaGenesisRequired)
-    }
-
-    // --------------------------------------------------------------- events
-
-    /// Apply one canonical event through the G0 no-op lane and commit it.
-    /// The same committed genesis + the same stimulus always produce the same
-    /// contract and receipt digest, in 1C1G and 2C2G alike.
-    pub fn apply_event(
-        &mut self,
-        scope: &ScopeRef,
+    fn prepare_user_stimulus_transition_v1(
+        &self,
         event: &CanonicalEvent,
-    ) -> Result<ApplyDecision, RuntimeError> {
-        let supported = matches!(
-            event,
-            CanonicalEvent::UserStimulus(_)
-                | CanonicalEvent::DeliveryOutcome(_)
-                | CanonicalEvent::TimeAdvance(_)
+    ) -> Result<PreparedSemanticTransitionV1, RuntimeError> {
+        if !self.field.validate() {
+            return Err(RuntimeError::InvalidNeuralField);
+        }
+        if !self.graph.validate() {
+            return Err(RuntimeError::InvalidSparseGraph);
+        }
+        if self.formula_digest != native_formula_digest() {
+            return Err(RuntimeError::NativeFormulaDigestMismatch);
+        }
+
+        let stimulus = match event {
+            CanonicalEvent::UserStimulus(stimulus) => stimulus,
+            _ => return Err(RuntimeError::UnsupportedEvent),
+        };
+        validate_user_stimulus(stimulus, self.revision)?;
+
+        let scope = scope_digest(&stimulus.scope);
+        let event_digest = user_stimulus_digest(stimulus, &scope);
+        let authority_digest = wire::domain_hash(
+            NATIVE_SEMANTIC_AUTHORITY_DOMAIN_V1,
+            &[
+                authority_name(event.authority()),
+                &stimulus.evidence.estimator_digest,
+                &event_digest,
+            ],
         );
-        if !supported {
-            return Err(RuntimeError::UnsupportedEvent(wire::event_kind_name(event)));
+        let state_before = neural_field_digest(&self.field);
+        let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
+        if load.active_nodes.is_empty() {
+            return Err(RuntimeError::InvalidSemanticEstimate);
         }
 
-        let turn_id = match event {
-            CanonicalEvent::UserStimulus(e) => e.causal.turn_id,
-            CanonicalEvent::DeliveryOutcome(e) => e.causal.turn_id,
-            CanonicalEvent::TimeAdvance(e) => e.event_id,
-            _ => unreachable!(),
-        };
-
-        // Copy the hot-brain facts before touching SQLite. Keeping a mutable
-        // reference across store calls violates the single-writer borrow
-        // boundary and is unnecessary: the only in-memory mutation is the
-        // revision update after a successful commit.
-        let (
-            hot_bot_token,
-            hot_persona_token,
-            persona_scope,
-            hot_revision,
-            formula_digest,
-            manifest_digest,
-            initial_snapshot_digest,
-            state_before,
-            graph_after,
-            active_nodes,
-            active_edges,
-        ) = {
-            let hot = self.hot_for(scope)?;
-            (
-                hot.bot_token,
-                hot.persona_token,
-                hot.persona_scope,
-                hot.revision,
-                hot.formula_digest,
-                hot.identity.manifest_digest,
-                hot.initial_snapshot_digest,
-                state_digest(&hot.field, &hot.formula_digest),
-                graph_digest(&hot.graph),
-                hot.field.active_node_count(),
-                hot.graph.edges.len() as u32,
-            )
-        };
-        let event_scope = match event {
-            CanonicalEvent::UserStimulus(e) => &e.scope,
-            CanonicalEvent::DeliveryOutcome(e) => &e.scope,
-            CanonicalEvent::TimeAdvance(e) => &e.scope,
-            _ => unreachable!(),
-        };
-        if event_scope.bot_token != hot_bot_token || event_scope.persona_token != hot_persona_token
-        {
-            return Err(RuntimeError::GenesisManifestMismatch);
+        let confidence = stimulus.evidence.estimator_confidence;
+        if load.regional_loads.is_empty() {
+            return Err(RuntimeError::InvalidSemanticEstimate);
         }
 
-        let event_bytes = wire::encode_event(event);
-        let event_digest = wire::event_digest(event);
-        let contract = noop_action_contract(&manifest_digest, &event_digest, turn_id);
-        let contract_digest = wire::action_contract_digest(&contract);
-
-        // Idempotency: an event that was already applied is never applied
-        // twice; the original receipt is returned unchanged.
-        if let Some(row) = self.store.lookup_event(&persona_scope, &event_digest)? {
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            return Ok(ApplyDecision {
-                contract,
-                receipt,
-                revision: row.revision,
-                deduplicated: true,
-            });
+        let mut next_field = self.field.clone();
+        for (position, node) in load.active_nodes.iter().enumerate() {
+            let index = *node as usize;
+            let regional_load = load.regional_loads[position % load.regional_loads.len()]
+                .checked_mul(confidence)
+                .ok_or(RuntimeError::InvalidSemanticEstimate)?;
+            next_field.potential[index] = next_field.potential[index].saturating_add(regional_load);
+            next_field.excitation[index] =
+                next_field.excitation[index].saturating_add(regional_load);
         }
-
-        let causal_base = match event {
-            CanonicalEvent::UserStimulus(e) => e.causal.base_revision,
-            CanonicalEvent::DeliveryOutcome(e) => e.causal.base_revision,
-            CanonicalEvent::TimeAdvance(_) => hot_revision,
-            _ => unreachable!(),
-        };
-        if causal_base != hot_revision {
-            return Err(RuntimeError::StaleCausalBase {
-                expected: hot_revision,
-                actual: causal_base,
-            });
+        if !next_field.validate() {
+            return Err(RuntimeError::InvalidNeuralField);
         }
-
-        let authority_digest = authority_projection_digest(event);
-        let receipt = TransitionReceipt {
-            schema_version: 1,
-            formula_digest,
-            scope_digest: persona_scope,
+        let state_after = neural_field_digest(&next_field);
+        if state_before == state_after {
+            return Err(RuntimeError::NativeStateUnchanged);
+        }
+        let graph_after = sparse_graph_digest(&self.graph);
+        let contract = native_action_contract(
+            stimulus,
+            &scope,
+            &event_digest,
+            &authority_digest,
+            &state_after,
+        )?;
+        let action_contract = action_contract_digest(&contract);
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(RuntimeError::RevisionOverflow)?;
+        let projection_turn_binding = committed_semantic_projection_turn_binding(
+            next_revision,
+            &state_after,
+            &stimulus.causal.turn_id,
+            &scope,
+            &event_digest,
+            &authority_digest,
+        );
+        let projection_binding = R7SemanticProjectionBindingV1::new(
+            next_revision,
+            state_after,
+            stimulus.causal.turn_id,
+            scope,
             event_digest,
             authority_digest,
-            base_revision: hot_revision,
-            next_revision: hot_revision + 1,
+            projection_turn_binding,
+        );
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: self.formula_digest,
+            scope_digest: scope,
+            event_digest,
+            authority_digest,
+            base_revision: self.revision,
+            next_revision,
             state_before,
-            state_after: state_before,
+            state_after,
             graph_after,
-            action_contract: Some(contract_digest),
-            active_nodes,
-            active_edges,
-            residuals: fixed_zero_vector(),
+            action_contract: Some(action_contract),
+            active_nodes: u32::try_from(load.active_nodes.len())
+                .map_err(|_| RuntimeError::InvalidNeuralField)?,
+            active_edges: self.graph.edges.len() as u32,
+            residuals: InvariantResiduals::default(),
             status: CommitStatus::Committed,
         };
-
-        // An empty journal is the normal first-turn case: start the chain at
-        // the committed Genesis snapshot. Only a store error should fail the
-        // event; ``Ok(None)`` is not evidence that Genesis is missing.
-        let chain_seed = self
-            .store
-            .last_chain_digest(&persona_scope)?
-            .unwrap_or(initial_snapshot_digest);
-        let envelope = CommitEnvelope {
-            event_kind: wire::event_kind_name(event).to_string(),
-            event_bytes,
+        Ok(PreparedSemanticTransitionV1 {
+            next_field,
+            next_revision,
+            state_after,
+            turn_id: stimulus.causal.turn_id,
+            scope_digest: scope,
+            event_digest,
+            authority_digest,
+            projection_turn_binding,
+            projection_binding,
+            contract,
             receipt,
-            chain_seed,
-            delta_bytes: vec![],
-        };
-
-        match self.store.commit_journal(&envelope) {
-            Ok((revision, _row)) => {
-                if let Some(hot) = self.hot.as_mut() {
-                    hot.revision = revision;
-                }
-                Ok(ApplyDecision {
-                    contract,
-                    receipt: envelope.receipt,
-                    revision,
-                    deduplicated: false,
-                })
-            }
-            Err(StoreError::DuplicateEvent(revision)) => {
-                let row = self
-                    .store
-                    .lookup_event(&persona_scope, &event_digest)?
-                    .ok_or(RuntimeError::RetryWait)?;
-                let receipt = row
-                    .decode_receipt()
-                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-                Ok(ApplyDecision {
-                    contract,
-                    receipt,
-                    revision,
-                    deduplicated: true,
-                })
-            }
-            Err(other) => Err(RuntimeError::Store(other)),
-        }
+        })
     }
 
-    // ------------------------------------------------------------ observatory
-
-    pub fn inspect(
-        &mut self,
-        bot_token: &Id128,
-        persona_token: &Id128,
-    ) -> Result<InspectReport, RuntimeError> {
-        let bound = self
-            .store
-            .lookup_bound_genesis(bot_token, persona_token)?
-            .map(|committed| {
-                let persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-                let revision = self.store.current_revision(&persona_scope).unwrap_or(0);
-                let last_chain = self.store.last_chain_digest(&persona_scope).unwrap_or(None);
-                let journal_count = self.store.count_journal().unwrap_or(0);
-                InspectReport {
-                    bound: true,
-                    bot_token: *bot_token,
-                    persona_token: *persona_token,
-                    seed_code: ae_genesis::format_seed_code(&committed.receipt.seed_code_digest),
-                    seed_code_short: ae_genesis::format_short_seed_code(
-                        &committed.receipt.seed_code_digest,
-                    ),
-                    incarnation_id: ae_genesis::format_incarnation_id(
-                        &committed.receipt.incarnation_id,
-                    ),
-                    revision,
-                    initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
-                    last_chain_digest: last_chain,
-                    journal_count,
-                    observatory_genesis_unavailable: false,
+    fn validate_prepared_projection_wire_v1(
+        &self,
+        candidate: &PreparedSemanticTransitionV1,
+        wire: &PrivateProjectionPayloadWireV1,
+    ) -> Result<(), RuntimeError> {
+        wire.validate_live_canonical_v1()
+            .map_err(|error| match error {
+                PrivateProjectionPayloadWireErrorV1::AlreadyConsumed => {
+                    RuntimeError::PrivateProjectionWireAlreadyConsumed
                 }
-            })
-            .unwrap_or(InspectReport {
-                bound: false,
-                bot_token: *bot_token,
-                persona_token: *persona_token,
-                seed_code: String::new(),
-                seed_code_short: String::new(),
-                incarnation_id: String::new(),
-                revision: 0,
-                initial_snapshot_digest: [0; 32],
-                last_chain_digest: None,
-                journal_count: 0,
-                observatory_genesis_unavailable: true,
+                _ => RuntimeError::PrivateProjectionWireUnavailable,
+            })?;
+        let metadata = wire.binding_metadata();
+        if metadata.revision() != candidate.next_revision {
+            return Err(RuntimeError::PrivateProjectionWireBindingMismatch { field: "revision" });
+        }
+        for (field, actual, expected) in [
+            (
+                "turn_id",
+                metadata.turn_id().as_slice(),
+                candidate.turn_id.as_slice(),
+            ),
+            (
+                "turn_binding",
+                metadata.turn_binding().as_slice(),
+                candidate.projection_turn_binding.as_slice(),
+            ),
+            (
+                "source_state_digest",
+                metadata.source_state_digest().as_slice(),
+                candidate.state_after.as_slice(),
+            ),
+        ] {
+            if actual != expected {
+                return Err(RuntimeError::PrivateProjectionWireBindingMismatch { field });
+            }
+        }
+        // `projection_turn_binding` canonically commits all of these values,
+        // including the full closed event digest, so the fixed wire header need
+        // not grow or drift.
+        let expected_turn_binding = committed_semantic_projection_turn_binding(
+            candidate.next_revision,
+            &candidate.state_after,
+            &candidate.turn_id,
+            &candidate.scope_digest,
+            &candidate.event_digest,
+            &candidate.authority_digest,
+        );
+        if metadata.turn_binding() != &expected_turn_binding {
+            return Err(RuntimeError::PrivateProjectionWireBindingMismatch {
+                field: "scope_event_authority_binding",
             });
-        Ok(bound)
-    }
-
-    pub fn verify_replay(
-        &mut self,
-        bot_token: &Id128,
-        persona_token: &Id128,
-    ) -> Result<ReplayReport, RuntimeError> {
-        let committed = self
-            .store
-            .lookup_bound_genesis(bot_token, persona_token)?
-            .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        let persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-        let rows = self.store.read_journal(&persona_scope)?;
-        Ok(ae_continuum::verify_replay(
-            committed.receipt.initial_snapshot_digest,
-            &rows,
-        ))
-    }
-
-    /// Drain the writer: snapshot the current state, checkpoint WAL and close
-    /// the store. Later calls fail with Closed.
-    pub fn flush_and_close(&mut self) -> Result<(), RuntimeError> {
-        if let Some(hot) = self.hot.take() {
-            let state = state_digest(&hot.field, &hot.formula_digest);
-            self.store.write_snapshot(
-                &hot.persona_scope,
-                hot.revision,
-                &state,
-                &self.encode_state(&hot.field, &hot.graph),
-            )?;
         }
-        self.store.flush()?;
         Ok(())
-    }
-
-    pub fn closed(&self) -> bool {
-        matches!(self.store.count_leases(), Err(StoreError::Closed))
-    }
-
-    pub fn current_revision(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
-        let hot = self.hot_for(scope)?;
-        Ok(hot.revision)
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod issued_registry_privacy_tests {
     use super::*;
-    use ae_contracts::{
-        wire, AllostaticSetpoints, CausalRef, EpistemicPriors, EvidenceVector, ExpressionPhenotype,
-        GenesisManifestProposal, PersonaScopeRef, PersonaSelectionKind, PersonaSourceRef,
-        PersonalityVector, SemanticEstimate, SocialPriors, UserStimulus,
-    };
-    use ae_fixed::Fixed;
 
-    fn request(seed: u8) -> PersonaGenesisRequest {
-        let scope = PersonaScopeRef {
-            bot_token: [seed; 16],
-            persona_token: [seed.wrapping_add(1); 16],
-        };
-        let source = PersonaSourceRef {
-            scope,
-            source_digest: [seed.wrapping_add(2); 32],
-            capability_digest: [seed.wrapping_add(3); 32],
-            selection: PersonaSelectionKind::Conversation,
-            prompt_chars: 10,
-            begin_dialog_count: 1,
-            mood_dialog_count: 0,
-        };
-        let proposal = GenesisManifestProposal {
+    const RAW_SESSION_ORIGIN: &str = "PRIVATE_RAW_SESSION_ORIGIN_SENTINEL";
+    const PROVIDER_PROMPT: &str = "PRIVATE_PROVIDER_PROMPT_SENTINEL";
+    const PROVIDER_CONTEXT: &str = "PRIVATE_PROVIDER_CONTEXT_SENTINEL";
+    const PROVIDER_TOOL: &str = "PRIVATE_PROVIDER_TOOL_SENTINEL";
+    const EMOTION: &str = "PRIVATE_EMOTION_SENTINEL";
+    const EXOCORTEX: &str = "PRIVATE_EXOCORTEX_SENTINEL";
+    const AUTHORITY_SOURCE: &str = "PRIVATE_AUTHORITY_SOURCE_SENTINEL";
+    const POLICY_SOURCE: &str = "PRIVATE_POLICY_SOURCE_SENTINEL";
+    const EXCEPTION: &str = "PRIVATE_EXCEPTION_SENTINEL";
+    const HISTORY: &str = "PRIVATE_HISTORY_SENTINEL";
+
+    #[test]
+    fn issued_registry_excludes_raw_current_public_and_private_source_text() {
+        let ingress = HostIngressV1 {
             schema_version: 1,
-            source: source.clone(),
-            traits: PersonalityVector {
-                baseline_warmth: Fixed::from_raw(700_000),
-                ..PersonalityVector::default()
-            },
-            trait_confidence: PersonalityVector {
-                baseline_warmth: Fixed::from_raw(500_000),
-                ..PersonalityVector::default()
-            },
-            expression: ExpressionPhenotype::default(),
-            allostasis: AllostaticSetpoints::default(),
-            epistemic: EpistemicPriors::default(),
-            social: SocialPriors::default(),
-            compiler_protocol_digest: [seed.wrapping_add(4); 32],
-            compiler_model_digest: [seed.wrapping_add(5); 32],
+            kind: HostIngressKindV1::CurrentEvent,
+            ingress_id: [1; 32],
+            process_epoch_id: [7; 16],
+            adapter_type: "lark".to_owned(),
+            adapter_id_binding: [2; 32],
+            scope_binding: [3; 32],
+            session_binding: [4; 32],
+            turn_binding: [5; 32],
+            event_id: [6; 32],
+            observed_at_ms: 1_000,
+            base_revision: 0,
+            current_event_text: Some(NATIVE_PUBLIC_EFFECT_TRIGGER_V1.to_owned()),
+            settlement: None,
         };
-        PersonaGenesisRequest {
-            source,
-            proposal,
-            formula_digest: [seed.wrapping_add(6); 32],
-            incarnation_nonce: [seed.wrapping_add(7); 32],
-            parent_incarnation_id: None,
-            observed_at_ms: 1_700_000_000_000,
+        let mut runtime = AstrRuntime::scaffold();
+        let effect = runtime.apply_host_ingress_v1(ingress).unwrap().unwrap();
+        assert_eq!(effect.disposition, HostEffectDispositionV1::PublicEffect);
+        assert_eq!(
+            effect
+                .public_payload
+                .as_ref()
+                .map(|payload| payload.text.as_str()),
+            Some(NATIVE_PUBLIC_EFFECT_TEXT_V1)
+        );
+
+        let record = runtime.issued_host_effects.get(&effect.effect_id).unwrap();
+        assert_eq!(record.disposition, HostEffectDispositionV1::PublicEffect);
+        assert_eq!(record.effect_id, effect.effect_id);
+        assert_eq!(record.action_id, effect.action_id);
+        assert_eq!(record.adapter_type, "lark");
+        assert_eq!(record.expires_at_ms, effect.expires_at_ms);
+        assert_eq!(record.settlement, None);
+
+        let rendered = format!("{record:?}");
+        for forbidden in [
+            NATIVE_PUBLIC_EFFECT_TRIGGER_V1,
+            NATIVE_PUBLIC_EFFECT_TEXT_V1,
+            RAW_SESSION_ORIGIN,
+            PROVIDER_PROMPT,
+            PROVIDER_CONTEXT,
+            PROVIDER_TOOL,
+            EMOTION,
+            EXOCORTEX,
+            AUTHORITY_SOURCE,
+            POLICY_SOURCE,
+            EXCEPTION,
+            HISTORY,
+        ] {
+            assert!(!rendered.contains(forbidden));
         }
     }
+}
 
-    fn stimulus(seed: u8, revision: u64, session: u8) -> CanonicalEvent {
+#[cfg(test)]
+mod atomic_private_projection_wire_tests {
+    use super::*;
+    use crate::private_projection_wire::{
+        test_only_tampered_wire_for_metadata_v1, test_only_wire_for_metadata_v1,
+        PrivateProjectionPayloadWireBindingMetadataV1,
+    };
+
+    fn closed_stimulus() -> CanonicalEvent {
         CanonicalEvent::UserStimulus(UserStimulus {
-            event_id: [seed.wrapping_add(10); 16],
+            event_id: [61; 16],
             scope: ScopeRef {
-                bot_token: [seed; 16],
-                persona_token: [seed.wrapping_add(1); 16],
-                relation_token: None,
-                session_token: [session; 16],
+                bot_token: [62; 16],
+                persona_token: [63; 16],
+                relation_token: Some([64; 16]),
+                session_token: [65; 16],
             },
-            causal: CausalRef {
-                turn_id: [seed.wrapping_add(11); 16],
-                action_id: None,
-                delivery_id: None,
-                claim_id: None,
-                base_revision: revision,
-            },
-            observed_at_ms: 1_700_000_000_100,
-            evidence: SemanticEstimate {
-                schema_version: 1,
-                dimensions: EvidenceVector::default(),
-                estimator_confidence: Fixed::ZERO,
-                estimator_digest: [0; 32],
-            },
-        })
-    }
-
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ae-runtime-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn full_g0_vertical_slice() {
-        let dir = temp_dir("slice");
-        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
-        let request = request(1);
-        let receipt = runtime.ensure_genesis(&request).unwrap();
-        assert_eq!(receipt.status, GenesisStatus::Committed);
-
-        let decision = runtime
-            .apply_event(&request.source.scope_persona_scope(), &stimulus(1, 0, 1))
-            .unwrap();
-        assert!(!decision.deduplicated);
-        assert_eq!(decision.revision, 1);
-        assert_eq!(decision.receipt.base_revision, 0);
-        assert_eq!(decision.receipt.next_revision, 1);
-        assert_eq!(decision.receipt.state_before, decision.receipt.state_after);
-
-        let report = runtime
-            .verify_replay(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .unwrap();
-        assert!(report.ok, "{:?}", report.first_error);
-        assert_eq!(report.checked, 1);
-
-        let inspect = runtime
-            .inspect(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .unwrap();
-        assert!(inspect.bound);
-        assert!(inspect.seed_code.starts_with("AE-S1-"));
-        assert!(!inspect.observatory_genesis_unavailable);
-
-        runtime.flush_and_close().unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn same_inputs_same_digests_across_runtime_instances() {
-        let dir_a = temp_dir("det-a");
-        let dir_b = temp_dir("det-b");
-        let mut a = AstrRuntime::open(&dir_a.join("store.db")).unwrap();
-        let mut b = AstrRuntime::open(&dir_b.join("store.db")).unwrap();
-        let request = request(7);
-        let receipt_a = a.ensure_genesis(&request).unwrap();
-        let receipt_b = b.ensure_genesis(&request).unwrap();
-        assert_eq!(receipt_a, receipt_b);
-        assert_eq!(
-            wire::genesis_receipt_digest(&receipt_a),
-            wire::genesis_receipt_digest(&receipt_b)
-        );
-
-        let event = stimulus(7, 0, 9);
-        let decision_a = a
-            .apply_event(&request.source.scope_persona_scope(), &event)
-            .unwrap();
-        let decision_b = b
-            .apply_event(&request.source.scope_persona_scope(), &event)
-            .unwrap();
-        assert_eq!(decision_a.contract, decision_b.contract);
-        assert_eq!(
-            wire::receipt_digest(&decision_a.receipt),
-            wire::receipt_digest(&decision_b.receipt)
-        );
-        assert_eq!(
-            wire::action_contract_digest(&decision_a.contract),
-            wire::action_contract_digest(&decision_b.contract)
-        );
-        let _ = std::fs::remove_dir_all(&dir_a);
-        let _ = std::fs::remove_dir_all(&dir_b);
-    }
-
-    #[test]
-    fn duplicate_event_is_applied_once() {
-        let dir = temp_dir("dup");
-        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
-        let request = request(2);
-        runtime.ensure_genesis(&request).unwrap();
-        let event = stimulus(2, 0, 1);
-        let first = runtime
-            .apply_event(&request.source.scope_persona_scope(), &event)
-            .unwrap();
-        let second = runtime
-            .apply_event(&request.source.scope_persona_scope(), &event)
-            .unwrap();
-        assert!(!first.deduplicated);
-        assert!(second.deduplicated);
-        assert_eq!(
-            wire::receipt_digest(&first.receipt),
-            wire::receipt_digest(&second.receipt)
-        );
-        let report = runtime
-            .verify_replay(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .unwrap();
-        assert_eq!(report.checked, 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn stale_causal_base_is_rejected() {
-        let dir = temp_dir("stale");
-        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
-        let request = request(3);
-        runtime.ensure_genesis(&request).unwrap();
-        let error = runtime
-            .apply_event(&request.source.scope_persona_scope(), &stimulus(3, 5, 1))
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            RuntimeError::StaleCausalBase {
-                expected: 0,
-                actual: 5
-            }
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn self_action_writes_zero_and_is_not_supported_in_g0() {
-        let dir = temp_dir("selfaction");
-        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
-        let request = request(4);
-        runtime.ensure_genesis(&request).unwrap();
-        let candidate = CanonicalEvent::SelfActionCandidate(ae_contracts::SelfActionCandidate {
-            event_id: [55; 16],
-            scope: ScopeRef {
-                bot_token: [4; 16],
-                persona_token: [5; 16],
-                relation_token: None,
-                session_token: [1; 16],
-            },
-            causal: CausalRef {
-                turn_id: [56; 16],
+            causal: ae_contracts::CausalRef {
+                turn_id: [12; 16],
                 action_id: None,
                 delivery_id: None,
                 claim_id: None,
                 base_revision: 0,
             },
-            visible_action_digest: [57; 32],
-            claims: vec![],
-        });
+            observed_at_ms: 1_000,
+            evidence: ae_contracts::SemanticEstimate {
+                schema_version: 1,
+                dimensions: EvidenceVector {
+                    positive: Fixed::from_raw(300_000),
+                    harm: Fixed::from_raw(100_000),
+                    epistemic_conflict: Fixed::from_raw(200_000),
+                    boundary: Fixed::from_raw(150_000),
+                    ..EvidenceVector::default()
+                },
+                estimator_confidence: Fixed::from_raw(800_000),
+                estimator_digest: [66; 32],
+            },
+        })
+    }
+
+    #[test]
+    fn preconsumed_binding_correct_wire_cannot_advance_runtime_state_or_revision() {
+        let event = closed_stimulus();
+        let mut runtime = AstrRuntime::scaffold();
+        let potential_before = runtime.field.potential.clone();
+        let excitation_before = runtime.field.excitation.clone();
+        let candidate = runtime
+            .prepare_user_stimulus_transition_v1(&event)
+            .expect("closed semantic candidate");
+        let metadata = PrivateProjectionPayloadWireBindingMetadataV1::new(
+            candidate.next_revision,
+            candidate.turn_id,
+            candidate.projection_turn_binding,
+            [18; 32],
+            candidate.state_after,
+        )
+        .expect("candidate metadata is binding-correct");
+        let mut wire = test_only_wire_for_metadata_v1(metadata).expect("canonical test capability");
+        let _ = wire.consume_once().expect("pre-consume exact capability");
+
         assert!(matches!(
-            runtime.apply_event(&request.source.scope_persona_scope(), &candidate),
-            Err(RuntimeError::UnsupportedEvent("self_action_candidate"))
+            runtime.commit_prepared_projection_wire_v1(candidate, wire),
+            Err(RuntimeError::PrivateProjectionWireAlreadyConsumed)
         ));
-        // Zero production writes: journal is untouched.
-        let report = runtime
-            .verify_replay(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .unwrap();
-        assert_eq!(report.checked, 0);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(runtime.current_revision(), 0);
+        assert_eq!(runtime.field.potential, potential_before);
+        assert_eq!(runtime.field.excitation, excitation_before);
     }
 
     #[test]
-    fn genesis_failure_creates_no_default_brain() {
-        let dir = temp_dir("nobrain");
-        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
-        let mut broken = request(5);
-        broken.proposal.source.source_digest = [99; 32];
-        let error = runtime.ensure_genesis(&broken).unwrap_err();
-        assert!(matches!(error, RuntimeError::Genesis(_)));
-        // No lease, no incarnation, no binding: applying an event fails.
+    fn tampered_binding_correct_wire_cannot_advance_runtime_state_or_revision() {
+        let event = closed_stimulus();
+        let mut runtime = AstrRuntime::scaffold();
+        let potential_before = runtime.field.potential.clone();
+        let excitation_before = runtime.field.excitation.clone();
+        let candidate = runtime
+            .prepare_user_stimulus_transition_v1(&event)
+            .expect("closed semantic candidate");
+        let metadata = PrivateProjectionPayloadWireBindingMetadataV1::new(
+            candidate.next_revision,
+            candidate.turn_id,
+            candidate.projection_turn_binding,
+            [18; 32],
+            candidate.state_after,
+        )
+        .expect("candidate metadata is binding-correct");
+        let wire = test_only_tampered_wire_for_metadata_v1(metadata)
+            .expect("tampered capability keeps matching private metadata");
+
         assert!(matches!(
-            runtime.apply_event(&broken.source.scope_persona_scope(), &stimulus(5, 0, 1)),
-            Err(RuntimeError::PersonaGenesisRequired)
+            runtime.commit_prepared_projection_wire_v1(candidate, wire),
+            Err(RuntimeError::PrivateProjectionWireUnavailable)
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(runtime.current_revision(), 0);
+        assert_eq!(runtime.field.potential, potential_before);
+        assert_eq!(runtime.field.excitation, excitation_before);
     }
 
     #[test]
-    fn crash_recovery_reopens_and_replays() {
-        let dir = temp_dir("crash");
-        let path = dir.join("store.db");
-        let mut runtime = AstrRuntime::open(&path).unwrap();
-        let request = request(6);
-        let receipt = runtime.ensure_genesis(&request).unwrap();
-        let decision = runtime
-            .apply_event(&request.source.scope_persona_scope(), &stimulus(6, 0, 1))
-            .unwrap();
-        assert_eq!(decision.revision, 1);
-        drop(runtime); // crash without flush_and_close
+    fn binding_correct_other_event_wire_cannot_advance_the_target_runtime() {
+        let event = closed_stimulus();
+        let mut target_runtime = AstrRuntime::scaffold();
+        let potential_before = target_runtime.field.potential.clone();
+        let excitation_before = target_runtime.field.excitation.clone();
+        let target_candidate = target_runtime
+            .prepare_user_stimulus_transition_v1(&event)
+            .expect("target candidate");
 
-        let mut reopened = AstrRuntime::open(&path).unwrap();
-        let report = reopened
-            .verify_replay(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .unwrap();
-        assert!(report.ok, "{:?}", report.first_error);
-        assert_eq!(report.checked, 1);
+        let mut other_event = closed_stimulus();
+        let CanonicalEvent::UserStimulus(stimulus) = &mut other_event else {
+            panic!("fixture is a user stimulus");
+        };
+        stimulus.event_id = [79; 16];
+        let other_candidate = AstrRuntime::scaffold()
+            .prepare_user_stimulus_transition_v1(&other_event)
+            .expect("other-event candidate");
+        let other_metadata = PrivateProjectionPayloadWireBindingMetadataV1::new(
+            other_candidate.next_revision,
+            other_candidate.turn_id,
+            other_candidate.projection_turn_binding,
+            [18; 32],
+            other_candidate.state_after,
+        )
+        .expect("other-event metadata");
+        let other_wire = test_only_wire_for_metadata_v1(other_metadata)
+            .expect("canonical other-event capability");
 
-        // The next event continues at revision 2, not 1, and the birth was
-        // not duplicated.
-        let next = reopened
-            .apply_event(&request.source.scope_persona_scope(), &stimulus(6, 1, 2))
-            .unwrap();
-        assert_eq!(next.revision, 2);
-        assert_eq!(next.receipt.base_revision, 1);
-        let again = reopened.ensure_genesis(&request).unwrap();
-        assert_eq!(again, receipt);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(
+            target_runtime.commit_prepared_projection_wire_v1(target_candidate, other_wire),
+            Err(RuntimeError::PrivateProjectionWireBindingMismatch { .. })
+        ));
+        assert_eq!(target_runtime.current_revision(), 0);
+        assert_eq!(target_runtime.field.potential, potential_before);
+        assert_eq!(target_runtime.field.excitation, excitation_before);
     }
 
     #[test]
-    fn twenty_concurrent_ensure_genesis_calls_join_one_birth() {
-        use std::sync::{Arc, Mutex};
-        let dir = temp_dir("concurrent");
-        let runtime = Arc::new(Mutex::new(
-            AstrRuntime::open(&dir.join("store.db")).unwrap(),
-        ));
-        let request = Arc::new(request(8));
+    fn invalid_and_stale_semantics_leave_runtime_unchanged_before_projection_compilation() {
+        let runtime = AstrRuntime::scaffold();
+        let potential_before = runtime.field.potential.clone();
+        let excitation_before = runtime.field.excitation.clone();
 
-        let mut handles = Vec::new();
-        for _ in 0..20 {
-            let runtime = Arc::clone(&runtime);
-            let request = Arc::clone(&request);
-            handles.push(std::thread::spawn(move || {
-                runtime.lock().unwrap().ensure_genesis(&request).unwrap()
-            }));
-        }
-        let receipts: Vec<GenesisReceipt> = handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect();
-        for receipt in &receipts[1..] {
-            assert_eq!(receipt, &receipts[0]);
-        }
-        let runtime = runtime.lock().unwrap();
-        assert!(matches!(runtime.store.count_incarnations(), Ok(1)));
-        assert!(matches!(runtime.store.count_leases(), Ok(1)));
-        let _ = std::fs::remove_dir_all(&dir);
+        let mut invalid = closed_stimulus();
+        let CanonicalEvent::UserStimulus(stimulus) = &mut invalid else {
+            panic!("fixture is a user stimulus");
+        };
+        stimulus.evidence.estimator_confidence = Fixed::ZERO;
+        assert!(matches!(
+            runtime.prepare_user_stimulus_transition_v1(&invalid),
+            Err(RuntimeError::InvalidSemanticEstimate)
+        ));
+
+        let mut stale = closed_stimulus();
+        let CanonicalEvent::UserStimulus(stimulus) = &mut stale else {
+            panic!("fixture is a user stimulus");
+        };
+        stimulus.causal.base_revision = 1;
+        assert!(matches!(
+            runtime.prepare_user_stimulus_transition_v1(&stale),
+            Err(RuntimeError::UserStimulusBaseRevisionMismatch)
+        ));
+        assert_eq!(runtime.current_revision(), 0);
+        assert_eq!(runtime.field.potential, potential_before);
+        assert_eq!(runtime.field.excitation, excitation_before);
     }
 }
 
 #[cfg(test)]
-trait PersonaScopeForRequest {
-    fn scope_persona_scope(&self) -> ScopeRef;
-}
+mod user_stimulus_state_transition_semantic_regressions {
+    use super::*;
+    use crate::private_projection_wire::{
+        test_only_wire_for_metadata_v1, PrivateProjectionPayloadWireBindingMetadataV1,
+    };
+    use ae_contracts::{
+        wire, ActionContract, CanonicalEvent, CausalRef, EvidenceVector, ScopeRef,
+        SemanticEstimate, UserStimulus,
+    };
 
-#[cfg(test)]
-impl PersonaScopeForRequest for ae_contracts::PersonaSourceRef {
-    fn scope_persona_scope(&self) -> ScopeRef {
-        ScopeRef {
-            bot_token: self.scope.bot_token,
-            persona_token: self.scope.persona_token,
-            relation_token: None,
-            session_token: [0; 16],
+    // The public typed-input pipeline is covered by the active organism
+    // committed_semantic_projection_path tests. This crate-private harness
+    // restores the baseline semantic-candidate/sole-commit matrix without
+    // recreating a public callback, sealer, producer, or wire constructor.
+    fn commit_semantic_transition_for_test(
+        runtime: &mut AstrRuntime,
+        event: &CanonicalEvent,
+    ) -> Result<RuntimeDecision, RuntimeError> {
+        let candidate = runtime.prepare_user_stimulus_transition_v1(event)?;
+        let metadata = PrivateProjectionPayloadWireBindingMetadataV1::new(
+            candidate.next_revision,
+            candidate.turn_id,
+            candidate.projection_turn_binding,
+            [18; 32],
+            candidate.state_after,
+        )
+        .map_err(|_| RuntimeError::PrivateProjectionWireUnavailable)?;
+        let wire = test_only_wire_for_metadata_v1(metadata)
+            .map_err(|_| RuntimeError::PrivateProjectionWireUnavailable)?;
+        runtime.commit_prepared_projection_wire_v1(candidate, wire)
+    }
+
+    const NATIVE_FORMULA_DIGEST_HEX_V1: &str =
+        "632bfe32268a280aa56189d5a198550502707d79069c9f2fa76f74aa977f957d";
+
+    fn closed_stimulus(positive_delta: i64) -> CanonicalEvent {
+        closed_stimulus_with_relation(positive_delta, Some([4; 16]))
+    }
+
+    fn closed_stimulus_with_relation(
+        positive_delta: i64,
+        relation_token: Option<[u8; 16]>,
+    ) -> CanonicalEvent {
+        CanonicalEvent::UserStimulus(UserStimulus {
+            event_id: [1; 16],
+            scope: ScopeRef {
+                bot_token: [2; 16],
+                persona_token: [3; 16],
+                relation_token,
+                session_token: [5; 16],
+            },
+            causal: CausalRef {
+                turn_id: [6; 16],
+                action_id: None,
+                delivery_id: None,
+                claim_id: None,
+                base_revision: 0,
+            },
+            observed_at_ms: 1,
+            evidence: SemanticEstimate {
+                schema_version: 1,
+                dimensions: EvidenceVector {
+                    positive: Fixed::from_raw(110_000 + positive_delta),
+                    affiliation: Fixed::from_raw(120_000),
+                    harm: Fixed::from_raw(130_000),
+                    boundary: Fixed::from_raw(140_000),
+                    repair: Fixed::from_raw(150_000),
+                    repetition: Fixed::from_raw(160_000),
+                    new_information: Fixed::from_raw(170_000),
+                    constraint_instability: Fixed::from_raw(180_000),
+                    epistemic_conflict: Fixed::from_raw(190_000),
+                    self_responsibility: Fixed::from_raw(200_000),
+                    other_responsibility: Fixed::from_raw(210_000),
+                    hostility: Fixed::from_raw(220_000),
+                    publicness: Fixed::from_raw(230_000),
+                    engagement: Fixed::from_raw(240_000),
+                    rejection: Fixed::from_raw(250_000),
+                },
+                estimator_confidence: Fixed::from_raw(800_000),
+                estimator_digest: [7; 32],
+            },
+        })
+    }
+
+    fn has_digest(digest: [u8; 32]) -> bool {
+        digest != [0; 32]
+    }
+
+    #[derive(Clone)]
+    struct RuntimeSnapshot {
+        potential: Vec<Fixed>,
+        excitation: Vec<Fixed>,
+        inhibition: Vec<Fixed>,
+        adaptation: Vec<Fixed>,
+        precision: Vec<Fixed>,
+        prediction_error: Vec<Fixed>,
+        eligibility: Vec<Fixed>,
+        metabolic_reserve: Vec<Fixed>,
+        row_offsets: Vec<u32>,
+        edges: Vec<ae_neurofield::Synapse>,
+        revision: u64,
+        formula_digest: [u8; 32],
+    }
+
+    fn snapshot(runtime: &AstrRuntime) -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            potential: runtime.field.potential.clone(),
+            excitation: runtime.field.excitation.clone(),
+            inhibition: runtime.field.inhibition.clone(),
+            adaptation: runtime.field.adaptation.clone(),
+            precision: runtime.field.precision.clone(),
+            prediction_error: runtime.field.prediction_error.clone(),
+            eligibility: runtime.field.eligibility.clone(),
+            metabolic_reserve: runtime.field.metabolic_reserve.clone(),
+            row_offsets: runtime.graph.row_offsets.clone(),
+            edges: runtime.graph.edges.clone(),
+            revision: runtime.current_revision(),
+            formula_digest: runtime.formula_digest,
         }
+    }
+
+    fn assert_unchanged(runtime: &AstrRuntime, before: &RuntimeSnapshot) {
+        assert_eq!(runtime.field.potential, before.potential);
+        assert_eq!(runtime.field.excitation, before.excitation);
+        assert_eq!(runtime.field.inhibition, before.inhibition);
+        assert_eq!(runtime.field.adaptation, before.adaptation);
+        assert_eq!(runtime.field.precision, before.precision);
+        assert_eq!(runtime.field.prediction_error, before.prediction_error);
+        assert_eq!(runtime.field.eligibility, before.eligibility);
+        assert_eq!(runtime.field.metabolic_reserve, before.metabolic_reserve);
+        assert_eq!(runtime.graph.row_offsets, before.row_offsets);
+        assert_eq!(runtime.graph.edges, before.edges);
+        assert_eq!(runtime.current_revision(), before.revision);
+        assert_eq!(runtime.formula_digest, before.formula_digest);
+    }
+
+    fn fixed_digest(domain: &[u8], values: &[Fixed]) -> [u8; 32] {
+        let mut encoded = Vec::with_capacity(values.len() * std::mem::size_of::<i64>());
+        for value in values {
+            encoded.extend_from_slice(&value.raw().to_be_bytes());
+        }
+        wire::domain_hash(domain, &[&encoded])
+    }
+
+    fn evidence_values(evidence: &EvidenceVector) -> [Fixed; 15] {
+        [
+            evidence.positive,
+            evidence.affiliation,
+            evidence.harm,
+            evidence.boundary,
+            evidence.repair,
+            evidence.repetition,
+            evidence.new_information,
+            evidence.constraint_instability,
+            evidence.epistemic_conflict,
+            evidence.self_responsibility,
+            evidence.other_responsibility,
+            evidence.hostility,
+            evidence.publicness,
+            evidence.engagement,
+            evidence.rejection,
+        ]
+    }
+
+    fn option_id_digest(value: Option<[u8; 16]>) -> [u8; 32] {
+        match value {
+            None => wire::domain_hash(b"astr-embodiment/native-semantic-option-id-v1", &[b"none"]),
+            Some(id) => wire::domain_hash(
+                b"astr-embodiment/native-semantic-option-id-v1",
+                &[b"some", &id],
+            ),
+        }
+    }
+
+    fn expected_scope_digest(scope: &ScopeRef) -> [u8; 32] {
+        let relation = option_id_digest(scope.relation_token);
+        wire::domain_hash(
+            b"astr-embodiment/native-semantic-scope-v1",
+            &[
+                &scope.bot_token,
+                &scope.persona_token,
+                &relation,
+                &scope.session_token,
+            ],
+        )
+    }
+
+    fn expected_estimate_digest(estimate: &SemanticEstimate) -> [u8; 32] {
+        let dimensions = fixed_digest(
+            b"astr-embodiment/native-semantic-evidence-vector-v1",
+            &evidence_values(&estimate.dimensions),
+        );
+        let confidence = estimate.estimator_confidence.raw().to_be_bytes();
+        wire::domain_hash(
+            b"astr-embodiment/native-semantic-estimate-v1",
+            &[&dimensions, &confidence, &estimate.estimator_digest],
+        )
+    }
+
+    fn expected_event_digest(stimulus: &UserStimulus, scope: [u8; 32]) -> [u8; 32] {
+        let action = option_id_digest(stimulus.causal.action_id);
+        let delivery = option_id_digest(stimulus.causal.delivery_id);
+        let claim = option_id_digest(stimulus.causal.claim_id);
+        let observed_at_ms = stimulus.observed_at_ms.to_be_bytes();
+        let base_revision = stimulus.causal.base_revision.to_be_bytes();
+        let schema_version = stimulus.evidence.schema_version.to_be_bytes();
+        let estimate = expected_estimate_digest(&stimulus.evidence);
+        wire::domain_hash(
+            b"astr-embodiment/native-semantic-user-stimulus-v1",
+            &[
+                &stimulus.event_id,
+                &scope,
+                &stimulus.causal.turn_id,
+                &action,
+                &delivery,
+                &claim,
+                &observed_at_ms,
+                &base_revision,
+                &schema_version,
+                &estimate,
+            ],
+        )
+    }
+
+    fn expected_field_digest(runtime: &AstrRuntime) -> [u8; 32] {
+        let potential = fixed_digest(
+            b"astr-embodiment/neural-field/potential-v1",
+            &runtime.field.potential,
+        );
+        let excitation = fixed_digest(
+            b"astr-embodiment/neural-field/excitation-v1",
+            &runtime.field.excitation,
+        );
+        let inhibition = fixed_digest(
+            b"astr-embodiment/neural-field/inhibition-v1",
+            &runtime.field.inhibition,
+        );
+        let adaptation = fixed_digest(
+            b"astr-embodiment/neural-field/adaptation-v1",
+            &runtime.field.adaptation,
+        );
+        let precision = fixed_digest(
+            b"astr-embodiment/neural-field/precision-v1",
+            &runtime.field.precision,
+        );
+        let prediction_error = fixed_digest(
+            b"astr-embodiment/neural-field/prediction-error-v1",
+            &runtime.field.prediction_error,
+        );
+        let eligibility = fixed_digest(
+            b"astr-embodiment/neural-field/eligibility-v1",
+            &runtime.field.eligibility,
+        );
+        let metabolic_reserve = fixed_digest(
+            b"astr-embodiment/neural-field/metabolic-reserve-v1",
+            &runtime.field.metabolic_reserve,
+        );
+        wire::domain_hash(
+            b"astr-embodiment/native-semantic-neural-field-v1",
+            &[
+                &potential,
+                &excitation,
+                &inhibition,
+                &adaptation,
+                &precision,
+                &prediction_error,
+                &eligibility,
+                &metabolic_reserve,
+            ],
+        )
+    }
+
+    fn expected_graph_digest(runtime: &AstrRuntime) -> [u8; 32] {
+        let mut row_offsets = Vec::with_capacity(runtime.graph.row_offsets.len() * 4);
+        for offset in &runtime.graph.row_offsets {
+            row_offsets.extend_from_slice(&offset.to_be_bytes());
+        }
+        let mut edges = Vec::with_capacity(runtime.graph.edges.len() * 16);
+        for edge in &runtime.graph.edges {
+            edges.extend_from_slice(&edge.target.to_be_bytes());
+            edges.extend_from_slice(&edge.weight.to_be_bytes());
+            edges.extend_from_slice(&edge.eligibility.to_be_bytes());
+            edges.extend_from_slice(&edge.stability.to_be_bytes());
+            edges.extend_from_slice(&edge.last_used_epoch.to_be_bytes());
+            edges.push(edge.operator_id);
+            edges.push(edge.delay_class);
+            edges.extend_from_slice(&edge.flags.to_be_bytes());
+        }
+        wire::domain_hash(
+            b"astr-embodiment/native-semantic-sparse-graph-v1",
+            &[&row_offsets, &edges],
+        )
+    }
+
+    fn expected_contract_digest(contract: &ActionContract) -> [u8; 32] {
+        let continuous = fixed_digest(
+            b"astr-embodiment/native-semantic-action-vector-v1",
+            &[
+                contract.continuous.answer,
+                contract.continuous.verify,
+                contract.continuous.acknowledge_error,
+                contract.continuous.repair,
+                contract.continuous.ask_evidence,
+                contract.continuous.set_boundary,
+                contract.continuous.withdraw,
+                contract.continuous.proactive_reach,
+                contract.continuous.warmth,
+                contract.continuous.directness,
+                contract.continuous.verbosity,
+                contract.continuous.confidence_ceiling,
+            ],
+        );
+        let flags = [
+            u8::from(contract.must_verify),
+            u8::from(contract.must_acknowledge_error),
+            u8::from(contract.must_correct_claim),
+            u8::from(contract.may_set_boundary),
+            u8::from(contract.may_withdraw),
+            u8::from(contract.must_not_seek_reassurance),
+        ];
+        let expires_at_ms = contract.expires_at_ms.to_be_bytes();
+        wire::domain_hash(
+            b"astr-embodiment/native-semantic-action-contract-v1",
+            &[
+                &contract.action_id,
+                &contract.turn_id,
+                &continuous,
+                &flags,
+                &expires_at_ms,
+            ],
+        )
+    }
+
+    fn digest_hex(digest: [u8; 32]) -> String {
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn closed_nonzero_user_stimulus_commits_a_bound_native_transition() {
+        let event = closed_stimulus(0);
+        let mut runtime = AstrRuntime::scaffold();
+        let field_before = runtime.field.potential.clone();
+
+        let decision = commit_semantic_transition_for_test(&mut runtime, &event)
+            .expect("closed typed user stimulus is accepted without a raw-text boundary");
+
+        assert!(runtime
+            .field
+            .potential
+            .iter()
+            .zip(field_before.iter())
+            .any(|(after, before)| after != before));
+        assert!(has_digest(decision.receipt.state_before));
+        assert!(has_digest(decision.receipt.state_after));
+        assert_ne!(decision.receipt.state_before, decision.receipt.state_after);
+        assert!(has_digest(decision.receipt.graph_after));
+        assert!(has_digest(decision.receipt.event_digest));
+        assert!(has_digest(decision.receipt.authority_digest));
+        assert!(has_digest(decision.receipt.action_contract.expect(
+            "committed transition carries an action-contract digest"
+        )));
+        assert_ne!(decision.contract.action_id, [0; 16]);
+        assert!(decision.receipt.active_nodes > 0);
+        assert_eq!(runtime.current_revision(), 1);
+    }
+
+    #[test]
+    fn closed_evidence_is_deterministic_and_distinguishes_native_state() {
+        let event = closed_stimulus(0);
+        let contrasting_event = closed_stimulus(100_000);
+
+        let mut first = AstrRuntime::scaffold();
+        let first_decision =
+            commit_semantic_transition_for_test(&mut first, &event).expect("first transition");
+        let mut repeated = AstrRuntime::scaffold();
+        let repeated_decision =
+            commit_semantic_transition_for_test(&mut repeated, &event).expect("repeat transition");
+        let mut contrasting = AstrRuntime::scaffold();
+        let contrasting_decision =
+            commit_semantic_transition_for_test(&mut contrasting, &contrasting_event)
+                .expect("contrasting transition");
+
+        assert_eq!(first.field.potential, repeated.field.potential);
+        assert_eq!(
+            first_decision.receipt.state_after,
+            repeated_decision.receipt.state_after
+        );
+        assert_eq!(
+            first_decision.receipt.action_contract,
+            repeated_decision.receipt.action_contract
+        );
+        assert_ne!(first.field.potential[0], contrasting.field.potential[0]);
+        assert_ne!(
+            first_decision.receipt.state_after,
+            contrasting_decision.receipt.state_after
+        );
+        assert_ne!(
+            first_decision.receipt.action_contract,
+            contrasting_decision.receipt.action_contract
+        );
+    }
+
+    #[test]
+    fn zero_confidence_fails_closed_without_mutating_runtime_state() {
+        let mut event = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut event else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.evidence.estimator_confidence = Fixed::ZERO;
+
+        let mut runtime = AstrRuntime::scaffold();
+        let before = snapshot(&runtime);
+        assert!(commit_semantic_transition_for_test(&mut runtime, &event).is_err());
+        assert_unchanged(&runtime, &before);
+    }
+
+    #[test]
+    fn zero_estimator_digest_fails_closed_without_mutating_runtime_state() {
+        let mut event = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut event else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.evidence.estimator_digest = [0; 32];
+
+        let mut runtime = AstrRuntime::scaffold();
+        let before = snapshot(&runtime);
+        assert!(commit_semantic_transition_for_test(&mut runtime, &event).is_err());
+        assert_unchanged(&runtime, &before);
+    }
+
+    #[test]
+    fn sparse_evidence_is_accepted_when_current_attention_has_effective_drive() {
+        let mut event = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut event else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.evidence.dimensions = EvidenceVector {
+            positive: Fixed::from_raw(500_000),
+            ..EvidenceVector::default()
+        };
+
+        let mut runtime = AstrRuntime::scaffold();
+        let before = snapshot(&runtime);
+        let decision = commit_semantic_transition_for_test(&mut runtime, &event)
+            .expect("sparse typed evidence with active attention is valid");
+        assert_ne!(decision.receipt.state_before, decision.receipt.state_after);
+        assert_ne!(runtime.field.potential, before.potential);
+    }
+
+    #[test]
+    fn fully_zero_evidence_fails_closed_without_mutating_runtime_state() {
+        let mut event = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut event else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.evidence.dimensions = EvidenceVector::default();
+
+        let mut runtime = AstrRuntime::scaffold();
+        let before = snapshot(&runtime);
+        assert!(commit_semantic_transition_for_test(&mut runtime, &event).is_err());
+        assert_unchanged(&runtime, &before);
+    }
+
+    #[test]
+    fn slice_a_aggregate_attention_collides_for_equal_sum_different_composition() {
+        let mut first_event = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(first_stimulus) = &mut first_event else {
+            unreachable!("fixture is a user stimulus");
+        };
+        first_stimulus.evidence.dimensions = EvidenceVector {
+            positive: Fixed::from_raw(300_000),
+            harm: Fixed::from_raw(100_000),
+            ..EvidenceVector::default()
+        };
+
+        let mut second_event = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(second_stimulus) = &mut second_event else {
+            unreachable!("fixture is a user stimulus");
+        };
+        second_stimulus.evidence.dimensions = EvidenceVector {
+            positive: Fixed::from_raw(100_000),
+            harm: Fixed::from_raw(300_000),
+            ..EvidenceVector::default()
+        };
+
+        let mut first_runtime = AstrRuntime::scaffold();
+        let first = commit_semantic_transition_for_test(&mut first_runtime, &first_event)
+            .expect("first sparse aggregate activation");
+        let mut second_runtime = AstrRuntime::scaffold();
+        let second = commit_semantic_transition_for_test(&mut second_runtime, &second_event)
+            .expect("second sparse aggregate activation");
+
+        assert_ne!(first.receipt.event_digest, second.receipt.event_digest);
+        assert_eq!(first.receipt.state_after, second.receipt.state_after);
+        assert_eq!(
+            first_runtime.field.potential,
+            second_runtime.field.potential
+        );
+    }
+
+    #[test]
+    fn canonical_receipt_digests_bind_every_returned_typed_field() {
+        let event = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &event else {
+            unreachable!("fixture is a user stimulus");
+        };
+        let mut runtime = AstrRuntime::scaffold();
+        let expected_before = expected_field_digest(&runtime);
+        let decision =
+            commit_semantic_transition_for_test(&mut runtime, &event).expect("closed transition");
+        let expected_scope = expected_scope_digest(&stimulus.scope);
+        let expected_event = expected_event_digest(stimulus, expected_scope);
+        let expected_authority = wire::domain_hash(
+            b"astr-embodiment/native-semantic-authority-v1",
+            &[
+                b"user_observed",
+                &stimulus.evidence.estimator_digest,
+                &expected_event,
+            ],
+        );
+
+        assert_eq!(
+            digest_hex(runtime.formula_digest),
+            NATIVE_FORMULA_DIGEST_HEX_V1
+        );
+        assert_eq!(decision.receipt.scope_digest, expected_scope);
+        assert_eq!(decision.receipt.event_digest, expected_event);
+        assert_eq!(decision.receipt.authority_digest, expected_authority);
+        assert_eq!(decision.receipt.state_before, expected_before);
+        assert_eq!(
+            decision.receipt.state_after,
+            expected_field_digest(&runtime)
+        );
+        assert_eq!(
+            decision.receipt.graph_after,
+            expected_graph_digest(&runtime)
+        );
+        assert_eq!(
+            decision.receipt.action_contract,
+            Some(expected_contract_digest(&decision.contract))
+        );
+    }
+
+    #[test]
+    fn optional_bindings_remain_canonical_and_legal_relation_absence_is_supported() {
+        let mut zero_optional = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut zero_optional else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.causal.action_id = Some([0; 16]);
+        let mut runtime = AstrRuntime::scaffold();
+        let before = snapshot(&runtime);
+        assert!(commit_semantic_transition_for_test(&mut runtime, &zero_optional).is_err());
+        assert_unchanged(&runtime, &before);
+
+        let without_relation = closed_stimulus_with_relation(0, None);
+        let CanonicalEvent::UserStimulus(stimulus) = &without_relation else {
+            unreachable!("fixture is a user stimulus");
+        };
+        let mut relationless_runtime = AstrRuntime::scaffold();
+        let decision =
+            commit_semantic_transition_for_test(&mut relationless_runtime, &without_relation)
+                .expect("relation is an optional typed binding");
+        assert_eq!(
+            decision.receipt.scope_digest,
+            expected_scope_digest(&stimulus.scope)
+        );
+    }
+
+    #[test]
+    fn zero_relation_binding_and_mutated_formula_fail_closed() {
+        let mut zero_relation = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut zero_relation else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.scope.relation_token = Some([0; 16]);
+        let mut relation_runtime = AstrRuntime::scaffold();
+        let before_relation = snapshot(&relation_runtime);
+        assert!(
+            commit_semantic_transition_for_test(&mut relation_runtime, &zero_relation).is_err()
+        );
+        assert_unchanged(&relation_runtime, &before_relation);
+
+        let event = closed_stimulus(0);
+        let mut formula_runtime = AstrRuntime::scaffold();
+        formula_runtime.formula_digest = [0; 32];
+        let before_formula = snapshot(&formula_runtime);
+        assert!(commit_semantic_transition_for_test(&mut formula_runtime, &event).is_err());
+        assert_unchanged(&formula_runtime, &before_formula);
+    }
+
+    #[test]
+    fn stale_replay_overflow_and_late_failure_leave_full_runtime_unchanged() {
+        let mut stale = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut stale else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.causal.base_revision = 1;
+        let mut runtime = AstrRuntime::scaffold();
+        let before_stale = snapshot(&runtime);
+        assert!(commit_semantic_transition_for_test(&mut runtime, &stale).is_err());
+        assert_unchanged(&runtime, &before_stale);
+
+        let replay = closed_stimulus(0);
+        commit_semantic_transition_for_test(&mut runtime, &replay).expect("first transition");
+        let before_replay = snapshot(&runtime);
+        assert!(commit_semantic_transition_for_test(&mut runtime, &replay).is_err());
+        assert_unchanged(&runtime, &before_replay);
+
+        let mut overflow = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut overflow else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.causal.base_revision = u64::MAX;
+        let mut overflow_runtime = AstrRuntime::scaffold();
+        overflow_runtime.revision = u64::MAX;
+        let before_overflow = snapshot(&overflow_runtime);
+        assert!(commit_semantic_transition_for_test(&mut overflow_runtime, &overflow).is_err());
+        assert_unchanged(&overflow_runtime, &before_overflow);
+
+        let mut late_failure = closed_stimulus(0);
+        let CanonicalEvent::UserStimulus(stimulus) = &mut late_failure else {
+            unreachable!("fixture is a user stimulus");
+        };
+        stimulus.observed_at_ms = u64::MAX;
+        let mut late_runtime = AstrRuntime::scaffold();
+        let before_late = snapshot(&late_runtime);
+        assert!(commit_semantic_transition_for_test(&mut late_runtime, &late_failure).is_err());
+        assert_unchanged(&late_runtime, &before_late);
     }
 }

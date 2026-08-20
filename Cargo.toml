@@ -3,7 +3,6 @@ resolver = "2"
 members = [
   "crates/ae-fixed",
   "crates/ae-contracts",
-  "crates/ae-genesis",
   "crates/ae-authority",
   "crates/ae-attention",
   "crates/ae-neurofield",
@@ -14,6 +13,15 @@ members = [
   "crates/ae-store",
   "crates/ae-runtime",
   "crates/ae-pyo3",
+  "crates/ae-cognitive-envelope",
+  "crates/ae-genesis",
+  "crates/ae-action-contract",
+  "crates/ae-efference-copy",
+  "crates/ae-subjective-present",
+  "crates/ae-soma",
+  "crates/ae-epistemic-state",
+  "crates/ae-organism-runtime",
+  "crates/ae-morph",
 ]
 
 [workspace.package]
@@ -42,3 +50,5 @@ ae-agent = { path = "crates/ae-agent" }
 ae-continuum = { path = "crates/ae-continuum" }
 ae-store = { path = "crates/ae-store" }
 ae-runtime = { path = "crates/ae-runtime" }
+ae-cognitive-envelope = { path = "crates/ae-cognitive-envelope" }
+ae-organism-runtime = { path = "crates/ae-organism-runtime" }

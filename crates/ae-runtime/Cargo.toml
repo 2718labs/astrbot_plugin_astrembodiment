@@ -7,12 +7,21 @@ license.workspace = true
 [dependencies]
 ae-fixed.workspace = true
 ae-contracts.workspace = true
-ae-genesis.workspace = true
-ae-authority.workspace = true
 ae-attention.workspace = true
 ae-neurofield.workspace = true
 ae-renorm.workspace = true
 ae-agent.workspace = true
 ae-continuum.workspace = true
-ae-store.workspace = true
+ae-action-contract = { path = "../ae-action-contract" }
+ae-cognitive-envelope.workspace = true
+ae-efference-copy = { path = "../ae-efference-copy" }
+ae-epistemic-state = { path = "../ae-epistemic-state" }
+ae-genesis.workspace = true
+ae-morph = { path = "../ae-morph" }
+ae-soma = { path = "../ae-soma" }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+ae-subjective-present = { path = "../ae-subjective-present" }
