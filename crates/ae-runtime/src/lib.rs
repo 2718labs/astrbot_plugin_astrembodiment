@@ -13,8 +13,10 @@ use ae_contracts::{
     wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisReceipt, GenesisStatus,
     Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
 };
+use ae_fixed::Fixed;
 use ae_neurofield::{
-    graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
+    graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph, Synapse,
+    EDGE_CAPACITY, NEURON_SLOTS,
 };
 use ae_store::{ClaimOutcome, GenesisCommit, Store, StoreError};
 use std::path::Path;
@@ -22,6 +24,11 @@ use thiserror::Error;
 
 /// Native R7 atomic projection remains a Rust-only additive namespace.
 pub mod r7;
+
+const CANONICAL_HOT_STATE_MAGIC_V1: [u8; 8] = *b"AEHOTST\0";
+const CANONICAL_HOT_STATE_SCHEMA_V1: u16 = 1;
+const CANONICAL_HOT_STATE_VECTOR_COUNT: usize = 8;
+const SYNAPSE_WIRE_BYTES: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -93,6 +100,265 @@ pub struct AstrRuntime {
 
 fn fixed_zero_vector() -> InvariantResiduals {
     InvariantResiduals::default()
+}
+
+struct HotStateCursor<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> HotStateCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], RuntimeError> {
+        let end = self
+            .position
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        let value = &self.bytes[self.position..end];
+        self.position = end;
+        Ok(value)
+    }
+
+    fn read_u16(&mut self) -> Result<u16, RuntimeError> {
+        let mut bytes = [0; 2];
+        bytes.copy_from_slice(self.take(2)?);
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, RuntimeError> {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_fixed(&mut self) -> Result<Fixed, RuntimeError> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(Fixed::decode(bytes))
+    }
+
+    fn ensure_available(&self, count: usize) -> Result<(), RuntimeError> {
+        self.position
+            .checked_add(count)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(RuntimeError::InvalidNeuralState)
+            .map(|_| ())
+    }
+
+    fn is_at_eof(&self) -> bool {
+        self.position == self.bytes.len()
+    }
+}
+
+fn encode_hot_state_v1(
+    formula_digest: &Digest,
+    field: &NeuralField,
+    graph: &SparseGraph,
+) -> Vec<u8> {
+    let field_bytes = [
+        &field.potential,
+        &field.excitation,
+        &field.inhibition,
+        &field.adaptation,
+        &field.precision,
+        &field.prediction_error,
+        &field.eligibility,
+        &field.metabolic_reserve,
+    ]
+    .iter()
+    .try_fold(0usize, |total, values| {
+        values
+            .len()
+            .checked_mul(8)
+            .and_then(|value_bytes| value_bytes.checked_add(4))
+            .and_then(|section_bytes| total.checked_add(section_bytes))
+    })
+    .unwrap_or(0);
+    let graph_bytes = graph
+        .row_offsets
+        .len()
+        .checked_mul(4)
+        .and_then(|row_bytes| row_bytes.checked_add(4))
+        .and_then(|row_section| {
+            graph
+                .edges
+                .len()
+                .checked_mul(SYNAPSE_WIRE_BYTES)
+                .and_then(|edge_bytes| edge_bytes.checked_add(4))
+                .and_then(|edge_section| row_section.checked_add(edge_section))
+        })
+        .unwrap_or(0);
+    let capacity = CANONICAL_HOT_STATE_MAGIC_V1
+        .len()
+        .checked_add(2)
+        .and_then(|header| header.checked_add(formula_digest.len()))
+        .and_then(|header| header.checked_add(field_bytes))
+        .and_then(|header| header.checked_add(graph_bytes))
+        .unwrap_or(0);
+    let mut body = Vec::with_capacity(capacity);
+    body.extend_from_slice(&CANONICAL_HOT_STATE_MAGIC_V1);
+    body.extend_from_slice(&CANONICAL_HOT_STATE_SCHEMA_V1.to_le_bytes());
+    body.extend_from_slice(formula_digest);
+    for values in [
+        &field.potential,
+        &field.excitation,
+        &field.inhibition,
+        &field.adaptation,
+        &field.precision,
+        &field.prediction_error,
+        &field.eligibility,
+        &field.metabolic_reserve,
+    ] {
+        body.extend_from_slice(&(values.len() as u32).to_le_bytes());
+        for value in values {
+            body.extend_from_slice(&value.encode());
+        }
+    }
+    body.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
+    for offset in &graph.row_offsets {
+        body.extend_from_slice(&offset.to_le_bytes());
+    }
+    body.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
+    for edge in &graph.edges {
+        body.extend_from_slice(&edge.target.to_le_bytes());
+        body.extend_from_slice(&edge.weight.to_le_bytes());
+        body.extend_from_slice(&edge.eligibility.to_le_bytes());
+        body.extend_from_slice(&edge.stability.to_le_bytes());
+        body.extend_from_slice(&edge.last_used_epoch.to_le_bytes());
+        body.push(edge.operator_id);
+        body.push(edge.delay_class);
+        body.extend_from_slice(&edge.flags.to_le_bytes());
+    }
+    body
+}
+
+fn decode_hot_state_v1(
+    bytes: &[u8],
+    expected_formula_digest: &Digest,
+    expected_state_digest: &Digest,
+    expected_graph_digest: &Digest,
+) -> Result<(NeuralField, SparseGraph), RuntimeError> {
+    let mut cursor = HotStateCursor::new(bytes);
+    if cursor.take(CANONICAL_HOT_STATE_MAGIC_V1.len())? != CANONICAL_HOT_STATE_MAGIC_V1 {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    if cursor.read_u16()? != CANONICAL_HOT_STATE_SCHEMA_V1 {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let mut formula_digest = [0; 32];
+    formula_digest.copy_from_slice(cursor.take(32)?);
+    if &formula_digest != expected_formula_digest {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+
+    let mut vectors = Vec::with_capacity(CANONICAL_HOT_STATE_VECTOR_COUNT);
+    for _ in 0..CANONICAL_HOT_STATE_VECTOR_COUNT {
+        let count =
+            usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+        if count != NEURON_SLOTS {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        cursor.ensure_available(
+            count
+                .checked_mul(8)
+                .ok_or(RuntimeError::InvalidNeuralState)?,
+        )?;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(cursor.read_fixed()?);
+        }
+        vectors.push(values);
+    }
+
+    let row_count =
+        usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    if row_count != NEURON_SLOTS + 1 {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    cursor.ensure_available(
+        row_count
+            .checked_mul(4)
+            .ok_or(RuntimeError::InvalidNeuralState)?,
+    )?;
+    let mut row_offsets = Vec::with_capacity(row_count);
+    for _ in 0..row_count {
+        row_offsets.push(cursor.read_u32()?);
+    }
+
+    let edge_count =
+        usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    if edge_count > EDGE_CAPACITY {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    cursor.ensure_available(
+        edge_count
+            .checked_mul(SYNAPSE_WIRE_BYTES)
+            .ok_or(RuntimeError::InvalidNeuralState)?,
+    )?;
+    let mut edges = Vec::with_capacity(edge_count);
+    for _ in 0..edge_count {
+        let target = cursor.read_u32()?;
+        if usize::try_from(target).map_err(|_| RuntimeError::InvalidNeuralState)? >= NEURON_SLOTS {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let mut i16_bytes = [0; 2];
+        i16_bytes.copy_from_slice(cursor.take(2)?);
+        let weight = i16::from_le_bytes(i16_bytes);
+        i16_bytes.copy_from_slice(cursor.take(2)?);
+        let eligibility = i16::from_le_bytes(i16_bytes);
+        let mut u16_bytes = [0; 2];
+        u16_bytes.copy_from_slice(cursor.take(2)?);
+        let stability = u16::from_le_bytes(u16_bytes);
+        u16_bytes.copy_from_slice(cursor.take(2)?);
+        let last_used_epoch = u16::from_le_bytes(u16_bytes);
+        let operator_id = cursor.take(1)?[0];
+        let delay_class = cursor.take(1)?[0];
+        u16_bytes.copy_from_slice(cursor.take(2)?);
+        let flags = u16::from_le_bytes(u16_bytes);
+        edges.push(Synapse {
+            target,
+            weight,
+            eligibility,
+            stability,
+            last_used_epoch,
+            operator_id,
+            delay_class,
+            flags,
+        });
+    }
+    if !cursor.is_at_eof()
+        || !row_offsets.windows(2).all(|pair| pair[0] <= pair[1])
+        || row_offsets
+            .iter()
+            .any(|offset| usize::try_from(*offset).map_or(true, |value| value > edge_count))
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+
+    let mut vectors = vectors.into_iter();
+    let field = NeuralField {
+        potential: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        excitation: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        inhibition: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        adaptation: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        precision: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        prediction_error: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        eligibility: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        metabolic_reserve: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+    };
+    let graph = SparseGraph { row_offsets, edges };
+    if !field.validate()
+        || !graph.validate()
+        || state_digest(&field, expected_formula_digest) != *expected_state_digest
+        || graph_digest(&graph) != *expected_graph_digest
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    Ok((field, graph))
 }
 
 impl AstrRuntime {
@@ -203,7 +469,7 @@ impl AstrRuntime {
                     compiled_at_ms: effective.observed_at_ms,
                     receipt: receipt.clone(),
                     initial_snapshot_digest,
-                    state_bytes: self.encode_state(&field, &graph),
+                    state_bytes: encode_hot_state_v1(&effective.formula_digest, &field, &graph),
                     graph_digest,
                 };
 
@@ -244,43 +510,11 @@ impl AstrRuntime {
         }
     }
 
-    fn encode_state(&self, field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
-        // G0 snapshot bytes: the canonical fixed-layout field encoding plus
-        // the graph body; nothing else is needed to re-derive every digest.
-        let mut body = Vec::with_capacity(16_384 * 8 * 8 + 65_540);
-        for values in [
-            &field.potential,
-            &field.excitation,
-            &field.inhibition,
-            &field.adaptation,
-            &field.precision,
-            &field.prediction_error,
-            &field.eligibility,
-            &field.metabolic_reserve,
-        ] {
-            body.extend_from_slice(&(values.len() as u32).to_le_bytes());
-            for value in values {
-                body.extend_from_slice(&value.encode());
-            }
-        }
-        body.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
-        for offset in &graph.row_offsets {
-            body.extend_from_slice(&offset.to_le_bytes());
-        }
-        body.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
-        body
-    }
-
     fn bind_hot(&mut self, bot_token: Id128, persona_token: Id128) -> Result<(), RuntimeError> {
         let committed = self
             .store
             .lookup_bound_genesis(&bot_token, &persona_token)?
             .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        let (field, graph) = initial_state_from_manifest(
-            &committed.manifest,
-            &committed.receipt.formula_digest,
-            &committed.receipt.development_seed_digest,
-        );
         let identity = ae_genesis::GenesisIdentity {
             manifest: committed.manifest,
             manifest_digest: committed.receipt.manifest_digest,
@@ -290,6 +524,19 @@ impl AstrRuntime {
         };
         let persona_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
         let revision = self.store.current_revision(&persona_scope)?;
+        let snapshot = self
+            .store
+            .read_snapshot(&persona_scope, 0)?
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        if snapshot.state_digest != committed.receipt.initial_snapshot_digest {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let (field, graph) = decode_hot_state_v1(
+            &snapshot.state_bytes,
+            &committed.receipt.formula_digest,
+            &committed.receipt.initial_snapshot_digest,
+            &committed.receipt.graph_digest,
+        )?;
         self.hot = Some(HotBrain {
             bot_token,
             persona_token,
@@ -560,7 +807,7 @@ impl AstrRuntime {
                 &hot.persona_scope,
                 hot.revision,
                 &state,
-                &self.encode_state(&hot.field, &hot.graph),
+                &encode_hot_state_v1(&hot.formula_digest, &hot.field, &hot.graph),
             )?;
         }
         self.store.flush()?;
