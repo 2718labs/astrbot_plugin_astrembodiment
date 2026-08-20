@@ -1,4 +1,4 @@
-use crate::{BoundedProjectionReferencesV1, NativeProjectionUpdateV1};
+use super::{BoundedProjectionReferencesV1, NativeProjectionUpdateV1};
 use ae_action_contract::{
     ActionContractV1, ActionDispositionV1, ActionRealizationV1, ActionRequirementsV1,
     CanonicalTokenSetV1, CanonicalTokenV1, UnitIntervalV1,
@@ -9,7 +9,7 @@ use ae_cognitive_envelope::{
     OrganismSnapshotRefV1, PraxisV1, ProjectionPreconditionsV1, ProjectionSourceKindV1,
     ProviderProfileV1, RelationScopeV1, RelationV1, SourceCapsuleV1, SourceProvenanceV1, TurnV1,
 };
-use ae_contracts::{
+use ae_contracts::r7::{
     wire, CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
 };
 use ae_efference_copy::{EfferenceCopySourceV1, ExpectedDispositionV1, ObservedDispositionV1};
@@ -18,7 +18,7 @@ use ae_epistemic_state::{
     EpistemicEvidenceGapV1, EpistemicProjectionInputV1, EpistemicSourceBindingV1, VerifierNeedV1,
 };
 use ae_fixed::Fixed;
-use ae_genesis::{
+use ae_genesis::r7::{
     AntiGoalsV1, CorrectionBoundaryConstitutionV1, ExpressionBasisV1, IdentityBoundsV1,
     IdentityConstitutionV1, IncarnationRefV1, OperationalCommitmentsV1, RelationalPlayLimitsV1,
     SeedCodeV1,

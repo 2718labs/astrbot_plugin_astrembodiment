@@ -2,8 +2,8 @@
 //! before the implementation so the rejected callback/producer surface cannot
 //! silently satisfy the acceptance test.
 
-use ae_contracts::CanonicalEvent;
-use ae_runtime::{AstrRuntime, R7PreOutputProjectionInputV1};
+use ae_contracts::r7::CanonicalEvent;
+use ae_runtime::r7::{AstrRuntime, R7PreOutputProjectionInputV1};
 
 fn accepts_only_typed_input(
     runtime: &mut AstrRuntime,

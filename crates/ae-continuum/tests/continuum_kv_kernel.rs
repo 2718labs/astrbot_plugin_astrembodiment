@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
 
-use ae_continuum::{
+use ae_continuum::r7::{
     key_digest, validate_canonical_value_len, validate_key, validate_scan_limit, validate_value,
     value_digest, ContinuumKey, ContinuumObjectKind, ContinuumValidationError, VersionedValue,
     KEY_DOMAIN, MAX_CANONICAL_VALUE_BYTES, VALUE_DOMAIN,
 };
-use ae_contracts::{wire::domain_hash, Digest};
+use ae_contracts::r7::{wire::domain_hash, Digest};
 
 fn digest(hex: &str) -> Digest {
     assert_eq!(hex.len(), 64);

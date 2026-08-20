@@ -1,11 +1,8 @@
 #![forbid(unsafe_code)]
 
-use ae_contracts::EvidenceVector;
+use ae_contracts::r7::EvidenceVector;
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
-
-/// R7-only attention input namespace.
-pub mod r7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttentionHead {

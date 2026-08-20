@@ -7,11 +7,11 @@
 //! vocabulary. Raw user text, conversation, neural arrays, Continuum-KV banks, floating-point
 //! values, and unbounded collections are intentionally unrepresentable at this boundary.
 
-use ae_contracts::{
+use ae_contracts::r7::{
     wire, CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
 };
 use ae_fixed::Fixed;
-use ae_genesis::IdentityConstitutionV1;
+use ae_genesis::r7::IdentityConstitutionV1;
 use std::cmp::Ordering;
 use thiserror::Error;
 

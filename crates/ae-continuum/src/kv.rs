@@ -1,4 +1,4 @@
-use ae_contracts::{wire::domain_hash, Digest};
+use ae_contracts::r7::{wire::domain_hash, Digest};
 
 pub const KEY_DOMAIN: &[u8] = b"ae.continuum-kv.key.v1";
 pub const VALUE_DOMAIN: &[u8] = b"ae.continuum-kv.value.v1";

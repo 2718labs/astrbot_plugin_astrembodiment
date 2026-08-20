@@ -18,10 +18,10 @@
 //! into the pre-output action contract.
 
 use ae_action_contract::{ActionContractV1, ActionRealizationV1, ACTION_CONTRACT_SCHEMA_V1};
-use ae_contracts::{wire, Digest, Id128};
+use ae_contracts::r7::{wire, Digest, Id128};
 use ae_efference_copy::EfferenceCopyV1;
 use ae_epistemic_state::EpistemicProjectionV1;
-use ae_genesis::IdentityConstitutionV1;
+use ae_genesis::r7::IdentityConstitutionV1;
 use ae_soma::{
     compile_subjective_present_v1, SomaClassificationIngressV1, SomaErrorV1, SomaStateV1,
 };

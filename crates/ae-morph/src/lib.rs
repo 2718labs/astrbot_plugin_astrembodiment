@@ -13,7 +13,7 @@
 //! provider text, neural/KV arrays, and effect payloads have no input field and are also
 //! rejected as classification tokens.
 
-use ae_contracts::{wire, Digest};
+use ae_contracts::r7::{wire, Digest};
 use std::cmp::Ordering;
 use thiserror::Error;
 

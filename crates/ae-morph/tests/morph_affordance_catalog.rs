@@ -1,4 +1,4 @@
-use ae_contracts::Digest;
+use ae_contracts::r7::Digest;
 use ae_morph::{
     MorphAffordanceCatalogV1, MorphAvailabilityV1, MorphClassificationVocabularyInputV1,
     MorphClassificationVocabularyV1, MorphConfirmationRequirementV1, MorphEffectorInputV1,

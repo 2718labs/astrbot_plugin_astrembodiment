@@ -1,4 +1,4 @@
-use ae_genesis::{
+use ae_genesis::r7::{
     AntiGoalsV1, CorrectionBoundaryConstitutionV1, ExpressionBasisV1, GenesisErrorV1,
     IdentityBoundsV1, IdentityConstitutionV1, IdentitySectionV1, IncarnationRefV1,
     OperationalCommitmentsV1, RelationalPlayLimitsV1, SeedCodeV1,

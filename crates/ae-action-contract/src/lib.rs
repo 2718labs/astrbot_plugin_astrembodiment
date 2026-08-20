@@ -12,7 +12,7 @@
 //! are not accepted. Revision and state bindings live in the embodiment-side action
 //! contract and are transitively bound into realization through its contract digest.
 
-use ae_contracts::{wire, Digest, Id128};
+use ae_contracts::r7::{wire, Digest, Id128};
 use serde::{Serialize, Serializer};
 use std::cmp::Ordering;
 use thiserror::Error;

@@ -13,7 +13,7 @@ use ae_cognitive_envelope::{
     OrganismSnapshotRefV1, PraxisV1, ProjectionPreconditionsV1, ProjectionSourceKindV1,
     ProviderProfileV1, RelationScopeV1, RelationV1, SourceCapsuleV1, SourceProvenanceV1, TurnV1,
 };
-use ae_contracts::{
+use ae_contracts::r7::{
     CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
 };
 use ae_epistemic_state::{
@@ -21,7 +21,7 @@ use ae_epistemic_state::{
     EpistemicEvidenceGapV1, EpistemicProjectionInputV1, EpistemicSourceBindingV1, VerifierNeedV1,
 };
 use ae_fixed::Fixed;
-use ae_genesis::{
+use ae_genesis::r7::{
     AntiGoalsV1, CorrectionBoundaryConstitutionV1, ExpressionBasisV1, IdentityBoundsV1,
     IdentityConstitutionV1, IncarnationRefV1, OperationalCommitmentsV1, RelationalPlayLimitsV1,
     SeedCodeV1,
@@ -206,8 +206,8 @@ pub(crate) fn identity_capsule(
     )
 }
 
-use ae_contracts::{CanonicalEvent, UserStimulus};
-use ae_runtime::{
+use ae_contracts::r7::{CanonicalEvent, UserStimulus};
+use ae_runtime::r7::{
     AstrRuntime, BoundedProjectionReferencesV1, PreOutputProjectionUpdateV1,
     R7PreOutputProjectionInputV1, RuntimeError,
 };

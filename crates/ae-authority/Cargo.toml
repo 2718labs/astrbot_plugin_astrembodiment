@@ -7,3 +7,7 @@ license.workspace = true
 [dependencies]
 ae-contracts.workspace = true
 serde.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
+ae-fixed.workspace = true

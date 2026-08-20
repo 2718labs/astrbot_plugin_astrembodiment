@@ -1,9 +1,9 @@
-use ae_contracts::{
+use ae_contracts::r7::{
     wire, DeliveryKnowledgeV1, HostContractErrorV1, HostEffectDispositionV1, HostEffectV1,
     HostIngressKindV1, HostIngressV1, HostSettlementStatusV1, HostSettlementV1, PublicTextV1,
     HOST_SCHEMA_V1, LARK_PUBLIC_EFFECT_V1, PUBLIC_TEXT_V1,
 };
-use ae_runtime::{AstrRuntime, RuntimeError};
+use ae_runtime::r7::{AstrRuntime, RuntimeError};
 
 fn current_ingress(epoch: [u8; 16]) -> HostIngressV1 {
     HostIngressV1 {

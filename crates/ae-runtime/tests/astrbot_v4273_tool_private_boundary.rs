@@ -1,5 +1,5 @@
-use ae_contracts::wire;
-use ae_runtime::{
+use ae_contracts::r7::wire;
+use ae_runtime::r7::{
     AstrBotPublicSignalV1, AstrBotToolDispositionV1, AstrBotToolIngressV1, AstrRuntime,
     RuntimeError,
 };

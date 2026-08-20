@@ -5,7 +5,7 @@
 //! inspect its binding/header state.
 
 use ae_cognitive_envelope::{CognitiveEnvelopeV1, PreOutputCognitiveEnvelopeV1};
-use ae_contracts::{wire, Digest, Id128};
+use ae_contracts::r7::{wire, Digest, Id128};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -105,7 +105,7 @@ impl PrivateProjectionPayloadWireBindingMetadataV1 {
 /// `consume_once`, which moves the capability to its exact native bridge.
 ///
 /// ```compile_fail
-/// use ae_runtime::PrivateProjectionPayloadWireV1;
+/// use ae_runtime::r7::PrivateProjectionPayloadWireV1;
 /// use std::fmt::Debug;
 /// fn require_debug<T: Debug>() {}
 /// require_debug::<PrivateProjectionPayloadWireV1>();

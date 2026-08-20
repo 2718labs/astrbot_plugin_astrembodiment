@@ -11,7 +11,7 @@
 //! accepted or inferred.
 
 use ae_action_contract::{ActionContractV1, ActionRealizationV1};
-use ae_contracts::{wire, Digest, Id128};
+use ae_contracts::r7::{wire, Digest, Id128};
 use std::collections::BTreeSet;
 use thiserror::Error;
 

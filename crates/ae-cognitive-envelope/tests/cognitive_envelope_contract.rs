@@ -10,7 +10,7 @@ use ae_cognitive_envelope::{
     RelationV1, SourceCapsuleV1, SourceProvenanceV1, TurnV1, COGNITIVE_ENVELOPE_SCHEMA_V1,
     MAX_PROJECTION_TOKENS,
 };
-use ae_contracts::{
+use ae_contracts::r7::{
     wire, CausalRef, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
 };
 use ae_efference_copy::{EfferenceCopySourceV1, ExpectedDispositionV1, ObservedDispositionV1};
@@ -19,7 +19,7 @@ use ae_epistemic_state::{
     EpistemicEvidenceGapV1, EpistemicProjectionInputV1, EpistemicSourceBindingV1, VerifierNeedV1,
 };
 use ae_fixed::Fixed;
-use ae_genesis::{
+use ae_genesis::r7::{
     AntiGoalsV1, CorrectionBoundaryConstitutionV1, ExpressionBasisV1, IdentityBoundsV1,
     IdentityConstitutionV1, IncarnationRefV1, OperationalCommitmentsV1, RelationalPlayLimitsV1,
     SeedCodeV1,

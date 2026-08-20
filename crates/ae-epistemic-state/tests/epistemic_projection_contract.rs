@@ -1,4 +1,4 @@
-use ae_contracts::{
+use ae_contracts::r7::{
     CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
 };
 use ae_epistemic_state::{
@@ -7,7 +7,7 @@ use ae_epistemic_state::{
     EpistemicStateErrorV1, VerifierNeedV1, EPISTEMIC_EVIDENCE_DIMENSION_COUNT_V1,
 };
 use ae_fixed::Fixed;
-use ae_genesis::{
+use ae_genesis::r7::{
     AntiGoalsV1, CorrectionBoundaryConstitutionV1, ExpressionBasisV1, IdentityBoundsV1,
     IdentityConstitutionV1, IncarnationRefV1, OperationalCommitmentsV1, RelationalPlayLimitsV1,
     SeedCodeV1,

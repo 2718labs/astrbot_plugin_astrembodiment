@@ -6,7 +6,7 @@
 //! digest itself. It deliberately has no fields for organism arrays, Continuum-KV banks,
 //! free-form emotional narratives, persistence, or provider transport.
 
-use ae_contracts::{wire, Digest};
+use ae_contracts::r7::{wire, Digest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

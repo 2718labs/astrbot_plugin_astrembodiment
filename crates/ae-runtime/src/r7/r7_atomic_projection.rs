@@ -11,12 +11,12 @@
 //! closure-scoped digest view.
 
 #[cfg(test)]
-use crate::private_projection_wire::{
+use super::private_projection_wire::{
     certificate_digest_v1, payload_digest_v1, wire_digest_v1,
     PRIVATE_PROJECTION_PAYLOAD_MAX_BYTES_V1, PRIVATE_PROJECTION_PAYLOAD_WIRE_HEADER_LEN_V1,
     PRIVATE_PROJECTION_PAYLOAD_WIRE_MAGIC_V1, PRIVATE_PROJECTION_PAYLOAD_WIRE_SCHEMA_VERSION_V1,
 };
-use crate::private_projection_wire::{
+use super::private_projection_wire::{
     seal_cognitive_envelope_v1, seal_pre_output_cognitive_envelope_v1,
     PrivateProjectionPayloadWireBindingMetadataV1, PrivateProjectionPayloadWireErrorV1,
     PrivateProjectionPayloadWireV1,
@@ -29,10 +29,10 @@ use ae_cognitive_envelope::{
     ProjectionPreconditionsV1, ProjectionSourceKindV1, ProviderProfileV1, RelationScopeV1,
     SourceCapsuleV1,
 };
-use ae_contracts::{wire, Digest, Id128};
+use ae_contracts::r7::{wire, Digest, Id128};
 use ae_efference_copy::EfferenceCopyV1;
 use ae_epistemic_state::EpistemicProjectionV1;
-use ae_genesis::IdentityConstitutionV1;
+use ae_genesis::r7::IdentityConstitutionV1;
 use ae_morph::MorphAffordanceCatalogV1;
 use ae_soma::{SomaClassificationIngressV1, SomaStateV1};
 use serde_json::{Map, Value};
@@ -896,22 +896,22 @@ fn validate_pre_output_projection_for_wire_v1(
 /// It contains no candidate, sealer, callback, wire, or raw payload input.
 ///
 /// ```compile_fail
-/// use ae_runtime::PreparedSemanticProjectionPayloadProducerV1;
+/// use ae_runtime::r7::PreparedSemanticProjectionPayloadProducerV1;
 /// let _ = std::any::TypeId::of::<PreparedSemanticProjectionPayloadProducerV1>();
 /// ```
 ///
 /// ```compile_fail
-/// use ae_runtime::PreparedSemanticTransitionViewV1;
+/// use ae_runtime::r7::PreparedSemanticTransitionViewV1;
 /// let _ = std::any::TypeId::of::<PreparedSemanticTransitionViewV1>();
 /// ```
 ///
 /// ```compile_fail
-/// use ae_runtime::PrivateProjectionPayloadWireBindingMetadataV1;
+/// use ae_runtime::r7::PrivateProjectionPayloadWireBindingMetadataV1;
 /// let _ = std::any::TypeId::of::<PrivateProjectionPayloadWireBindingMetadataV1>();
 /// ```
 ///
 /// ```compile_fail
-/// use ae_runtime::seal_private_projection_payload_wire_v1;
+/// use ae_runtime::r7::seal_private_projection_payload_wire_v1;
 /// let _ = seal_private_projection_payload_wire_v1;
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2567,7 +2567,7 @@ mod legacy_producer_sealing_transaction_tests {
         MORPH_AFFORDANCE_MAX_ITEMS_V1,
     };
 
-    include!("../tests/support/native_projection_runtime.rs");
+    include!("../../tests/support/native_projection_runtime.rs");
 
     fn morph_catalog(
         revision: u64,

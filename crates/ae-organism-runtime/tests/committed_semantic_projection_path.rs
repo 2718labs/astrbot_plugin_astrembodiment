@@ -4,9 +4,9 @@
 // prepared semantic-transition origin and the pre-output boundary.
 include!("support/private_projection_runtime.rs");
 
-use ae_contracts::{CanonicalEvent, UserStimulus};
+use ae_contracts::r7::{CanonicalEvent, UserStimulus};
 use ae_organism_runtime::NativeProjectionPayloadProducerV1;
-use ae_runtime::{
+use ae_runtime::r7::{
     AstrRuntime, PreOutputProjectionUpdateV1, PrivateProjectionPayloadWireErrorV1,
     R7PreOutputProjectionInputV1, RuntimeError,
 };
@@ -290,7 +290,7 @@ fn atomically_compile(
     runtime: &mut AstrRuntime,
     identity: IdentityConstitutionV1,
     event: &CanonicalEvent,
-) -> Result<ae_runtime::RuntimeDecision, RuntimeError> {
+) -> Result<ae_runtime::r7::RuntimeDecision, RuntimeError> {
     let binding = matching_semantic_binding();
     let update = pre_output_update(identity.clone(), &binding, None, None, None, None);
     let input = R7PreOutputProjectionInputV1::new(identity_capsule(identity), update)
@@ -492,4 +492,34 @@ fn migrated_legacy_causal_binding_mismatches_do_not_consume_the_transition() {
         assert_eq!(runtime.current_revision(), 0);
         assert_eq!(runtime.field.potential, field_before);
     }
+}
+
+// These are test-only, fully typed authority fixtures shared with the PyO3
+// crate's Rust-internal bridge regression.  They are deliberately not a
+// production ingress and do not make a Python constructor or sealer possible.
+pub(crate) fn matching_first_transition_fixture() -> (CanonicalEvent, R7PreOutputProjectionInputV1)
+{
+    let constitution = identity(41);
+    let binding = matching_semantic_binding();
+    let update = pre_output_update(constitution.clone(), &binding, None, None, None, None);
+    let input = R7PreOutputProjectionInputV1::new(identity_capsule(constitution), update)
+        .expect("immutable typed identity");
+    (user_event([61; 16], 0), input)
+}
+
+pub(crate) fn rejected_first_transition_fixture() -> (CanonicalEvent, R7PreOutputProjectionInputV1)
+{
+    let constitution = identity(41);
+    let binding = matching_semantic_binding();
+    let update = pre_output_update(
+        constitution.clone(),
+        &binding,
+        Some(digest(99)),
+        None,
+        None,
+        None,
+    );
+    let input = R7PreOutputProjectionInputV1::new(identity_capsule(constitution), update)
+        .expect("immutable typed identity");
+    (user_event([61; 16], 0), input)
 }

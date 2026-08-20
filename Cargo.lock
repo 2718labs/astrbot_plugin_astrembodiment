@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "ae-action-contract"
+version = "1.0.0"
+dependencies = [
+ "ae-contracts",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ae-agent"
 version = "1.0.0"
 dependencies = [
@@ -32,6 +42,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-cognitive-envelope"
+version = "1.0.0"
+dependencies = [
+ "ae-action-contract",
+ "ae-contracts",
+ "ae-efference-copy",
+ "ae-epistemic-state",
+ "ae-fixed",
+ "ae-genesis",
+ "ae-soma",
+ "ae-subjective-present",
+ "blake3",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ae-continuum"
 version = "1.0.0"
 dependencies = [
@@ -48,6 +76,25 @@ dependencies = [
  "blake3",
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "ae-efference-copy"
+version = "1.0.0"
+dependencies = [
+ "ae-action-contract",
+ "ae-contracts",
+ "thiserror",
+]
+
+[[package]]
+name = "ae-epistemic-state"
+version = "1.0.0"
+dependencies = [
+ "ae-contracts",
+ "ae-fixed",
+ "ae-genesis",
  "thiserror",
 ]
 
@@ -81,12 +128,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "ae-morph"
+version = "1.0.0"
+dependencies = [
+ "ae-contracts",
+ "thiserror",
+]
+
+[[package]]
 name = "ae-neurofield"
 version = "1.0.0"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
  "serde",
+]
+
+[[package]]
+name = "ae-organism-runtime"
+version = "1.0.0"
+dependencies = [
+ "ae-action-contract",
+ "ae-cognitive-envelope",
+ "ae-contracts",
+ "ae-efference-copy",
+ "ae-epistemic-state",
+ "ae-fixed",
+ "ae-genesis",
+ "ae-morph",
+ "ae-runtime",
+ "ae-soma",
+ "ae-subjective-present",
+ "serde_json",
 ]
 
 [[package]]
@@ -101,16 +174,34 @@ dependencies = [
 name = "ae-runtime"
 version = "1.0.0"
 dependencies = [
+ "ae-action-contract",
  "ae-agent",
  "ae-attention",
  "ae-authority",
+ "ae-cognitive-envelope",
  "ae-continuum",
  "ae-contracts",
+ "ae-efference-copy",
+ "ae-epistemic-state",
  "ae-fixed",
  "ae-genesis",
+ "ae-morph",
  "ae-neurofield",
  "ae-renorm",
+ "ae-soma",
  "ae-store",
+ "ae-subjective-present",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "ae-soma"
+version = "1.0.0"
+dependencies = [
+ "ae-contracts",
+ "ae-subjective-present",
  "thiserror",
 ]
 
@@ -123,6 +214,16 @@ dependencies = [
  "ae-fixed",
  "ae-genesis",
  "rusqlite",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "ae-subjective-present"
+version = "1.0.0"
+dependencies = [
+ "ae-contracts",
+ "serde",
  "serde_json",
  "thiserror",
 ]
@@ -155,10 +256,19 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 name = "astrembodiment-core"
 version = "1.0.0"
 dependencies = [
+ "ae-action-contract",
+ "ae-cognitive-envelope",
  "ae-contracts",
+ "ae-efference-copy",
+ "ae-epistemic-state",
+ "ae-fixed",
  "ae-genesis",
+ "ae-morph",
+ "ae-organism-runtime",
  "ae-runtime",
+ "ae-soma",
  "ae-store",
+ "ae-subjective-present",
  "pyo3",
  "serde",
  "serde_json",

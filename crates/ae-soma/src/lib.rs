@@ -12,7 +12,7 @@
 //! Raw Persona text, user conversation, neural/KV arrays, and provider payload text have no
 //! input field. All identifiers and projected strings are canonical tokens.
 
-use ae_contracts::{wire, Digest};
+use ae_contracts::r7::{wire, Digest};
 use ae_subjective_present::{
     ConfidenceV1, DisclosureV1, SubjectiveBandV1, SubjectivePresentInputV1,
     SubjectivePresentProjectionV1, SubjectivePresentV1, SubjectiveTrendV1,

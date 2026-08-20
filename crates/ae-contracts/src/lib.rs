@@ -1,28 +1,155 @@
 #![forbid(unsafe_code)]
 
+//! Frozen 1.0.0 production contracts for AstrEmbodiment.
+//!
+//! All wire-exchanged structs are closed schemas: unknown JSON fields are
+//! rejected instead of being silently ignored. Identity and persistence use
+//! the canonical binary codecs in [wire]; JSON is for the FFI boundary and
+//! debugging only and never participates in a digest.
+
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
-pub mod wire {
-    use crate::Digest;
+/// R7 authority types are isolated from the alpha compatibility ABI.
+pub mod r7;
 
-    pub fn domain_hash(domain: &[u8], fields: &[&[u8]]) -> Digest {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(domain);
-        hasher.update(&[0]);
-        for field in fields {
-            hasher.update(&(field.len() as u64).to_le_bytes());
-            hasher.update(field);
+pub mod hex {
+    //! Serde helpers: digests and opaque tokens cross the FFI as lowercase hex
+    //! strings. The canonical binary wire forms are unaffected.
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn encode16(bytes: &[u8; 16]) -> String {
+        let mut out = String::with_capacity(32);
+        for byte in bytes {
+            out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap());
+            out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap());
         }
-        *hasher.finalize().as_bytes()
+        out
+    }
+
+    pub fn encode32(bytes: &[u8; 32]) -> String {
+        let mut out = String::with_capacity(64);
+        for byte in bytes {
+            out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap());
+            out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap());
+        }
+        out
+    }
+
+    pub fn decode16(text: &str) -> Result<[u8; 16], String> {
+        let trimmed = text.trim();
+        if trimmed.len() != 32 {
+            return Err(format!("expected 32 hex chars, got {}", trimmed.len()));
+        }
+        let mut out = [0u8; 16];
+        for (index, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
+            let high = (chunk[0] as char).to_digit(16).ok_or("invalid hex")?;
+            let low = (chunk[1] as char).to_digit(16).ok_or("invalid hex")?;
+            out[index] = ((high << 4) | low) as u8;
+        }
+        Ok(out)
+    }
+
+    pub fn decode32(text: &str) -> Result<[u8; 32], String> {
+        let trimmed = text.trim();
+        if trimmed.len() != 64 {
+            return Err(format!("expected 64 hex chars, got {}", trimmed.len()));
+        }
+        let mut out = [0u8; 32];
+        for (index, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
+            let high = (chunk[0] as char).to_digit(16).ok_or("invalid hex")?;
+            let low = (chunk[1] as char).to_digit(16).ok_or("invalid hex")?;
+            out[index] = ((high << 4) | low) as u8;
+        }
+        Ok(out)
+    }
+
+    pub mod d16 {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(
+            value: &[u8; 16],
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serializer.serialize_str(&encode16(value))
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<[u8; 16], D::Error> {
+            let text = String::deserialize(deserializer)?;
+            decode16(&text).map_err(serde::de::Error::custom)
+        }
+    }
+
+    pub mod d32 {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(
+            value: &[u8; 32],
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            serializer.serialize_str(&encode32(value))
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<[u8; 32], D::Error> {
+            let text = String::deserialize(deserializer)?;
+            decode32(&text).map_err(serde::de::Error::custom)
+        }
+    }
+
+    pub mod d16_opt {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<[u8; 16]>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(bytes) => serializer.serialize_some(&encode16(bytes)),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<[u8; 16]>, D::Error> {
+            Option::<String>::deserialize(deserializer)?
+                .map(|text| decode16(&text).map_err(serde::de::Error::custom))
+                .transpose()
+        }
+    }
+
+    pub mod d32_opt {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(
+            value: &Option<[u8; 32]>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(bytes) => serializer.serialize_some(&encode32(bytes)),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<[u8; 32]>, D::Error> {
+            Option::<String>::deserialize(deserializer)?
+                .map(|text| decode32(&text).map_err(serde::de::Error::custom))
+                .transpose()
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceAuthority {
     UserObserved,
@@ -33,26 +160,272 @@ pub enum SourceAuthority {
     SelfCritique,
     TimeAdvance,
     AdminAction,
+    PersonaConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeRef {
+    #[serde(with = "crate::hex::d16")]
     pub bot_token: Id128,
+    #[serde(with = "crate::hex::d16")]
     pub persona_token: Id128,
+    #[serde(with = "crate::hex::d16_opt")]
     pub relation_token: Option<Id128>,
+    #[serde(with = "crate::hex::d16")]
     pub session_token: Id128,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonaSelectionKind {
+    SessionForced,
+    Conversation,
+    ProviderDefault,
+    WebchatSpecial,
+    ExplicitDefault,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonaScopeRef {
+    #[serde(with = "crate::hex::d16")]
+    pub bot_token: Id128,
+    #[serde(with = "crate::hex::d16")]
+    pub persona_token: Id128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonaSourceRef {
+    pub scope: PersonaScopeRef,
+    #[serde(with = "crate::hex::d32")]
+    pub source_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub capability_digest: Digest,
+    pub selection: PersonaSelectionKind,
+    pub prompt_chars: u32,
+    pub begin_dialog_count: u16,
+    pub mood_dialog_count: u16,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonalityVector {
+    pub baseline_warmth: Fixed,
+    pub baseline_patience: Fixed,
+    pub sensitivity: Fixed,
+    pub irritability: Fixed,
+    pub composure: Fixed,
+    pub epistemic_pride: Fixed,
+    pub epistemic_openness: Fixed,
+    pub boundary_strength: Fixed,
+    pub forgiveness: Fixed,
+    pub attachment_propensity: Fixed,
+    pub expression_drive: Fixed,
+    pub curiosity: Fixed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpressionPhenotype {
+    pub warmth: Fixed,
+    pub directness: Fixed,
+    pub verbosity: Fixed,
+    pub self_disclosure: Fixed,
+    pub humor: Fixed,
+    pub formality: Fixed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllostaticSetpoints {
+    pub energy: Fixed,
+    pub arousal: Fixed,
+    pub contact_need: Fixed,
+    pub quiet_need: Fixed,
+    pub expression_pressure: Fixed,
+    pub exploration_drive: Fixed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EpistemicPriors {
+    pub verification_drive: Fixed,
+    pub confidence_style: Fixed,
+    pub correction_defensiveness: Fixed,
+    pub repair_after_error: Fixed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SocialPriors {
+    pub stranger_distance: Fixed,
+    pub approach_threshold: Fixed,
+    pub rejection_sensitivity: Fixed,
+    pub reciprocity_expectation: Fixed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionGenesis {
+    pub gain: Fixed,
+    pub inhibitory_tone: Fixed,
+    pub time_scale: Fixed,
+    pub plasticity_gate: Fixed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisManifestProposal {
+    pub schema_version: u16,
+    pub source: PersonaSourceRef,
+    pub traits: PersonalityVector,
+    pub trait_confidence: PersonalityVector,
+    pub expression: ExpressionPhenotype,
+    pub allostasis: AllostaticSetpoints,
+    pub epistemic: EpistemicPriors,
+    pub social: SocialPriors,
+    #[serde(with = "crate::hex::d32")]
+    pub compiler_protocol_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub compiler_model_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisManifest {
+    /// Canonical, immutable phenotype data. Content identity deliberately excludes
+    /// Bot/Persona scope, capabilities, compiler model and timestamps: equal modeled
+    /// data must have exactly one SeedCode regardless of where or how it was compiled.
+    /// The self digest is computed over the canonical body with this field zeroed.
+    pub schema_version: u16,
+    pub traits: PersonalityVector,
+    pub expression: ExpressionPhenotype,
+    pub allostasis: AllostaticSetpoints,
+    pub epistemic: EpistemicPriors,
+    pub social: SocialPriors,
+    #[serde(with = "crate::hex::d32")]
+    pub manifest_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisRecord {
+    #[serde(with = "crate::hex::d32")]
+    pub seed_code_digest: Digest,
+    pub manifest: GenesisManifest,
+    pub source: PersonaSourceRef,
+    #[serde(with = "crate::hex::d32")]
+    pub compiler_protocol_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub compiler_model_digest: Digest,
+    pub compiled_at_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonaGenesisRequest {
+    pub source: PersonaSourceRef,
+    pub proposal: GenesisManifestProposal,
+    /// Formula is intentionally excluded from SeedCode identity. It identifies
+    /// the laws used to instantiate one concrete brain from the Manifest.
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub incarnation_nonce: Digest,
+    #[serde(with = "crate::hex::d32_opt")]
+    pub parent_incarnation_id: Option<Digest>,
+    pub observed_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenesisStatus {
+    Committed,
+    Rejected,
+    Superseded,
+    RetryWait,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisReceipt {
+    pub schema_version: u16,
+    /// Content identity of the immutable GenesisManifest.
+    #[serde(with = "crate::hex::d32")]
+    pub seed_code_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub manifest_digest: Digest,
+    /// Identity of one concrete birth; may differ for multiple incarnations of
+    /// the same Manifest and never replaces SeedCode.
+    #[serde(with = "crate::hex::d32")]
+    pub incarnation_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub persona_source_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub compiler_protocol_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub compiler_model_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub development_seed_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub initial_snapshot_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub graph_digest: Digest,
+    pub equilibrium_residual: Fixed,
+    pub energy_residual: Fixed,
+    pub capacity_residual: Fixed,
+    pub sample_fit_residual: Fixed,
+    pub status: GenesisStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisCapsule {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub seed_code_digest: Digest,
+    pub manifest: GenesisManifest,
+    #[serde(with = "crate::hex::d32")]
+    pub provenance_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub capsule_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IncarnationRef {
+    #[serde(with = "crate::hex::d32")]
+    pub seed_code_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub manifest_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub incarnation_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub active_snapshot_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CausalRef {
+    #[serde(with = "crate::hex::d16")]
     pub turn_id: Id128,
+    #[serde(with = "crate::hex::d16_opt")]
     pub action_id: Option<Id128>,
+    #[serde(with = "crate::hex::d16_opt")]
     pub delivery_id: Option<Id128>,
+    #[serde(with = "crate::hex::d16_opt")]
     pub claim_id: Option<Id128>,
     pub base_revision: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceVector {
     pub positive: Fixed,
     pub affiliation: Fixed,
@@ -72,15 +445,19 @@ pub struct EvidenceVector {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SemanticEstimate {
     pub schema_version: u16,
     pub dimensions: EvidenceVector,
     pub estimator_confidence: Fixed,
+    #[serde(with = "crate::hex::d32")]
     pub estimator_digest: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserStimulus {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub causal: CausalRef,
@@ -89,7 +466,9 @@ pub struct UserStimulus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserReaction {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub causal: CausalRef,
@@ -98,7 +477,9 @@ pub struct UserReaction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CorrectionClaim {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub causal: CausalRef,
@@ -119,7 +500,9 @@ pub enum VerdictKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CorrectionVerdictEvent {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub causal: CausalRef,
@@ -127,45 +510,78 @@ pub struct CorrectionVerdictEvent {
     pub confidence: Fixed,
     pub contradiction: Fixed,
     pub hostility: Fixed,
+    #[serde(with = "crate::hex::d32")]
     pub evidence_digest: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SelfActionCandidate {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub causal: CausalRef,
+    #[serde(with = "crate::hex::d32")]
     pub visible_action_digest: Digest,
     pub claims: Vec<ClaimCommitment>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolActionDescriptor {
+    #[serde(with = "crate::hex::d16")]
+    pub action_id: Id128,
+    pub tool_class: u16,
+    pub side_effect_class: u8,
+    #[serde(with = "crate::hex::d32")]
+    pub argument_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub authorization_digest: Digest,
+    #[serde(with = "crate::hex::d32_opt")]
+    pub result_digest: Option<Digest>,
+    pub stage: ActionEffectStage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeliveryOutcome {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub causal: CausalRef,
     pub delivered: bool,
+    #[serde(with = "crate::hex::d32")]
     pub visible_action_digest: Digest,
     pub delivered_at_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeAdvance {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub elapsed_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdminAction {
+    #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
     pub scope: ScopeRef,
     pub operation: String,
+    #[serde(with = "crate::hex::d32")]
     pub nonce_digest: Digest,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum CanonicalEvent {
     UserStimulus(UserStimulus),
     UserReaction(UserReaction),
@@ -173,6 +589,7 @@ pub enum CanonicalEvent {
     CorrectionVerdict(CorrectionVerdictEvent),
     SelfActionCandidate(SelfActionCandidate),
     DeliveryOutcome(DeliveryOutcome),
+    SettlementEvidence(SettlementEvidence),
     TimeAdvance(TimeAdvance),
     AdminAction(AdminAction),
 }
@@ -185,6 +602,7 @@ impl CanonicalEvent {
             Self::CorrectionVerdict(_) => SourceAuthority::VerifierResult,
             Self::SelfActionCandidate(_) => SourceAuthority::SelfAction,
             Self::DeliveryOutcome(_) => SourceAuthority::PlatformObserved,
+            Self::SettlementEvidence(e) => e.source,
             Self::TimeAdvance(_) => SourceAuthority::TimeAdvance,
             Self::AdminAction(_) => SourceAuthority::AdminAction,
         }
@@ -192,7 +610,9 @@ impl CanonicalEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimCommitment {
+    #[serde(with = "crate::hex::d16")]
     pub claim_id: Id128,
     pub confidence: Fixed,
     pub assertiveness: Fixed,
@@ -201,7 +621,75 @@ pub struct ClaimCommitment {
     pub expires_at_ms: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimDescriptor {
+    #[serde(with = "crate::hex::d16")]
+    pub claim_id: Id128,
+    #[serde(with = "crate::hex::d16")]
+    pub action_id: Id128,
+    #[serde(with = "crate::hex::d32")]
+    pub text_digest: Digest,
+    pub confidence: Fixed,
+    pub assertiveness: Fixed,
+    pub stakes: Fixed,
+    pub delivered: bool,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionEffectStage {
+    Proposed,
+    Authorized,
+    Started,
+    Executed,
+    Decorated,
+    Delivered,
+    Settled,
+    Failed,
+    Cancelled,
+    UnknownTerminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementKind {
+    ExplicitAcceptance,
+    ExplicitRejection,
+    RepairAcknowledged,
+    ConfirmedSelfError,
+    RejectedChallenge,
+    VerifiedBoundaryViolation,
+    ConfirmedFrictionPattern,
+    ToolResult,
+    DeliveryTerminal,
+    StrongContinuation,
+    AmbiguousObservation,
+}
+
+/// The only event class that may request irreversible Relation learning.
+/// Raw user text, semantic estimates and delivery lifecycle events first create
+/// candidates; an independently validated, causally bound settlement is required
+/// before the authority projection can expose any residual coordinate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettlementEvidence {
+    #[serde(with = "crate::hex::d16")]
+    pub settlement_id: Id128,
+    pub scope: ScopeRef,
+    pub causal: CausalRef,
+    pub kind: SettlementKind,
+    pub source: SourceAuthority,
+    pub confidence: Fixed,
+    pub evidence_level: u8,
+    #[serde(with = "crate::hex::d32")]
+    pub evidence_digest: Digest,
+    pub observed_at_ms: u64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionVector {
     pub answer: Fixed,
     pub verify: Fixed,
@@ -218,8 +706,11 @@ pub struct ActionVector {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionContract {
+    #[serde(with = "crate::hex::d16")]
     pub action_id: Id128,
+    #[serde(with = "crate::hex::d16")]
     pub turn_id: Id128,
     pub continuous: ActionVector,
     pub must_verify: bool,
@@ -232,6 +723,7 @@ pub struct ActionContract {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvariantResiduals {
     pub authority: Fixed,
     pub continuity: Fixed,
@@ -250,17 +742,26 @@ pub enum CommitStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransitionReceipt {
     pub schema_version: u16,
+    #[serde(with = "crate::hex::d32")]
     pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
     pub scope_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
     pub event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
     pub authority_digest: Digest,
     pub base_revision: u64,
     pub next_revision: u64,
+    #[serde(with = "crate::hex::d32")]
     pub state_before: Digest,
+    #[serde(with = "crate::hex::d32")]
     pub state_after: Digest,
+    #[serde(with = "crate::hex::d32")]
     pub graph_after: Digest,
+    #[serde(with = "crate::hex::d32_opt")]
     pub action_contract: Option<Digest>,
     pub active_nodes: u32,
     pub active_edges: u32,
@@ -268,739 +769,1462 @@ pub struct TransitionReceipt {
     pub status: CommitStatus,
 }
 
-pub const HOST_SCHEMA_V1: u16 = 1;
-pub const LARK_PUBLIC_EFFECT_V1: &str = "LARK_PUBLIC_EFFECT_V1";
-pub const PUBLIC_TEXT_V1: &str = "PUBLIC_TEXT_V1";
-pub const ASTRBOT_TOOL_SCHEMA_V1: u16 = 1;
+pub mod wire {
+    //! Canonical binary wire codec (fixed layout, little-endian, closed
+    //! boundaries). Every struct here has exactly one encoding; a digest is
+    //! computed over the encoded bytes with a domain-separated BLAKE3 key.
+    //! JSON is never an identity codec.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostIngressKindV1 {
-    CurrentEvent,
-    EffectSettlement,
-}
+    use super::*;
+    use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostEffectDispositionV1 {
-    Silence,
-    PublicEffect,
-}
+    pub const WIRE_SCHEMA_VERSION: u16 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryKnowledgeV1 {
-    NotDispatched,
-    Unknown,
-}
+    pub const MANIFEST_BODY_DOMAIN: &[u8] = b"ae.genesis.manifest-body.v1";
+    pub const EVENT_DOMAIN: &[u8] = b"ae.event.v1";
+    pub const ACTION_CONTRACT_DOMAIN: &[u8] = b"ae.action-contract.v1";
+    pub const TRANSITION_RECEIPT_DOMAIN: &[u8] = b"ae.transition-receipt.v1";
+    pub const SCOPE_DOMAIN: &[u8] = b"ae.journal.scope.v1";
+    pub const AUTHORITY_DOMAIN: &[u8] = b"ae.authority.v1";
+    pub const CAPSULE_DOMAIN: &[u8] = b"ae.genesis-capsule.v1";
+    pub const STATE_DOMAIN: &[u8] = b"ae.neural-state.v1";
+    pub const GRAPH_DOMAIN: &[u8] = b"ae.graph.v1";
+    pub const SNAPSHOT_DOMAIN: &[u8] = b"ae.snapshot.v1";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostSettlementStatusV1 {
-    Silenced,
-    RejectedSchema,
-    RejectedIngressKind,
-    RejectedPlatform,
-    RejectedAdapterIdentity,
-    RejectedScope,
-    RejectedSession,
-    RejectedTurn,
-    RejectedAction,
-    RejectedProcessEpoch,
-    RejectedCapability,
-    RejectedAuthority,
-    RejectedPolicy,
-    RejectedExpired,
-    RejectedPayloadClass,
-    RejectedPayloadShape,
-    IdempotencyConflict,
-    DuplicateSuppressed,
-    FailedBeforeDispatch,
-    DispatchReturnedNoTypedReceipt,
-    DeliveryUnknown,
-}
+    pub const MAX_WIRE_STRING: usize = 4096;
+    pub const MAX_CLAIMS: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PublicTextV1 {
-    pub text: String,
-}
+    /// 2 bytes schema version + 32 fixed-point values (8 bytes each).
+    pub const MANIFEST_BODY_LEN: usize = 2 + 32 * 8;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostSettlementV1 {
-    pub schema_version: u16,
-    pub settlement_id: Digest,
-    pub effect_id: Digest,
-    pub process_epoch_id: Id128,
-    pub adapter_type: String,
-    pub adapter_id_binding: Digest,
-    pub scope_binding: Digest,
-    pub session_binding: Digest,
-    pub turn_binding: Digest,
-    pub action_id: Digest,
-    pub status: HostSettlementStatusV1,
-    pub delivery: DeliveryKnowledgeV1,
-    pub observed_at_ms: u64,
-}
+    pub const KIND_USER_STIMULUS: u8 = 1;
+    pub const KIND_USER_REACTION: u8 = 2;
+    pub const KIND_CORRECTION_CLAIM: u8 = 3;
+    pub const KIND_CORRECTION_VERDICT: u8 = 4;
+    pub const KIND_SELF_ACTION_CANDIDATE: u8 = 5;
+    pub const KIND_DELIVERY_OUTCOME: u8 = 6;
+    pub const KIND_SETTLEMENT_EVIDENCE: u8 = 7;
+    pub const KIND_TIME_ADVANCE: u8 = 8;
+    pub const KIND_ADMIN_ACTION: u8 = 9;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostIngressV1 {
-    pub schema_version: u16,
-    pub kind: HostIngressKindV1,
-    pub ingress_id: Digest,
-    pub process_epoch_id: Id128,
-    pub adapter_type: String,
-    pub adapter_id_binding: Digest,
-    pub scope_binding: Digest,
-    pub session_binding: Digest,
-    pub turn_binding: Digest,
-    pub event_id: Digest,
-    pub observed_at_ms: u64,
-    pub base_revision: u64,
-    pub current_event_text: Option<String>,
-    pub settlement: Option<HostSettlementV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostEffectV1 {
-    pub schema_version: u16,
-    pub disposition: HostEffectDispositionV1,
-    pub effect_id: Digest,
-    pub process_epoch_id: Id128,
-    pub adapter_type: String,
-    pub adapter_id_binding: Digest,
-    pub scope_binding: Digest,
-    pub session_binding: Digest,
-    pub turn_binding: Digest,
-    pub action_id: Digest,
-    pub capability_id: String,
-    pub authority_evidence_digest: Digest,
-    pub policy_evidence_digest: Digest,
-    pub authority_granted: bool,
-    pub policy_granted: bool,
-    pub payload_class: String,
-    pub public_payload: Option<PublicTextV1>,
-    pub expires_at_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AstrBotToolDispositionV1 {
-    Silence,
-    PublicSignal,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AstrBotPublicSignalV1 {
-    Observed,
-}
-
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AstrBotToolIngressV1 {
-    pub schema_version: u16,
-    pub invocation_id: Digest,
-    pub process_epoch_id: Digest,
-    pub adapter_binding: Digest,
-    pub session_binding: Digest,
-    pub turn_binding: Digest,
-    pub event_binding: Digest,
-    pub observed_at_ms: u64,
-    pub base_revision: u64,
-    pub current_event_text: String,
-}
-
-impl fmt::Debug for AstrBotToolIngressV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AstrBotToolIngressV1")
-            .field("schema_version", &self.schema_version)
-            .field("invocation_id", &self.invocation_id)
-            .field("process_epoch_id", &self.process_epoch_id)
-            .field("adapter_binding", &self.adapter_binding)
-            .field("session_binding", &self.session_binding)
-            .field("turn_binding", &self.turn_binding)
-            .field("event_binding", &self.event_binding)
-            .field("observed_at_ms", &self.observed_at_ms)
-            .field("base_revision", &self.base_revision)
-            .finish_non_exhaustive()
+    #[derive(Debug, Error, PartialEq, Eq)]
+    pub enum WireError {
+        #[error("wire byte boundary violation (need {0} bytes, have {1})")]
+        Boundary(usize, usize),
+        #[error("wire trailing bytes after complete message ({0} bytes)")]
+        TrailingBytes(usize),
+        #[error("wire schema version {0} is not supported")]
+        SchemaVersion(u16),
+        #[error("wire unknown event kind {0}")]
+        UnknownKind(u8),
+        #[error("wire invalid enum code {0}")]
+        InvalidEnum(&'static str),
+        #[error("wire string is not valid UTF-8")]
+        InvalidUtf8,
+        #[error("wire string exceeds length limit")]
+        StringTooLong,
+        #[error("wire claim count exceeds limit")]
+        TooManyClaims,
     }
-}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AstrBotToolOutcomeV1 {
-    pub schema_version: u16,
-    pub outcome_id: Digest,
-    pub invocation_id: Digest,
-    pub process_epoch_id: Digest,
-    pub adapter_binding: Digest,
-    pub session_binding: Digest,
-    pub turn_binding: Digest,
-    pub event_binding: Digest,
-    pub revision: u64,
-    pub disposition: AstrBotToolDispositionV1,
-    pub public_signal: Option<AstrBotPublicSignalV1>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AstrBotToolContractErrorV1 {
-    InvalidSchema,
-    InvalidIngressShape,
-    InvalidOutcomeShape,
-}
-
-impl fmt::Display for AstrBotToolContractErrorV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::InvalidSchema => "invalid astrbot tool schema",
-            Self::InvalidIngressShape => "invalid astrbot tool ingress",
-            Self::InvalidOutcomeShape => "invalid astrbot tool outcome",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for AstrBotToolContractErrorV1 {}
-
-impl AstrBotToolIngressV1 {
-    pub fn validate_shape(&self) -> Result<(), AstrBotToolContractErrorV1> {
-        if self.schema_version != ASTRBOT_TOOL_SCHEMA_V1 {
-            return Err(AstrBotToolContractErrorV1::InvalidSchema);
+    /// Domain-separated hash: BLAKE3(domain || 0x00 || len(field) || field ...)
+    /// with u64 little-endian field lengths.
+    pub fn domain_hash(domain: &[u8], fields: &[&[u8]]) -> Digest {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(domain);
+        hasher.update(&[0]);
+        for field in fields {
+            hasher.update(&(field.len() as u64).to_le_bytes());
+            hasher.update(field);
         }
-        if all_zero(&self.invocation_id)
-            || all_zero(&self.process_epoch_id)
-            || all_zero(&self.adapter_binding)
-            || all_zero(&self.session_binding)
-            || all_zero(&self.turn_binding)
-            || all_zero(&self.event_binding)
-            || self.observed_at_ms == 0
-            || self.current_event_text.contains('\0')
-            || self.current_event_text.chars().count() > 16_384
-            || self.current_event_text.len() > 65_536
-            || self.invocation_id != self.recompute_invocation_id()
-        {
-            return Err(AstrBotToolContractErrorV1::InvalidIngressShape);
+        *hasher.finalize().as_bytes()
+    }
+
+    pub fn encode_fixed(fixed: Fixed) -> [u8; 8] {
+        fixed.encode()
+    }
+
+    pub fn decode_fixed(bytes: [u8; 8]) -> Fixed {
+        Fixed::decode(bytes)
+    }
+
+    // ---------------------------------------------------------------- reader
+
+    pub struct Reader<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Reader<'a> {
+        pub fn new(data: &'a [u8]) -> Self {
+            Self { data, pos: 0 }
         }
-        Ok(())
-    }
 
-    pub fn recompute_invocation_id(&self) -> Digest {
-        let text_sha256 = sha256_digest(self.current_event_text.as_bytes());
-        let base_revision = self.base_revision.to_be_bytes();
-        wire::domain_hash(
-            b"astr-embodiment/astrbot-v4273-tool-invocation-v1",
-            &[
-                &self.process_epoch_id,
-                &self.adapter_binding,
-                &self.session_binding,
-                &self.turn_binding,
-                &self.event_binding,
-                &text_sha256,
-                &base_revision,
-            ],
-        )
-    }
-}
-
-impl AstrBotToolOutcomeV1 {
-    pub fn for_ingress(
-        ingress: &AstrBotToolIngressV1,
-        revision: u64,
-        disposition: AstrBotToolDispositionV1,
-        public_signal: Option<AstrBotPublicSignalV1>,
-    ) -> Result<Self, AstrBotToolContractErrorV1> {
-        ingress.validate_shape()?;
-        let mut outcome = Self {
-            schema_version: ASTRBOT_TOOL_SCHEMA_V1,
-            outcome_id: [0; 32],
-            invocation_id: ingress.invocation_id,
-            process_epoch_id: ingress.process_epoch_id,
-            adapter_binding: ingress.adapter_binding,
-            session_binding: ingress.session_binding,
-            turn_binding: ingress.turn_binding,
-            event_binding: ingress.event_binding,
-            revision,
-            disposition,
-            public_signal,
-        };
-        outcome.outcome_id = outcome.recompute_outcome_id();
-        outcome.validate_shape()?;
-        Ok(outcome)
-    }
-
-    pub fn validate_shape(&self) -> Result<(), AstrBotToolContractErrorV1> {
-        if self.schema_version != ASTRBOT_TOOL_SCHEMA_V1 {
-            return Err(AstrBotToolContractErrorV1::InvalidSchema);
+        pub fn remaining(&self) -> usize {
+            self.data.len() - self.pos
         }
-        let signal_shape_is_valid = matches!(
-            (self.disposition, self.public_signal),
-            (AstrBotToolDispositionV1::Silence, None)
-                | (
-                    AstrBotToolDispositionV1::PublicSignal,
-                    Some(AstrBotPublicSignalV1::Observed)
-                )
-        );
-        if all_zero(&self.outcome_id)
-            || all_zero(&self.invocation_id)
-            || all_zero(&self.process_epoch_id)
-            || all_zero(&self.adapter_binding)
-            || all_zero(&self.session_binding)
-            || all_zero(&self.turn_binding)
-            || all_zero(&self.event_binding)
-            || self.revision == 0
-            || !signal_shape_is_valid
-            || self.outcome_id != self.recompute_outcome_id()
-        {
-            return Err(AstrBotToolContractErrorV1::InvalidOutcomeShape);
+
+        fn take(&mut self, count: usize) -> Result<&'a [u8], WireError> {
+            if self.remaining() < count {
+                return Err(WireError::Boundary(count, self.remaining()));
+            }
+            let slice = &self.data[self.pos..self.pos + count];
+            self.pos += count;
+            Ok(slice)
         }
-        Ok(())
-    }
 
-    pub fn recompute_outcome_id(&self) -> Digest {
-        let revision = self.revision.to_be_bytes();
-        let disposition = match self.disposition {
-            AstrBotToolDispositionV1::Silence => b"silence".as_slice(),
-            AstrBotToolDispositionV1::PublicSignal => b"public_signal".as_slice(),
-        };
-        let signal = match self.public_signal {
-            None => b"".as_slice(),
-            Some(AstrBotPublicSignalV1::Observed) => b"observed".as_slice(),
-        };
-        wire::domain_hash(
-            b"astr-embodiment/astrbot-v4273-tool-outcome-v1",
-            &[
-                &self.invocation_id,
-                &self.process_epoch_id,
-                &self.adapter_binding,
-                &self.session_binding,
-                &self.turn_binding,
-                &self.event_binding,
-                &revision,
-                disposition,
-                signal,
-            ],
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostContractErrorV1 {
-    InvalidSchema,
-    InvalidIngressShape,
-    InvalidEffectShape,
-    InvalidSettlementShape,
-    InvalidHexLength,
-    InvalidPublicText,
-}
-
-impl fmt::Display for HostContractErrorV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::InvalidSchema => "invalid host schema",
-            Self::InvalidIngressShape => "invalid host ingress shape",
-            Self::InvalidEffectShape => "invalid host effect shape",
-            Self::InvalidSettlementShape => "invalid host settlement shape",
-            Self::InvalidHexLength => "invalid host identifier",
-            Self::InvalidPublicText => "invalid public text",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for HostContractErrorV1 {}
-
-impl PublicTextV1 {
-    pub fn new(text: String) -> Result<Self, HostContractErrorV1> {
-        if text.chars().count() > 4_096 || text.contains('\0') {
-            return Err(HostContractErrorV1::InvalidPublicText);
+        pub fn u8(&mut self) -> Result<u8, WireError> {
+            Ok(self.take(1)?[0])
         }
-        Ok(Self { text })
-    }
-}
 
-impl HostEffectV1 {
-    pub fn silence_for_ingress(ingress: &HostIngressV1, action_id: Digest) -> Self {
-        let mut effect = Self {
-            schema_version: HOST_SCHEMA_V1,
-            disposition: HostEffectDispositionV1::Silence,
-            effect_id: [0; 32],
-            process_epoch_id: ingress.process_epoch_id,
-            adapter_type: ingress.adapter_type.clone(),
-            adapter_id_binding: ingress.adapter_id_binding,
-            scope_binding: ingress.scope_binding,
-            session_binding: ingress.session_binding,
-            turn_binding: ingress.turn_binding,
+        pub fn bool(&mut self) -> Result<bool, WireError> {
+            match self.u8()? {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(WireError::InvalidEnum("boolean")),
+            }
+        }
+
+        pub fn u16(&mut self) -> Result<u16, WireError> {
+            let bytes: [u8; 2] = self.take(2)?.try_into().unwrap();
+            Ok(u16::from_le_bytes(bytes))
+        }
+
+        pub fn u32(&mut self) -> Result<u32, WireError> {
+            let bytes: [u8; 4] = self.take(4)?.try_into().unwrap();
+            Ok(u32::from_le_bytes(bytes))
+        }
+
+        pub fn u64(&mut self) -> Result<u64, WireError> {
+            let bytes: [u8; 8] = self.take(8)?.try_into().unwrap();
+            Ok(u64::from_le_bytes(bytes))
+        }
+
+        pub fn fixed(&mut self) -> Result<Fixed, WireError> {
+            let bytes: [u8; 8] = self.take(8)?.try_into().unwrap();
+            Ok(decode_fixed(bytes))
+        }
+
+        pub fn id(&mut self) -> Result<Id128, WireError> {
+            let bytes: [u8; 16] = self.take(16)?.try_into().unwrap();
+            Ok(bytes)
+        }
+
+        pub fn digest(&mut self) -> Result<Digest, WireError> {
+            let bytes: [u8; 32] = self.take(32)?.try_into().unwrap();
+            Ok(bytes)
+        }
+
+        pub fn opt_id(&mut self) -> Result<Option<Id128>, WireError> {
+            if self.bool()? {
+                Ok(Some(self.id()?))
+            } else {
+                Ok(None)
+            }
+        }
+
+        pub fn opt_digest(&mut self) -> Result<Option<Digest>, WireError> {
+            if self.bool()? {
+                Ok(Some(self.digest()?))
+            } else {
+                Ok(None)
+            }
+        }
+
+        pub fn string(&mut self) -> Result<String, WireError> {
+            let length = self.u32()? as usize;
+            if length > MAX_WIRE_STRING {
+                return Err(WireError::StringTooLong);
+            }
+            let bytes = self.take(length)?;
+            String::from_utf8(bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)
+        }
+
+        pub fn finish(self) -> Result<(), WireError> {
+            if self.pos != self.data.len() {
+                return Err(WireError::TrailingBytes(self.data.len() - self.pos));
+            }
+            Ok(())
+        }
+    }
+
+    fn push_u16(out: &mut Vec<u8>, value: u16) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u64(out: &mut Vec<u8>, value: u64) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_bool(out: &mut Vec<u8>, value: bool) {
+        out.push(u8::from(value));
+    }
+
+    fn push_id(out: &mut Vec<u8>, value: &Id128) {
+        out.extend_from_slice(value);
+    }
+
+    fn push_digest(out: &mut Vec<u8>, value: &Digest) {
+        out.extend_from_slice(value);
+    }
+
+    fn push_opt_id(out: &mut Vec<u8>, value: &Option<Id128>) {
+        push_bool(out, value.is_some());
+        if let Some(id) = value {
+            push_id(out, id);
+        }
+    }
+
+    fn push_opt_digest(out: &mut Vec<u8>, value: &Option<Digest>) {
+        push_bool(out, value.is_some());
+        if let Some(digest) = value {
+            push_digest(out, digest);
+        }
+    }
+
+    fn push_string(out: &mut Vec<u8>, value: &str) {
+        debug_assert!(value.len() <= MAX_WIRE_STRING);
+        push_u32(out, value.len() as u32);
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    // ---------------------------------------------------------------- scope
+
+    pub fn encode_scope(scope: &ScopeRef) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 * 3 + 17);
+        push_id(&mut out, &scope.bot_token);
+        push_id(&mut out, &scope.persona_token);
+        push_opt_id(&mut out, &scope.relation_token);
+        push_id(&mut out, &scope.session_token);
+        out
+    }
+
+    fn decode_scope(reader: &mut Reader<'_>) -> Result<ScopeRef, WireError> {
+        Ok(ScopeRef {
+            bot_token: reader.id()?,
+            persona_token: reader.id()?,
+            relation_token: reader.opt_id()?,
+            session_token: reader.id()?,
+        })
+    }
+
+    pub fn scope_digest(scope: &ScopeRef) -> Digest {
+        domain_hash(SCOPE_DOMAIN, &[&encode_scope(scope)])
+    }
+
+    /// Digest of the stable commit lane: (Bot, Persona, Relation?) without
+    /// the session token. Revisions and the journal hash chain advance per
+    /// persona/relation writer, not per conversation.
+    pub fn persona_scope_digest(
+        bot_token: &Id128,
+        persona_token: &Id128,
+        relation_token: Option<&Id128>,
+    ) -> Digest {
+        let mut body = Vec::with_capacity(49);
+        body.extend_from_slice(bot_token);
+        body.extend_from_slice(persona_token);
+        push_bool(&mut body, relation_token.is_some());
+        if let Some(relation) = relation_token {
+            body.extend_from_slice(relation);
+        }
+        domain_hash(SCOPE_DOMAIN, &[&body])
+    }
+
+    // ---------------------------------------------------------------- causal
+
+    fn encode_causal(causal: &CausalRef, out: &mut Vec<u8>) {
+        push_id(out, &causal.turn_id);
+        push_opt_id(out, &causal.action_id);
+        push_opt_id(out, &causal.delivery_id);
+        push_opt_id(out, &causal.claim_id);
+        push_u64(out, causal.base_revision);
+    }
+
+    fn decode_causal(reader: &mut Reader<'_>) -> Result<CausalRef, WireError> {
+        Ok(CausalRef {
+            turn_id: reader.id()?,
+            action_id: reader.opt_id()?,
+            delivery_id: reader.opt_id()?,
+            claim_id: reader.opt_id()?,
+            base_revision: reader.u64()?,
+        })
+    }
+
+    // ---------------------------------------------------------------- manifest
+
+    fn manifest_fixed_values(manifest: &GenesisManifest) -> [Fixed; 32] {
+        let t = &manifest.traits;
+        let e = &manifest.expression;
+        let a = &manifest.allostasis;
+        let p = &manifest.epistemic;
+        let s = &manifest.social;
+        [
+            t.baseline_warmth,
+            t.baseline_patience,
+            t.sensitivity,
+            t.irritability,
+            t.composure,
+            t.epistemic_pride,
+            t.epistemic_openness,
+            t.boundary_strength,
+            t.forgiveness,
+            t.attachment_propensity,
+            t.expression_drive,
+            t.curiosity,
+            e.warmth,
+            e.directness,
+            e.verbosity,
+            e.self_disclosure,
+            e.humor,
+            e.formality,
+            a.energy,
+            a.arousal,
+            a.contact_need,
+            a.quiet_need,
+            a.expression_pressure,
+            a.exploration_drive,
+            p.verification_drive,
+            p.confidence_style,
+            p.correction_defensiveness,
+            p.repair_after_error,
+            s.stranger_distance,
+            s.approach_threshold,
+            s.rejection_sensitivity,
+            s.reciprocity_expectation,
+        ]
+    }
+
+    /// Canonical binary ABI v1: fixed field order, little-endian i64
+    /// fixed-point values, no self digest. The manifest_digest field is
+    /// ignored during encoding (it is the digest of the rest).
+    pub fn encode_manifest_body(manifest: &GenesisManifest) -> Vec<u8> {
+        let mut out = Vec::with_capacity(MANIFEST_BODY_LEN);
+        push_u16(&mut out, manifest.schema_version);
+        for value in manifest_fixed_values(manifest) {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+        debug_assert_eq!(out.len(), MANIFEST_BODY_LEN);
+        out
+    }
+
+    pub fn decode_manifest_body(bytes: &[u8]) -> Result<GenesisManifest, WireError> {
+        if bytes.len() != MANIFEST_BODY_LEN {
+            return Err(WireError::Boundary(MANIFEST_BODY_LEN, bytes.len()));
+        }
+        let mut reader = Reader::new(bytes);
+        let schema_version = reader.u16()?;
+        let mut values = [Fixed::ZERO; 32];
+        for slot in &mut values {
+            *slot = reader.fixed()?;
+        }
+        reader.finish()?;
+        let t = &values[0..12];
+        let e = &values[12..18];
+        let a = &values[18..24];
+        let p = &values[24..28];
+        let s = &values[28..32];
+        Ok(GenesisManifest {
+            schema_version,
+            traits: PersonalityVector {
+                baseline_warmth: t[0],
+                baseline_patience: t[1],
+                sensitivity: t[2],
+                irritability: t[3],
+                composure: t[4],
+                epistemic_pride: t[5],
+                epistemic_openness: t[6],
+                boundary_strength: t[7],
+                forgiveness: t[8],
+                attachment_propensity: t[9],
+                expression_drive: t[10],
+                curiosity: t[11],
+            },
+            expression: ExpressionPhenotype {
+                warmth: e[0],
+                directness: e[1],
+                verbosity: e[2],
+                self_disclosure: e[3],
+                humor: e[4],
+                formality: e[5],
+            },
+            allostasis: AllostaticSetpoints {
+                energy: a[0],
+                arousal: a[1],
+                contact_need: a[2],
+                quiet_need: a[3],
+                expression_pressure: a[4],
+                exploration_drive: a[5],
+            },
+            epistemic: EpistemicPriors {
+                verification_drive: p[0],
+                confidence_style: p[1],
+                correction_defensiveness: p[2],
+                repair_after_error: p[3],
+            },
+            social: SocialPriors {
+                stranger_distance: s[0],
+                approach_threshold: s[1],
+                rejection_sensitivity: s[2],
+                reciprocity_expectation: s[3],
+            },
+            manifest_digest: [0; 32],
+        })
+    }
+
+    pub fn manifest_body_digest(manifest: &GenesisManifest) -> Digest {
+        domain_hash(MANIFEST_BODY_DOMAIN, &[&encode_manifest_body(manifest)])
+    }
+
+    // ---------------------------------------------------------------- evidence
+
+    fn encode_evidence_vector(out: &mut Vec<u8>, evidence: &EvidenceVector) {
+        for value in [
+            evidence.positive,
+            evidence.affiliation,
+            evidence.harm,
+            evidence.boundary,
+            evidence.repair,
+            evidence.repetition,
+            evidence.new_information,
+            evidence.constraint_instability,
+            evidence.epistemic_conflict,
+            evidence.self_responsibility,
+            evidence.other_responsibility,
+            evidence.hostility,
+            evidence.publicness,
+            evidence.engagement,
+            evidence.rejection,
+        ] {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+    }
+
+    fn decode_evidence_vector(reader: &mut Reader<'_>) -> Result<EvidenceVector, WireError> {
+        Ok(EvidenceVector {
+            positive: reader.fixed()?,
+            affiliation: reader.fixed()?,
+            harm: reader.fixed()?,
+            boundary: reader.fixed()?,
+            repair: reader.fixed()?,
+            repetition: reader.fixed()?,
+            new_information: reader.fixed()?,
+            constraint_instability: reader.fixed()?,
+            epistemic_conflict: reader.fixed()?,
+            self_responsibility: reader.fixed()?,
+            other_responsibility: reader.fixed()?,
+            hostility: reader.fixed()?,
+            publicness: reader.fixed()?,
+            engagement: reader.fixed()?,
+            rejection: reader.fixed()?,
+        })
+    }
+
+    fn encode_semantic_estimate(out: &mut Vec<u8>, estimate: &SemanticEstimate) {
+        push_u16(out, estimate.schema_version);
+        encode_evidence_vector(out, &estimate.dimensions);
+        out.extend_from_slice(&encode_fixed(estimate.estimator_confidence));
+        push_digest(out, &estimate.estimator_digest);
+    }
+
+    fn decode_semantic_estimate(reader: &mut Reader<'_>) -> Result<SemanticEstimate, WireError> {
+        Ok(SemanticEstimate {
+            schema_version: reader.u16()?,
+            dimensions: decode_evidence_vector(reader)?,
+            estimator_confidence: reader.fixed()?,
+            estimator_digest: reader.digest()?,
+        })
+    }
+
+    // ---------------------------------------------------------------- events
+
+    pub fn event_kind_code(event: &CanonicalEvent) -> u8 {
+        match event {
+            CanonicalEvent::UserStimulus(_) => KIND_USER_STIMULUS,
+            CanonicalEvent::UserReaction(_) => KIND_USER_REACTION,
+            CanonicalEvent::CorrectionClaim(_) => KIND_CORRECTION_CLAIM,
+            CanonicalEvent::CorrectionVerdict(_) => KIND_CORRECTION_VERDICT,
+            CanonicalEvent::SelfActionCandidate(_) => KIND_SELF_ACTION_CANDIDATE,
+            CanonicalEvent::DeliveryOutcome(_) => KIND_DELIVERY_OUTCOME,
+            CanonicalEvent::SettlementEvidence(_) => KIND_SETTLEMENT_EVIDENCE,
+            CanonicalEvent::TimeAdvance(_) => KIND_TIME_ADVANCE,
+            CanonicalEvent::AdminAction(_) => KIND_ADMIN_ACTION,
+        }
+    }
+
+    pub fn event_kind_name(event: &CanonicalEvent) -> &'static str {
+        match event {
+            CanonicalEvent::UserStimulus(_) => "user_stimulus",
+            CanonicalEvent::UserReaction(_) => "user_reaction",
+            CanonicalEvent::CorrectionClaim(_) => "correction_claim",
+            CanonicalEvent::CorrectionVerdict(_) => "correction_verdict",
+            CanonicalEvent::SelfActionCandidate(_) => "self_action_candidate",
+            CanonicalEvent::DeliveryOutcome(_) => "delivery_outcome",
+            CanonicalEvent::SettlementEvidence(_) => "settlement_evidence",
+            CanonicalEvent::TimeAdvance(_) => "time_advance",
+            CanonicalEvent::AdminAction(_) => "admin_action",
+        }
+    }
+
+    pub fn source_authority_code(source: SourceAuthority) -> u8 {
+        match source {
+            SourceAuthority::UserObserved => 1,
+            SourceAuthority::ExplicitFeedback => 2,
+            SourceAuthority::PlatformObserved => 3,
+            SourceAuthority::VerifierResult => 4,
+            SourceAuthority::SelfAction => 5,
+            SourceAuthority::SelfCritique => 6,
+            SourceAuthority::TimeAdvance => 7,
+            SourceAuthority::AdminAction => 8,
+            SourceAuthority::PersonaConfig => 9,
+        }
+    }
+
+    pub fn source_authority_from_code(code: u8) -> Option<SourceAuthority> {
+        Some(match code {
+            1 => SourceAuthority::UserObserved,
+            2 => SourceAuthority::ExplicitFeedback,
+            3 => SourceAuthority::PlatformObserved,
+            4 => SourceAuthority::VerifierResult,
+            5 => SourceAuthority::SelfAction,
+            6 => SourceAuthority::SelfCritique,
+            7 => SourceAuthority::TimeAdvance,
+            8 => SourceAuthority::AdminAction,
+            9 => SourceAuthority::PersonaConfig,
+            _ => return None,
+        })
+    }
+
+    pub fn settlement_kind_code(kind: SettlementKind) -> u8 {
+        match kind {
+            SettlementKind::ExplicitAcceptance => 1,
+            SettlementKind::ExplicitRejection => 2,
+            SettlementKind::RepairAcknowledged => 3,
+            SettlementKind::ConfirmedSelfError => 4,
+            SettlementKind::RejectedChallenge => 5,
+            SettlementKind::VerifiedBoundaryViolation => 6,
+            SettlementKind::ConfirmedFrictionPattern => 7,
+            SettlementKind::ToolResult => 8,
+            SettlementKind::DeliveryTerminal => 9,
+            SettlementKind::StrongContinuation => 10,
+            SettlementKind::AmbiguousObservation => 11,
+        }
+    }
+
+    pub fn settlement_kind_from_code(code: u8) -> Option<SettlementKind> {
+        Some(match code {
+            1 => SettlementKind::ExplicitAcceptance,
+            2 => SettlementKind::ExplicitRejection,
+            3 => SettlementKind::RepairAcknowledged,
+            4 => SettlementKind::ConfirmedSelfError,
+            5 => SettlementKind::RejectedChallenge,
+            6 => SettlementKind::VerifiedBoundaryViolation,
+            7 => SettlementKind::ConfirmedFrictionPattern,
+            8 => SettlementKind::ToolResult,
+            9 => SettlementKind::DeliveryTerminal,
+            10 => SettlementKind::StrongContinuation,
+            11 => SettlementKind::AmbiguousObservation,
+            _ => return None,
+        })
+    }
+
+    pub fn verdict_kind_code(kind: VerdictKind) -> u8 {
+        match kind {
+            VerdictKind::ConfirmedSelfError => 1,
+            VerdictKind::RejectedChallenge => 2,
+            VerdictKind::SharedAmbiguity => 3,
+            VerdictKind::HostFailure => 4,
+            VerdictKind::Unresolved => 5,
+        }
+    }
+
+    pub fn verdict_kind_from_code(code: u8) -> Option<VerdictKind> {
+        Some(match code {
+            1 => VerdictKind::ConfirmedSelfError,
+            2 => VerdictKind::RejectedChallenge,
+            3 => VerdictKind::SharedAmbiguity,
+            4 => VerdictKind::HostFailure,
+            5 => VerdictKind::Unresolved,
+            _ => return None,
+        })
+    }
+
+    pub fn commit_status_code(status: CommitStatus) -> u8 {
+        match status {
+            CommitStatus::Committed => 1,
+            CommitStatus::Rejected => 2,
+            CommitStatus::Superseded => 3,
+            CommitStatus::Stale => 4,
+        }
+    }
+
+    pub fn commit_status_from_code(code: u8) -> Option<CommitStatus> {
+        Some(match code {
+            1 => CommitStatus::Committed,
+            2 => CommitStatus::Rejected,
+            3 => CommitStatus::Superseded,
+            4 => CommitStatus::Stale,
+            _ => return None,
+        })
+    }
+
+    pub fn genesis_status_code(status: GenesisStatus) -> u8 {
+        match status {
+            GenesisStatus::Committed => 1,
+            GenesisStatus::Rejected => 2,
+            GenesisStatus::Superseded => 3,
+            GenesisStatus::RetryWait => 4,
+        }
+    }
+
+    pub fn genesis_status_from_code(code: u8) -> Option<GenesisStatus> {
+        Some(match code {
+            1 => GenesisStatus::Committed,
+            2 => GenesisStatus::Rejected,
+            3 => GenesisStatus::Superseded,
+            4 => GenesisStatus::RetryWait,
+            _ => return None,
+        })
+    }
+
+    fn decode_scope_and_causal_payload(
+        reader: &mut Reader<'_>,
+    ) -> Result<(ScopeRef, CausalRef), WireError> {
+        Ok((decode_scope(reader)?, decode_causal(reader)?))
+    }
+
+    pub fn encode_event(event: &CanonicalEvent) -> Vec<u8> {
+        let mut out = Vec::with_capacity(128);
+        push_u16(&mut out, WIRE_SCHEMA_VERSION);
+        out.push(event_kind_code(event));
+        match event {
+            CanonicalEvent::UserStimulus(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                encode_causal(&e.causal, &mut out);
+                push_u64(&mut out, e.observed_at_ms);
+                encode_semantic_estimate(&mut out, &e.evidence);
+            }
+            CanonicalEvent::UserReaction(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                encode_causal(&e.causal, &mut out);
+                push_u64(&mut out, e.observed_at_ms);
+                encode_semantic_estimate(&mut out, &e.evidence);
+            }
+            CanonicalEvent::CorrectionClaim(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                encode_causal(&e.causal, &mut out);
+                out.extend_from_slice(&encode_fixed(e.specificity));
+                out.extend_from_slice(&encode_fixed(e.supplied_evidence));
+                out.extend_from_slice(&encode_fixed(e.hostility));
+                out.extend_from_slice(&encode_fixed(e.publicness));
+            }
+            CanonicalEvent::CorrectionVerdict(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                encode_causal(&e.causal, &mut out);
+                out.push(verdict_kind_code(e.verdict));
+                out.extend_from_slice(&encode_fixed(e.confidence));
+                out.extend_from_slice(&encode_fixed(e.contradiction));
+                out.extend_from_slice(&encode_fixed(e.hostility));
+                push_digest(&mut out, &e.evidence_digest);
+            }
+            CanonicalEvent::SelfActionCandidate(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                encode_causal(&e.causal, &mut out);
+                push_digest(&mut out, &e.visible_action_digest);
+                push_u32(&mut out, e.claims.len() as u32);
+                for claim in &e.claims {
+                    push_id(&mut out, &claim.claim_id);
+                    out.extend_from_slice(&encode_fixed(claim.confidence));
+                    out.extend_from_slice(&encode_fixed(claim.assertiveness));
+                    out.extend_from_slice(&encode_fixed(claim.stakes));
+                    out.extend_from_slice(&encode_fixed(claim.audience_publicness));
+                    push_u64(&mut out, claim.expires_at_ms);
+                }
+            }
+            CanonicalEvent::DeliveryOutcome(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                encode_causal(&e.causal, &mut out);
+                push_bool(&mut out, e.delivered);
+                push_digest(&mut out, &e.visible_action_digest);
+                push_u64(&mut out, e.delivered_at_ms);
+            }
+            CanonicalEvent::SettlementEvidence(e) => {
+                push_id(&mut out, &e.settlement_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                encode_causal(&e.causal, &mut out);
+                out.push(settlement_kind_code(e.kind));
+                out.push(source_authority_code(e.source));
+                out.extend_from_slice(&encode_fixed(e.confidence));
+                out.push(e.evidence_level);
+                push_digest(&mut out, &e.evidence_digest);
+                push_u64(&mut out, e.observed_at_ms);
+            }
+            CanonicalEvent::TimeAdvance(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                push_u64(&mut out, e.elapsed_ms);
+            }
+            CanonicalEvent::AdminAction(e) => {
+                push_id(&mut out, &e.event_id);
+                out.extend_from_slice(&encode_scope(&e.scope));
+                push_string(&mut out, &e.operation);
+                push_digest(&mut out, &e.nonce_digest);
+            }
+        }
+        out
+    }
+
+    pub fn decode_event(bytes: &[u8]) -> Result<CanonicalEvent, WireError> {
+        let mut reader = Reader::new(bytes);
+        let schema_version = reader.u16()?;
+        if schema_version != WIRE_SCHEMA_VERSION {
+            return Err(WireError::SchemaVersion(schema_version));
+        }
+        let kind = reader.u8()?;
+        let event = match kind {
+            KIND_USER_STIMULUS => {
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                let observed_at_ms = reader.u64()?;
+                let evidence = decode_semantic_estimate(&mut reader)?;
+                CanonicalEvent::UserStimulus(UserStimulus {
+                    event_id,
+                    scope,
+                    causal,
+                    observed_at_ms,
+                    evidence,
+                })
+            }
+            KIND_USER_REACTION => {
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                let observed_at_ms = reader.u64()?;
+                let evidence = decode_semantic_estimate(&mut reader)?;
+                CanonicalEvent::UserReaction(UserReaction {
+                    event_id,
+                    scope,
+                    causal,
+                    observed_at_ms,
+                    evidence,
+                })
+            }
+            KIND_CORRECTION_CLAIM => {
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                CanonicalEvent::CorrectionClaim(CorrectionClaim {
+                    event_id,
+                    scope,
+                    causal,
+                    specificity: reader.fixed()?,
+                    supplied_evidence: reader.fixed()?,
+                    hostility: reader.fixed()?,
+                    publicness: reader.fixed()?,
+                })
+            }
+            KIND_CORRECTION_VERDICT => {
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                let verdict = verdict_kind_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("verdict kind"))?;
+                CanonicalEvent::CorrectionVerdict(CorrectionVerdictEvent {
+                    event_id,
+                    scope,
+                    causal,
+                    verdict,
+                    confidence: reader.fixed()?,
+                    contradiction: reader.fixed()?,
+                    hostility: reader.fixed()?,
+                    evidence_digest: reader.digest()?,
+                })
+            }
+            KIND_SELF_ACTION_CANDIDATE => {
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                let visible_action_digest = reader.digest()?;
+                let count = reader.u32()? as usize;
+                if count > MAX_CLAIMS {
+                    return Err(WireError::TooManyClaims);
+                }
+                let mut claims = Vec::with_capacity(count);
+                for _ in 0..count {
+                    claims.push(ClaimCommitment {
+                        claim_id: reader.id()?,
+                        confidence: reader.fixed()?,
+                        assertiveness: reader.fixed()?,
+                        stakes: reader.fixed()?,
+                        audience_publicness: reader.fixed()?,
+                        expires_at_ms: reader.u64()?,
+                    });
+                }
+                CanonicalEvent::SelfActionCandidate(SelfActionCandidate {
+                    event_id,
+                    scope,
+                    causal,
+                    visible_action_digest,
+                    claims,
+                })
+            }
+            KIND_DELIVERY_OUTCOME => {
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                CanonicalEvent::DeliveryOutcome(DeliveryOutcome {
+                    event_id,
+                    scope,
+                    causal,
+                    delivered: reader.bool()?,
+                    visible_action_digest: reader.digest()?,
+                    delivered_at_ms: reader.u64()?,
+                })
+            }
+            KIND_SETTLEMENT_EVIDENCE => {
+                let settlement_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                let kind = settlement_kind_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("settlement kind"))?;
+                let source = source_authority_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("source authority"))?;
+                CanonicalEvent::SettlementEvidence(SettlementEvidence {
+                    settlement_id,
+                    scope,
+                    causal,
+                    kind,
+                    source,
+                    confidence: reader.fixed()?,
+                    evidence_level: reader.u8()?,
+                    evidence_digest: reader.digest()?,
+                    observed_at_ms: reader.u64()?,
+                })
+            }
+            KIND_TIME_ADVANCE => {
+                let event_id = reader.id()?;
+                let scope = decode_scope(&mut reader)?;
+                CanonicalEvent::TimeAdvance(TimeAdvance {
+                    event_id,
+                    scope,
+                    elapsed_ms: reader.u64()?,
+                })
+            }
+            KIND_ADMIN_ACTION => {
+                let event_id = reader.id()?;
+                let scope = decode_scope(&mut reader)?;
+                CanonicalEvent::AdminAction(AdminAction {
+                    event_id,
+                    scope,
+                    operation: reader.string()?,
+                    nonce_digest: reader.digest()?,
+                })
+            }
+            other => return Err(WireError::UnknownKind(other)),
+        };
+        reader.finish()?;
+        Ok(event)
+    }
+
+    pub fn event_digest(event: &CanonicalEvent) -> Digest {
+        domain_hash(EVENT_DOMAIN, &[&encode_event(event)])
+    }
+
+    // ---------------------------------------------------------------- action contract
+
+    pub fn encode_action_contract(contract: &ActionContract) -> Vec<u8> {
+        let mut out = Vec::with_capacity(140);
+        push_id(&mut out, &contract.action_id);
+        push_id(&mut out, &contract.turn_id);
+        let c = &contract.continuous;
+        for value in [
+            c.answer,
+            c.verify,
+            c.acknowledge_error,
+            c.repair,
+            c.ask_evidence,
+            c.set_boundary,
+            c.withdraw,
+            c.proactive_reach,
+            c.warmth,
+            c.directness,
+            c.verbosity,
+            c.confidence_ceiling,
+        ] {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+        push_bool(&mut out, contract.must_verify);
+        push_bool(&mut out, contract.must_acknowledge_error);
+        push_bool(&mut out, contract.must_correct_claim);
+        push_bool(&mut out, contract.may_set_boundary);
+        push_bool(&mut out, contract.may_withdraw);
+        push_bool(&mut out, contract.must_not_seek_reassurance);
+        push_u64(&mut out, contract.expires_at_ms);
+        out
+    }
+
+    pub fn decode_action_contract(bytes: &[u8]) -> Result<ActionContract, WireError> {
+        let mut reader = Reader::new(bytes);
+        let action_id = reader.id()?;
+        let turn_id = reader.id()?;
+        let mut values = [Fixed::ZERO; 12];
+        for slot in &mut values {
+            *slot = reader.fixed()?;
+        }
+        let contract = ActionContract {
             action_id,
-            capability_id: String::new(),
-            authority_evidence_digest: [0; 32],
-            policy_evidence_digest: [0; 32],
-            authority_granted: false,
-            policy_granted: false,
-            payload_class: String::new(),
-            public_payload: None,
-            expires_at_ms: ingress.observed_at_ms,
+            turn_id,
+            continuous: ActionVector {
+                answer: values[0],
+                verify: values[1],
+                acknowledge_error: values[2],
+                repair: values[3],
+                ask_evidence: values[4],
+                set_boundary: values[5],
+                withdraw: values[6],
+                proactive_reach: values[7],
+                warmth: values[8],
+                directness: values[9],
+                verbosity: values[10],
+                confidence_ceiling: values[11],
+            },
+            must_verify: reader.bool()?,
+            must_acknowledge_error: reader.bool()?,
+            must_correct_claim: reader.bool()?,
+            may_set_boundary: reader.bool()?,
+            may_withdraw: reader.bool()?,
+            must_not_seek_reassurance: reader.bool()?,
+            expires_at_ms: reader.u64()?,
         };
-        effect.effect_id = effect.recompute_effect_id();
-        effect
+        reader.finish()?;
+        Ok(contract)
     }
 
-    pub fn public_for_ingress_v1(
-        ingress: &HostIngressV1,
-        action_id: Digest,
-        public_text: String,
-        authority_evidence_digest: Digest,
-        policy_evidence_digest: Digest,
-        expires_at_ms: u64,
-    ) -> Result<Self, HostContractErrorV1> {
-        ingress.validate_shape()?;
-        if ingress.kind != HostIngressKindV1::CurrentEvent
-            || all_zero(&action_id)
-            || all_zero(&authority_evidence_digest)
-            || all_zero(&policy_evidence_digest)
-            || expires_at_ms <= ingress.observed_at_ms
-        {
-            return Err(HostContractErrorV1::InvalidEffectShape);
-        }
+    pub fn action_contract_digest(contract: &ActionContract) -> Digest {
+        domain_hash(ACTION_CONTRACT_DOMAIN, &[&encode_action_contract(contract)])
+    }
 
-        let mut effect = Self {
-            schema_version: HOST_SCHEMA_V1,
-            disposition: HostEffectDispositionV1::PublicEffect,
-            effect_id: [0; 32],
-            process_epoch_id: ingress.process_epoch_id,
-            adapter_type: ingress.adapter_type.clone(),
-            adapter_id_binding: ingress.adapter_id_binding,
-            scope_binding: ingress.scope_binding,
-            session_binding: ingress.session_binding,
-            turn_binding: ingress.turn_binding,
-            action_id,
-            capability_id: LARK_PUBLIC_EFFECT_V1.to_owned(),
-            authority_evidence_digest,
-            policy_evidence_digest,
-            authority_granted: true,
-            policy_granted: true,
-            payload_class: PUBLIC_TEXT_V1.to_owned(),
-            public_payload: Some(PublicTextV1::new(public_text)?),
-            expires_at_ms,
+    // ---------------------------------------------------------------- transition receipt
+
+    pub fn encode_transition_receipt(receipt: &TransitionReceipt) -> Vec<u8> {
+        let mut out = Vec::with_capacity(260);
+        push_u16(&mut out, receipt.schema_version);
+        push_digest(&mut out, &receipt.formula_digest);
+        push_digest(&mut out, &receipt.scope_digest);
+        push_digest(&mut out, &receipt.event_digest);
+        push_digest(&mut out, &receipt.authority_digest);
+        push_u64(&mut out, receipt.base_revision);
+        push_u64(&mut out, receipt.next_revision);
+        push_digest(&mut out, &receipt.state_before);
+        push_digest(&mut out, &receipt.state_after);
+        push_digest(&mut out, &receipt.graph_after);
+        push_opt_digest(&mut out, &receipt.action_contract);
+        push_u32(&mut out, receipt.active_nodes);
+        push_u32(&mut out, receipt.active_edges);
+        let r = &receipt.residuals;
+        for value in [
+            r.authority,
+            r.continuity,
+            r.energy,
+            r.renormalization,
+            r.capacity,
+        ] {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+        out.push(commit_status_code(receipt.status));
+        out
+    }
+
+    pub fn decode_transition_receipt(bytes: &[u8]) -> Result<TransitionReceipt, WireError> {
+        let mut reader = Reader::new(bytes);
+        let receipt = TransitionReceipt {
+            schema_version: reader.u16()?,
+            formula_digest: reader.digest()?,
+            scope_digest: reader.digest()?,
+            event_digest: reader.digest()?,
+            authority_digest: reader.digest()?,
+            base_revision: reader.u64()?,
+            next_revision: reader.u64()?,
+            state_before: reader.digest()?,
+            state_after: reader.digest()?,
+            graph_after: reader.digest()?,
+            action_contract: reader.opt_digest()?,
+            active_nodes: reader.u32()?,
+            active_edges: reader.u32()?,
+            residuals: InvariantResiduals {
+                authority: reader.fixed()?,
+                continuity: reader.fixed()?,
+                energy: reader.fixed()?,
+                renormalization: reader.fixed()?,
+                capacity: reader.fixed()?,
+            },
+            status: commit_status_from_code(reader.u8()?)
+                .ok_or(WireError::InvalidEnum("commit status"))?,
         };
-        effect.effect_id = effect.recompute_effect_id();
-        effect.validate_shape()?;
-        Ok(effect)
+        reader.finish()?;
+        Ok(receipt)
     }
 
-    pub fn validate_shape(&self) -> Result<(), HostContractErrorV1> {
-        if self.schema_version != HOST_SCHEMA_V1 {
-            return Err(HostContractErrorV1::InvalidSchema);
-        }
-        if self.adapter_type != "lark" {
-            return Err(HostContractErrorV1::InvalidEffectShape);
-        }
-        if all_zero_id(&self.process_epoch_id)
-            || all_zero(&self.adapter_id_binding)
-            || all_zero(&self.scope_binding)
-            || all_zero(&self.session_binding)
-            || all_zero(&self.turn_binding)
-            || all_zero(&self.action_id)
-            || self.effect_id != self.recompute_effect_id()
-        {
-            return Err(HostContractErrorV1::InvalidEffectShape);
-        }
-        match self.disposition {
-            HostEffectDispositionV1::Silence => {
-                if self.public_payload.is_some()
-                    || !self.capability_id.is_empty()
-                    || !self.payload_class.is_empty()
-                    || self.authority_granted
-                    || self.policy_granted
-                {
-                    return Err(HostContractErrorV1::InvalidEffectShape);
-                }
-            }
-            HostEffectDispositionV1::PublicEffect => {
-                if self.capability_id != LARK_PUBLIC_EFFECT_V1
-                    || self.payload_class != PUBLIC_TEXT_V1
-                    || !self.authority_granted
-                    || !self.policy_granted
-                    || all_zero(&self.authority_evidence_digest)
-                    || all_zero(&self.policy_evidence_digest)
-                    || self.public_payload.is_none()
-                {
-                    return Err(HostContractErrorV1::InvalidEffectShape);
-                }
-                let payload = self.public_payload.as_ref().expect("checked is_some");
-                PublicTextV1::new(payload.text.clone())?;
-            }
-        }
-        Ok(())
+    pub fn receipt_digest(receipt: &TransitionReceipt) -> Digest {
+        domain_hash(
+            TRANSITION_RECEIPT_DOMAIN,
+            &[&encode_transition_receipt(receipt)],
+        )
     }
 
-    pub fn recompute_effect_id(&self) -> Digest {
-        let expires_at_ms = self.expires_at_ms.to_le_bytes();
-        wire::domain_hash(
-            b"astr-embodiment/host-effect-v1",
+    // ---------------------------------------------------------------- genesis receipt
+
+    pub fn encode_genesis_receipt(receipt: &GenesisReceipt) -> Vec<u8> {
+        let mut out = Vec::with_capacity(340);
+        push_u16(&mut out, receipt.schema_version);
+        for digest in [
+            &receipt.seed_code_digest,
+            &receipt.manifest_digest,
+            &receipt.incarnation_id,
+            &receipt.formula_digest,
+            &receipt.persona_source_digest,
+            &receipt.compiler_protocol_digest,
+            &receipt.compiler_model_digest,
+            &receipt.development_seed_digest,
+            &receipt.initial_snapshot_digest,
+            &receipt.graph_digest,
+        ] {
+            push_digest(&mut out, digest);
+        }
+        for value in [
+            receipt.equilibrium_residual,
+            receipt.energy_residual,
+            receipt.capacity_residual,
+            receipt.sample_fit_residual,
+        ] {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+        out.push(genesis_status_code(receipt.status));
+        out
+    }
+
+    pub fn decode_genesis_receipt(bytes: &[u8]) -> Result<GenesisReceipt, WireError> {
+        let mut reader = Reader::new(bytes);
+        let receipt = GenesisReceipt {
+            schema_version: reader.u16()?,
+            seed_code_digest: reader.digest()?,
+            manifest_digest: reader.digest()?,
+            incarnation_id: reader.digest()?,
+            formula_digest: reader.digest()?,
+            persona_source_digest: reader.digest()?,
+            compiler_protocol_digest: reader.digest()?,
+            compiler_model_digest: reader.digest()?,
+            development_seed_digest: reader.digest()?,
+            initial_snapshot_digest: reader.digest()?,
+            graph_digest: reader.digest()?,
+            equilibrium_residual: reader.fixed()?,
+            energy_residual: reader.fixed()?,
+            capacity_residual: reader.fixed()?,
+            sample_fit_residual: reader.fixed()?,
+            status: genesis_status_from_code(reader.u8()?)
+                .ok_or(WireError::InvalidEnum("genesis status"))?,
+        };
+        reader.finish()?;
+        Ok(receipt)
+    }
+
+    pub fn genesis_receipt_digest(receipt: &GenesisReceipt) -> Digest {
+        domain_hash(
+            TRANSITION_RECEIPT_DOMAIN,
+            &[&encode_genesis_receipt(receipt)],
+        )
+    }
+
+    // ---------------------------------------------------------------- capsule
+
+    pub fn encode_capsule_body(capsule: &GenesisCapsule) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + 32 + MANIFEST_BODY_LEN + 64);
+        push_u16(&mut out, capsule.schema_version);
+        push_digest(&mut out, &capsule.seed_code_digest);
+        out.extend_from_slice(&encode_manifest_body(&capsule.manifest));
+        push_digest(&mut out, &capsule.provenance_digest);
+        push_digest(&mut out, &capsule.capsule_digest);
+        out
+    }
+
+    pub fn decode_capsule_body(bytes: &[u8]) -> Result<GenesisCapsule, WireError> {
+        let mut reader = Reader::new(bytes);
+        let schema_version = reader.u16()?;
+        let seed_code_digest = reader.digest()?;
+        let manifest_bytes: &[u8] = reader.take(MANIFEST_BODY_LEN)?;
+        let manifest = decode_manifest_body(manifest_bytes)?;
+        let provenance_digest = reader.digest()?;
+        let capsule_digest = reader.digest()?;
+        reader.finish()?;
+        Ok(GenesisCapsule {
+            schema_version,
+            seed_code_digest,
+            manifest,
+            provenance_digest,
+            capsule_digest,
+        })
+    }
+
+    /// Capsule identity covers schema, seed digest, canonical manifest body
+    /// and provenance. The embedded capsule_digest field is excluded (it is
+    /// the digest of everything else).
+    pub fn capsule_digest(capsule: &GenesisCapsule) -> Digest {
+        domain_hash(
+            CAPSULE_DOMAIN,
             &[
-                &self.process_epoch_id,
-                &self.scope_binding,
-                &self.adapter_id_binding,
-                &self.session_binding,
-                &self.turn_binding,
-                &self.action_id,
-                self.capability_id.as_bytes(),
-                self.payload_class.as_bytes(),
-                &expires_at_ms,
+                &capsule.schema_version.to_le_bytes(),
+                &capsule.seed_code_digest,
+                &encode_manifest_body(&capsule.manifest),
+                &capsule.provenance_digest,
             ],
         )
     }
 }
 
-impl HostSettlementV1 {
-    pub fn for_effect(
-        effect: &HostEffectV1,
-        status: HostSettlementStatusV1,
-        delivery: DeliveryKnowledgeV1,
-        observed_at_ms: u64,
-    ) -> Self {
-        let observed = observed_at_ms.to_le_bytes();
-        let settlement_id = wire::domain_hash(
-            b"astr-embodiment/host-settlement-v1",
-            &[
-                &effect.effect_id,
-                settlement_status_name(status).as_bytes(),
-                delivery_knowledge_name(delivery).as_bytes(),
-                &observed,
-            ],
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wire::*;
+
+    fn scope() -> ScopeRef {
+        ScopeRef {
+            bot_token: [7; 16],
+            persona_token: [9; 16],
+            relation_token: None,
+            session_token: [3; 16],
+        }
+    }
+
+    fn sample_manifest() -> GenesisManifest {
+        let mut manifest = GenesisManifest {
+            schema_version: 1,
+            traits: PersonalityVector {
+                baseline_warmth: Fixed::from_raw(600_000),
+                ..PersonalityVector::default()
+            },
+            expression: ExpressionPhenotype::default(),
+            allostasis: AllostaticSetpoints::default(),
+            epistemic: EpistemicPriors::default(),
+            social: SocialPriors::default(),
+            manifest_digest: [0; 32],
+        };
+        manifest.manifest_digest = manifest_body_digest(&manifest);
+        manifest
+    }
+
+    #[test]
+    fn manifest_body_has_fixed_layout() {
+        let manifest = sample_manifest();
+        let bytes = encode_manifest_body(&manifest);
+        assert_eq!(bytes.len(), MANIFEST_BODY_LEN);
+        assert_eq!(bytes[0], 1);
+        assert_eq!(bytes[1], 0);
+        // baseline_warmth = 600_000 = 0x0009_27C0 little-endian.
+        assert_eq!(&bytes[2..10], &[0xC0, 0x27, 0x09, 0x00, 0, 0, 0, 0]);
+        let decoded = decode_manifest_body(&bytes).unwrap();
+        assert_eq!(decoded.traits, manifest.traits);
+        assert_eq!(decoded.manifest_digest, [0; 32]);
+    }
+
+    #[test]
+    fn manifest_decode_rejects_wrong_length() {
+        let bytes = encode_manifest_body(&sample_manifest());
+        assert_eq!(
+            decode_manifest_body(&bytes[..bytes.len() - 1]).unwrap_err(),
+            WireError::Boundary(MANIFEST_BODY_LEN, bytes.len() - 1)
         );
-        Self {
-            schema_version: HOST_SCHEMA_V1,
-            settlement_id,
-            effect_id: effect.effect_id,
-            process_epoch_id: effect.process_epoch_id,
-            adapter_type: effect.adapter_type.clone(),
-            adapter_id_binding: effect.adapter_id_binding,
-            scope_binding: effect.scope_binding,
-            session_binding: effect.session_binding,
-            turn_binding: effect.turn_binding,
-            action_id: effect.action_id,
-            status,
-            delivery,
-            observed_at_ms,
-        }
-    }
-}
-
-impl HostIngressV1 {
-    pub fn validate_shape(&self) -> Result<(), HostContractErrorV1> {
-        if self.schema_version != HOST_SCHEMA_V1 {
-            return Err(HostContractErrorV1::InvalidSchema);
-        }
-        if self.adapter_type != "lark"
-            || all_zero(&self.ingress_id)
-            || all_zero_id(&self.process_epoch_id)
-            || all_zero(&self.adapter_id_binding)
-            || all_zero(&self.scope_binding)
-            || all_zero(&self.session_binding)
-            || all_zero(&self.turn_binding)
-            || all_zero(&self.event_id)
-        {
-            return Err(HostContractErrorV1::InvalidIngressShape);
-        }
-        match self.kind {
-            HostIngressKindV1::CurrentEvent => {
-                let text = self
-                    .current_event_text
-                    .as_ref()
-                    .ok_or(HostContractErrorV1::InvalidIngressShape)?;
-                if text.chars().count() > 16_384 || self.settlement.is_some() {
-                    return Err(HostContractErrorV1::InvalidIngressShape);
-                }
-            }
-            HostIngressKindV1::EffectSettlement => {
-                if self.current_event_text.is_some() {
-                    return Err(HostContractErrorV1::InvalidIngressShape);
-                }
-                let settlement = self
-                    .settlement
-                    .as_ref()
-                    .ok_or(HostContractErrorV1::InvalidSettlementShape)?;
-                if settlement.schema_version != HOST_SCHEMA_V1
-                    || settlement.process_epoch_id != self.process_epoch_id
-                    || settlement.adapter_type != self.adapter_type
-                    || settlement.adapter_id_binding != self.adapter_id_binding
-                    || settlement.scope_binding != self.scope_binding
-                    || settlement.session_binding != self.session_binding
-                    || settlement.turn_binding != self.turn_binding
-                    || settlement.effect_id != self.event_id
-                    || all_zero(&settlement.action_id)
-                {
-                    return Err(HostContractErrorV1::InvalidSettlementShape);
-                }
-            }
-        }
-        Ok(())
     }
 
-    pub fn for_settlement(settlement: HostSettlementV1, base_revision: u64) -> Self {
-        let revision = base_revision.to_le_bytes();
-        let ingress_id = wire::domain_hash(
-            b"astr-embodiment/host-settlement-ingress-v1",
-            &[&settlement.settlement_id, &revision],
+    #[test]
+    fn closed_schema_rejects_unknown_json_field() {
+        let proposal = GenesisManifestProposal {
+            schema_version: 1,
+            source: PersonaSourceRef {
+                scope: PersonaScopeRef {
+                    bot_token: [0xAA; 16],
+                    persona_token: [0xBB; 16],
+                },
+                source_digest: [0xCC; 32],
+                capability_digest: [0xDD; 32],
+                selection: PersonaSelectionKind::Conversation,
+                prompt_chars: 10,
+                begin_dialog_count: 0,
+                mood_dialog_count: 0,
+            },
+            traits: PersonalityVector::default(),
+            trait_confidence: PersonalityVector::default(),
+            expression: ExpressionPhenotype::default(),
+            allostasis: AllostaticSetpoints::default(),
+            epistemic: EpistemicPriors::default(),
+            social: SocialPriors::default(),
+            compiler_protocol_digest: [0xEE; 32],
+            compiler_model_digest: [0xFF; 32],
+        };
+        let mut json = serde_json::to_value(&proposal).unwrap();
+        serde_json::from_value::<GenesisManifestProposal>(json.clone()).unwrap();
+        json["neural_topology"] = serde_json::json!({});
+        let err = serde_json::from_value::<GenesisManifestProposal>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn canonical_event_rejects_unknown_json_field() {
+        let mut json = serde_json::to_value(CanonicalEvent::TimeAdvance(TimeAdvance {
+            event_id: [1; 16],
+            scope: scope(),
+            elapsed_ms: 5,
+        }))
+        .unwrap();
+        json["payload"]["secret"] = serde_json::json!(1);
+        let err = serde_json::from_value::<CanonicalEvent>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn event_codec_round_trips_every_kind() {
+        let causal = CausalRef {
+            turn_id: [1; 16],
+            action_id: Some([2; 16]),
+            delivery_id: None,
+            claim_id: Some([3; 16]),
+            base_revision: 7,
+        };
+        let estimate = SemanticEstimate {
+            schema_version: 1,
+            dimensions: EvidenceVector {
+                positive: Fixed::from_raw(100),
+                ..EvidenceVector::default()
+            },
+            estimator_confidence: Fixed::from_raw(500_000),
+            estimator_digest: [4; 32],
+        };
+        let events = [
+            CanonicalEvent::UserStimulus(UserStimulus {
+                event_id: [5; 16],
+                scope: scope(),
+                causal: causal.clone(),
+                observed_at_ms: 10,
+                evidence: estimate.clone(),
+            }),
+            CanonicalEvent::UserReaction(UserReaction {
+                event_id: [6; 16],
+                scope: scope(),
+                causal: causal.clone(),
+                observed_at_ms: 11,
+                evidence: estimate.clone(),
+            }),
+            CanonicalEvent::CorrectionClaim(CorrectionClaim {
+                event_id: [7; 16],
+                scope: scope(),
+                causal: causal.clone(),
+                specificity: Fixed::ONE,
+                supplied_evidence: Fixed::ZERO,
+                hostility: Fixed::from_raw(10),
+                publicness: Fixed::from_raw(20),
+            }),
+            CanonicalEvent::CorrectionVerdict(CorrectionVerdictEvent {
+                event_id: [8; 16],
+                scope: scope(),
+                causal: causal.clone(),
+                verdict: VerdictKind::RejectedChallenge,
+                confidence: Fixed::from_raw(30),
+                contradiction: Fixed::from_raw(40),
+                hostility: Fixed::ZERO,
+                evidence_digest: [9; 32],
+            }),
+            CanonicalEvent::SelfActionCandidate(SelfActionCandidate {
+                event_id: [10; 16],
+                scope: scope(),
+                causal: causal.clone(),
+                visible_action_digest: [11; 32],
+                claims: vec![ClaimCommitment {
+                    claim_id: [12; 16],
+                    confidence: Fixed::from_raw(50),
+                    assertiveness: Fixed::from_raw(60),
+                    stakes: Fixed::from_raw(70),
+                    audience_publicness: Fixed::from_raw(80),
+                    expires_at_ms: 90,
+                }],
+            }),
+            CanonicalEvent::DeliveryOutcome(DeliveryOutcome {
+                event_id: [13; 16],
+                scope: scope(),
+                causal: causal.clone(),
+                delivered: true,
+                visible_action_digest: [14; 32],
+                delivered_at_ms: 15,
+            }),
+            CanonicalEvent::SettlementEvidence(SettlementEvidence {
+                settlement_id: [16; 16],
+                scope: scope(),
+                causal: causal.clone(),
+                kind: SettlementKind::ExplicitAcceptance,
+                source: SourceAuthority::ExplicitFeedback,
+                confidence: Fixed::from_raw(17),
+                evidence_level: 2,
+                evidence_digest: [18; 32],
+                observed_at_ms: 19,
+            }),
+            CanonicalEvent::TimeAdvance(TimeAdvance {
+                event_id: [20; 16],
+                scope: scope(),
+                elapsed_ms: 21,
+            }),
+            CanonicalEvent::AdminAction(AdminAction {
+                event_id: [22; 16],
+                scope: scope(),
+                operation: "migration".to_string(),
+                nonce_digest: [23; 32],
+            }),
+        ];
+        for event in events {
+            let bytes = encode_event(&event);
+            let decoded = decode_event(&bytes).unwrap();
+            assert_eq!(decoded, event);
+            assert_eq!(event_kind_code(&decoded), event_kind_code(&event));
+        }
+    }
+
+    #[test]
+    fn event_decode_rejects_trailing_bytes_and_unknown_kind() {
+        let event = CanonicalEvent::TimeAdvance(TimeAdvance {
+            event_id: [1; 16],
+            scope: scope(),
+            elapsed_ms: 1,
+        });
+        let mut bytes = encode_event(&event);
+        bytes.push(0xFF);
+        assert_eq!(
+            decode_event(&bytes).unwrap_err(),
+            WireError::TrailingBytes(1)
         );
-        Self {
-            schema_version: HOST_SCHEMA_V1,
-            kind: HostIngressKindV1::EffectSettlement,
-            ingress_id,
-            process_epoch_id: settlement.process_epoch_id,
-            adapter_type: settlement.adapter_type.clone(),
-            adapter_id_binding: settlement.adapter_id_binding,
-            scope_binding: settlement.scope_binding,
-            session_binding: settlement.session_binding,
-            turn_binding: settlement.turn_binding,
-            event_id: settlement.effect_id,
-            observed_at_ms: settlement.observed_at_ms,
-            base_revision,
-            current_event_text: None,
-            settlement: Some(settlement),
-        }
-    }
-}
-
-fn sha256_digest(input: &[u8]) -> Digest {
-    const INITIAL: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    const ROUND: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    let bit_length = (input.len() as u64) * 8;
-    let mut padded = Vec::with_capacity(input.len() + 72);
-    padded.extend_from_slice(input);
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_length.to_be_bytes());
-
-    let mut hash = INITIAL;
-    for chunk in padded.chunks_exact(64) {
-        let mut words = [0_u32; 64];
-        for (index, word) in words[..16].iter_mut().enumerate() {
-            let offset = index * 4;
-            *word = u32::from_be_bytes([
-                chunk[offset],
-                chunk[offset + 1],
-                chunk[offset + 2],
-                chunk[offset + 3],
-            ]);
-        }
-        for index in 16..64 {
-            let sigma0 = words[index - 15].rotate_right(7)
-                ^ words[index - 15].rotate_right(18)
-                ^ (words[index - 15] >> 3);
-            let sigma1 = words[index - 2].rotate_right(17)
-                ^ words[index - 2].rotate_right(19)
-                ^ (words[index - 2] >> 10);
-            words[index] = words[index - 16]
-                .wrapping_add(sigma0)
-                .wrapping_add(words[index - 7])
-                .wrapping_add(sigma1);
-        }
-
-        let mut a = hash[0];
-        let mut b = hash[1];
-        let mut c = hash[2];
-        let mut d = hash[3];
-        let mut e = hash[4];
-        let mut f = hash[5];
-        let mut g = hash[6];
-        let mut h = hash[7];
-
-        for index in 0..64 {
-            let upper_sigma1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choice = (e & f) ^ ((!e) & g);
-            let temporary1 = h
-                .wrapping_add(upper_sigma1)
-                .wrapping_add(choice)
-                .wrapping_add(ROUND[index])
-                .wrapping_add(words[index]);
-            let upper_sigma0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let temporary2 = upper_sigma0.wrapping_add(majority);
-
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temporary1);
-            d = c;
-            c = b;
-            b = a;
-            a = temporary1.wrapping_add(temporary2);
-        }
-
-        hash[0] = hash[0].wrapping_add(a);
-        hash[1] = hash[1].wrapping_add(b);
-        hash[2] = hash[2].wrapping_add(c);
-        hash[3] = hash[3].wrapping_add(d);
-        hash[4] = hash[4].wrapping_add(e);
-        hash[5] = hash[5].wrapping_add(f);
-        hash[6] = hash[6].wrapping_add(g);
-        hash[7] = hash[7].wrapping_add(h);
+        bytes[2] = 99;
+        assert_eq!(
+            decode_event(&bytes).unwrap_err(),
+            WireError::UnknownKind(99)
+        );
     }
 
-    let mut output = [0_u8; 32];
-    for (index, word) in hash.iter().enumerate() {
-        output[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    #[test]
+    fn receipt_and_contract_codecs_round_trip() {
+        let contract = ActionContract {
+            action_id: [1; 16],
+            turn_id: [2; 16],
+            continuous: ActionVector {
+                answer: Fixed::ONE,
+                directness: Fixed::from_raw(500_000),
+                verbosity: Fixed::from_raw(500_000),
+                confidence_ceiling: Fixed::from_raw(700_000),
+                ..ActionVector::default()
+            },
+            must_verify: false,
+            must_acknowledge_error: false,
+            must_correct_claim: false,
+            may_set_boundary: true,
+            may_withdraw: true,
+            must_not_seek_reassurance: true,
+            expires_at_ms: 0,
+        };
+        let contract_bytes = encode_action_contract(&contract);
+        assert_eq!(decode_action_contract(&contract_bytes).unwrap(), contract);
+
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: [3; 32],
+            scope_digest: [4; 32],
+            event_digest: [5; 32],
+            authority_digest: [6; 32],
+            base_revision: 0,
+            next_revision: 1,
+            state_before: [7; 32],
+            state_after: [8; 32],
+            graph_after: [9; 32],
+            action_contract: Some(action_contract_digest(&contract)),
+            active_nodes: 16_384,
+            active_edges: 0,
+            residuals: InvariantResiduals::default(),
+            status: CommitStatus::Committed,
+        };
+        let receipt_bytes = encode_transition_receipt(&receipt);
+        assert_eq!(decode_transition_receipt(&receipt_bytes).unwrap(), receipt);
+        assert_ne!(receipt_digest(&receipt), [0; 32]);
+
+        let mut without_contract = receipt.clone();
+        without_contract.action_contract = None;
+        let round =
+            decode_transition_receipt(&encode_transition_receipt(&without_contract)).unwrap();
+        assert_eq!(round.action_contract, None);
     }
-    output
-}
 
-fn all_zero(value: &Digest) -> bool {
-    value.iter().all(|byte| *byte == 0)
-}
-
-fn all_zero_id(value: &Id128) -> bool {
-    value.iter().all(|byte| *byte == 0)
-}
-
-fn settlement_status_name(status: HostSettlementStatusV1) -> &'static str {
-    match status {
-        HostSettlementStatusV1::Silenced => "silenced",
-        HostSettlementStatusV1::RejectedSchema => "rejected_schema",
-        HostSettlementStatusV1::RejectedIngressKind => "rejected_ingress_kind",
-        HostSettlementStatusV1::RejectedPlatform => "rejected_platform",
-        HostSettlementStatusV1::RejectedAdapterIdentity => "rejected_adapter_identity",
-        HostSettlementStatusV1::RejectedScope => "rejected_scope",
-        HostSettlementStatusV1::RejectedSession => "rejected_session",
-        HostSettlementStatusV1::RejectedTurn => "rejected_turn",
-        HostSettlementStatusV1::RejectedAction => "rejected_action",
-        HostSettlementStatusV1::RejectedProcessEpoch => "rejected_process_epoch",
-        HostSettlementStatusV1::RejectedCapability => "rejected_capability",
-        HostSettlementStatusV1::RejectedAuthority => "rejected_authority",
-        HostSettlementStatusV1::RejectedPolicy => "rejected_policy",
-        HostSettlementStatusV1::RejectedExpired => "rejected_expired",
-        HostSettlementStatusV1::RejectedPayloadClass => "rejected_payload_class",
-        HostSettlementStatusV1::RejectedPayloadShape => "rejected_payload_shape",
-        HostSettlementStatusV1::IdempotencyConflict => "idempotency_conflict",
-        HostSettlementStatusV1::DuplicateSuppressed => "duplicate_suppressed",
-        HostSettlementStatusV1::FailedBeforeDispatch => "failed_before_dispatch",
-        HostSettlementStatusV1::DispatchReturnedNoTypedReceipt => {
-            "dispatch_returned_no_typed_receipt"
-        }
-        HostSettlementStatusV1::DeliveryUnknown => "delivery_unknown",
+    #[test]
+    fn scope_digest_is_stable_and_relation_sensitive() {
+        let mut scoped = scope();
+        let base = scope_digest(&scoped);
+        assert_eq!(base, scope_digest(&scoped));
+        scoped.relation_token = Some([42; 16]);
+        assert_ne!(base, scope_digest(&scoped));
     }
-}
 
-fn delivery_knowledge_name(delivery: DeliveryKnowledgeV1) -> &'static str {
-    match delivery {
-        DeliveryKnowledgeV1::NotDispatched => "not_dispatched",
-        DeliveryKnowledgeV1::Unknown => "unknown",
+    #[test]
+    fn hex_serde_round_trips() {
+        let source = PersonaSourceRef {
+            scope: PersonaScopeRef {
+                bot_token: [0xAB; 16],
+                persona_token: [0x0F; 16],
+            },
+            source_digest: [0xCD; 32],
+            capability_digest: [0xEF; 32],
+            selection: PersonaSelectionKind::Conversation,
+            prompt_chars: 10,
+            begin_dialog_count: 0,
+            mood_dialog_count: 0,
+        };
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(
+            json["scope"]["bot_token"],
+            serde_json::json!("ab".repeat(16))
+        );
+        assert_eq!(
+            json["scope"]["persona_token"],
+            serde_json::json!("0f".repeat(16))
+        );
+        assert_eq!(json["source_digest"], serde_json::json!("cd".repeat(32)));
+        assert_eq!(
+            json["capability_digest"],
+            serde_json::json!("ef".repeat(32))
+        );
+        let back: PersonaSourceRef = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, source);
+
+        let mut invalid = json;
+        invalid["source_digest"] = serde_json::json!("zz");
+        assert!(serde_json::from_value::<PersonaSourceRef>(invalid).is_err());
+    }
+
+    #[test]
+    fn genesis_receipt_codec_round_trips() {
+        let receipt = GenesisReceipt {
+            schema_version: 1,
+            seed_code_digest: [1; 32],
+            manifest_digest: [2; 32],
+            incarnation_id: [3; 32],
+            formula_digest: [4; 32],
+            persona_source_digest: [5; 32],
+            compiler_protocol_digest: [6; 32],
+            compiler_model_digest: [7; 32],
+            development_seed_digest: [8; 32],
+            initial_snapshot_digest: [9; 32],
+            graph_digest: [10; 32],
+            equilibrium_residual: Fixed::ZERO,
+            energy_residual: Fixed::ZERO,
+            capacity_residual: Fixed::ZERO,
+            sample_fit_residual: Fixed::ZERO,
+            status: GenesisStatus::Committed,
+        };
+        let bytes = encode_genesis_receipt(&receipt);
+        assert_eq!(decode_genesis_receipt(&bytes).unwrap(), receipt);
     }
 }

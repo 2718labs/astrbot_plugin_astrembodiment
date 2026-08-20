@@ -7,7 +7,7 @@
 //! forwards only compatibility types for callers that have not yet moved their
 //! import paths.
 
-pub use ae_runtime::{
+pub use ae_runtime::r7::{
     BoundedProjectionReferencesV1, NativeProjectionPayloadIngressV1,
     NativeProjectionPayloadProducerErrorV1, NativeProjectionPayloadProducerInputV1,
     NativeProjectionPayloadProducerV1, NativeProjectionUpdateV1, OrganismRuntimeErrorV1,
