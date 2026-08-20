@@ -1,7 +1,7 @@
 name: astrbot_plugin_astrembodiment
 display_name: AstrEmbodiment
-desc: Private alpha source snapshot of an incomplete Rust-native embodiment runtime for AstrBot; not a functional release.
-short_desc: Private alpha source snapshot; the semantic reaction chain is not implemented.
+desc: Open-source alpha source snapshot of an incomplete Rust-native embodiment runtime for AstrBot; not a functional release.
+short_desc: Open-source alpha source snapshot; the semantic reaction chain is not implemented.
 version: "v1.0.0-alpha.1"
 author: 2718labs
 repo: https://github.com/2718labs/astrbot_plugin_astrembodiment

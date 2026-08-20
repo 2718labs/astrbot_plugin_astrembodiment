@@ -9,7 +9,7 @@
 
 ### 保全
 
-- 建立私有源码保全快照与对应 Git 标签；不创建 GitHub Release，不提交 AstrBot Marketplace。
+- 建立公开源码保全快照与对应 Git 标签；不创建 GitHub Release，不提交 AstrBot Marketplace。
 - 明确排除本地虚拟环境、构建输出、运行配置、生成清单与未引用的重复 crate 树，避免把本机数据或构建残留误当发布内容。
 
 ### 已知未实现
