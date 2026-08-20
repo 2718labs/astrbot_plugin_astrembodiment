@@ -193,6 +193,20 @@ pub struct SnapshotRow {
     pub state_bytes: Vec<u8>,
 }
 
+/// A journal transition and the opaque semantic state it commits.
+#[derive(Clone, Debug)]
+pub struct StatefulCommit {
+    pub journal: CommitEnvelope,
+    pub state_bytes: Vec<u8>,
+}
+
+struct ValidatedJournalCommit {
+    revision: u64,
+    event_digest: Digest,
+    receipt_bytes: Vec<u8>,
+    chain_digest: Digest,
+}
+
 pub struct Store {
     conn: Option<Connection>,
 }
@@ -1133,6 +1147,50 @@ impl Store {
         let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
+        let validated = Self::validate_journal_commit(&tx, envelope)?;
+        Self::insert_journal_row(&tx, envelope, &validated)?;
+        Self::insert_applied_event(&tx, envelope, &validated)?;
+        tx.commit()?;
+        Ok((validated.revision, Self::journal_row(envelope, validated)))
+    }
+
+    /// CAS commit one journal entry and the semantic snapshot it certifies in
+    /// one transaction. A failed write leaves no journal or event residue.
+    pub fn commit_stateful_journal(
+        &mut self,
+        commit: &StatefulCommit,
+    ) -> Result<(u64, JournalRow), StoreError> {
+        let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        if commit.state_bytes.is_empty() {
+            return Err(StoreError::Sqlite(
+                "stateful journal commit requires non-empty state bytes".to_owned(),
+            ));
+        }
+        let validated = Self::validate_journal_commit(&tx, &commit.journal)?;
+        Self::insert_journal_row(&tx, &commit.journal, &validated)?;
+        Self::insert_applied_event(&tx, &commit.journal, &validated)?;
+        tx.execute(
+            "INSERT INTO snapshots (revision, scope_digest, state_digest, state_bytes) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                validated.revision as i64,
+                blob(commit.journal.receipt.scope_digest),
+                blob(commit.journal.receipt.state_after),
+                commit.state_bytes.clone(),
+            ],
+        )?;
+        tx.commit()?;
+        Ok((
+            validated.revision,
+            Self::journal_row(&commit.journal, validated),
+        ))
+    }
+
+    fn validate_journal_commit(
+        tx: &Transaction<'_>,
+        envelope: &CommitEnvelope,
+    ) -> Result<ValidatedJournalCommit, StoreError> {
         let current = tx.query_row(
             "SELECT COALESCE(MAX(logical_revision), 0) FROM journal WHERE scope_digest = ?1",
             params![blob(envelope.receipt.scope_digest)],
@@ -1191,41 +1249,63 @@ impl Store {
         let receipt_bytes = wire::encode_transition_receipt(&envelope.receipt);
         let chain_digest =
             ae_continuum::chain_link(&envelope.chain_seed, &envelope.event_bytes, &receipt_bytes);
+        Ok(ValidatedJournalCommit {
+            revision: current + 1,
+            event_digest,
+            receipt_bytes,
+            chain_digest,
+        })
+    }
+
+    fn insert_journal_row(
+        tx: &Transaction<'_>,
+        envelope: &CommitEnvelope,
+        validated: &ValidatedJournalCommit,
+    ) -> Result<(), StoreError> {
         tx.execute(
             "INSERT INTO journal (logical_revision, scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                (current + 1) as i64,
+                validated.revision as i64,
                 blob(envelope.receipt.scope_digest),
                 envelope.receipt.base_revision as i64,
                 envelope.event_kind.clone(),
                 envelope.event_bytes.clone(),
-                blob(event_digest),
-                receipt_bytes.clone(),
-                blob(chain_digest),
+                blob(validated.event_digest),
+                validated.receipt_bytes.clone(),
+                blob(validated.chain_digest),
                 now_ms() as i64,
             ],
         )?;
-        let revision = current + 1;
+        Ok(())
+    }
+
+    fn insert_applied_event(
+        tx: &Transaction<'_>,
+        envelope: &CommitEnvelope,
+        validated: &ValidatedJournalCommit,
+    ) -> Result<(), StoreError> {
         tx.execute(
             "INSERT INTO applied_events (scope_digest, event_digest, revision) VALUES (?1, ?2, ?3)",
             params![
                 blob(envelope.receipt.scope_digest),
-                blob(event_digest),
-                revision as i64,
+                blob(validated.event_digest),
+                validated.revision as i64,
             ],
         )?;
-        tx.commit()?;
-        let row = JournalRow {
-            revision,
+        Ok(())
+    }
+
+    fn journal_row(envelope: &CommitEnvelope, validated: ValidatedJournalCommit) -> JournalRow {
+        JournalRow {
+            revision: validated.revision,
             scope_digest: envelope.receipt.scope_digest,
             base_revision: envelope.receipt.base_revision,
             event_kind: envelope.event_kind.clone(),
             event_bytes: envelope.event_bytes.clone(),
-            event_digest,
-            receipt_bytes,
-            chain_digest,
-        };
-        Ok((revision, row))
+            event_digest: validated.event_digest,
+            receipt_bytes: validated.receipt_bytes,
+            chain_digest: validated.chain_digest,
+        }
     }
 
     // ------------------------------------------------------------ snapshots
@@ -1268,6 +1348,31 @@ impl Store {
                     scope_digest: *scope_digest,
                     state_digest,
                     state_bytes: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
+    }
+
+    pub fn read_latest_snapshot(
+        &self,
+        scope_digest: &Digest,
+        at_or_before_revision: u64,
+    ) -> Result<Option<SnapshotRow>, StoreError> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT revision, state_digest, state_bytes FROM snapshots WHERE scope_digest = ?1 AND revision <= ?2 ORDER BY revision DESC LIMIT 1",
+            params![blob(*scope_digest), at_or_before_revision as i64],
+            |row| {
+                let bytes: Vec<u8> = row.get(1)?;
+                let mut state_digest = [0u8; 32];
+                state_digest.copy_from_slice(&bytes);
+                Ok(SnapshotRow {
+                    revision: row.get::<_, i64>(0)? as u64,
+                    scope_digest: *scope_digest,
+                    state_digest,
+                    state_bytes: row.get(2)?,
                 })
             },
         )
