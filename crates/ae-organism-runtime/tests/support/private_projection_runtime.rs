@@ -1,3 +1,6 @@
+#[allow(unused_macros)]
+macro_rules! private_projection_runtime_test_contents {
+    () => {
 use ae_action_contract::{
     ActionContractV1, ActionDispositionV1, ActionRealizationV1, ActionRequirementsV1,
     CanonicalTokenSetV1, CanonicalTokenV1, UnitIntervalV1,
@@ -22,7 +25,7 @@ use ae_genesis::r7::{
     IdentityConstitutionV1, IncarnationRefV1, OperationalCommitmentsV1, RelationalPlayLimitsV1,
     SeedCodeV1,
 };
-use ae_organism_runtime::{BoundedProjectionReferencesV1, NativeProjectionUpdateV1};
+use crate::r7::{BoundedProjectionReferencesV1, NativeProjectionUpdateV1};
 use ae_soma::{
     BoundedSomaSignalV1, CallerProvidedClassificationV1, SomaClassificationIngressV1,
     SomaFieldSetV1, SomaStateV1, SomaSubjectiveAxisV1,
@@ -436,4 +439,6 @@ fn update(
         efference,
         ProjectionPreconditionsV1::new(1_000, 0, 0, 7, 7, 0, 512),
     )
+}
+    };
 }

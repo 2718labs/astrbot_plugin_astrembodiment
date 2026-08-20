@@ -8,6 +8,13 @@ use ae_cognitive_envelope::{CognitiveEnvelopeV1, PreOutputCognitiveEnvelopeV1};
 use ae_contracts::r7::{wire, Digest, Id128};
 use serde_json::Value;
 use thiserror::Error;
+use zeroize::Zeroize;
+
+#[cfg(test)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 pub(crate) const PRIVATE_PROJECTION_PAYLOAD_WIRE_SCHEMA_VERSION_V1: u16 = 1;
 pub(crate) const PRIVATE_PROJECTION_PAYLOAD_WIRE_MAGIC_V1: &[u8; 8] = b"AER7PPW1";
@@ -22,7 +29,7 @@ const PRIVATE_PROJECTION_PAYLOAD_WIRE_DOMAIN_V1: &[u8] =
     b"astr-embodiment/r7/private-projection-payload-wire-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum PrivateProjectionPayloadWireErrorV1 {
+pub(crate) enum PrivateProjectionPayloadWireErrorV1 {
     #[error("private projection payload wire has already been consumed")]
     AlreadyConsumed,
     #[error("private projection identity is zero: {field}")]
@@ -43,6 +50,75 @@ pub enum PrivateProjectionPayloadWireErrorV1 {
     NonCanonicalWire,
     #[error("private projection payload wire digest mismatch: {field}")]
     DigestMismatch { field: &'static str },
+}
+
+/// The only owner for N3H-A encoded payload, certificate, and frame bytes.
+/// It deliberately exposes no public byte conversion or serialization seam.
+struct SecretBufferV1 {
+    bytes: Vec<u8>,
+    #[cfg(test)]
+    zeroization_probe: Option<TestOnlyZeroizationProbeV1>,
+}
+
+impl SecretBufferV1 {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            #[cfg(test)]
+            zeroization_probe: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_probe(bytes: Vec<u8>, probe: TestOnlyZeroizationProbeV1) -> Self {
+        Self {
+            bytes,
+            zeroization_probe: Some(probe),
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+}
+
+impl Drop for SecretBufferV1 {
+    fn drop(&mut self) {
+        self.bytes.as_mut_slice().zeroize();
+        #[cfg(test)]
+        if let Some(probe) = &self.zeroization_probe {
+            probe.observe_zeroized(&self.bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct TestOnlyZeroizationProbeV1 {
+    zeroized_observations: Arc<AtomicUsize>,
+}
+
+#[cfg(test)]
+impl TestOnlyZeroizationProbeV1 {
+    fn observe_zeroized(&self, bytes: &[u8]) {
+        assert!(
+            bytes.iter().all(|byte| *byte == 0),
+            "N3H-A owned storage must be zero before release"
+        );
+        self.zeroized_observations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn assert_zeroized_observations(&self, expected: usize) {
+        assert_eq!(
+            self.zeroized_observations.load(Ordering::SeqCst),
+            expected,
+            "unexpected count of zero-before-release observations"
+        );
+    }
 }
 
 /// Digest-only binding metadata carried by the fixed `AER7PPW1` header.
@@ -101,19 +177,35 @@ impl PrivateProjectionPayloadWireBindingMetadataV1 {
 /// One-shot opaque semantic payload for the private Host boundary.
 ///
 /// It implements neither `Clone`, `Debug`, nor serialization and exposes no
-/// body, text, JSON, envelope, or reusable byte getter. The sole transfer is
-/// `consume_once`, which moves the capability to its exact native bridge.
-///
-/// ```compile_fail
-/// use ae_runtime::r7::PrivateProjectionPayloadWireV1;
-/// use std::fmt::Debug;
-/// fn require_debug<T: Debug>() {}
-/// require_debug::<PrivateProjectionPayloadWireV1>();
-/// ```
-pub struct PrivateProjectionPayloadWireV1 {
-    private_bytes: Option<Box<[u8]>>,
+/// body, text, JSON, envelope, reusable byte getter, or callback materializer.
+pub(crate) struct PrivateProjectionPayloadWireV1 {
+    private_bytes: Option<SecretBufferV1>,
     metadata: PrivateProjectionPayloadWireBindingMetadataV1,
     wire_digest: Digest,
+}
+
+impl Drop for PrivateProjectionPayloadWireV1 {
+    fn drop(&mut self) {
+        drop(self.private_bytes.take());
+    }
+}
+
+/// Crate-private one-shot handoff object. It can only be consumed by the
+/// trusted native terminal below; neither it nor that terminal returns bytes.
+pub(crate) struct PrivateProjectionTransferV1 {
+    private_bytes: Option<SecretBufferV1>,
+}
+
+impl Drop for PrivateProjectionTransferV1 {
+    fn drop(&mut self) {
+        drop(self.private_bytes.take());
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateProjectionTransferReceiptV1 {
+    Discarded,
+    Cancelled,
 }
 
 impl PrivateProjectionPayloadWireV1 {
@@ -124,24 +216,44 @@ impl PrivateProjectionPayloadWireV1 {
     ) -> Result<(), PrivateProjectionPayloadWireErrorV1> {
         let bytes = self
             .private_bytes
-            .as_deref()
+            .as_ref()
             .ok_or(PrivateProjectionPayloadWireErrorV1::AlreadyConsumed)?;
-        validate_canonical_framing_v1(bytes)
+        validate_canonical_framing_v1(bytes.as_slice())
     }
 
     pub(crate) fn binding_metadata(&self) -> &PrivateProjectionPayloadWireBindingMetadataV1 {
         &self.metadata
     }
 
-    pub fn wire_digest(&self) -> &Digest {
+    pub(crate) fn wire_digest(&self) -> &Digest {
         &self.wire_digest
     }
 
-    pub fn consume_once(&mut self) -> Result<Box<[u8]>, PrivateProjectionPayloadWireErrorV1> {
-        self.private_bytes
+    pub(crate) fn begin_transfer_once_v1(
+        &mut self,
+    ) -> Result<PrivateProjectionTransferV1, PrivateProjectionPayloadWireErrorV1> {
+        let private_bytes = self
+            .private_bytes
             .take()
-            .ok_or(PrivateProjectionPayloadWireErrorV1::AlreadyConsumed)
+            .ok_or(PrivateProjectionPayloadWireErrorV1::AlreadyConsumed)?;
+        Ok(PrivateProjectionTransferV1 {
+            private_bytes: Some(private_bytes),
+        })
     }
+
+    pub(crate) fn cancel_v1(mut self) -> PrivateProjectionTransferReceiptV1 {
+        drop(self.private_bytes.take());
+        PrivateProjectionTransferReceiptV1::Cancelled
+    }
+}
+
+/// Current N3H-A terminal. N3H-C may later replace this with an isolated
+/// gateway, but this task performs no provider, IPC, or Host delivery.
+pub(crate) fn discard_private_projection_transfer_v1(
+    mut transfer: PrivateProjectionTransferV1,
+) -> PrivateProjectionTransferReceiptV1 {
+    drop(transfer.private_bytes.take());
+    PrivateProjectionTransferReceiptV1::Discarded
 }
 
 /// Canonically seals a typed full cognitive envelope. Callers cannot supply
@@ -152,7 +264,7 @@ pub(crate) fn seal_cognitive_envelope_v1(
     binding_digest: Digest,
 ) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
     let (payload, certificate_payload) = canonical_payload_from_envelope_v1(envelope)?;
-    seal_canonical_payload_v1(metadata, payload, certificate_payload, binding_digest)
+    seal_owned_payload_v1(metadata, payload, certificate_payload, binding_digest)
 }
 
 /// Canonically seals a typed pre-output cognitive envelope. It uses the same
@@ -163,49 +275,72 @@ pub(crate) fn seal_pre_output_cognitive_envelope_v1(
     binding_digest: Digest,
 ) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
     let (payload, certificate_payload) = canonical_payload_from_envelope_v1(envelope)?;
-    seal_canonical_payload_v1(metadata, payload, certificate_payload, binding_digest)
+    seal_owned_payload_v1(metadata, payload, certificate_payload, binding_digest)
 }
 
-fn seal_canonical_payload_v1(
+fn seal_owned_payload_v1(
     metadata: PrivateProjectionPayloadWireBindingMetadataV1,
-    payload: Vec<u8>,
-    certificate_payload: Vec<u8>,
+    payload: SecretBufferV1,
+    certificate_payload: SecretBufferV1,
     binding_digest: Digest,
 ) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
-    if payload.len() > PRIVATE_PROJECTION_PAYLOAD_MAX_BYTES_V1 {
+    seal_owned_payload_with_frame_v1(
+        metadata,
+        payload,
+        certificate_payload,
+        binding_digest,
+        SecretBufferV1::new,
+    )
+}
+
+fn seal_owned_payload_with_frame_v1(
+    metadata: PrivateProjectionPayloadWireBindingMetadataV1,
+    payload: SecretBufferV1,
+    certificate_payload: SecretBufferV1,
+    binding_digest: Digest,
+    frame_owner: impl FnOnce(Vec<u8>) -> SecretBufferV1,
+) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
+    if payload.as_slice().len() > PRIVATE_PROJECTION_PAYLOAD_MAX_BYTES_V1 {
         return Err(PrivateProjectionPayloadWireErrorV1::PayloadTooLarge);
     }
     require_nonzero_digest(&binding_digest, "binding_digest")?;
-    let payload_len = u32::try_from(payload.len())
+    let payload_len = u32::try_from(payload.as_slice().len())
         .map_err(|_| PrivateProjectionPayloadWireErrorV1::PayloadTooLarge)?;
-    let payload_digest = payload_digest_v1(&payload);
-    let certificate_digest = certificate_digest_v1(&certificate_payload);
-    let mut bytes =
-        Vec::with_capacity(PRIVATE_PROJECTION_PAYLOAD_WIRE_HEADER_LEN_V1 + payload.len() + 32);
-    bytes.extend_from_slice(PRIVATE_PROJECTION_PAYLOAD_WIRE_MAGIC_V1);
-    bytes.extend_from_slice(&PRIVATE_PROJECTION_PAYLOAD_WIRE_SCHEMA_VERSION_V1.to_be_bytes());
-    bytes.extend_from_slice(
+    let payload_digest = payload_digest_v1(payload.as_slice());
+    let certificate_digest = certificate_digest_v1(certificate_payload.as_slice());
+    let mut bytes = frame_owner(Vec::with_capacity(
+        PRIVATE_PROJECTION_PAYLOAD_WIRE_HEADER_LEN_V1 + payload.as_slice().len() + 32,
+    ));
+    bytes
+        .bytes
+        .extend_from_slice(PRIVATE_PROJECTION_PAYLOAD_WIRE_MAGIC_V1);
+    bytes
+        .bytes
+        .extend_from_slice(&PRIVATE_PROJECTION_PAYLOAD_WIRE_SCHEMA_VERSION_V1.to_be_bytes());
+    bytes.bytes.extend_from_slice(
         &u16::try_from(PRIVATE_PROJECTION_PAYLOAD_WIRE_HEADER_LEN_V1)
             .expect("fixed payload header length fits u16")
             .to_be_bytes(),
     );
-    bytes.extend_from_slice(&payload_len.to_be_bytes());
-    bytes.extend_from_slice(&metadata.revision.to_be_bytes());
-    bytes.extend_from_slice(&metadata.turn_id);
-    bytes.extend_from_slice(&metadata.turn_binding);
-    bytes.extend_from_slice(&metadata.projection_digest);
-    bytes.extend_from_slice(&certificate_digest);
-    bytes.extend_from_slice(&binding_digest);
-    bytes.extend_from_slice(&payload_digest);
-    if bytes.len() != PRIVATE_PROJECTION_PAYLOAD_WIRE_HEADER_LEN_V1 {
+    bytes.bytes.extend_from_slice(&payload_len.to_be_bytes());
+    bytes
+        .bytes
+        .extend_from_slice(&metadata.revision.to_be_bytes());
+    bytes.bytes.extend_from_slice(&metadata.turn_id);
+    bytes.bytes.extend_from_slice(&metadata.turn_binding);
+    bytes.bytes.extend_from_slice(&metadata.projection_digest);
+    bytes.bytes.extend_from_slice(&certificate_digest);
+    bytes.bytes.extend_from_slice(&binding_digest);
+    bytes.bytes.extend_from_slice(&payload_digest);
+    if bytes.as_slice().len() != PRIVATE_PROJECTION_PAYLOAD_WIRE_HEADER_LEN_V1 {
         return Err(PrivateProjectionPayloadWireErrorV1::MalformedWire);
     }
-    bytes.extend_from_slice(&payload);
-    let wire_digest = wire_digest_v1(&bytes);
-    bytes.extend_from_slice(&wire_digest);
-    validate_canonical_framing_v1(&bytes)?;
+    bytes.bytes.extend_from_slice(payload.as_slice());
+    let wire_digest = wire_digest_v1(bytes.as_slice());
+    bytes.bytes.extend_from_slice(&wire_digest);
+    validate_canonical_framing_v1(bytes.as_slice())?;
     Ok(PrivateProjectionPayloadWireV1 {
-        private_bytes: Some(bytes.into_boxed_slice()),
+        private_bytes: Some(bytes),
         metadata,
         wire_digest,
     })
@@ -216,41 +351,76 @@ fn seal_canonical_payload_v1(
 pub(crate) fn test_only_wire_for_metadata_v1(
     metadata: PrivateProjectionPayloadWireBindingMetadataV1,
 ) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
-    seal_canonical_payload_v1(metadata, b"{}".to_vec(), b"{}".to_vec(), [1; 32])
+    seal_owned_payload_v1(
+        metadata,
+        SecretBufferV1::new(b"{}".to_vec()),
+        SecretBufferV1::new(b"{}".to_vec()),
+        [1; 32],
+    )
 }
 
-/// Internal regression fixture only. The capability preserves its private
-/// metadata but has noncanonical framing, so runtime validation must reject it
-/// before any semantic field/revision commit.
 #[cfg(test)]
-pub(crate) fn test_only_tampered_wire_for_metadata_v1(
+pub(crate) fn test_only_wire_for_metadata_with_probe_v1(
     metadata: PrivateProjectionPayloadWireBindingMetadataV1,
+    probe: TestOnlyZeroizationProbeV1,
 ) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
-    let mut wire = test_only_wire_for_metadata_v1(metadata)?;
-    let bytes = wire
-        .private_bytes
-        .as_deref_mut()
-        .expect("test fixture starts live");
-    bytes[168] ^= 1;
+    let payload = SecretBufferV1::with_probe(b"{}".to_vec(), probe.clone());
+    let certificate = SecretBufferV1::with_probe(b"{}".to_vec(), probe.clone());
+    seal_owned_payload_with_frame_v1(metadata, payload, certificate, [1; 32], |bytes| {
+        SecretBufferV1::with_probe(bytes, probe)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn test_only_tampered_wire_for_metadata_with_probe_v1(
+    metadata: PrivateProjectionPayloadWireBindingMetadataV1,
+    probe: TestOnlyZeroizationProbeV1,
+) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
+    let mut wire = test_only_wire_for_metadata_with_probe_v1(metadata, probe)?;
+    wire.private_bytes
+        .as_mut()
+        .expect("test fixture starts live")
+        .as_mut_slice()[168] ^= 1;
     Ok(wire)
+}
+
+#[cfg(test)]
+pub(crate) fn test_only_post_allocation_seal_error_v1(
+    metadata: PrivateProjectionPayloadWireBindingMetadataV1,
+    probe: TestOnlyZeroizationProbeV1,
+) -> Result<PrivateProjectionPayloadWireV1, PrivateProjectionPayloadWireErrorV1> {
+    let mut wire = test_only_wire_for_metadata_with_probe_v1(metadata, probe)?;
+    wire.private_bytes
+        .as_mut()
+        .expect("post-allocation fixture starts live")
+        .as_mut_slice()[0] ^= 1;
+    let error = wire
+        .validate_live_canonical_v1()
+        .expect_err("tampered allocated frame must fail validation");
+    drop(wire);
+    Err(error)
 }
 
 fn canonical_payload_from_envelope_v1(
     envelope: &impl serde::Serialize,
-) -> Result<(Vec<u8>, Vec<u8>), PrivateProjectionPayloadWireErrorV1> {
+) -> Result<(SecretBufferV1, SecretBufferV1), PrivateProjectionPayloadWireErrorV1> {
     let mut body = serde_json::to_value(envelope)
         .map_err(|_| PrivateProjectionPayloadWireErrorV1::PayloadEncodingInvalid)?;
     normalize_payload_digests_v1(&mut body, None)?;
-    let payload = serde_json::to_vec(&body)
-        .map_err(|_| PrivateProjectionPayloadWireErrorV1::PayloadEncodingInvalid)?;
-    if payload.len() > PRIVATE_PROJECTION_PAYLOAD_MAX_BYTES_V1 {
+    let payload = SecretBufferV1::new(
+        serde_json::to_vec(&body)
+            .map_err(|_| PrivateProjectionPayloadWireErrorV1::PayloadEncodingInvalid)?,
+    );
+    if payload.as_slice().len() > PRIVATE_PROJECTION_PAYLOAD_MAX_BYTES_V1 {
         return Err(PrivateProjectionPayloadWireErrorV1::PayloadTooLarge);
     }
     let certificate = body
         .get("projection_certificate")
         .ok_or(PrivateProjectionPayloadWireErrorV1::UnsafePayloadShape)?;
-    let certificate_payload = serde_json::to_vec(certificate)
-        .map_err(|_| PrivateProjectionPayloadWireErrorV1::PayloadEncodingInvalid)?;
+    let certificate_payload = SecretBufferV1::new(
+        serde_json::to_vec(certificate)
+            .map_err(|_| PrivateProjectionPayloadWireErrorV1::PayloadEncodingInvalid)?,
+    );
     Ok((payload, certificate_payload))
 }
 
@@ -470,23 +640,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn golden_header_is_stable_and_one_shot() {
+    fn golden_header_is_stable_and_native_discard_is_one_shot() {
         let metadata = PrivateProjectionPayloadWireBindingMetadataV1::new(
             7, [1; 16], [2; 32], [3; 32], [4; 32],
         )
         .expect("nonzero metadata");
-        let mut wire = seal_canonical_payload_v1(metadata, b"{}".to_vec(), b"{}".to_vec(), [5; 32])
+        let probe = TestOnlyZeroizationProbeV1::default();
+        let mut wire = test_only_wire_for_metadata_with_probe_v1(metadata, probe.clone())
             .expect("fixed canonical framing");
-        let bytes = wire.consume_once().expect("first consumption");
+        let bytes: &[u8] = wire
+            .private_bytes
+            .as_ref()
+            .expect("live private buffer")
+            .as_slice();
         assert_eq!(&bytes[..8], PRIVATE_PROJECTION_PAYLOAD_WIRE_MAGIC_V1);
         assert_eq!(u16::from_be_bytes(bytes[8..10].try_into().unwrap()), 1);
         assert_eq!(u16::from_be_bytes(bytes[10..12].try_into().unwrap()), 200);
         assert_eq!(u64::from_be_bytes(bytes[16..24].try_into().unwrap()), 7);
-        validate_canonical_framing_v1(&bytes).expect("stable golden header validates");
+        validate_canonical_framing_v1(bytes).expect("stable golden header validates");
+        let transfer = wire
+            .begin_transfer_once_v1()
+            .expect("begin the exact native transfer once");
         assert!(matches!(
-            wire.consume_once(),
+            wire.begin_transfer_once_v1(),
             Err(PrivateProjectionPayloadWireErrorV1::AlreadyConsumed)
         ));
+        assert_eq!(
+            discard_private_projection_transfer_v1(transfer),
+            PrivateProjectionTransferReceiptV1::Discarded
+        );
+        probe.assert_zeroized_observations(3);
     }
 
     #[test]
@@ -495,14 +678,19 @@ mod tests {
             7, [1; 16], [2; 32], [3; 32], [4; 32],
         )
         .expect("nonzero metadata");
-        let mut wire = seal_canonical_payload_v1(metadata, b"{}".to_vec(), b"{}".to_vec(), [5; 32])
+        let probe = TestOnlyZeroizationProbeV1::default();
+        let mut wire = test_only_wire_for_metadata_with_probe_v1(metadata, probe.clone())
             .expect("fixed canonical framing");
-        let mut bytes = wire.consume_once().expect("wire bytes").into_vec();
-        bytes[168] ^= 1;
+        wire.private_bytes
+            .as_mut()
+            .expect("live private buffer")
+            .as_mut_slice()[168] ^= 1;
         assert!(matches!(
-            validate_canonical_framing_v1(&bytes),
+            wire.validate_live_canonical_v1(),
             Err(PrivateProjectionPayloadWireErrorV1::DigestMismatch { .. })
         ));
+        drop(wire);
+        probe.assert_zeroized_observations(3);
     }
 
     #[test]
@@ -511,14 +699,49 @@ mod tests {
             7, [1; 16], [2; 32], [3; 32], [4; 32],
         )
         .expect("nonzero metadata");
-        let mut wire = seal_canonical_payload_v1(metadata, b"{}".to_vec(), b"{}".to_vec(), [5; 32])
+        let probe = TestOnlyZeroizationProbeV1::default();
+        let mut wire = test_only_wire_for_metadata_with_probe_v1(metadata, probe.clone())
             .expect("fixed canonical framing");
         wire.validate_live_canonical_v1()
             .expect("unconsumed canonical wire is live");
-        let _ = wire.consume_once().expect("consume the exact capability");
+        let transfer = wire
+            .begin_transfer_once_v1()
+            .expect("move the exact capability into its native transfer");
         assert!(matches!(
             wire.validate_live_canonical_v1(),
             Err(PrivateProjectionPayloadWireErrorV1::AlreadyConsumed)
         ));
+        drop(transfer);
+        probe.assert_zeroized_observations(3);
+    }
+
+    #[test]
+    fn cancel_drop_and_post_allocation_error_zero_owned_buffers_before_release() {
+        let metadata = PrivateProjectionPayloadWireBindingMetadataV1::new(
+            7, [1; 16], [2; 32], [3; 32], [4; 32],
+        )
+        .expect("nonzero metadata");
+
+        let cancel_probe = TestOnlyZeroizationProbeV1::default();
+        let wire = test_only_wire_for_metadata_with_probe_v1(metadata, cancel_probe.clone())
+            .expect("cancel fixture");
+        assert_eq!(
+            wire.cancel_v1(),
+            PrivateProjectionTransferReceiptV1::Cancelled
+        );
+        cancel_probe.assert_zeroized_observations(3);
+
+        let drop_probe = TestOnlyZeroizationProbeV1::default();
+        let wire = test_only_wire_for_metadata_with_probe_v1(metadata, drop_probe.clone())
+            .expect("drop fixture");
+        drop(wire);
+        drop_probe.assert_zeroized_observations(3);
+
+        let error_probe = TestOnlyZeroizationProbeV1::default();
+        assert!(matches!(
+            test_only_post_allocation_seal_error_v1(metadata, error_probe.clone()),
+            Err(PrivateProjectionPayloadWireErrorV1::MalformedWire)
+        ));
+        error_probe.assert_zeroized_observations(3);
     }
 }

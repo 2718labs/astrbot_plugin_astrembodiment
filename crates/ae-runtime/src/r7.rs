@@ -19,15 +19,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 use thiserror::Error;
 
-pub use ae_contracts::r7::{
+pub(crate) use ae_contracts::r7::{
     AstrBotPublicSignalV1, AstrBotToolDispositionV1, AstrBotToolIngressV1, AstrBotToolOutcomeV1,
     DeliveryKnowledgeV1, HostEffectDispositionV1, HostEffectV1, HostIngressKindV1, HostIngressV1,
-    HostSettlementStatusV1, HostSettlementV1, PublicTextV1,
+    HostSettlementStatusV1, HostSettlementV1,
 };
-pub use private_projection_wire::{
-    PrivateProjectionPayloadWireErrorV1, PrivateProjectionPayloadWireV1,
+pub(crate) use private_projection_wire::{
+    discard_private_projection_transfer_v1, PrivateProjectionPayloadWireErrorV1,
+    PrivateProjectionPayloadWireV1, PrivateProjectionTransferReceiptV1,
 };
-pub use r7_atomic_projection::{
+pub(crate) use r7_atomic_projection::{
     BoundedProjectionReferencesV1, NativeProjectionPayloadIngressV1,
     NativeProjectionPayloadProducerErrorV1, NativeProjectionPayloadProducerInputV1,
     NativeProjectionPayloadProducerV1, NativeProjectionUpdateV1, OrganismRuntimeErrorV1,
@@ -35,7 +36,7 @@ pub use r7_atomic_projection::{
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum RuntimeError {
+pub(crate) enum RuntimeError {
     #[error("invalid neural field")]
     InvalidNeuralField,
     #[error("invalid sparse graph")]
@@ -86,6 +87,35 @@ pub enum RuntimeError {
     AstrBotToolInvocationExpired,
     #[error("astrbot tool registry full")]
     AstrBotToolRegistryFull,
+}
+
+#[cfg(test)]
+mod organism_compatibility_transfer_tests {
+    mod committed_semantic_projection_path {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ae-organism-runtime/tests/support/private_projection_runtime.rs"
+        ));
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ae-organism-runtime/tests/committed_semantic_projection_path.rs"
+        ));
+
+        committed_semantic_projection_path_test_contents!();
+    }
+
+    mod private_projection_payload_producer {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ae-organism-runtime/tests/support/private_projection_runtime.rs"
+        ));
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ae-organism-runtime/tests/private_projection_payload_producer.rs"
+        ));
+
+        private_projection_payload_producer_test_contents!();
+    }
 }
 
 const NATIVE_PUBLIC_EFFECT_TRIGGER_V1: &str = "[[AE_NATIVE_PUBLIC_EFFECT_V1]]";
@@ -239,11 +269,11 @@ impl AstrBotToolRegistryRecordV1 {
     }
 }
 
-pub struct AstrRuntime {
-    pub field: NeuralField,
-    pub graph: SparseGraph,
-    pub revision: u64,
-    pub formula_digest: [u8; 32],
+pub(crate) struct AstrRuntime {
+    pub(crate) field: NeuralField,
+    pub(crate) graph: SparseGraph,
+    pub(crate) revision: u64,
+    pub(crate) formula_digest: [u8; 32],
     host_process_epoch: Option<[u8; 16]>,
     last_host_settlement: Option<HostSettlementV1>,
     issued_host_effects: BTreeMap<[u8; 32], IssuedHostEffectV1>,
@@ -274,16 +304,16 @@ impl fmt::Debug for AstrRuntime {
     }
 }
 
-pub struct RuntimeDecision {
-    pub contract: ae_contracts::r7::ActionContract,
-    pub receipt: TransitionReceipt,
+pub(crate) struct RuntimeDecision {
+    pub(crate) contract: ae_contracts::r7::ActionContract,
+    pub(crate) receipt: TransitionReceipt,
     private_projection_wire: PrivateProjectionPayloadWireV1,
 }
 
 impl RuntimeDecision {
     /// Transfers the exactly-bound one-shot private projection capability only
     /// after the runtime has atomically committed its matching semantic state.
-    pub fn into_private_projection_wire(self) -> PrivateProjectionPayloadWireV1 {
+    pub(crate) fn into_private_projection_wire(self) -> PrivateProjectionPayloadWireV1 {
         self.private_projection_wire
     }
 }
@@ -631,7 +661,7 @@ impl AstrRuntime {
     /// Constructs an isolated, non-durable fixture harness for Rust-only
     /// Host/projection tests. Production `ae_runtime::AstrRuntime` never owns
     /// or delegates semantic state to this scaffold.
-    pub fn scaffold() -> Self {
+    pub(crate) fn scaffold() -> Self {
         Self {
             field: NeuralField::zeroed(),
             graph: SparseGraph {
@@ -648,11 +678,11 @@ impl AstrRuntime {
         }
     }
 
-    pub fn current_revision(&self) -> u64 {
+    pub(crate) fn current_revision(&self) -> u64 {
         self.revision
     }
 
-    pub fn last_host_settlement(&self) -> Option<&HostSettlementV1> {
+    pub(crate) fn last_host_settlement(&self) -> Option<&HostSettlementV1> {
         self.last_host_settlement.as_ref()
     }
 
@@ -678,7 +708,7 @@ impl AstrRuntime {
         Ok(())
     }
 
-    pub fn apply_astrbot_tool_v1(
+    pub(crate) fn apply_astrbot_tool_v1(
         &mut self,
         ingress: AstrBotToolIngressV1,
     ) -> Result<AstrBotToolOutcomeV1, RuntimeError> {
@@ -752,7 +782,7 @@ impl AstrRuntime {
         Ok(outcome)
     }
 
-    pub fn apply_host_ingress_v1(
+    pub(crate) fn apply_host_ingress_v1(
         &mut self,
         ingress: HostIngressV1,
     ) -> Result<Option<HostEffectV1>, RuntimeError> {
@@ -854,39 +884,9 @@ impl AstrRuntime {
     }
 
     /// Evaluates a closed user stimulus and atomically compiles its exact
-    /// private projection capability. The runtime never accepts a callback,
-    /// byte buffer, custom sealer, or caller-supplied wire; it validates the
-    /// canonical live wire before making its sole state/revision commit.
-    ///
-    /// ```compile_fail
-    /// use ae_contracts::r7::CanonicalEvent;
-    /// use ae_runtime::r7::{AstrRuntime, R7PreOutputProjectionInputV1};
-    ///
-    /// fn bypass(
-    ///     runtime: &mut AstrRuntime,
-    ///     event: &CanonicalEvent,
-    ///     input: &R7PreOutputProjectionInputV1,
-    /// ) {
-    ///     let _ = runtime.apply_user_stimulus_with_private_projection_wire_v1(
-    ///         event,
-    ///         |_prepared_transition| input,
-    ///     );
-    /// }
-    /// ```
-    ///
-    /// ```compile_fail
-    /// use ae_contracts::r7::CanonicalEvent;
-    /// use ae_runtime::r7::{AstrRuntime, PrivateProjectionPayloadWireV1};
-    ///
-    /// fn bypass(
-    ///     runtime: &mut AstrRuntime,
-    ///     event: &CanonicalEvent,
-    ///     wire: PrivateProjectionPayloadWireV1,
-    /// ) {
-    ///     let _ = runtime.apply_user_stimulus_with_private_projection_wire_v1(event, &wire);
-    /// }
-    /// ```
-    pub fn apply_user_stimulus_with_private_projection_wire_v1(
+    /// private projection capability. The crate-private runtime never accepts
+    /// a callback, byte buffer, custom sealer, or caller-supplied wire.
+    pub(crate) fn apply_user_stimulus_with_private_projection_wire_v1(
         &mut self,
         event: &CanonicalEvent,
         input: &R7PreOutputProjectionInputV1,
@@ -1315,8 +1315,9 @@ mod issued_registry_privacy_tests {
 #[cfg(test)]
 mod atomic_private_projection_wire_tests {
     use super::private_projection_wire::{
-        test_only_tampered_wire_for_metadata_v1, test_only_wire_for_metadata_v1,
-        PrivateProjectionPayloadWireBindingMetadataV1,
+        test_only_tampered_wire_for_metadata_with_probe_v1,
+        test_only_wire_for_metadata_with_probe_v1, PrivateProjectionPayloadWireBindingMetadataV1,
+        TestOnlyZeroizationProbeV1,
     };
     use super::*;
 
@@ -1369,8 +1370,14 @@ mod atomic_private_projection_wire_tests {
             candidate.state_after,
         )
         .expect("candidate metadata is binding-correct");
-        let mut wire = test_only_wire_for_metadata_v1(metadata).expect("canonical test capability");
-        let _ = wire.consume_once().expect("pre-consume exact capability");
+        let probe = TestOnlyZeroizationProbeV1::default();
+        let mut wire = test_only_wire_for_metadata_with_probe_v1(metadata, probe.clone())
+            .expect("canonical test capability");
+        let transfer = wire
+            .begin_transfer_once_v1()
+            .expect("pre-transfer exact capability");
+        drop(transfer);
+        probe.assert_zeroized_observations(3);
 
         assert!(matches!(
             runtime.commit_prepared_projection_wire_v1(candidate, wire),
@@ -1398,7 +1405,8 @@ mod atomic_private_projection_wire_tests {
             candidate.state_after,
         )
         .expect("candidate metadata is binding-correct");
-        let wire = test_only_tampered_wire_for_metadata_v1(metadata)
+        let probe = TestOnlyZeroizationProbeV1::default();
+        let wire = test_only_tampered_wire_for_metadata_with_probe_v1(metadata, probe.clone())
             .expect("tampered capability keeps matching private metadata");
 
         assert!(matches!(
@@ -1408,6 +1416,7 @@ mod atomic_private_projection_wire_tests {
         assert_eq!(runtime.current_revision(), 0);
         assert_eq!(runtime.field.potential, potential_before);
         assert_eq!(runtime.field.excitation, excitation_before);
+        probe.assert_zeroized_observations(3);
     }
 
     #[test]
@@ -1436,7 +1445,8 @@ mod atomic_private_projection_wire_tests {
             other_candidate.state_after,
         )
         .expect("other-event metadata");
-        let other_wire = test_only_wire_for_metadata_v1(other_metadata)
+        let probe = TestOnlyZeroizationProbeV1::default();
+        let other_wire = test_only_wire_for_metadata_with_probe_v1(other_metadata, probe.clone())
             .expect("canonical other-event capability");
 
         assert!(matches!(
@@ -1446,6 +1456,7 @@ mod atomic_private_projection_wire_tests {
         assert_eq!(target_runtime.current_revision(), 0);
         assert_eq!(target_runtime.field.potential, potential_before);
         assert_eq!(target_runtime.field.excitation, excitation_before);
+        probe.assert_zeroized_observations(3);
     }
 
     #[test]

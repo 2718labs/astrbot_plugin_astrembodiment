@@ -1,18 +1,21 @@
-#![allow(dead_code, unused_imports)]
-
 // The established runtime fixture supplies only fully-bound typed source values.
 // Reusing it keeps this test focused on the producer transaction boundary.
-include!("support/private_projection_runtime.rs");
+#[allow(unused_macros)]
+macro_rules! private_projection_payload_producer_test_contents {
+    () => {
+private_projection_runtime_test_contents!();
 
 use ae_morph::{
     MorphAffordanceCatalogV1, MorphAvailabilityV1, MorphClassificationVocabularyInputV1,
     MorphClassificationVocabularyV1, MorphConfirmationRequirementV1, MorphEffectorInputV1,
     MorphEffectorV1, MorphStateBindingV1, MorphVocabularyBoundsV1, MORPH_AFFORDANCE_MAX_ITEMS_V1,
 };
-use ae_organism_runtime::{
+use crate::r7::{
+    discard_private_projection_transfer_v1,
     NativeProjectionPayloadIngressV1, NativeProjectionPayloadProducerErrorV1,
     NativeProjectionPayloadProducerInputV1, NativeProjectionPayloadProducerV1,
     OrganismRuntimeErrorV1, PrivateProjectionPayloadWireErrorV1,
+    PrivateProjectionTransferReceiptV1,
 };
 
 fn morph_catalog(
@@ -276,11 +279,20 @@ fn producer_seals_a_canonical_one_shot_wire_only_after_a_fully_bound_update() {
         .expect("equivalent fully bound native source ingress");
     assert_eq!(producer.current_revision(), Some(9));
     assert_eq!(wire.wire_digest(), equivalent_wire.wire_digest());
-    let first = wire.consume_once().expect("one private consumption");
-    assert!(!first.is_empty());
-    assert_eq!(
-        wire.consume_once(),
+    let transfer = wire
+        .begin_transfer_once_v1()
+        .expect("one crate-private native transfer");
+    assert!(matches!(
+        wire.begin_transfer_once_v1(),
         Err(PrivateProjectionPayloadWireErrorV1::AlreadyConsumed)
+    ));
+    assert_eq!(
+        discard_private_projection_transfer_v1(transfer),
+        PrivateProjectionTransferReceiptV1::Discarded
+    );
+    assert_eq!(
+        equivalent_wire.cancel_v1(),
+        PrivateProjectionTransferReceiptV1::Cancelled
     );
     assert!(matches!(
         producer.produce(producer_input(
@@ -437,4 +449,6 @@ fn compilation_failure_does_not_advance_the_transaction_revision() {
             9,
         ))
         .expect("compile failure did not consume revision");
+}
+    };
 }

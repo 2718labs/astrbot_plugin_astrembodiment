@@ -42,7 +42,7 @@ const PRIVATE_PROJECTION_PAYLOAD_BINDING_DOMAIN_V1: &[u8] =
     b"astr-embodiment/r7/private-projection-payload-binding-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum OrganismRuntimeErrorV1 {
+pub(crate) enum OrganismRuntimeErrorV1 {
     #[error("identity source capsule has wrong kind: {actual:?}")]
     WrongIdentitySourceKind { actual: ProjectionSourceKindV1 },
     #[error("identity source capsule digest does not match the typed constitution")]
@@ -76,7 +76,7 @@ pub enum OrganismRuntimeErrorV1 {
 /// The six bounded reference capsules that have no native producer in this
 /// crate. Values remain typed and bounded by `ae-cognitive-envelope`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BoundedProjectionReferencesV1 {
+pub(crate) struct BoundedProjectionReferencesV1 {
     organism_snapshot: SourceCapsuleV1<OrganismSnapshotRefV1>,
     cognitive_kv_view: SourceCapsuleV1<CognitiveKvViewV1>,
     exact_turn_anchors: SourceCapsuleV1<ExactTurnAnchorsV1>,
@@ -86,7 +86,7 @@ pub struct BoundedProjectionReferencesV1 {
 }
 
 impl BoundedProjectionReferencesV1 {
-    pub fn new(
+    pub(crate) fn new(
         organism_snapshot: SourceCapsuleV1<OrganismSnapshotRefV1>,
         cognitive_kv_view: SourceCapsuleV1<CognitiveKvViewV1>,
         exact_turn_anchors: SourceCapsuleV1<ExactTurnAnchorsV1>,
@@ -108,7 +108,7 @@ impl BoundedProjectionReferencesV1 {
 /// One complete native update. No optional/default source exists: callers must
 /// provide every typed source and every projection precondition explicitly.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeProjectionUpdateV1 {
+pub(crate) struct NativeProjectionUpdateV1 {
     revision: u64,
     references: BoundedProjectionReferencesV1,
     action_contract: SourceCapsuleV1<ActionContractV1>,
@@ -122,7 +122,7 @@ pub struct NativeProjectionUpdateV1 {
 
 impl NativeProjectionUpdateV1 {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         revision: u64,
         references: BoundedProjectionReferencesV1,
         action_contract: SourceCapsuleV1<ActionContractV1>,
@@ -150,7 +150,7 @@ impl NativeProjectionUpdateV1 {
 /// Typed R7 sources available before provider output. In particular, this type
 /// contains no `ActionRealizationV1` or `EfferenceCopyV1` field.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreOutputProjectionUpdateV1 {
+pub(crate) struct PreOutputProjectionUpdateV1 {
     revision: u64,
     references: BoundedProjectionReferencesV1,
     action_contract: SourceCapsuleV1<ActionContractV1>,
@@ -162,7 +162,7 @@ pub struct PreOutputProjectionUpdateV1 {
 
 impl PreOutputProjectionUpdateV1 {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         revision: u64,
         references: BoundedProjectionReferencesV1,
         action_contract: SourceCapsuleV1<ActionContractV1>,
@@ -622,14 +622,14 @@ fn require_nonzero_id(
 /// A complete, caller-provided typed ingress for one private projection
 /// payload. The KV value is an opaque reference only: it must exactly match
 /// the digest already bound by the typed cognitive-KV source capsule.
-pub struct NativeProjectionPayloadProducerInputV1 {
+pub(crate) struct NativeProjectionPayloadProducerInputV1 {
     update: NativeProjectionUpdateV1,
     kv_snapshot_digest: Digest,
     morph_affordance_catalog: MorphAffordanceCatalogV1,
 }
 
 impl NativeProjectionPayloadProducerInputV1 {
-    pub fn new(
+    pub(crate) fn new(
         update: NativeProjectionUpdateV1,
         kv_snapshot_digest: Digest,
         morph_affordance_catalog: MorphAffordanceCatalogV1,
@@ -644,23 +644,23 @@ impl NativeProjectionPayloadProducerInputV1 {
 
 /// The producer accepts no fallback or default input. Callers that cannot
 /// supply every typed source must state that condition explicitly.
-pub enum NativeProjectionPayloadIngressV1 {
+pub(crate) enum NativeProjectionPayloadIngressV1 {
     Unavailable,
     Ready(Box<NativeProjectionPayloadProducerInputV1>),
 }
 
 impl NativeProjectionPayloadIngressV1 {
-    pub fn unavailable() -> Self {
+    pub(crate) fn unavailable() -> Self {
         Self::Unavailable
     }
 
-    pub fn ready(input: NativeProjectionPayloadProducerInputV1) -> Self {
+    pub(crate) fn ready(input: NativeProjectionPayloadProducerInputV1) -> Self {
         Self::Ready(Box::new(input))
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum NativeProjectionPayloadProducerErrorV1 {
+pub(crate) enum NativeProjectionPayloadProducerErrorV1 {
     #[error("fully-bound native projection input is unavailable")]
     InputUnavailable,
     #[error("opaque KV snapshot digest does not match the typed cognitive-KV source")]
@@ -676,13 +676,13 @@ pub enum NativeProjectionPayloadProducerErrorV1 {
 /// Legacy compatibility producer. Its watermark is independent of
 /// `AstrRuntime`'s R7 semantic field/revision and advances only after a
 /// canonical wire is successfully sealed.
-pub struct NativeProjectionPayloadProducerV1 {
+pub(crate) struct NativeProjectionPayloadProducerV1 {
     runtime: OrganismProjectionRuntimeV1,
     last_issued_revision: Option<u64>,
 }
 
 impl NativeProjectionPayloadProducerV1 {
-    pub fn new(
+    pub(crate) fn new(
         identity: SourceCapsuleV1<IdentityConstitutionV1>,
     ) -> Result<Self, OrganismRuntimeErrorV1> {
         Ok(Self {
@@ -691,11 +691,11 @@ impl NativeProjectionPayloadProducerV1 {
         })
     }
 
-    pub fn current_revision(&self) -> Option<u64> {
+    pub(crate) fn current_revision(&self) -> Option<u64> {
         self.last_issued_revision
     }
 
-    pub fn produce(
+    pub(crate) fn produce(
         &mut self,
         ingress: NativeProjectionPayloadIngressV1,
     ) -> Result<PrivateProjectionPayloadWireV1, NativeProjectionPayloadProducerErrorV1> {
@@ -892,36 +892,17 @@ fn validate_pre_output_projection_for_wire_v1(
     Ok(())
 }
 
-/// The only public typed source bundle accepted by the atomic R7 transition.
-/// It contains no candidate, sealer, callback, wire, or raw payload input.
-///
-/// ```compile_fail
-/// use ae_runtime::r7::PreparedSemanticProjectionPayloadProducerV1;
-/// let _ = std::any::TypeId::of::<PreparedSemanticProjectionPayloadProducerV1>();
-/// ```
-///
-/// ```compile_fail
-/// use ae_runtime::r7::PreparedSemanticTransitionViewV1;
-/// let _ = std::any::TypeId::of::<PreparedSemanticTransitionViewV1>();
-/// ```
-///
-/// ```compile_fail
-/// use ae_runtime::r7::PrivateProjectionPayloadWireBindingMetadataV1;
-/// let _ = std::any::TypeId::of::<PrivateProjectionPayloadWireBindingMetadataV1>();
-/// ```
-///
-/// ```compile_fail
-/// use ae_runtime::r7::seal_private_projection_payload_wire_v1;
-/// let _ = seal_private_projection_payload_wire_v1;
-/// ```
+/// The only crate-private typed source bundle accepted by the atomic R7
+/// transition. It contains no candidate, sealer, callback, wire, or raw
+/// payload input.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct R7PreOutputProjectionInputV1 {
+pub(crate) struct R7PreOutputProjectionInputV1 {
     identity: SourceCapsuleV1<IdentityConstitutionV1>,
     update: PreOutputProjectionUpdateV1,
 }
 
 impl R7PreOutputProjectionInputV1 {
-    pub fn new(
+    pub(crate) fn new(
         identity: SourceCapsuleV1<IdentityConstitutionV1>,
         update: PreOutputProjectionUpdateV1,
     ) -> Result<Self, OrganismRuntimeErrorV1> {

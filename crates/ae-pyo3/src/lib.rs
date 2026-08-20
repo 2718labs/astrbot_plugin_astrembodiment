@@ -60,6 +60,10 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
         ae_runtime::RuntimeError::UnsupportedEvent(_) => ("UNSUPPORTED_EVENT", error.to_string()),
         ae_runtime::RuntimeError::Closed => ("CLOSED", error.to_string()),
         ae_runtime::RuntimeError::InvalidNeuralState => ("INVALID_NEURAL_STATE", error.to_string()),
+        ae_runtime::RuntimeError::PrivateProjectionUnavailable => (
+            "PRIVATE_PROJECTION_UNAVAILABLE",
+            "private projection unavailable".to_owned(),
+        ),
     };
     NativeCoreError::new_err(format!("{code}::{message}"))
 }
@@ -275,81 +279,21 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-// Reuses exact typed R7 authority fixtures only in the Rust test target.  The
-// file is not part of the extension-module production surface.
 #[cfg(test)]
-#[path = "../../ae-organism-runtime/tests/committed_semantic_projection_path.rs"]
-mod r7_typed_fixture;
-
-#[cfg(test)]
-mod native_r7_atomic_ingress_tests {
+mod native_private_projection_absence_tests {
     use super::*;
-    use ae_contracts::r7::CanonicalEvent as R7CanonicalEvent;
-    use ae_runtime::r7::{
-        PrivateProjectionPayloadWireErrorV1, R7PreOutputProjectionInputV1,
-        RuntimeDecision as R7RuntimeDecision, RuntimeError as R7RuntimeError,
-    };
     use pyo3::types::PyModule;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEST_STORE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-    /// This bridge is deliberately Rust-private: it owns the legacy runtime
-    /// instance and delegates only closed R7 typed sources into its additive
-    /// atomic ingress.  It is neither a PyO3 class nor registered function.
-    struct NativeAtomicIngressV1 {
-        runtime: ae_runtime::AstrRuntime,
-    }
-
-    impl NativeAtomicIngressV1 {
-        fn open_for_test() -> Self {
-            let serial = TEST_STORE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let directory = std::env::temp_dir().join(format!(
-                "astrembodiment-core-r7-atomic-ingress-{}-{serial}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&directory).expect("test store directory");
-            let runtime = ae_runtime::AstrRuntime::open(&directory.join("store.db"))
-                .expect("legacy runtime owns the Rust-only R7 ingress");
-            Self { runtime }
-        }
-
-        fn produce(
-            &mut self,
-            event: &R7CanonicalEvent,
-            input: &R7PreOutputProjectionInputV1,
-        ) -> Result<R7RuntimeDecision, R7RuntimeError> {
-            self.runtime
-                .apply_user_stimulus_with_private_projection_wire_v1(event, input)
-        }
-    }
 
     #[test]
-    fn native_atomic_ingress_commits_once_after_a_typed_retry_and_emits_one_shot_wire() {
-        let mut ingress = NativeAtomicIngressV1::open_for_test();
-        let (rejected_event, rejected_input) =
-            super::r7_typed_fixture::rejected_first_transition_fixture();
-        assert!(matches!(
-            ingress.produce(&rejected_event, &rejected_input),
-            Err(R7RuntimeError::PrivateProjectionWireUnavailable)
-        ));
-
-        let (event, input) = super::r7_typed_fixture::matching_first_transition_fixture();
-        let decision = ingress
-            .produce(&event, &input)
-            .expect("the same runtime accepts a fully bound typed retry");
-        assert_eq!(decision.receipt.base_revision, 0);
-        assert_eq!(decision.receipt.next_revision, 1);
-
-        let mut wire = decision.into_private_projection_wire();
-        assert!(!wire
-            .consume_once()
-            .expect("opaque wire permits exactly one native consumption")
-            .is_empty());
-        assert!(matches!(
-            wire.consume_once(),
-            Err(PrivateProjectionPayloadWireErrorV1::AlreadyConsumed)
-        ));
+    fn private_projection_failure_maps_to_one_fixed_non_payload_error() {
+        Python::initialize();
+        Python::attach(|py| {
+            let error = map_error(ae_runtime::RuntimeError::PrivateProjectionUnavailable);
+            assert_eq!(
+                error.value(py).to_string(),
+                "PRIVATE_PROJECTION_UNAVAILABLE::private projection unavailable"
+            );
+        });
     }
 
     #[test]
@@ -361,13 +305,30 @@ mod native_r7_atomic_ingress_tests {
             assert!(module.getattr("apply_event").is_ok());
             for forbidden in [
                 "apply_user_stimulus_with_private_projection_wire_v1",
+                "R7PreOutputProjectionInputV1",
                 "_PrivateProjectionPayloadWireV1",
                 "_PrivateProjectionPayloadProducerV1",
                 "_PrivateProjectionPayloadIngressV1",
+                "_PrivateProjectionTransferV1",
                 "_consume_private_projection_payload_wire_v1",
+                "_discard_private_projection_transfer_v1",
                 "_astrbot_host_private_projection_wire_capability_v1",
                 "PrivateProjectionPayloadWireV1",
+                "PrivateProjectionPayloadProducerV1",
+                "PrivateProjectionPayloadIngressV1",
+                "PrivateProjectionTransferV1",
                 "seal_private_projection_payload_wire_v1",
+                "materialize_private_projection_payload_v1",
+                "private_projection_payload_callback_v1",
+                "repr_private_projection_payload_wire_v1",
+                "pickle_private_projection_payload_wire_v1",
+                "buffer_private_projection_payload_wire_v1",
+                "consume_once",
+                "wire_digest",
+                "to_bytes",
+                "as_bytes",
+                "__bytes__",
+                "__buffer__",
             ] {
                 assert!(
                     module.getattr(forbidden).is_err(),

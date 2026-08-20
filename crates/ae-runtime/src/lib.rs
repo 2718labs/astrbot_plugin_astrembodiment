@@ -5,6 +5,16 @@
 //! ensure_genesis -> deterministic no-op apply_event -> SQLite commit ->
 //! replay verification. Python cannot reach any of this state directly; the
 //! PyO3 surface exposes only coarse calls.
+//!
+//! The R7 compatibility implementation is deliberately crate-private; it is
+//! not a second production runtime authority.
+//!
+//! ```compile_fail
+//! use ae_runtime::r7::{AstrRuntime, R7PreOutputProjectionInputV1};
+//!
+//! let _ = std::any::TypeId::of::<AstrRuntime>();
+//! let _ = std::any::TypeId::of::<R7PreOutputProjectionInputV1>();
+//! ```
 
 use ae_agent::noop_action_contract;
 use ae_authority::authority_projection_digest;
@@ -22,8 +32,10 @@ use ae_store::{ClaimOutcome, GenesisCommit, StatefulCommit, Store, StoreError};
 use std::path::Path;
 use thiserror::Error;
 
-/// Native R7 atomic projection remains a Rust-only additive namespace.
-pub mod r7;
+/// Native R7 compatibility projection is an implementation detail of the
+/// durable root runtime, never an alternate production authority.
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+mod r7;
 
 const CANONICAL_HOT_STATE_MAGIC_V1: [u8; 8] = *b"AEHOTST\0";
 const CANONICAL_HOT_STATE_SCHEMA_V1: u16 = 1;
@@ -52,8 +64,14 @@ pub enum RuntimeError {
     Closed,
     #[error("invalid neural state")]
     InvalidNeuralState,
-    #[error("R7 transition error: {0}")]
-    R7(#[from] r7::RuntimeError),
+    #[error("private projection unavailable")]
+    PrivateProjectionUnavailable,
+}
+
+impl From<r7::RuntimeError> for RuntimeError {
+    fn from(_error: r7::RuntimeError) -> Self {
+        Self::PrivateProjectionUnavailable
+    }
 }
 
 #[derive(Debug)]
@@ -69,17 +87,26 @@ pub struct ApplyDecision {
 /// Result of the one supported production R7 semantic transition. Its receipt
 /// is always the root canonical receipt that was committed to SQLite. An exact
 /// retry returns no second one-shot wire.
-pub struct UserStimulusDecisionV1 {
-    pub contract: ActionContract,
-    pub receipt: TransitionReceipt,
-    pub revision: u64,
-    pub deduplicated: bool,
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct UserStimulusDecisionV1 {
+    pub(crate) receipt: TransitionReceipt,
+    pub(crate) revision: u64,
+    pub(crate) deduplicated: bool,
     private_projection_wire: Option<r7::PrivateProjectionPayloadWireV1>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl UserStimulusDecisionV1 {
-    pub fn into_private_projection_wire(self) -> Option<r7::PrivateProjectionPayloadWireV1> {
-        self.private_projection_wire
+    pub(crate) fn discard_private_projection_v1(
+        mut self,
+    ) -> Result<Option<r7::PrivateProjectionTransferReceiptV1>, RuntimeError> {
+        let Some(mut wire) = self.private_projection_wire.take() else {
+            return Ok(None);
+        };
+        let transfer = wire
+            .begin_transfer_once_v1()
+            .map_err(|_| RuntimeError::PrivateProjectionUnavailable)?;
+        Ok(Some(r7::discard_private_projection_transfer_v1(transfer)))
     }
 }
 
@@ -98,6 +125,7 @@ pub struct InspectReport {
     pub observatory_genesis_unavailable: bool,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 struct HotBrain {
     bot_token: Id128,
     persona_token: Id128,
@@ -389,6 +417,7 @@ fn decode_hot_state_v1(
     Ok((field, graph))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn canonical_event_from_r7(
     event: &ae_contracts::r7::CanonicalEvent,
 ) -> Result<CanonicalEvent, r7::RuntimeError> {
@@ -448,7 +477,8 @@ impl AstrRuntime {
     /// source and returns only its opaque, one-shot decision capability.
     /// Python keeps its unchanged G0 compatibility surface and has no route
     /// to this method, a raw wire, or a source-state mutation API.
-    pub fn apply_user_stimulus_with_private_projection_wire_v1(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn apply_user_stimulus_with_private_projection_wire_v1(
         &mut self,
         event: &ae_contracts::r7::CanonicalEvent,
         input: &r7::R7PreOutputProjectionInputV1,
@@ -498,7 +528,6 @@ impl AstrRuntime {
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
             return Ok(UserStimulusDecisionV1 {
-                contract,
                 receipt,
                 revision: row.revision,
                 deduplicated: true,
@@ -580,7 +609,6 @@ impl AstrRuntime {
                     hot.semantic_revision = revision;
                 }
                 Ok(UserStimulusDecisionV1 {
-                    contract,
                     receipt,
                     revision,
                     deduplicated: false,
@@ -596,7 +624,6 @@ impl AstrRuntime {
                     .decode_receipt()
                     .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
                 Ok(UserStimulusDecisionV1 {
-                    contract,
                     receipt,
                     revision,
                     deduplicated: true,
@@ -1007,55 +1034,15 @@ impl AstrRuntime {
 
     // ------------------------------------------------------------ observatory
 
-    /// Inspect the semantic authority lane when it has committed work;
-    /// otherwise preserve the legacy G0 lane's observatory view.
+    /// Inspect only the public legacy G0 authority lane. The private semantic
+    /// history is never a public observatory selector.
     pub fn inspect(
         &mut self,
         bot_token: &Id128,
         persona_token: &Id128,
     ) -> Result<InspectReport, RuntimeError> {
-        let bound = self
-            .store
-            .lookup_bound_genesis(bot_token, persona_token)?
-            .map(|committed| {
-                let legacy_persona_scope =
-                    wire::persona_scope_digest(bot_token, persona_token, None);
-                let semantic_persona_scope = r7_semantic_persona_scope(bot_token, persona_token);
-                let semantic_revision = self
-                    .store
-                    .current_revision(&semantic_persona_scope)
-                    .unwrap_or(0);
-                let (persona_scope, revision) = if semantic_revision == 0 {
-                    (
-                        legacy_persona_scope,
-                        self.store
-                            .current_revision(&legacy_persona_scope)
-                            .unwrap_or(0),
-                    )
-                } else {
-                    (semantic_persona_scope, semantic_revision)
-                };
-                let last_chain = self.store.last_chain_digest(&persona_scope).unwrap_or(None);
-                let journal_count = self.store.count_journal().unwrap_or(0);
-                InspectReport {
-                    bound: true,
-                    bot_token: *bot_token,
-                    persona_token: *persona_token,
-                    seed_code: ae_genesis::format_seed_code(&committed.receipt.seed_code_digest),
-                    seed_code_short: ae_genesis::format_short_seed_code(
-                        &committed.receipt.seed_code_digest,
-                    ),
-                    incarnation_id: ae_genesis::format_incarnation_id(
-                        &committed.receipt.incarnation_id,
-                    ),
-                    revision,
-                    initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
-                    last_chain_digest: last_chain,
-                    journal_count,
-                    observatory_genesis_unavailable: false,
-                }
-            })
-            .unwrap_or(InspectReport {
+        let Some(committed) = self.store.lookup_bound_genesis(bot_token, persona_token)? else {
+            return Ok(InspectReport {
                 bound: false,
                 bot_token: *bot_token,
                 persona_token: *persona_token,
@@ -1068,29 +1055,36 @@ impl AstrRuntime {
                 journal_count: 0,
                 observatory_genesis_unavailable: true,
             });
-        Ok(bound)
+        };
+        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+        let legacy_rows = self.store.read_journal(&legacy_persona_scope)?;
+        let journal_count =
+            u64::try_from(legacy_rows.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
+        Ok(InspectReport {
+            bound: true,
+            bot_token: *bot_token,
+            persona_token: *persona_token,
+            seed_code: ae_genesis::format_seed_code(&committed.receipt.seed_code_digest),
+            seed_code_short: ae_genesis::format_short_seed_code(
+                &committed.receipt.seed_code_digest,
+            ),
+            incarnation_id: ae_genesis::format_incarnation_id(&committed.receipt.incarnation_id),
+            revision: self.store.current_revision(&legacy_persona_scope)?,
+            initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
+            last_chain_digest: self.store.last_chain_digest(&legacy_persona_scope)?,
+            journal_count,
+            observatory_genesis_unavailable: false,
+        })
     }
 
-    /// Verify the semantic authority chain when it exists; otherwise verify
-    /// the legacy G0 chain for compatibility before the first R7 transition.
-    pub fn verify_replay(
-        &mut self,
-        bot_token: &Id128,
-        persona_token: &Id128,
+    fn verify_durable_history_v1(
+        &self,
+        formula_digest: Digest,
+        initial_snapshot_digest: Digest,
+        persona_scope: Digest,
     ) -> Result<ReplayReport, RuntimeError> {
-        let committed = self
-            .store
-            .lookup_bound_genesis(bot_token, persona_token)?
-            .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-        let semantic_persona_scope = r7_semantic_persona_scope(bot_token, persona_token);
-        let persona_scope = if self.store.current_revision(&semantic_persona_scope)? == 0 {
-            legacy_persona_scope
-        } else {
-            semantic_persona_scope
-        };
         let rows = self.store.read_journal(&persona_scope)?;
-        let report = ae_continuum::verify_replay(committed.receipt.initial_snapshot_digest, &rows);
+        let report = ae_continuum::verify_replay(initial_snapshot_digest, &rows);
         if !report.ok || report.final_revision != self.store.current_revision(&persona_scope)? {
             return Err(RuntimeError::InvalidNeuralState);
         }
@@ -1098,7 +1092,7 @@ impl AstrRuntime {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.formula_digest != committed.receipt.formula_digest {
+            if receipt.formula_digest != formula_digest || receipt.scope_digest != persona_scope {
                 return Err(RuntimeError::InvalidNeuralState);
             }
             let snapshot = self.store.read_snapshot(&persona_scope, row.revision)?;
@@ -1109,13 +1103,55 @@ impl AstrRuntime {
                 }
                 let _ = decode_hot_state_v1(
                     &snapshot.state_bytes,
-                    &committed.receipt.formula_digest,
+                    &formula_digest,
                     &receipt.state_after,
                     &receipt.graph_after,
                 )?;
             }
         }
         Ok(report)
+    }
+
+    /// Verify only the public legacy G0 chain.
+    pub fn verify_replay(
+        &mut self,
+        bot_token: &Id128,
+        persona_token: &Id128,
+    ) -> Result<ReplayReport, RuntimeError> {
+        let committed = self
+            .store
+            .lookup_bound_genesis(bot_token, persona_token)?
+            .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+        self.verify_durable_history_v1(
+            committed.receipt.formula_digest,
+            committed.receipt.initial_snapshot_digest,
+            legacy_persona_scope,
+        )
+    }
+
+    /// Internal integrity audit for both independent durable histories. It
+    /// returns neither a lane selector nor any projection material.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn audit_durable_histories_v1(
+        &mut self,
+        bot_token: &Id128,
+        persona_token: &Id128,
+    ) -> Result<(), RuntimeError> {
+        let committed = self
+            .store
+            .lookup_bound_genesis(bot_token, persona_token)?
+            .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+        let semantic_persona_scope = r7_semantic_persona_scope(bot_token, persona_token);
+        for persona_scope in [legacy_persona_scope, semantic_persona_scope] {
+            self.verify_durable_history_v1(
+                committed.receipt.formula_digest,
+                committed.receipt.initial_snapshot_digest,
+                persona_scope,
+            )?;
+        }
+        Ok(())
     }
 
     /// Drain the writer: drop the hot cache, checkpoint WAL and close the
@@ -1166,6 +1202,16 @@ mod tests {
         PersonalityVector, SemanticEstimate, SocialPriors, UserStimulus,
     };
     use ae_fixed::Fixed;
+
+    #[test]
+    fn private_r7_errors_collapse_to_one_non_payload_root_error() {
+        let error: RuntimeError = r7::RuntimeError::PrivateProjectionWireBindingMismatch {
+            field: "PRIVATE_BINDING_FIELD_SENTINEL",
+        }
+        .into();
+        assert!(matches!(error, RuntimeError::PrivateProjectionUnavailable));
+        assert_eq!(error.to_string(), "private projection unavailable");
+    }
 
     fn request(seed: u8) -> PersonaGenesisRequest {
         let scope = PersonaScopeRef {
@@ -1483,4 +1529,53 @@ mod tests {
         assert!(matches!(runtime.store.count_leases(), Ok(1)));
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+// Former external R7/scaffold consumers are compiled here so private runtime
+// coverage remains active without preserving a public alternate authority.
+#[cfg(test)]
+include!("../tests/user_stimulus_state_transition.rs");
+#[cfg(test)]
+include!("../tests/durable_semantic_authority.rs");
+#[cfg(test)]
+include!("../tests/astrbot_v4273_tool_private_boundary.rs");
+#[cfg(test)]
+include!("../tests/lark_public_effect_boundary.rs");
+#[cfg(test)]
+include!("../../ae-organism-runtime/tests/support/private_projection_runtime.rs");
+#[cfg(test)]
+include!("../../ae-organism-runtime/tests/committed_semantic_projection_path.rs");
+#[cfg(test)]
+include!("../../ae-organism-runtime/tests/private_projection_payload_producer.rs");
+
+#[cfg(test)]
+mod internal_user_stimulus_state_transition_tests {
+    user_stimulus_state_transition_test_contents!();
+}
+
+#[cfg(test)]
+mod internal_durable_semantic_authority_tests {
+    durable_semantic_authority_test_contents!();
+}
+
+#[cfg(test)]
+mod internal_astrbot_v4273_tool_private_boundary_tests {
+    astrbot_v4273_tool_private_boundary_test_contents!();
+}
+
+#[cfg(test)]
+mod internal_lark_public_effect_boundary_tests {
+    lark_public_effect_boundary_test_contents!();
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod internal_committed_semantic_projection_path_tests {
+    committed_semantic_projection_path_test_contents!();
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod internal_private_projection_payload_producer_tests {
+    private_projection_payload_producer_test_contents!();
 }

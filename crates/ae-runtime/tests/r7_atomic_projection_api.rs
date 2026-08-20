@@ -1,19 +1,10 @@
-//! Desired external R7 surface: typed input only. This is intentionally added
-//! before the implementation so the rejected callback/producer surface cannot
-//! silently satisfy the acceptance test.
-
-use ae_contracts::r7::CanonicalEvent;
-use ae_runtime::r7::{AstrRuntime, R7PreOutputProjectionInputV1};
-
-fn accepts_only_typed_input(
-    runtime: &mut AstrRuntime,
-    event: &CanonicalEvent,
-    input: &R7PreOutputProjectionInputV1,
-) {
-    let _ = runtime.apply_user_stimulus_with_private_projection_wire_v1(event, input);
-}
+//! External regression for the retired public R7 authority path. The crate
+//! doctest proves imports fail; this source assertion prevents an accidental
+//! `pub mod r7` restoration from being hidden by internal test compilation.
 
 #[test]
-fn desired_public_surface_compiles() {
-    let _ = accepts_only_typed_input;
+fn runtime_r7_namespace_remains_private() {
+    let root = include_str!("../src/lib.rs");
+    assert!(root.contains("mod r7;"));
+    assert!(!root.contains("pub mod r7;"));
 }
