@@ -833,6 +833,19 @@ impl AstrRuntime {
             {
                 return Err(RuntimeError::InvalidNeuralState);
             }
+            let snapshot = self
+                .store
+                .read_snapshot(&persona_scope, row.revision)?
+                .ok_or(RuntimeError::InvalidNeuralState)?;
+            if snapshot.state_digest != receipt.state_after {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+            let _ = decode_hot_state_v1(
+                &snapshot.state_bytes,
+                &committed.receipt.formula_digest,
+                &receipt.state_after,
+                &receipt.graph_after,
+            )?;
         }
         let (field, graph) = decode_hot_state_v1(
             &snapshot.state_bytes,
@@ -1090,6 +1103,7 @@ impl AstrRuntime {
         formula_digest: Digest,
         initial_snapshot_digest: Digest,
         persona_scope: Digest,
+        requires_semantic_snapshots: bool,
     ) -> Result<ReplayReport, RuntimeError> {
         let rows = self.store.read_journal(&persona_scope)?;
         let report = ae_continuum::verify_replay(initial_snapshot_digest, &rows);
@@ -1108,7 +1122,10 @@ impl AstrRuntime {
                 return Err(RuntimeError::InvalidNeuralState);
             }
             let snapshot = self.store.read_snapshot(&persona_scope, row.revision)?;
-            if receipt.state_before != receipt.state_after || snapshot.is_some() {
+            if requires_semantic_snapshots
+                || receipt.state_before != receipt.state_after
+                || snapshot.is_some()
+            {
                 let snapshot = snapshot.ok_or(RuntimeError::InvalidNeuralState)?;
                 if snapshot.state_digest != receipt.state_after {
                     return Err(RuntimeError::InvalidNeuralState);
@@ -1139,6 +1156,7 @@ impl AstrRuntime {
             committed.receipt.formula_digest,
             committed.receipt.initial_snapshot_digest,
             legacy_persona_scope,
+            false,
         )
     }
 
@@ -1161,6 +1179,7 @@ impl AstrRuntime {
                 committed.receipt.formula_digest,
                 committed.receipt.initial_snapshot_digest,
                 persona_scope,
+                persona_scope == semantic_persona_scope,
             )?;
         }
         Ok(())

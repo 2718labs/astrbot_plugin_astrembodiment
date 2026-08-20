@@ -5,12 +5,14 @@ macro_rules! durable_semantic_authority_test_contents {
         use crate::AstrRuntime;
         use ae_attention::r7::assemble_load;
         use ae_authority::authority_projection_digest;
+        use ae_continuum::CommitEnvelope;
         use ae_contracts::r7 as r7_contracts;
         use ae_contracts::{
-            wire, AllostaticSetpoints, CanonicalEvent, CausalRef, EpistemicPriors, EvidenceVector,
-            ExpressionPhenotype, GenesisManifestProposal, GenesisReceipt, GenesisStatus,
-            PersonaGenesisRequest, PersonaScopeRef, PersonaSelectionKind, PersonaSourceRef,
-            PersonalityVector, ScopeRef, SemanticEstimate, SocialPriors, UserStimulus,
+            wire, AllostaticSetpoints, CanonicalEvent, CausalRef, CommitStatus, EpistemicPriors,
+            EvidenceVector, ExpressionPhenotype, GenesisManifestProposal, GenesisReceipt,
+            GenesisStatus, InvariantResiduals, PersonaGenesisRequest, PersonaScopeRef,
+            PersonaSelectionKind, PersonaSourceRef, PersonalityVector, ScopeRef, SemanticEstimate,
+            SocialPriors, TransitionReceipt, UserStimulus,
         };
         use ae_fixed::Fixed;
         use ae_genesis::{derive_identity, genesis_scope_key, GenesisPrior};
@@ -18,7 +20,7 @@ macro_rules! durable_semantic_authority_test_contents {
             graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
             Synapse, EDGE_CAPACITY, NEURON_SLOTS,
         };
-        use ae_store::{ClaimOutcome, GenesisCommit, Store};
+        use ae_store::{ClaimOutcome, GenesisCommit, StatefulCommit, Store};
         use std::path::PathBuf;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -571,6 +573,94 @@ macro_rules! durable_semantic_authority_test_contents {
                 &identity.development_seed_digest,
             );
             apply_stimulus_to_field(field, event)
+        }
+
+        #[test]
+        fn semantic_journal_without_same_revision_snapshot_fails_closed() {
+            let request = request(70);
+            let database = unique_database("semantic-missing-snapshot");
+            let mut runtime = AstrRuntime::open(&database).expect("open runtime");
+            runtime.ensure_genesis(&request).expect("commit genesis");
+            drop(runtime);
+
+            let mut store = Store::open(&database).expect("open store");
+            let committed = store
+                .lookup_bound_genesis(
+                    &request.source.scope.bot_token,
+                    &request.source.scope.persona_token,
+                )
+                .expect("lookup bound genesis")
+                .expect("genesis");
+            let scope = ScopeRef {
+                bot_token: request.source.scope.bot_token,
+                persona_token: request.source.scope.persona_token,
+                relation_token: None,
+                session_token: [0; 16],
+            };
+            let semantic_scope = semantic_persona_scope(&scope);
+            let legacy_scope =
+                wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+            let state_bytes = store
+                .read_snapshot(&legacy_scope, 0)
+                .expect("read genesis snapshot")
+                .expect("genesis snapshot")
+                .state_bytes;
+            let receipt_for = |event: &CanonicalEvent, base_revision| TransitionReceipt {
+                schema_version: 1,
+                formula_digest: committed.receipt.formula_digest,
+                scope_digest: semantic_scope,
+                event_digest: wire::event_digest(event),
+                authority_digest: [72; 32],
+                base_revision,
+                next_revision: base_revision + 1,
+                state_before: committed.receipt.initial_snapshot_digest,
+                state_after: committed.receipt.initial_snapshot_digest,
+                graph_after: committed.receipt.graph_digest,
+                action_contract: None,
+                active_nodes: 0,
+                active_edges: 0,
+                residuals: InvariantResiduals::default(),
+                status: CommitStatus::Committed,
+            };
+            let first_event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
+                event_id: [71; 16],
+                scope: scope.clone(),
+                elapsed_ms: 1,
+            });
+            let first_receipt = receipt_for(&first_event, 0);
+            let (_, first_row) = store
+                .commit_stateful_journal(&StatefulCommit {
+                    journal: CommitEnvelope {
+                        event_kind: "time_advance".to_owned(),
+                        event_bytes: wire::encode_event(&first_event),
+                        receipt: first_receipt,
+                        chain_seed: committed.receipt.initial_snapshot_digest,
+                        delta_bytes: Vec::new(),
+                    },
+                    state_bytes,
+                })
+                .expect("install paired semantic journal row");
+            let second_event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
+                event_id: [73; 16],
+                scope: scope.clone(),
+                elapsed_ms: 1,
+            });
+            store
+                .commit_journal(&CommitEnvelope {
+                    event_kind: "time_advance".to_owned(),
+                    event_bytes: wire::encode_event(&second_event),
+                    receipt: receipt_for(&second_event, 1),
+                    chain_seed: first_row.chain_digest,
+                    delta_bytes: Vec::new(),
+                })
+                .expect("install malformed semantic journal row");
+            drop(store);
+
+            let mut reopened = AstrRuntime::open(&database).expect("reopen runtime");
+            assert!(
+                reopened.current_revision(&scope).is_err(),
+                "semantic journal rows require a same-revision snapshot"
+            );
         }
 
         #[test]
