@@ -2,8 +2,9 @@ use ae_contracts::r7::{
     CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
 };
 use ae_epistemic_state::{
-    compile_epistemic_projection_v1, CallerProvidedEpistemicClassificationV1,
-    EpistemicEvidenceGapV1, EpistemicProjectionInputV1, EpistemicSourceBindingV1,
+    compile_epistemic_projection_v1, derive_epistemic_projection_v1,
+    CallerProvidedEpistemicClassificationV1, EpistemicEvidenceGapV1,
+    EpistemicProjectionEvidenceInputV1, EpistemicProjectionInputV1, EpistemicSourceBindingV1,
     EpistemicStateErrorV1, VerifierNeedV1, EPISTEMIC_EVIDENCE_DIMENSION_COUNT_V1,
 };
 use ae_fixed::Fixed;
@@ -105,15 +106,29 @@ fn input(turn_id: Id128, revision: u64) -> EpistemicProjectionInputV1 {
     )
 }
 
+fn evidence_input(turn_id: Id128, revision: u64) -> EpistemicProjectionEvidenceInputV1 {
+    EpistemicProjectionEvidenceInputV1::new(
+        binding(turn_id, revision),
+        CausalRef {
+            turn_id,
+            action_id: Some(id(8)),
+            delivery_id: None,
+            claim_id: Some(id(9)),
+            base_revision: revision,
+        },
+        estimate(Fixed::from_raw(500_000)),
+    )
+}
+
 #[test]
 fn compiles_existing_typed_evidence_into_a_bound_projection() {
-    let projection = compile_epistemic_projection_v1(&input(id(10), 11))
+    let projection = derive_epistemic_projection_v1(&evidence_input(id(10), 11))
         .expect("projection from typed evidence");
 
     assert_eq!(projection.turn_id(), &id(10));
     assert_eq!(projection.revision(), 11);
     assert_eq!(projection.claim_under_challenge(), Some(&id(9)));
-    assert!(projection.classification_is_caller_provided());
+    assert!(!projection.classification_is_caller_provided());
     assert_ne!(projection.identity_digest(), &[0; 32]);
     assert_ne!(projection.source_estimate_digest(), &[0; 32]);
     assert_ne!(projection.projection_digest(), &[0; 32]);
@@ -122,7 +137,7 @@ fn compiles_existing_typed_evidence_into_a_bound_projection() {
 
 #[test]
 fn rejects_turn_and_revision_binding_mismatches() {
-    let turn_mismatch = EpistemicProjectionInputV1::new(
+    let turn_mismatch = EpistemicProjectionEvidenceInputV1::new(
         binding(id(10), 11),
         CausalRef {
             turn_id: id(12),
@@ -132,14 +147,13 @@ fn rejects_turn_and_revision_binding_mismatches() {
             base_revision: 11,
         },
         estimate(Fixed::ZERO),
-        classification(),
     );
     assert_eq!(
-        compile_epistemic_projection_v1(&turn_mismatch),
+        derive_epistemic_projection_v1(&turn_mismatch),
         Err(EpistemicStateErrorV1::TurnBindingMismatch)
     );
 
-    let revision_mismatch = EpistemicProjectionInputV1::new(
+    let revision_mismatch = EpistemicProjectionEvidenceInputV1::new(
         binding(id(10), 11),
         CausalRef {
             turn_id: id(10),
@@ -149,10 +163,9 @@ fn rejects_turn_and_revision_binding_mismatches() {
             base_revision: 12,
         },
         estimate(Fixed::ZERO),
-        classification(),
     );
     assert_eq!(
-        compile_epistemic_projection_v1(&revision_mismatch),
+        derive_epistemic_projection_v1(&revision_mismatch),
         Err(EpistemicStateErrorV1::RevisionBindingMismatch)
     );
 }
@@ -207,8 +220,8 @@ fn rejects_noncanonical_or_unbounded_caller_classification() {
 
 #[test]
 fn projection_digest_is_deterministic_and_binds_the_typed_estimate() {
-    let first = compile_epistemic_projection_v1(&input(id(10), 11)).expect("first");
-    let same = compile_epistemic_projection_v1(&input(id(10), 11)).expect("same");
+    let first = derive_epistemic_projection_v1(&evidence_input(id(10), 11)).expect("first");
+    let same = derive_epistemic_projection_v1(&evidence_input(id(10), 11)).expect("same");
     assert_eq!(first.projection_digest(), same.projection_digest());
     assert_eq!(
         first.source_estimate_digest(),
@@ -217,10 +230,44 @@ fn projection_digest_is_deterministic_and_binds_the_typed_estimate() {
 
     let mut changed_input = input(id(10), 11);
     changed_input.estimate = estimate(Fixed::from_raw(600_000));
-    let changed = compile_epistemic_projection_v1(&changed_input).expect("changed");
+    let changed = derive_epistemic_projection_v1(&EpistemicProjectionEvidenceInputV1::new(
+        changed_input.binding,
+        changed_input.causal,
+        changed_input.estimate,
+    ))
+    .expect("changed");
     assert_ne!(
         first.source_estimate_digest(),
         changed.source_estimate_digest()
     );
     assert_ne!(first.projection_digest(), changed.projection_digest());
+}
+
+#[test]
+fn red_safe_compiler_derives_classification_without_caller_fields() {
+    let projection = derive_epistemic_projection_v1(&EpistemicProjectionEvidenceInputV1::new(
+        binding(id(10), 11),
+        CausalRef {
+            turn_id: id(10),
+            action_id: None,
+            delivery_id: None,
+            claim_id: None,
+            base_revision: 11,
+        },
+        estimate(Fixed::from_raw(500_000)),
+    ))
+    .expect("typed evidence derives the projection");
+
+    assert!(!projection.classification_is_caller_provided());
+}
+
+#[test]
+fn red_caller_selected_classification_is_rejected_without_state_mutation() {
+    let before_revision = 11;
+    let result = compile_epistemic_projection_v1(&input(id(10), before_revision));
+    assert_eq!(
+        result,
+        Err(EpistemicStateErrorV1::CallerSelectedClassificationRejected)
+    );
+    assert_eq!(before_revision, 11);
 }

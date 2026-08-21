@@ -59,6 +59,8 @@ impl VerifierNeedV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum EpistemicStateErrorV1 {
+    #[error("caller-selected epistemic classification is not an authority input")]
+    CallerSelectedClassificationRejected,
     #[error("zero identifier is not valid for {field}")]
     ZeroIdentifier { field: &'static str },
     #[error("zero digest is not valid for {field}")]
@@ -190,6 +192,29 @@ pub struct EpistemicProjectionInputV1 {
     pub classification: CallerProvidedEpistemicClassificationV1,
 }
 
+/// Typed evidence and its committed binding. Classification is derived by this crate;
+/// no caller-selected verdict, action, text, provider, or control field is accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EpistemicProjectionEvidenceInputV1 {
+    pub binding: EpistemicSourceBindingV1,
+    pub causal: CausalRef,
+    pub estimate: SemanticEstimate,
+}
+
+impl EpistemicProjectionEvidenceInputV1 {
+    pub fn new(
+        binding: EpistemicSourceBindingV1,
+        causal: CausalRef,
+        estimate: SemanticEstimate,
+    ) -> Self {
+        Self {
+            binding,
+            causal,
+            estimate,
+        }
+    }
+}
+
 impl EpistemicProjectionInputV1 {
     pub fn new(
         binding: EpistemicSourceBindingV1,
@@ -216,6 +241,7 @@ pub struct EpistemicProjectionV1 {
     claim_under_challenge: Option<Id128>,
     source_estimate_digest: Digest,
     classification: CallerProvidedEpistemicClassificationV1,
+    caller_provided: bool,
     projection_digest: Digest,
 }
 
@@ -245,7 +271,7 @@ impl EpistemicProjectionV1 {
     }
 
     pub fn classification_is_caller_provided(&self) -> bool {
-        true
+        self.caller_provided
     }
 
     pub fn projection_digest(&self) -> &Digest {
@@ -256,56 +282,77 @@ impl EpistemicProjectionV1 {
 pub fn compile_epistemic_projection_v1(
     input: &EpistemicProjectionInputV1,
 ) -> Result<EpistemicProjectionV1, EpistemicStateErrorV1> {
-    if input.causal.turn_id != input.binding.turn_id {
+    let _ = input;
+    Err(EpistemicStateErrorV1::CallerSelectedClassificationRejected)
+}
+
+pub fn derive_epistemic_projection_v1(
+    input: &EpistemicProjectionEvidenceInputV1,
+) -> Result<EpistemicProjectionV1, EpistemicStateErrorV1> {
+    let classification = derive_classification(&input.estimate);
+    compile_projection(
+        input.binding.clone(),
+        input.causal.clone(),
+        input.estimate.clone(),
+        classification,
+        false,
+    )
+}
+
+fn compile_projection(
+    binding: EpistemicSourceBindingV1,
+    causal: CausalRef,
+    estimate: SemanticEstimate,
+    classification: CallerProvidedEpistemicClassificationV1,
+    caller_provided: bool,
+) -> Result<EpistemicProjectionV1, EpistemicStateErrorV1> {
+    if causal.turn_id != binding.turn_id {
         return Err(EpistemicStateErrorV1::TurnBindingMismatch);
     }
-    if input.causal.base_revision != input.binding.revision {
+    if causal.base_revision != binding.revision {
         return Err(EpistemicStateErrorV1::RevisionBindingMismatch);
     }
-    require_optional_id(input.causal.action_id.as_ref(), "causal.action_id")?;
-    require_optional_id(input.causal.delivery_id.as_ref(), "causal.delivery_id")?;
-    require_optional_id(input.causal.claim_id.as_ref(), "causal.claim_id")?;
-    if input.estimate.schema_version == 0 {
+    require_optional_id(causal.action_id.as_ref(), "causal.action_id")?;
+    require_optional_id(causal.delivery_id.as_ref(), "causal.delivery_id")?;
+    require_optional_id(causal.claim_id.as_ref(), "causal.claim_id")?;
+    if estimate.schema_version == 0 {
         return Err(EpistemicStateErrorV1::InvalidEstimateSchemaVersion);
     }
-    require_digest(
-        &input.estimate.estimator_digest,
-        "estimate.estimator_digest",
-    )?;
+    require_digest(&estimate.estimator_digest, "estimate.estimator_digest")?;
     require_confidence_range(
-        input.estimate.estimator_confidence,
+        estimate.estimator_confidence,
         "estimate.estimator_confidence",
     )?;
 
-    let evidence_digest = canonical_evidence_vector_digest(&input.estimate.dimensions);
-    let schema_version = input.estimate.schema_version.to_be_bytes();
-    let estimator_confidence = input.estimate.estimator_confidence.raw().to_be_bytes();
+    let evidence_digest = canonical_evidence_vector_digest(&estimate.dimensions);
+    let schema_version = estimate.schema_version.to_be_bytes();
+    let estimator_confidence = estimate.estimator_confidence.raw().to_be_bytes();
     let source_estimate_digest = wire::domain_hash(
         EPISTEMIC_SOURCE_ESTIMATE_DOMAIN_V1,
         &[
             &schema_version,
             &evidence_digest,
             &estimator_confidence,
-            &input.estimate.estimator_digest,
+            &estimate.estimator_digest,
         ],
     );
-    let classification_digest = classification_digest(&input.classification);
-    let revision = input.binding.revision.to_be_bytes();
-    let causal_action = input.causal.action_id.unwrap_or([0; 16]);
-    let causal_delivery = input.causal.delivery_id.unwrap_or([0; 16]);
-    let causal_claim = input.causal.claim_id.unwrap_or([0; 16]);
-    let relation = input.binding.scope.relation_token.unwrap_or([0; 16]);
+    let classification_digest = classification_digest(&classification);
+    let revision = binding.revision.to_be_bytes();
+    let causal_action = causal.action_id.unwrap_or([0; 16]);
+    let causal_delivery = causal.delivery_id.unwrap_or([0; 16]);
+    let causal_claim = causal.claim_id.unwrap_or([0; 16]);
+    let relation = binding.scope.relation_token.unwrap_or([0; 16]);
     let projection_digest = wire::domain_hash(
         EPISTEMIC_PROJECTION_DOMAIN_V1,
         &[
-            &input.binding.scope.bot_token,
-            &input.binding.scope.persona_token,
+            &binding.scope.bot_token,
+            &binding.scope.persona_token,
             &relation,
-            &input.binding.scope.session_token,
-            &input.binding.turn_id,
-            &input.binding.state_digest,
+            &binding.scope.session_token,
+            &binding.turn_id,
+            &binding.state_digest,
             &revision,
-            &input.binding.identity_digest,
+            &binding.identity_digest,
             &causal_action,
             &causal_delivery,
             &causal_claim,
@@ -315,15 +362,58 @@ pub fn compile_epistemic_projection_v1(
     );
 
     Ok(EpistemicProjectionV1 {
-        turn_id: input.binding.turn_id,
-        state_digest: input.binding.state_digest,
-        revision: input.binding.revision,
-        identity_digest: input.binding.identity_digest,
-        claim_under_challenge: input.causal.claim_id,
+        turn_id: binding.turn_id,
+        state_digest: binding.state_digest,
+        revision: binding.revision,
+        identity_digest: binding.identity_digest,
+        claim_under_challenge: causal.claim_id,
         source_estimate_digest,
-        classification: input.classification.clone(),
+        classification,
+        caller_provided,
         projection_digest,
     })
+}
+
+fn derive_classification(estimate: &SemanticEstimate) -> CallerProvidedEpistemicClassificationV1 {
+    let mut gaps = Vec::new();
+    if estimate.estimator_confidence < Fixed::from_raw(500_000) {
+        gaps.push(EpistemicEvidenceGapV1::InsufficientEvidence);
+    }
+    if estimate.dimensions.epistemic_conflict > Fixed::from_raw(500_000) {
+        gaps.push(EpistemicEvidenceGapV1::ConflictingEvidence);
+    }
+    if estimate.estimator_confidence < Fixed::from_raw(800_000) {
+        gaps.push(EpistemicEvidenceGapV1::VerifierPending);
+    }
+    let verdict = if estimate.dimensions.self_responsibility
+        >= estimate.dimensions.other_responsibility
+        && estimate.dimensions.positive >= estimate.dimensions.harm
+    {
+        VerdictKind::ConfirmedSelfError
+    } else if estimate.dimensions.epistemic_conflict > Fixed::from_raw(500_000) {
+        VerdictKind::SharedAmbiguity
+    } else {
+        VerdictKind::Unresolved
+    };
+    let confidence_ceiling = if estimate.estimator_confidence > Fixed::from_raw(700_000) {
+        Fixed::from_raw(700_000)
+    } else {
+        estimate.estimator_confidence
+    };
+    CallerProvidedEpistemicClassificationV1::new(
+        verdict,
+        gaps,
+        if estimate.estimator_confidence < Fixed::from_raw(800_000) {
+            VerifierNeedV1::Required
+        } else {
+            VerifierNeedV1::NotRequired
+        },
+        confidence_ceiling,
+        matches!(verdict, VerdictKind::ConfirmedSelfError),
+        matches!(verdict, VerdictKind::ConfirmedSelfError)
+            && estimate.estimator_confidence >= Fixed::from_raw(500_000),
+    )
+    .expect("derived classification is canonical and bounded")
 }
 
 fn canonical_evidence_vector_digest(evidence: &EvidenceVector) -> Digest {
