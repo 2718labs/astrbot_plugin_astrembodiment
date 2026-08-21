@@ -16,6 +16,13 @@ from importlib import util as importlib_util
 from pathlib import Path
 from typing import Any
 
+from .contracts import ScopeTokens
+from .semantic_estimator import (
+    SemanticProposalError,
+    proposal_to_json,
+    validate_perception_proposal,
+)
+
 _STORE_FILENAME = "astrembodiment.sqlite3"
 
 
@@ -68,6 +75,26 @@ class StaleCausalBase(NativeCoreError):
     pass
 
 
+class InvalidPerceptionProposal(NativeCoreError):
+    pass
+
+
+class InvalidPerceptionScope(NativeCoreError):
+    pass
+
+
+class SemanticIdentityConflict(NativeCoreError):
+    pass
+
+
+class SemanticRevisionOverflow(NativeCoreError):
+    pass
+
+
+class SemanticStateUnchanged(NativeCoreError):
+    pass
+
+
 _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "GENESIS_UNAVAILABLE": GenesisUnavailable,
     "RETRY_WAIT": RetryWait,
@@ -78,7 +105,76 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "GENESIS_REQUIRED": GenesisRequired,
     "GENESIS_MANIFEST_MISMATCH": GenesisManifestMismatch,
     "STALE_CAUSAL_BASE": StaleCausalBase,
+    "INVALID_PERCEPTION_PROPOSAL": InvalidPerceptionProposal,
+    "INVALID_PERCEPTION_SCOPE": InvalidPerceptionScope,
+    "SEMANTIC_IDENTITY_CONFLICT": SemanticIdentityConflict,
+    "SEMANTIC_REVISION_OVERFLOW": SemanticRevisionOverflow,
+    "SEMANTIC_STATE_UNCHANGED": SemanticStateUnchanged,
 }
+
+_SEMANTIC_CURSOR_SCHEMA = "astrembodiment.semantic-revision.v1"
+_SEMANTIC_RESULT_SCHEMA = "astrembodiment.semantic-perception-closure.v1"
+_SEMANTIC_RESULT_FIELDS = frozenset(
+    {"schema", "receipt", "revision", "deduplicated"}
+)
+SEMANTIC_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "formula_digest",
+        "scope_digest",
+        "event_digest",
+        "authority_digest",
+        "base_revision",
+        "next_revision",
+        "state_before",
+        "state_after",
+        "graph_after",
+        "active_nodes",
+        "active_edges",
+        "residuals",
+        "status",
+    }
+)
+_RESIDUAL_FIELDS = frozenset(
+    {"authority", "continuity", "energy", "renormalization", "capacity"}
+)
+_SEMANTIC_ERROR_CODES = frozenset(
+    {
+        "CLOSED",
+        "CLOSED_SCHEMA",
+        "ENCODING",
+        "GENESIS_REQUIRED",
+        "INVALID_PERCEPTION_PROPOSAL",
+        "INVALID_PERCEPTION_SCOPE",
+        "INVALID_NEURAL_STATE",
+        "LEASE_CONFLICT",
+        "LEASE_IN_FLIGHT",
+        "NATIVE_SYMBOL_UNAVAILABLE",
+        "NATIVE_UNAVAILABLE",
+        "SEMANTIC_IDENTITY_CONFLICT",
+        "SEMANTIC_REVISION_OVERFLOW",
+        "SEMANTIC_STATE_UNCHANGED",
+        "STALE_REVISION",
+        "STALE_CAUSAL_BASE",
+        "STORAGE",
+    }
+)
+_FORBIDDEN_RECEIPT_KEYS = frozenset(
+    {
+        "action",
+        "action_contract",
+        "context",
+        "history",
+        "input",
+        "provider",
+        "raw_text",
+        "text",
+        "tool",
+        "tools",
+        "xml",
+    }
+)
+_RECEIPT_FIELDS = SEMANTIC_RECEIPT_FIELDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +200,193 @@ def _parse_payload(result: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise NativeCoreUnavailable("native core returned invalid payload")
     return payload
+
+
+def _degraded(code: str) -> dict[str, str]:
+    """Return the only semantic failure shape exposed to the plugin."""
+
+    return {"status": "DEGRADED", "code": code}
+
+
+def _semantic_error_code(error: BaseException) -> str:
+    """Extract only a fixed code; never expose native detail text."""
+
+    code = getattr(error, "code", None)
+    if not isinstance(code, str):
+        message = str(error)
+        code = message.partition("::")[0]
+    if code in _SEMANTIC_ERROR_CODES:
+        return code
+    if isinstance(error, NativeCoreUnavailable):
+        return "NATIVE_UNAVAILABLE"
+    return "NATIVE_ERROR"
+
+
+def _scope_payload(scope: ScopeTokens | str | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(scope, ScopeTokens):
+        payload = scope.scope_json()
+    elif isinstance(scope, str):
+        try:
+            payload = json.loads(
+                scope, object_pairs_hook=_scope_pairs_without_duplicates
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("scope") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("scope")
+    elif isinstance(scope, dict):
+        payload = dict(scope)
+    else:
+        raise ValueError("scope")
+    if set(payload) != {
+        "bot_token",
+        "persona_token",
+        "relation_token",
+        "session_token",
+    }:
+        raise ValueError("scope")
+    for name in ("bot_token", "persona_token", "session_token"):
+        value = payload.get(name)
+        if (
+            not isinstance(value, str)
+            or len(value) != 32
+            or not _looks_hex(value)
+            or not any(bytes.fromhex(value))
+        ):
+            raise ValueError("scope")
+    relation = payload.get("relation_token")
+    if relation is not None and (
+        not isinstance(relation, str)
+        or len(relation) != 32
+        or not _looks_hex(relation)
+        or not any(bytes.fromhex(relation))
+    ):
+        raise ValueError("scope")
+    return payload
+
+
+def _scope_pairs_without_duplicates(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("scope")
+        result[key] = value
+    return result
+
+
+def _looks_hex(value: str) -> bool:
+    try:
+        decoded = bytes.fromhex(value)
+    except (TypeError, ValueError):
+        return False
+    return len(decoded) == len(value) // 2
+
+
+def _closed_json(value: dict[str, Any]) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _native_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        payload = json.loads(value)
+    else:
+        payload = value
+    if not isinstance(payload, dict):
+        raise ValueError("native payload")
+    return payload
+
+
+def _validate_cursor_payload(value: Any) -> dict[str, Any]:
+    payload = _native_json(value)
+    if set(payload) != {"schema", "revision"}:
+        raise ValueError("cursor payload")
+    if payload.get("schema") != _SEMANTIC_CURSOR_SCHEMA:
+        raise ValueError("cursor schema")
+    revision = payload.get("revision")
+    if type(revision) is not int or revision < 0:
+        raise ValueError("cursor revision")
+    return {"schema": _SEMANTIC_CURSOR_SCHEMA, "revision": revision}
+
+
+def _validate_semantic_result(value: Any) -> dict[str, Any]:
+    payload = _native_json(value)
+    if set(payload) != _SEMANTIC_RESULT_FIELDS:
+        raise ValueError("semantic payload")
+    if payload.get("schema") != _SEMANTIC_RESULT_SCHEMA:
+        raise ValueError("semantic schema")
+    revision = payload.get("revision")
+    if type(revision) is not int or revision < 0:
+        raise ValueError("semantic revision")
+    deduplicated = payload.get("deduplicated")
+    if type(deduplicated) is not bool:
+        raise ValueError("semantic deduplication")
+    receipt = payload.get("receipt")
+    if not isinstance(receipt, dict):
+        raise ValueError("semantic receipt")
+    if set(receipt) - _RECEIPT_FIELDS:
+        raise ValueError("semantic receipt fields")
+    if _FORBIDDEN_RECEIPT_KEYS.intersection(receipt):
+        raise ValueError("semantic receipt fields")
+    integer_fields = {
+        "schema_version",
+        "base_revision",
+        "next_revision",
+        "active_nodes",
+        "active_edges",
+    }
+    for field in integer_fields.intersection(receipt):
+        if type(receipt[field]) is not int or receipt[field] < 0:
+            raise ValueError("semantic receipt integer")
+    digest_fields = {
+        "formula_digest",
+        "scope_digest",
+        "event_digest",
+        "authority_digest",
+        "state_before",
+        "state_after",
+        "graph_after",
+    }
+    for field in digest_fields.intersection(receipt):
+        digest = receipt[field]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or not _looks_hex(digest)
+        ):
+            raise ValueError("semantic receipt digest")
+    if "status" in receipt and receipt["status"] not in {
+        "committed",
+        "rejected",
+        "superseded",
+        "stale",
+    }:
+        raise ValueError("semantic receipt status")
+    if "residuals" in receipt:
+        residuals = receipt["residuals"]
+        if not isinstance(residuals, dict) or set(residuals) != _RESIDUAL_FIELDS:
+            raise ValueError("semantic receipt residuals")
+        if any(
+            type(residuals[name]) is not int
+            or not -(1 << 63) <= residuals[name] <= (1 << 63) - 1
+            for name in _RESIDUAL_FIELDS
+        ):
+            raise ValueError("semantic receipt residuals")
+    # Rebuild the outer object so an extension cannot smuggle extra fields or
+    # a mutable reference into coordinator state.
+    return {
+        "schema": _SEMANTIC_RESULT_SCHEMA,
+        "receipt": json.loads(_closed_json(receipt)),
+        "revision": revision,
+        "deduplicated": deduplicated,
+    }
 
 
 def _bundled_native_package_dir() -> Path:
@@ -265,6 +548,90 @@ class NativeBridge:
         except Exception as exc:
             raise _classify(exc) from exc
         return _parse_payload(result)
+
+    def semantic_revision_v1(
+        self, scope_json: ScopeTokens | str | dict[str, Any]
+    ) -> dict[str, Any]:
+        """Read the content-free SPC1 semantic cursor.
+
+        Missing symbols, malformed native output, and native exceptions are
+        represented by a fixed degraded object.  The ordinary G0 bridge
+        methods above retain their historical exception semantics.
+        """
+
+        try:
+            scope = _scope_payload(scope_json)
+        except Exception:
+            return _degraded("INVALID_PERCEPTION_SCOPE")
+        try:
+            native = self._require()
+        except Exception as exc:
+            return _degraded(_semantic_error_code(exc))
+        method = getattr(native, "semantic_revision_v1", None)
+        if not callable(method):
+            return _degraded("NATIVE_SYMBOL_UNAVAILABLE")
+        try:
+            result = method(_closed_json(scope))
+            return _validate_cursor_payload(result)
+        except Exception as exc:
+            if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
+                return _degraded("NATIVE_MALFORMED")
+            return _degraded(_semantic_error_code(exc))
+
+    def apply_perception_proposal_v1(
+        self,
+        scope_json: ScopeTokens | str | dict[str, Any],
+        proposal_json: str | dict[str, Any],
+    ) -> dict[str, Any]:
+        """Submit one closed SPC1 proposal to the native semantic lane."""
+
+        try:
+            scope = _scope_payload(scope_json)
+        except Exception:
+            return _degraded("INVALID_PERCEPTION_SCOPE")
+        try:
+            native = self._require()
+        except Exception as exc:
+            return _degraded(_semantic_error_code(exc))
+        method = getattr(native, "apply_perception_proposal_v1", None)
+        if not callable(method):
+            return _degraded("NATIVE_SYMBOL_UNAVAILABLE")
+        try:
+            proposal = validate_perception_proposal(proposal_json)
+            encoded_proposal = proposal_to_json(proposal)
+        except SemanticProposalError:
+            return _degraded("INVALID_PERCEPTION_PROPOSAL")
+        except Exception:
+            return _degraded("INVALID_PERCEPTION_PROPOSAL")
+        try:
+            result = method(_closed_json(scope), encoded_proposal)
+            return _validate_semantic_result(result)
+        except Exception as exc:
+            if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
+                return _degraded("NATIVE_MALFORMED")
+            return _degraded(_semantic_error_code(exc))
+
+    def commit_perception_proposal_v1(
+        self,
+        scope_json: ScopeTokens | str | dict[str, Any],
+        proposal: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read the cursor then submit a proposal, preserving native order.
+
+        This helper intentionally does not rewrite ``base_revision``.  The
+        coordinator freezes that field after the cursor read; a mismatch is a
+        fixed degraded stale-base outcome rather than an implicit rebind.
+        """
+
+        cursor = self.semantic_revision_v1(scope_json)
+        if cursor.get("status") == "DEGRADED":
+            return cursor
+        try:
+            if proposal.get("base_revision") != cursor.get("revision"):
+                return _degraded("STALE_REVISION")
+        except AttributeError:
+            return _degraded("INVALID_PERCEPTION_PROPOSAL")
+        return self.apply_perception_proposal_v1(scope_json, proposal)
 
     @property
     def loaded(self) -> bool:

@@ -11,19 +11,32 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
+import json
 import secrets
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 from .bridge import (
     GenesisUnavailable,
     NativeBridge,
     RetryWait,
+    SEMANTIC_RECEIPT_FIELDS,
 )
 from .contracts import (
+    FrozenTurn,
     ScopeTokens,
     build_delivery_outcome_json,
     build_user_stimulus_json,
+)
+from .semantic_estimator import (
+    SemanticEstimate,
+    SemanticEstimateError,
+    build_perception_proposal,
+    make_request_nonce_digest,
+    parse_estimator_output,
+    proposal_to_json,
 )
 from .persona_genesis import (
     PersonaCompilerMalformed,
@@ -35,6 +48,11 @@ from .persona_genesis import (
 FORMULA_DIGEST = "00" * 32  # placeholder; G2 fills the real FormulaProfile digest
 
 Compiler = Callable[[PersonaSourceSnapshot], Awaitable[dict[str, Any]]]
+PreflightEstimator = Callable[[str], Any]
+
+SEMANTIC_SUCCESS = "SUCCESS"
+SEMANTIC_NOOP = "NOOP"
+SEMANTIC_DEGRADED = "DEGRADED"
 
 _RETRY_WAIT_ATTEMPTS = 40
 _RETRY_WAIT_DELAY_S = 0.05
@@ -48,6 +66,11 @@ class GenesisCoordinator:
         self._inflight: dict[str, asyncio.Future] = {}
         self._committed: dict[str, dict[str, Any]] = {}
         self._applied: dict[str, dict[str, Any]] = {}
+        # SPC1 is a separate request-local lane.  These maps contain only
+        # opaque scope/turn keys and closed outcomes; raw request text is
+        # never retained.
+        self._preflight_inflight: dict[str, asyncio.Future] = {}
+        self._preflight_results: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _scope_key(scope: ScopeTokens, source_digest: str) -> str:
@@ -198,6 +221,243 @@ class GenesisCoordinator:
         )
         return await self._apply_once(scope, event_id, event)
 
+    @staticmethod
+    def _preflight_key(scope: ScopeTokens, turn: FrozenTurn) -> str:
+        """Build a cache key from opaque facts only (never request text)."""
+
+        relation = scope.relation_token or "-"
+        return ":".join(
+            (
+                scope.bot_token,
+                scope.persona_token,
+                scope.session_token,
+                relation,
+                turn.event_id,
+                turn.turn_id,
+            )
+        )
+
+    @staticmethod
+    def _preflight_failure(code: str) -> dict[str, str]:
+        return {"status": SEMANTIC_DEGRADED, "code": code}
+
+    @staticmethod
+    def _preflight_noop(code: str) -> dict[str, str]:
+        return {"status": SEMANTIC_NOOP, "code": code}
+
+    @staticmethod
+    def _valid_frozen_turn(scope: ScopeTokens, turn: FrozenTurn) -> bool:
+        if not isinstance(scope, ScopeTokens):
+            return False
+        for token in (scope.bot_token, scope.persona_token, scope.session_token):
+            try:
+                decoded = bytes.fromhex(token)
+            except (TypeError, ValueError):
+                return False
+            if len(decoded) != 16 or not any(decoded):
+                return False
+        if scope.relation_token is not None:
+            try:
+                relation = bytes.fromhex(scope.relation_token)
+            except (TypeError, ValueError):
+                return False
+            if len(relation) != 16 or not any(relation):
+                return False
+        if not isinstance(turn, FrozenTurn) or turn.scope != scope:
+            return False
+        if not isinstance(turn.event_id, str) or not isinstance(turn.turn_id, str):
+            return False
+        try:
+            event = bytes.fromhex(turn.event_id)
+            turn_bytes = bytes.fromhex(turn.turn_id)
+        except (TypeError, ValueError):
+            return False
+        if len(event) != 16 or len(turn_bytes) != 16 or not any(event) or not any(turn_bytes):
+            return False
+        return (
+            type(turn.base_revision) is int
+            and turn.base_revision >= 0
+            and type(turn.observed_at_ms) is int
+            and turn.observed_at_ms > 0
+        )
+
+    @staticmethod
+    async def _invoke_preflight_estimator(
+        estimator: PreflightEstimator,
+        request_text: str,
+    ) -> Any:
+        candidate: Any = estimator
+        if not callable(candidate):
+            candidate = getattr(candidate, "estimate", None)
+        if not callable(candidate):
+            raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE")
+        # Exactly one positional argument.  In particular, do not pass tools,
+        # history, contexts, provider payloads, or control-plane kwargs.
+        result = candidate(request_text)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    async def preflight_stimulus(
+        self,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        estimator: PreflightEstimator,
+    ) -> dict[str, Any]:
+        """Run one request-local SPC1 estimate and, when useful, commit it.
+
+        This method is intentionally additive: callers may invoke it after
+        Genesis and before the provider while the existing ``first_turn`` and
+        ``apply_stimulus`` G0 paths remain unchanged.  A request key joins
+        concurrent calls and prevents a second estimator invocation even when
+        the second call supplies different text.
+        """
+
+        if not self._valid_frozen_turn(scope, frozen_turn):
+            return self._preflight_failure("INVALID_TURN")
+        key = self._preflight_key(scope, frozen_turn)
+        previous = self._preflight_results.get(key)
+        if previous is not None:
+            return copy.deepcopy(previous)
+        inflight = self._preflight_inflight.get(key)
+        if inflight is not None and not inflight.done():
+            return copy.deepcopy(await asyncio.shield(inflight))
+
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._preflight_inflight[key] = future
+        try:
+            outcome = await self._run_preflight(
+                scope=scope,
+                frozen_turn=frozen_turn,
+                request_text=request_text,
+                estimator=estimator,
+            )
+            # Store only closed structured data.  A defensive JSON round trip
+            # also prevents a provider-owned mutable object from being cached.
+            try:
+                outcome = json.loads(
+                    json.dumps(outcome, ensure_ascii=False, sort_keys=True)
+                )
+            except Exception:
+                outcome = self._preflight_failure("NATIVE_MALFORMED")
+            self._preflight_results[key] = copy.deepcopy(outcome)
+            future.set_result(outcome)
+        except BaseException as exc:
+            if not future.done():
+                future.set_exception(exc)
+            raise
+        finally:
+            if self._preflight_inflight.get(key) is future:
+                self._preflight_inflight.pop(key, None)
+        return copy.deepcopy(await future)
+
+    async def _run_preflight(
+        self,
+        *,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        estimator: PreflightEstimator,
+    ) -> dict[str, Any]:
+        if not isinstance(request_text, str):
+            return self._preflight_failure("ESTIMATOR_MALFORMED")
+        if not request_text.strip():
+            return self._preflight_noop("EMPTY_REQUEST")
+        try:
+            raw_estimate = await self._invoke_preflight_estimator(estimator, request_text)
+        except SemanticEstimateError as exc:
+            return self._preflight_failure(
+                exc.code if exc.code in {"ESTIMATOR_MALFORMED", "ESTIMATOR_UNAVAILABLE"} else "ESTIMATOR_UNAVAILABLE"
+            )
+        except Exception:
+            # Provider exception details are deliberately discarded.
+            return self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+
+        try:
+            estimate = (
+                parse_estimator_output(raw_estimate.as_json())
+                if isinstance(raw_estimate, SemanticEstimate)
+                else parse_estimator_output(raw_estimate)
+            )
+        except Exception:
+            return self._preflight_failure("ESTIMATOR_MALFORMED")
+        try:
+            is_load_noop = estimate.is_load_noop
+        except Exception:
+            return self._preflight_failure("ESTIMATOR_MALFORMED")
+        if is_load_noop:
+            # This is a fixed no-op: no nonce, cursor read, or native commit.
+            return self._preflight_noop("ZERO_LOAD")
+
+        # The semantic cursor is content-free.  It is read before the proposal
+        # base revision is frozen, so G0's separate revision lane is untouched.
+        try:
+            cursor = self._bridge.semantic_revision_v1(scope.scope_json())
+        except Exception:
+            return self._preflight_failure("NATIVE_ERROR")
+        if not isinstance(cursor, dict):
+            return self._preflight_failure("NATIVE_MALFORMED")
+        if cursor.get("status") == SEMANTIC_DEGRADED:
+            return self._preflight_failure(
+                cursor.get("code")
+                if isinstance(cursor.get("code"), str)
+                else "NATIVE_ERROR"
+            )
+        if set(cursor) != {"schema", "revision"} or cursor.get("schema") != "astrembodiment.semantic-revision.v1":
+            return self._preflight_failure("NATIVE_MALFORMED")
+        revision = cursor.get("revision")
+        if type(revision) is not int or revision < 0:
+            return self._preflight_failure("NATIVE_MALFORMED")
+
+        try:
+            bound_turn = replace(frozen_turn, base_revision=revision)
+            nonce = make_request_nonce_digest(scope, bound_turn)
+            proposal = build_perception_proposal(
+                scope=scope,
+                turn=bound_turn,
+                estimate=estimate,
+                base_revision=revision,
+                nonce_digest=nonce,
+            )
+            proposal_json = proposal_to_json(proposal)
+        except Exception:
+            return self._preflight_failure("INVALID_PROPOSAL")
+
+        try:
+            native_result = self._bridge.apply_perception_proposal_v1(
+                scope.scope_json(), proposal_json
+            )
+        except Exception:
+            return self._preflight_failure("NATIVE_ERROR")
+        if not isinstance(native_result, dict):
+            return self._preflight_failure("NATIVE_MALFORMED")
+        if native_result.get("status") == SEMANTIC_DEGRADED:
+            return self._preflight_failure(
+                native_result.get("code")
+                if isinstance(native_result.get("code"), str)
+                else "NATIVE_ERROR"
+            )
+        if set(native_result) != {"schema", "receipt", "revision", "deduplicated"}:
+            return self._preflight_failure("NATIVE_MALFORMED")
+        if native_result.get("schema") != "astrembodiment.semantic-perception-closure.v1":
+            return self._preflight_failure("NATIVE_MALFORMED")
+        if type(native_result.get("revision")) is not int or native_result["revision"] < 0:
+            return self._preflight_failure("NATIVE_MALFORMED")
+        if type(native_result.get("deduplicated")) is not bool:
+            return self._preflight_failure("NATIVE_MALFORMED")
+        receipt = native_result.get("receipt")
+        if not isinstance(receipt, dict):
+            return self._preflight_failure("NATIVE_MALFORMED")
+        if set(receipt) - SEMANTIC_RECEIPT_FIELDS:
+            return self._preflight_failure("NATIVE_MALFORMED")
+        return {
+            "status": SEMANTIC_SUCCESS,
+            "code": "SEMANTIC_COMMITTED",
+            "proposal": proposal,
+            "result": copy.deepcopy(native_result),
+        }
+
     async def apply_delivery(
         self,
         *,
@@ -250,3 +510,5 @@ class GenesisCoordinator:
         self._inflight.clear()
         self._committed.clear()
         self._applied.clear()
+        self._preflight_inflight.clear()
+        self._preflight_results.clear()
