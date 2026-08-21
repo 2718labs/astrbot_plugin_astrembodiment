@@ -18,7 +18,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import astr_embodiment.bridge as bridge_module  # noqa: E402
+from astr_embodiment.contracts import FrozenTurn, ScopeTokens  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
+from astr_embodiment.tokens import event_id, turn_id  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
 
 
@@ -1151,3 +1153,151 @@ def test_runtime_commands_and_hooks_expose_chinese_descriptions_without_webui():
         in source
     )
     assert "无需 WebUI" in inspect.getdoc(AstrEmbodimentPlugin.seed_command)
+
+
+def _spc1_scope() -> ScopeTokens:
+    return ScopeTokens(
+        bot_token="11" * 16,
+        persona_token="22" * 16,
+        session_token="33" * 16,
+    )
+
+
+def _spc1_genesis_result(scope: ScopeTokens, *, seq: int = 0) -> tuple:
+    session_key = scope.session_token
+    return (
+        {
+            "genesis": {
+                "seed_code": "AE-S1-SPC1",
+                "incarnation_id": "AE-I1-SPC1",
+            },
+            "seed_code": "AE-S1-SPC1",
+            "incarnation_id": "AE-I1-SPC1",
+            "revision": 8,
+            "contract": {"continuous": {"directness": 500_000}},
+        },
+        scope,
+        session_key,
+        seq,
+        turn_id(session_key, seq),
+        7,
+    )
+
+
+def test_spc1_hook_runs_after_g0_injection_and_passes_only_current_prompt():
+    async def run():
+        instance = plugin(FakeConfig(), FakeContext())
+        scope = _spc1_scope()
+        async def run_genesis(*_args, **_kwargs):
+            return _spc1_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        calls: list[tuple] = []
+
+        async def preflight(scope_arg, frozen_turn, request_text, estimator):
+            calls.append((scope_arg, frozen_turn, request_text, estimator))
+            return {"status": "DEGRADED", "code": "NATIVE_SYMBOL_UNAVAILABLE"}
+
+        instance._coordinator.preflight_stimulus = preflight
+        event = FakeEvent()
+        request = FakeRequest()
+        await instance.on_llm_request(event, request)
+        return instance, event, request, calls
+
+    instance, event, request, calls = asyncio.run(run())
+
+    assert event.stopped is False
+    assert len(calls) == 1
+    scope, frozen_turn, request_text, estimator = calls[0]
+    assert scope == _spc1_scope()
+    assert isinstance(frozen_turn, FrozenTurn)
+    assert frozen_turn.scope == scope
+    assert frozen_turn.turn_id == event.turn_token
+    assert frozen_turn.event_id == event_id(f"{scope.session_token}#0")
+    assert frozen_turn.base_revision == 7
+    assert frozen_turn.observed_at_ms > 0
+    assert request_text == request.prompt
+    assert callable(estimator)
+    assert "seed_code=AE-S1-SPC1" in request.system_prompt
+    assert instance._pending[event.turn_token]["base_revision"] == 8
+
+
+def test_spc1_estimator_boundary_uses_one_prompt_argument_and_keeps_g0_contract():
+    async def run():
+        instance = plugin(FakeConfig(), FakeContext())
+        scope = _spc1_scope()
+        async def run_genesis(*_args, **_kwargs):
+            return _spc1_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        observed: dict[str, object] = {}
+
+        async def preflight(scope_arg, frozen_turn, request_text, estimator):
+            observed["scope"] = scope_arg
+            observed["turn"] = frozen_turn
+            observed["text"] = request_text
+            result = estimator(request_text)
+            if inspect.isawaitable(result):
+                result = await result
+            observed["estimate_result"] = result
+            return {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"}
+
+        instance._coordinator.preflight_stimulus = preflight
+        event = FakeEvent()
+        request = FakeRequest()
+        request.prompt = "SPC1_RAW_SENTINEL"
+        await instance.on_llm_request(event, request)
+        return instance, event, request, observed
+
+    instance, event, request, observed = asyncio.run(run())
+
+    assert event.stopped is False
+    assert observed["text"] == "SPC1_RAW_SENTINEL"
+    assert observed["estimate_result"] == '{"ok": true}'
+    provider_call = instance.context.generate_calls[-1]
+    assert provider_call["prompt"] == "SPC1_RAW_SENTINEL"
+    assert provider_call["contexts"] is None
+    assert provider_call["tools"] is None
+    assert provider_call["temperature"] == 0
+    assert "SPC1_RAW_SENTINEL" not in provider_call["system_prompt"]
+    assert request.system_prompt.count("SPC1_RAW_SENTINEL") == 0
+    assert request.contexts == [{"role": "user", "content": "历史"}]
+    assert instance._pending[event.turn_token]["contract"] == {
+        "continuous": {"directness": 500_000}
+    }
+
+
+def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker():
+    async def run():
+        instance = plugin(FakeConfig(), FakeContext())
+        scope = _spc1_scope()
+        async def run_genesis(*_args, **_kwargs):
+            return _spc1_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        calls: list[str] = []
+
+        async def preflight(_scope, _turn, request_text, _estimator):
+            calls.append(request_text)
+            return {"status": "DEGRADED", "code": "NATIVE_SYMBOL_UNAVAILABLE"}
+
+        instance._coordinator.preflight_stimulus = preflight
+        event = FakeEvent()
+        request = FakeRequest()
+        await instance.on_llm_request(event, request)
+        request.prompt = "CHANGED_RAW_SENTINEL"
+        await instance.on_llm_request(event, request)
+        return instance, event, request, calls
+
+    instance, event, request, calls = asyncio.run(run())
+
+    assert calls == ["用户原始问题"]
+    assert getattr(request, "_astrembodiment_semantic_preflight_v1") == {
+        "status": "DEGRADED",
+        "code": "NATIVE_SYMBOL_UNAVAILABLE",
+    }
+    assert "CHANGED_RAW_SENTINEL" not in json.dumps(
+        getattr(request, "_astrembodiment_semantic_preflight_v1")
+    )
+    assert event.stopped is False
+    assert len(instance._pending) == 1

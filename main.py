@@ -56,7 +56,11 @@ except ImportError:  # Static checks outside AstrBot.
 
 try:
     from .astr_embodiment import NativeBridge, NativeCoreUnavailable
-    from .astr_embodiment.contracts import ScopeTokens, build_delivery_outcome_json
+    from .astr_embodiment.contracts import (
+        FrozenTurn,
+        ScopeTokens,
+        build_delivery_outcome_json,
+    )
     from .astr_embodiment.coordinator import GenesisCoordinator
     from .astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
@@ -73,7 +77,11 @@ try:
     )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment import NativeBridge, NativeCoreUnavailable
-    from astr_embodiment.contracts import ScopeTokens, build_delivery_outcome_json
+    from astr_embodiment.contracts import (
+        FrozenTurn,
+        ScopeTokens,
+        build_delivery_outcome_json,
+    )
     from astr_embodiment.coordinator import GenesisCoordinator
     from astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
@@ -91,6 +99,39 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
 
 _G0_FORMULA_DIGEST = "00" * 32
 _G0_PROTOCOL_DIGEST = "00" * 32
+_SPC1_ESTIMATOR_SYSTEM_PROMPT = (
+    "Return only the closed SPC1 semantic estimate JSON object. "
+    "Use integer fxp6 dimensions and estimator_confidence; do not include "
+    "text, tools, history, provider data, or control fields."
+)
+_SPC1_OUTCOME_CODES = {
+    "CLOSED",
+    "CLOSED_SCHEMA",
+    "ENCODING",
+    "EMPTY_REQUEST",
+    "ESTIMATOR_MALFORMED",
+    "ESTIMATOR_UNAVAILABLE",
+    "GENESIS_REQUIRED",
+    "INVALID_NEURAL_STATE",
+    "INVALID_PROPOSAL",
+    "INVALID_PERCEPTION_PROPOSAL",
+    "INVALID_PERCEPTION_SCOPE",
+    "INVALID_TURN",
+    "LEASE_CONFLICT",
+    "LEASE_IN_FLIGHT",
+    "NATIVE_ERROR",
+    "NATIVE_MALFORMED",
+    "NATIVE_SYMBOL_UNAVAILABLE",
+    "NATIVE_UNAVAILABLE",
+    "SEMANTIC_COMMITTED",
+    "SEMANTIC_IDENTITY_CONFLICT",
+    "SEMANTIC_REVISION_OVERFLOW",
+    "SEMANTIC_STATE_UNCHANGED",
+    "STALE_CAUSAL_BASE",
+    "STALE_REVISION",
+    "STORAGE",
+    "ZERO_LOAD",
+}
 
 
 class AstrEmbodimentPlugin(Star):
@@ -111,6 +152,7 @@ class AstrEmbodimentPlugin(Star):
         self._seed_receipts: dict[str, dict[str, Any]] = {}
         self._injection_marker = "AstrEmbodiment Runtime Context"
         self._request_injected_attr = "_astrembodiment_runtime_injected_v1"
+        self._request_semantic_attr = "_astrembodiment_semantic_preflight_v1"
 
     async def initialize(self) -> None:
         data_dir = str(self._config_values.get("native_data_dir") or "")
@@ -381,6 +423,56 @@ class AstrEmbodimentPlugin(Star):
             request.system_prompt = current
             raise
 
+    @staticmethod
+    def _closed_semantic_outcome(value: Any) -> dict[str, str]:
+        """Keep request-local SPC1 diagnostics closed and content-free."""
+        try:
+            if not isinstance(value, Mapping):
+                raise TypeError
+            status = value.get("status")
+            code = value.get("code")
+            if type(status) is not str or status not in {
+                "SUCCESS",
+                "NOOP",
+                "DEGRADED",
+            }:
+                raise ValueError
+            if (
+                type(code) is not str
+                or code not in _SPC1_OUTCOME_CODES
+                or len(code) > 64
+            ):
+                raise ValueError
+            if status == "SUCCESS" and code != "SEMANTIC_COMMITTED":
+                raise ValueError
+            if status == "NOOP" and code not in {"EMPTY_REQUEST", "ZERO_LOAD"}:
+                raise ValueError
+            if status == "DEGRADED" and code == "SEMANTIC_COMMITTED":
+                raise ValueError
+            return {"status": status, "code": code}
+        except BaseException:
+            return {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+
+    async def _spc1_estimate(self, event: Any, request_text: str) -> Any:
+        """Run the bounded semantic provider call with the current text only."""
+        response = await self._llm_generate(
+            event,
+            prompt=request_text,
+            system_prompt=_SPC1_ESTIMATOR_SYSTEM_PROMPT,
+        )
+        if type(response) is str:
+            return response
+        completion = getattr(response, "completion_text", None)
+        if type(completion) is str:
+            return completion
+        if isinstance(response, Mapping):
+            candidate = response.get("completion_text")
+            if type(candidate) is str:
+                return candidate
+        # Let the coordinator's closed parser classify any other provider
+        # object as a fixed malformed result; never retain it in plugin state.
+        return response
+
     async def _save_receipt(self, receipt: Mapping[str, Any]) -> str:
         seed_code = str(receipt.get("seed_code", "") or "").strip()
         if seed_code:
@@ -616,6 +708,19 @@ class AstrEmbodimentPlugin(Star):
         if bool(getattr(request, self._request_injected_attr, False)):
             return
 
+        # Freeze the only accepted semantic input before any G0 request
+        # mutation.  No event text, history, tools, or system prompt is a
+        # fallback source for this additive lane.
+        try:
+            observed_at_ms = max(1, int(time.time() * 1000))
+        except BaseException:
+            observed_at_ms = 1
+        try:
+            candidate_text = getattr(request, "prompt", None)
+            request_text = candidate_text if type(candidate_text) is str else None
+        except BaseException:
+            request_text = None
+
         try:
             (
                 decision,
@@ -692,6 +797,53 @@ class AstrEmbodimentPlugin(Star):
                 "base_revision": revision,
                 "contract": contract,
             }
+
+            # SPC1 is request-local and additive.  G0 is fully accepted and
+            # injected before this await, so any semantic downgrade leaves the
+            # ordinary host request and pending G0 turn intact.
+            try:
+                provisional_revision = (
+                    base_revision
+                    if type(base_revision) is int and base_revision >= 0
+                    else 0
+                )
+                frozen_turn = FrozenTurn(
+                    scope=scope,
+                    turn_id=turn_token,
+                    event_id=event_id(f"{session_key}#{seq}"),
+                    base_revision=provisional_revision,
+                    observed_at_ms=observed_at_ms,
+                )
+            except BaseException:
+                outcome = {"status": "DEGRADED", "code": "INVALID_TURN"}
+            else:
+                outcome = {"status": "IN_FLIGHT", "code": "PREFLIGHT"}
+                try:
+                    setattr(request, self._request_semantic_attr, outcome)
+                except BaseException:
+                    # A host request that cannot carry a marker cannot satisfy
+                    # the local at-most-once contract; keep G0 usable and stop
+                    # this additive lane without exposing an exception.
+                    outcome = {"status": "DEGRADED", "code": "NATIVE_ERROR"}
+                if outcome["status"] == "IN_FLIGHT":
+                    try:
+                        raw_outcome = await self._coordinator.preflight_stimulus(
+                            scope,
+                            frozen_turn,
+                            request_text,
+                            lambda text: self._spc1_estimate(event, text),
+                        )
+                        outcome = self._closed_semantic_outcome(raw_outcome)
+                    except BaseException:
+                        # Semantic failures are fixed-code diagnostics only;
+                        # they must never stop a valid G0 turn or echo details.
+                        outcome = {"status": "DEGRADED", "code": "NATIVE_ERROR"}
+            try:
+                setattr(request, self._request_semantic_attr, outcome)
+            except BaseException:
+                logger.warning(
+                    "AstrEmbodiment SPC1 preflight degraded: NATIVE_ERROR"
+                )
         except PersonaGenesisError as exc:
             logger.error("AstrEmbodiment Genesis result rejected: %s", exc)
             await self._stop_genesis_turn(event, str(exc))
