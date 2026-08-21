@@ -53,6 +53,7 @@ pub struct CausalRef {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceVector {
     pub positive: Fixed,
     pub affiliation: Fixed,
@@ -69,6 +70,169 @@ pub struct EvidenceVector {
     pub publicness: Fixed,
     pub engagement: Fixed,
     pub rejection: Fixed,
+}
+
+/// Closed request-local evidence proposal for the SPC1 semantic perception
+/// preview.  This type deliberately contains no authority, action, policy,
+/// wire, callback, provider, or text material.  The estimator commitment is
+/// derived by Rust from this exact field order and the bound request scope.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerceptionProposalV1 {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d16")]
+    pub event_id: Id128,
+    #[serde(with = "crate::hex::d16")]
+    pub turn_id: Id128,
+    pub observed_at_ms: u64,
+    pub base_revision: u64,
+    pub dimensions: EvidenceVector,
+    pub estimator_confidence: Fixed,
+    pub protocol_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub request_nonce_digest: Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerceptionProposalErrorV1 {
+    InvalidSchemaVersion,
+    InvalidProtocolVersion,
+    InvalidIdentity,
+    InvalidObservedAt,
+    InvalidDimensions,
+    InvalidConfidence,
+    ZeroRequestNonce,
+}
+
+impl fmt::Display for PerceptionProposalErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::InvalidSchemaVersion => "invalid perception proposal schema",
+            Self::InvalidProtocolVersion => "invalid perception proposal protocol",
+            Self::InvalidIdentity => "invalid perception proposal identity",
+            Self::InvalidObservedAt => "invalid perception proposal observed time",
+            Self::InvalidDimensions => "invalid perception proposal dimensions",
+            Self::InvalidConfidence => "invalid perception proposal confidence",
+            Self::ZeroRequestNonce => "invalid perception proposal nonce",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for PerceptionProposalErrorV1 {}
+
+impl PerceptionProposalV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+    pub const PROTOCOL_VERSION: u16 = 1;
+    pub const DIGEST_DOMAIN_V1: &'static [u8] = b"astr-embodiment/semantic-perception-proposal-v1";
+
+    pub fn validate_v1(&self) -> Result<(), PerceptionProposalErrorV1> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            return Err(PerceptionProposalErrorV1::InvalidSchemaVersion);
+        }
+        if self.protocol_version != Self::PROTOCOL_VERSION {
+            return Err(PerceptionProposalErrorV1::InvalidProtocolVersion);
+        }
+        if proposal_all_zero_id(&self.event_id) || proposal_all_zero_id(&self.turn_id) {
+            return Err(PerceptionProposalErrorV1::InvalidIdentity);
+        }
+        if self.observed_at_ms == 0 {
+            return Err(PerceptionProposalErrorV1::InvalidObservedAt);
+        }
+        let values = [
+            self.dimensions.positive,
+            self.dimensions.affiliation,
+            self.dimensions.harm,
+            self.dimensions.boundary,
+            self.dimensions.repair,
+            self.dimensions.repetition,
+            self.dimensions.new_information,
+            self.dimensions.constraint_instability,
+            self.dimensions.epistemic_conflict,
+            self.dimensions.self_responsibility,
+            self.dimensions.other_responsibility,
+            self.dimensions.hostility,
+            self.dimensions.publicness,
+            self.dimensions.engagement,
+            self.dimensions.rejection,
+        ];
+        if values
+            .iter()
+            .any(|value| *value < Fixed::ZERO || *value > Fixed::ONE)
+            || values.iter().all(|value| *value == Fixed::ZERO)
+        {
+            return Err(PerceptionProposalErrorV1::InvalidDimensions);
+        }
+        if self.estimator_confidence <= Fixed::ZERO || self.estimator_confidence > Fixed::ONE {
+            return Err(PerceptionProposalErrorV1::InvalidConfidence);
+        }
+        if proposal_all_zero_digest(&self.request_nonce_digest) {
+            return Err(PerceptionProposalErrorV1::ZeroRequestNonce);
+        }
+        Ok(())
+    }
+
+    /// Derive the estimator commitment using the canonical fixed field order.
+    /// The caller supplies only the already-bound scope; no caller-supplied
+    /// digest or authority can influence this result.
+    pub fn estimator_digest_v1(&self, scope: &ScopeRef) -> Digest {
+        let schema_version = self.schema_version.to_le_bytes();
+        let values = [
+            self.dimensions.positive.encode(),
+            self.dimensions.affiliation.encode(),
+            self.dimensions.harm.encode(),
+            self.dimensions.boundary.encode(),
+            self.dimensions.repair.encode(),
+            self.dimensions.repetition.encode(),
+            self.dimensions.new_information.encode(),
+            self.dimensions.constraint_instability.encode(),
+            self.dimensions.epistemic_conflict.encode(),
+            self.dimensions.self_responsibility.encode(),
+            self.dimensions.other_responsibility.encode(),
+            self.dimensions.hostility.encode(),
+            self.dimensions.publicness.encode(),
+            self.dimensions.engagement.encode(),
+            self.dimensions.rejection.encode(),
+        ];
+        let confidence = self.estimator_confidence.encode();
+        let protocol_version = self.protocol_version.to_le_bytes();
+        let scope_digest = scope_digest(scope);
+        let base_revision = self.base_revision.to_le_bytes();
+        let mut fields: Vec<&[u8]> = Vec::with_capacity(22);
+        fields.push(&schema_version);
+        fields.extend(values.iter().map(|value| value.as_slice()));
+        fields.push(&confidence);
+        fields.push(&protocol_version);
+        fields.push(&self.request_nonce_digest);
+        fields.push(&self.event_id);
+        fields.push(&scope_digest);
+        fields.push(&self.turn_id);
+        fields.push(&base_revision);
+        wire::domain_hash(Self::DIGEST_DOMAIN_V1, &fields)
+    }
+}
+
+fn proposal_all_zero_id(value: &Id128) -> bool {
+    value.iter().all(|byte| *byte == 0)
+}
+
+fn proposal_all_zero_digest(value: &Digest) -> bool {
+    value.iter().all(|byte| *byte == 0)
+}
+
+fn scope_digest(scope: &ScopeRef) -> Digest {
+    let mut body = Vec::with_capacity(16 * 4 + 1);
+    body.extend_from_slice(&scope.bot_token);
+    body.extend_from_slice(&scope.persona_token);
+    match scope.relation_token {
+        Some(relation) => {
+            body.push(1);
+            body.extend_from_slice(&relation);
+        }
+        None => body.push(0),
+    }
+    body.extend_from_slice(&scope.session_token);
+    wire::domain_hash(b"astr-embodiment/semantic-perception-scope-v1", &[&body])
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

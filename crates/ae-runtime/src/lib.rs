@@ -19,6 +19,7 @@
 use ae_agent::noop_action_contract;
 use ae_authority::authority_projection_digest;
 use ae_continuum::{CommitEnvelope, ReplayReport};
+use ae_contracts::r7::{PerceptionProposalErrorV1, PerceptionProposalV1};
 use ae_contracts::{
     wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisReceipt, GenesisStatus,
     Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
@@ -70,6 +71,16 @@ pub enum RuntimeError {
     InvalidNeuralState,
     #[error("private projection unavailable")]
     PrivateProjectionUnavailable,
+    #[error("invalid perception proposal")]
+    InvalidPerceptionProposal,
+    #[error("invalid perception scope")]
+    InvalidPerceptionScope,
+    #[error("semantic proposal identity conflicts with a committed event")]
+    SemanticIdentityConflict,
+    #[error("semantic revision overflow")]
+    SemanticRevisionOverflow,
+    #[error("semantic transition did not change state")]
+    SemanticStateUnchanged,
 }
 
 impl From<r7::RuntimeError> for RuntimeError {
@@ -85,6 +96,15 @@ pub struct ApplyDecision {
     pub revision: u64,
     /// True when this exact event had already been applied; the state was not
     /// changed and the returned receipt is the originally committed one.
+    pub deduplicated: bool,
+}
+
+/// Closed result of the SPC1 native semantic ingress.  It intentionally has
+/// no action contract, private projection, wire bytes, callback, or payload.
+#[derive(Clone, Debug)]
+pub struct PerceptionProposalDecisionV1 {
+    pub receipt: TransitionReceipt,
+    pub revision: u64,
     pub deduplicated: bool,
 }
 
@@ -476,6 +496,90 @@ fn canonical_event_from_r7(
             estimator_digest: stimulus.evidence.estimator_digest,
         },
     }))
+}
+
+fn r7_scope_from_root(scope: &ScopeRef) -> ae_contracts::r7::ScopeRef {
+    ae_contracts::r7::ScopeRef {
+        bot_token: scope.bot_token,
+        persona_token: scope.persona_token,
+        relation_token: scope.relation_token,
+        session_token: scope.session_token,
+    }
+}
+
+fn r7_perception_event(
+    scope: &ScopeRef,
+    proposal: &PerceptionProposalV1,
+    estimator_digest: Digest,
+) -> ae_contracts::r7::CanonicalEvent {
+    ae_contracts::r7::CanonicalEvent::UserStimulus(ae_contracts::r7::UserStimulus {
+        event_id: proposal.event_id,
+        scope: r7_scope_from_root(scope),
+        causal: ae_contracts::r7::CausalRef {
+            turn_id: proposal.turn_id,
+            action_id: None,
+            delivery_id: None,
+            claim_id: None,
+            base_revision: proposal.base_revision,
+        },
+        observed_at_ms: proposal.observed_at_ms,
+        evidence: ae_contracts::r7::SemanticEstimate {
+            schema_version: proposal.schema_version,
+            dimensions: ae_contracts::r7::EvidenceVector {
+                positive: proposal.dimensions.positive,
+                affiliation: proposal.dimensions.affiliation,
+                harm: proposal.dimensions.harm,
+                boundary: proposal.dimensions.boundary,
+                repair: proposal.dimensions.repair,
+                repetition: proposal.dimensions.repetition,
+                new_information: proposal.dimensions.new_information,
+                constraint_instability: proposal.dimensions.constraint_instability,
+                epistemic_conflict: proposal.dimensions.epistemic_conflict,
+                self_responsibility: proposal.dimensions.self_responsibility,
+                other_responsibility: proposal.dimensions.other_responsibility,
+                hostility: proposal.dimensions.hostility,
+                publicness: proposal.dimensions.publicness,
+                engagement: proposal.dimensions.engagement,
+                rejection: proposal.dimensions.rejection,
+            },
+            estimator_confidence: proposal.estimator_confidence,
+            estimator_digest,
+        },
+    })
+}
+
+fn validate_perception_scope(scope: &ScopeRef) -> Result<(), RuntimeError> {
+    let nonzero = |value: &[u8]| value.iter().any(|byte| *byte != 0);
+    if !nonzero(&scope.bot_token)
+        || !nonzero(&scope.persona_token)
+        || !nonzero(&scope.session_token)
+        || scope
+            .relation_token
+            .as_ref()
+            .is_some_and(|relation| !nonzero(relation))
+    {
+        return Err(RuntimeError::InvalidPerceptionScope);
+    }
+    Ok(())
+}
+
+fn map_perception_proposal_error(_error: PerceptionProposalErrorV1) -> RuntimeError {
+    RuntimeError::InvalidPerceptionProposal
+}
+
+fn map_semantic_prepare_error(error: r7::RuntimeError) -> RuntimeError {
+    match error {
+        r7::RuntimeError::InvalidNeuralField
+        | r7::RuntimeError::InvalidSparseGraph
+        | r7::RuntimeError::NativeFormulaDigestMismatch => RuntimeError::InvalidNeuralState,
+        r7::RuntimeError::InvalidUserStimulus | r7::RuntimeError::InvalidSemanticEstimate => {
+            RuntimeError::InvalidPerceptionProposal
+        }
+        r7::RuntimeError::NativeStateUnchanged => RuntimeError::SemanticStateUnchanged,
+        r7::RuntimeError::RevisionOverflow => RuntimeError::SemanticRevisionOverflow,
+        r7::RuntimeError::UnsupportedEvent => RuntimeError::UnsupportedEvent("user_stimulus"),
+        _ => RuntimeError::InvalidPerceptionProposal,
+    }
 }
 
 impl AstrRuntime {
@@ -1283,6 +1387,193 @@ impl AstrRuntime {
         let hot = self.hot_for(scope)?;
         Ok(hot.legacy_revision)
     }
+
+    /// Return the content-free cursor for the durable semantic lane.  This is
+    /// deliberately separate from the public G0 `current_revision` cursor.
+    pub fn semantic_revision_v1(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
+        validate_perception_scope(scope)?;
+        let hot = self.hot_for(scope)?;
+        Ok(hot.semantic_revision)
+    }
+
+    fn semantic_event_identity_conflict(
+        &self,
+        semantic_scope: &Digest,
+        event_id: &Id128,
+        event_digest: &Digest,
+    ) -> Result<bool, RuntimeError> {
+        for row in self.store.read_journal(semantic_scope)? {
+            let event = wire::decode_event(&row.event_bytes)
+                .map_err(|_| RuntimeError::InvalidNeuralState)?;
+            if let CanonicalEvent::UserStimulus(stimulus) = event {
+                if stimulus.event_id == *event_id && row.event_digest != *event_digest {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Validate and durably apply one closed SPC1 proposal.  The method owns
+    /// the estimator commitment, reuses the existing semantic field
+    /// preparation seam, and commits only the semantic journal/snapshot.  No
+    /// ActionContract or private projection material is produced.
+    pub fn apply_perception_proposal_v1(
+        &mut self,
+        scope: &ScopeRef,
+        proposal: &PerceptionProposalV1,
+    ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
+        validate_perception_scope(scope)?;
+        proposal
+            .validate_v1()
+            .map_err(map_perception_proposal_error)?;
+
+        let r7_scope = r7_scope_from_root(scope);
+        let estimator_digest = proposal.estimator_digest_v1(&r7_scope);
+        let r7_event = r7_perception_event(scope, proposal, estimator_digest);
+        let root_event = canonical_event_from_r7(&r7_event).map_err(map_semantic_prepare_error)?;
+
+        let (
+            hot_bot_token,
+            hot_persona_token,
+            semantic_persona_scope,
+            semantic_revision,
+            formula_digest,
+            initial_snapshot_digest,
+            field,
+            graph,
+        ) = {
+            let hot = self.hot_for(scope)?;
+            (
+                hot.bot_token,
+                hot.persona_token,
+                hot.persona_scope,
+                hot.semantic_revision,
+                hot.formula_digest,
+                hot.initial_snapshot_digest,
+                hot.field.clone(),
+                hot.graph.clone(),
+            )
+        };
+        if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
+            return Err(RuntimeError::GenesisManifestMismatch);
+        }
+
+        let event_digest = wire::event_digest(&root_event);
+        if let Some(row) = self
+            .store
+            .lookup_event(&semantic_persona_scope, &event_digest)?
+        {
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if receipt.action_contract.is_some() {
+                return Err(RuntimeError::SemanticIdentityConflict);
+            }
+            return Ok(PerceptionProposalDecisionV1 {
+                receipt,
+                revision: row.revision,
+                deduplicated: true,
+            });
+        }
+        if self.semantic_event_identity_conflict(
+            &semantic_persona_scope,
+            &proposal.event_id,
+            &event_digest,
+        )? {
+            return Err(RuntimeError::SemanticIdentityConflict);
+        }
+        if proposal.base_revision != semantic_revision {
+            return Err(RuntimeError::StaleCausalBase {
+                expected: semantic_revision,
+                actual: proposal.base_revision,
+            });
+        }
+
+        let prepared = r7::prepare_production_user_stimulus_transition_v1(
+            &r7_event,
+            &field,
+            &graph,
+            semantic_revision,
+        )
+        .map_err(map_semantic_prepare_error)?;
+        let next_revision = semantic_revision
+            .checked_add(1)
+            .ok_or(RuntimeError::SemanticRevisionOverflow)?;
+        let state_before = state_digest(&field, &formula_digest);
+        let state_after = state_digest(&prepared.next_field, &formula_digest);
+        if state_before == state_after {
+            return Err(RuntimeError::SemanticStateUnchanged);
+        }
+        let graph_after = graph_digest(&graph);
+        let authority_digest = authority_projection_digest(&root_event);
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest,
+            scope_digest: semantic_persona_scope,
+            event_digest,
+            authority_digest,
+            base_revision: semantic_revision,
+            next_revision,
+            state_before,
+            state_after,
+            graph_after,
+            action_contract: None,
+            active_nodes: prepared.active_nodes,
+            active_edges: graph.edges.len() as u32,
+            residuals: fixed_zero_vector(),
+            status: CommitStatus::Committed,
+        };
+        let state_bytes = encode_hot_state_v1(&formula_digest, &prepared.next_field, &graph);
+        let _ = decode_hot_state_v1(&state_bytes, &formula_digest, &state_after, &graph_after)?;
+        let chain_seed = self
+            .store
+            .last_chain_digest(&semantic_persona_scope)?
+            .unwrap_or(initial_snapshot_digest);
+        let commit = StatefulCommit {
+            journal: CommitEnvelope {
+                event_kind: wire::event_kind_name(&root_event).to_owned(),
+                event_bytes: wire::encode_event(&root_event),
+                receipt: receipt.clone(),
+                chain_seed,
+                delta_bytes: vec![],
+            },
+            state_bytes,
+        };
+
+        match self.store.commit_stateful_journal(&commit) {
+            Ok((revision, _row)) => {
+                if let Some(hot) = self.hot.as_mut() {
+                    hot.field = prepared.next_field;
+                    hot.graph = graph;
+                    hot.semantic_revision = revision;
+                }
+                Ok(PerceptionProposalDecisionV1 {
+                    receipt,
+                    revision,
+                    deduplicated: false,
+                })
+            }
+            Err(StoreError::DuplicateEvent(revision)) => {
+                let row = self
+                    .store
+                    .lookup_event(&semantic_persona_scope, &event_digest)?
+                    .ok_or(RuntimeError::RetryWait)?;
+                let receipt = row
+                    .decode_receipt()
+                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+                if receipt.action_contract.is_some() {
+                    return Err(RuntimeError::SemanticIdentityConflict);
+                }
+                Ok(PerceptionProposalDecisionV1 {
+                    receipt,
+                    revision,
+                    deduplicated: true,
+                })
+            }
+            Err(other) => Err(RuntimeError::Store(other)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1322,7 +1613,7 @@ mod tests {
         assert_eq!(error.to_string(), "private projection unavailable");
     }
 
-    fn request(seed: u8) -> PersonaGenesisRequest {
+    pub(super) fn request(seed: u8) -> PersonaGenesisRequest {
         let scope = PersonaScopeRef {
             bot_token: [seed; 16],
             persona_token: [seed.wrapping_add(1); 16],
@@ -1637,6 +1928,484 @@ mod tests {
         assert!(matches!(runtime.store.count_incarnations(), Ok(1)));
         assert!(matches!(runtime.store.count_leases(), Ok(1)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod spc1_native_ingress_red_tests {
+    use super::*;
+    use ae_contracts::r7::{EvidenceVector, PerceptionProposalV1};
+    use ae_fixed::Fixed;
+    use std::collections::BTreeSet;
+
+    fn scope(seed: u8, session: u8) -> ScopeRef {
+        ScopeRef {
+            bot_token: [seed; 16],
+            persona_token: [seed.wrapping_add(1); 16],
+            relation_token: None,
+            session_token: [session; 16],
+        }
+    }
+
+    fn proposal(seed: u8, base_revision: u64) -> PerceptionProposalV1 {
+        PerceptionProposalV1 {
+            schema_version: 1,
+            event_id: [seed; 16],
+            turn_id: [seed.wrapping_add(1); 16],
+            observed_at_ms: 1_700_000_000_000 + u64::from(seed),
+            base_revision,
+            dimensions: EvidenceVector {
+                positive: Fixed::from_raw(200_000 + i64::from(seed)),
+                harm: Fixed::from_raw(100_000),
+                boundary: Fixed::from_raw(150_000),
+                epistemic_conflict: Fixed::from_raw(250_000),
+                ..EvidenceVector::default()
+            },
+            estimator_confidence: Fixed::from_raw(800_000),
+            protocol_version: 1,
+            request_nonce_digest: [seed.wrapping_add(2); 32],
+        }
+    }
+
+    fn set_dimension(proposal: &mut PerceptionProposalV1, index: usize, value: Fixed) {
+        match index {
+            0 => proposal.dimensions.positive = value,
+            1 => proposal.dimensions.affiliation = value,
+            2 => proposal.dimensions.harm = value,
+            3 => proposal.dimensions.boundary = value,
+            4 => proposal.dimensions.repair = value,
+            5 => proposal.dimensions.repetition = value,
+            6 => proposal.dimensions.new_information = value,
+            7 => proposal.dimensions.constraint_instability = value,
+            8 => proposal.dimensions.epistemic_conflict = value,
+            9 => proposal.dimensions.self_responsibility = value,
+            10 => proposal.dimensions.other_responsibility = value,
+            11 => proposal.dimensions.hostility = value,
+            12 => proposal.dimensions.publicness = value,
+            13 => proposal.dimensions.engagement = value,
+            14 => proposal.dimensions.rejection = value,
+            _ => panic!("invalid evidence dimension index"),
+        }
+    }
+
+    fn expected_estimator_digest(
+        proposal: &PerceptionProposalV1,
+        scope: &ae_contracts::r7::ScopeRef,
+    ) -> Digest {
+        let schema_version = proposal.schema_version.to_le_bytes();
+        let values = [
+            proposal.dimensions.positive.encode(),
+            proposal.dimensions.affiliation.encode(),
+            proposal.dimensions.harm.encode(),
+            proposal.dimensions.boundary.encode(),
+            proposal.dimensions.repair.encode(),
+            proposal.dimensions.repetition.encode(),
+            proposal.dimensions.new_information.encode(),
+            proposal.dimensions.constraint_instability.encode(),
+            proposal.dimensions.epistemic_conflict.encode(),
+            proposal.dimensions.self_responsibility.encode(),
+            proposal.dimensions.other_responsibility.encode(),
+            proposal.dimensions.hostility.encode(),
+            proposal.dimensions.publicness.encode(),
+            proposal.dimensions.engagement.encode(),
+            proposal.dimensions.rejection.encode(),
+        ];
+        let confidence = proposal.estimator_confidence.encode();
+        let protocol_version = proposal.protocol_version.to_le_bytes();
+        let base_revision = proposal.base_revision.to_le_bytes();
+        let mut scope_body = Vec::with_capacity(16 * 4 + 1);
+        scope_body.extend_from_slice(&scope.bot_token);
+        scope_body.extend_from_slice(&scope.persona_token);
+        match scope.relation_token {
+            Some(relation) => {
+                scope_body.push(1);
+                scope_body.extend_from_slice(&relation);
+            }
+            None => scope_body.push(0),
+        }
+        scope_body.extend_from_slice(&scope.session_token);
+        let scope_digest = ae_contracts::r7::wire::domain_hash(
+            b"astr-embodiment/semantic-perception-scope-v1",
+            &[&scope_body],
+        );
+        let mut fields: Vec<&[u8]> = Vec::with_capacity(22);
+        fields.push(&schema_version);
+        fields.extend(values.iter().map(|value| value.as_slice()));
+        fields.push(&confidence);
+        fields.push(&protocol_version);
+        fields.push(&proposal.request_nonce_digest);
+        fields.push(&proposal.event_id);
+        fields.push(&scope_digest);
+        fields.push(&proposal.turn_id);
+        fields.push(&base_revision);
+        ae_contracts::r7::wire::domain_hash(PerceptionProposalV1::DIGEST_DOMAIN_V1, &fields)
+    }
+
+    fn database(name: &str) -> std::path::PathBuf {
+        let root = std::path::PathBuf::from(
+            r"G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\test-runs\spc1-native-ingress",
+        );
+        std::fs::create_dir_all(&root).expect("test root");
+        let path = root.join(format!("{name}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    fn runtime_for(seed: u8, name: &str) -> (AstrRuntime, ScopeRef) {
+        let path = database(name);
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        let genesis = super::tests::request(seed);
+        runtime.ensure_genesis(&genesis).expect("genesis");
+        (runtime, scope(seed, 90))
+    }
+
+    #[test]
+    fn perception_proposal_has_a_closed_digest_and_semantic_cursor_api() {
+        let scope = ae_contracts::r7::ScopeRef {
+            bot_token: [31; 16],
+            persona_token: [32; 16],
+            relation_token: None,
+            session_token: [3; 16],
+        };
+        let proposal = PerceptionProposalV1 {
+            schema_version: 1,
+            event_id: [4; 16],
+            turn_id: [5; 16],
+            observed_at_ms: 1,
+            base_revision: 0,
+            dimensions: EvidenceVector {
+                positive: Fixed::from_raw(1),
+                ..EvidenceVector::default()
+            },
+            estimator_confidence: Fixed::ONE,
+            protocol_version: 1,
+            request_nonce_digest: [6; 32],
+        };
+        assert_ne!(proposal.estimator_digest_v1(&scope), [0; 32]);
+
+        let path = database("red");
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        let genesis = super::tests::request(31);
+        runtime.ensure_genesis(&genesis).expect("genesis");
+        let runtime_scope = ScopeRef {
+            bot_token: scope.bot_token,
+            persona_token: scope.persona_token,
+            relation_token: scope.relation_token,
+            session_token: scope.session_token,
+        };
+        assert_eq!(runtime.semantic_revision_v1(&runtime_scope).unwrap(), 0);
+        runtime.flush_and_close().expect("close runtime");
+        drop(runtime);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn proposal_json_is_closed_and_fixed_digest_is_scope_bound() {
+        let mut proposal = proposal(41, 0);
+        for (index, raw) in (1..=15).map(|value| value * 10_000).enumerate() {
+            set_dimension(&mut proposal, index, Fixed::from_raw(raw));
+        }
+        proposal.validate_v1().expect("valid proposal");
+        let encoded = serde_json::to_value(&proposal).expect("encode proposal");
+        let keys = encoded
+            .as_object()
+            .expect("proposal object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "schema_version",
+                "event_id",
+                "turn_id",
+                "observed_at_ms",
+                "base_revision",
+                "dimensions",
+                "estimator_confidence",
+                "protocol_version",
+                "request_nonce_digest",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert!(encoded["event_id"].is_string());
+        assert!(encoded["request_nonce_digest"].is_string());
+        assert_eq!(
+            encoded["dimensions"]["positive"],
+            serde_json::json!(proposal.dimensions.positive.raw())
+        );
+        let mut unknown = encoded.clone();
+        unknown["unknown"] = serde_json::json!("sentinel");
+        assert!(serde_json::from_value::<PerceptionProposalV1>(unknown).is_err());
+        let mut nested_unknown = encoded.clone();
+        nested_unknown["dimensions"]["unknown"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<PerceptionProposalV1>(nested_unknown).is_err());
+        for invalid_json_number in [serde_json::json!(0.5), serde_json::json!(true)] {
+            let mut invalid = encoded.clone();
+            invalid["dimensions"]["positive"] = invalid_json_number;
+            assert!(serde_json::from_value::<PerceptionProposalV1>(invalid).is_err());
+        }
+        let r7_scope = ae_contracts::r7::ScopeRef {
+            bot_token: [41; 16],
+            persona_token: [42; 16],
+            relation_token: None,
+            session_token: [90; 16],
+        };
+        let mut other_scope = r7_scope.clone();
+        other_scope.session_token = [91; 16];
+        assert_ne!(
+            proposal.estimator_digest_v1(&r7_scope),
+            proposal.estimator_digest_v1(&other_scope)
+        );
+        let mut changed = proposal.clone();
+        changed.dimensions.rejection = Fixed::from_raw(1);
+        assert_ne!(
+            proposal.estimator_digest_v1(&r7_scope),
+            changed.estimator_digest_v1(&r7_scope)
+        );
+        assert_eq!(
+            proposal.estimator_digest_v1(&r7_scope),
+            expected_estimator_digest(&proposal, &r7_scope)
+        );
+        assert_eq!(
+            proposal.estimator_digest_v1(&r7_scope),
+            [
+                0x40, 0x54, 0x37, 0x53, 0x26, 0xa6, 0x5e, 0xa9, 0x36, 0xe6, 0x5d, 0x79, 0x04, 0xac,
+                0xcc, 0x9e, 0x50, 0x51, 0x80, 0x45, 0x0b, 0xcd, 0xc0, 0x63, 0x45, 0x27, 0x8f, 0x37,
+                0xa4, 0xd3, 0x39, 0xa0,
+            ]
+        );
+        let mut all_one = proposal.clone();
+        for index in 0..15 {
+            set_dimension(&mut all_one, index, Fixed::ONE);
+        }
+        all_one.estimator_confidence = Fixed::ONE;
+        all_one.validate_v1().expect("inclusive one boundary");
+        let mut high_confidence = all_one.clone();
+        high_confidence.estimator_confidence = Fixed::from_raw(1_000_001);
+        assert!(high_confidence.validate_v1().is_err());
+        for index in 0..15 {
+            let mut negative = all_one.clone();
+            set_dimension(&mut negative, index, Fixed::from_raw(-1));
+            assert!(negative.validate_v1().is_err());
+            let mut high = all_one.clone();
+            set_dimension(&mut high, index, Fixed::from_raw(1_000_001));
+            assert!(high.validate_v1().is_err());
+        }
+    }
+
+    #[test]
+    fn semantic_commit_is_durable_idempotent_and_isolated_from_g0() {
+        let path = database("lifecycle");
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        let genesis = super::tests::request(51);
+        runtime.ensure_genesis(&genesis).expect("genesis");
+        let request_scope = scope(51, 90);
+        assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 0);
+
+        let first_proposal = proposal(61, 0);
+        let first = runtime
+            .apply_perception_proposal_v1(&request_scope, &first_proposal)
+            .expect("first semantic commit");
+        assert_eq!(first.revision, 1);
+        assert!(!first.deduplicated);
+        assert_eq!(first.receipt.action_contract, None);
+        assert_ne!(first.receipt.state_before, first.receipt.state_after);
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
+        assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
+        let semantic_scope =
+            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
+        let semantic_rows_after_first = runtime
+            .store
+            .read_journal(&semantic_scope)
+            .expect("semantic rows");
+        let semantic_snapshot_after_first = runtime
+            .store
+            .read_snapshot(&semantic_scope, 1)
+            .expect("semantic snapshot")
+            .expect("revision one snapshot");
+
+        let retry = runtime
+            .apply_perception_proposal_v1(&request_scope, &first_proposal)
+            .expect("exact retry");
+        assert!(retry.deduplicated);
+        assert_eq!(retry.receipt, first.receipt);
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
+
+        let mut modified = first_proposal.clone();
+        modified.dimensions.positive = Fixed::from_raw(300_000);
+        assert!(matches!(
+            runtime.apply_perception_proposal_v1(&request_scope, &modified),
+            Err(RuntimeError::SemanticIdentityConflict)
+        ));
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
+
+        let mut changed_turn = first_proposal.clone();
+        changed_turn.turn_id = [99; 16];
+        assert!(matches!(
+            runtime.apply_perception_proposal_v1(&request_scope, &changed_turn),
+            Err(RuntimeError::SemanticIdentityConflict)
+        ));
+        let alternate_session = scope(51, 91);
+        assert!(matches!(
+            runtime.apply_perception_proposal_v1(&alternate_session, &first_proposal),
+            Err(RuntimeError::SemanticIdentityConflict)
+        ));
+        let stale = proposal(64, 0);
+        assert!(matches!(
+            runtime.apply_perception_proposal_v1(&request_scope, &stale),
+            Err(RuntimeError::StaleCausalBase {
+                expected: 1,
+                actual: 0
+            })
+        ));
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
+        assert_eq!(
+            runtime.store.read_journal(&semantic_scope).unwrap(),
+            semantic_rows_after_first
+        );
+        assert_eq!(
+            runtime
+                .store
+                .read_snapshot(&semantic_scope, 1)
+                .unwrap()
+                .expect("revision one snapshot"),
+            semantic_snapshot_after_first
+        );
+
+        let second_proposal = proposal(62, 1);
+        let second = runtime
+            .apply_perception_proposal_v1(&request_scope, &second_proposal)
+            .expect("second semantic commit");
+        assert_eq!(second.revision, 2);
+        assert_ne!(second.receipt.state_after, first.receipt.state_after);
+        assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
+        runtime
+            .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token)
+            .expect("both lanes audit");
+        let inspect = runtime
+            .inspect(&request_scope.bot_token, &request_scope.persona_token)
+            .expect("G0 inspect");
+        assert_eq!(inspect.revision, 0);
+        assert_eq!(inspect.journal_count, 0);
+        let g0_replay = runtime
+            .verify_replay(&request_scope.bot_token, &request_scope.persona_token)
+            .expect("G0 replay");
+        assert_eq!(g0_replay.checked, 0);
+        runtime.flush_and_close().expect("close");
+        drop(runtime);
+
+        let mut reopened = AstrRuntime::open(&path).expect("reopen");
+        assert_eq!(reopened.semantic_revision_v1(&request_scope).unwrap(), 2);
+        assert_eq!(reopened.current_revision(&request_scope).unwrap(), 0);
+        reopened
+            .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token)
+            .expect("reopened semantic and G0 replay");
+        let third = reopened
+            .apply_perception_proposal_v1(&request_scope, &proposal(63, 2))
+            .expect("post-reopen semantic commit");
+        assert_eq!(third.revision, 3);
+        assert_eq!(reopened.current_revision(&request_scope).unwrap(), 0);
+        reopened.flush_and_close().expect("close reopened");
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalid_proposals_fail_closed_without_advancing_semantic_cursor() {
+        let (mut runtime, request_scope) = runtime_for(71, "invalid");
+        let base = proposal(81, 0);
+        let semantic_scope =
+            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
+        let legacy_scope = wire::persona_scope_digest(
+            &request_scope.bot_token,
+            &request_scope.persona_token,
+            None,
+        );
+        let semantic_rows_before = runtime.store.read_journal(&semantic_scope).unwrap();
+        let legacy_rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
+        assert!(semantic_rows_before.is_empty());
+        assert!(legacy_rows_before.is_empty());
+        let mut invalid = Vec::new();
+        let mut schema = base.clone();
+        schema.schema_version = 2;
+        invalid.push(schema);
+        let mut protocol = base.clone();
+        protocol.protocol_version = 2;
+        invalid.push(protocol);
+        let mut zero_vector = base.clone();
+        zero_vector.dimensions = EvidenceVector::default();
+        invalid.push(zero_vector);
+        let mut four_load_noop = base.clone();
+        four_load_noop.dimensions = EvidenceVector {
+            affiliation: Fixed::ONE,
+            ..EvidenceVector::default()
+        };
+        invalid.push(four_load_noop);
+        let mut negative = base.clone();
+        negative.dimensions.positive = Fixed::from_raw(-1);
+        invalid.push(negative);
+        let mut out_of_range = base.clone();
+        out_of_range.dimensions.positive = Fixed::from_raw(1_000_001);
+        invalid.push(out_of_range);
+        let mut zero_confidence = base.clone();
+        zero_confidence.estimator_confidence = Fixed::ZERO;
+        invalid.push(zero_confidence);
+        let mut zero_nonce = base.clone();
+        zero_nonce.request_nonce_digest = [0; 32];
+        invalid.push(zero_nonce);
+        let mut zero_event = base.clone();
+        zero_event.event_id = [0; 16];
+        invalid.push(zero_event);
+        let mut zero_turn = base.clone();
+        zero_turn.turn_id = [0; 16];
+        invalid.push(zero_turn);
+        let mut zero_observed_at = base.clone();
+        zero_observed_at.observed_at_ms = 0;
+        invalid.push(zero_observed_at);
+        let mut stale = base.clone();
+        stale.base_revision = 9;
+        invalid.push(stale);
+
+        for candidate in invalid {
+            assert!(runtime
+                .apply_perception_proposal_v1(&request_scope, &candidate)
+                .is_err());
+            assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 0);
+            assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
+            assert_eq!(
+                runtime.store.read_journal(&semantic_scope).unwrap(),
+                semantic_rows_before
+            );
+            assert_eq!(
+                runtime.store.read_journal(&legacy_scope).unwrap(),
+                legacy_rows_before
+            );
+            assert!(runtime
+                .store
+                .read_snapshot(&semantic_scope, 1)
+                .unwrap()
+                .is_none());
+        }
+        let invalid_scope = ScopeRef {
+            bot_token: [0; 16],
+            persona_token: request_scope.persona_token,
+            relation_token: None,
+            session_token: request_scope.session_token,
+        };
+        assert!(matches!(
+            runtime.semantic_revision_v1(&invalid_scope),
+            Err(RuntimeError::InvalidPerceptionScope)
+        ));
+        runtime
+            .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token)
+            .expect("failed proposals leave both histories valid");
+        runtime.flush_and_close().expect("close");
+        drop(runtime);
+        let _ = std::fs::remove_file(database("invalid"));
     }
 }
 

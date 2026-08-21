@@ -7,6 +7,7 @@
 //! residual writers, no import-from-SeedCode entry point. JSON is exchanged
 //! as closed, deny-unknown-field payloads; identity is computed in Rust.
 
+use ae_contracts::r7::PerceptionProposalV1;
 use ae_contracts::{hex, CanonicalEvent, PersonaGenesisRequest, ScopeRef};
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -64,12 +65,70 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
             "PRIVATE_PROJECTION_UNAVAILABLE",
             "private projection unavailable".to_owned(),
         ),
+        ae_runtime::RuntimeError::InvalidPerceptionProposal => (
+            "INVALID_PERCEPTION_PROPOSAL",
+            "invalid perception proposal".to_owned(),
+        ),
+        ae_runtime::RuntimeError::InvalidPerceptionScope => (
+            "INVALID_PERCEPTION_SCOPE",
+            "invalid perception scope".to_owned(),
+        ),
+        ae_runtime::RuntimeError::SemanticIdentityConflict => (
+            "SEMANTIC_IDENTITY_CONFLICT",
+            "semantic proposal identity conflict".to_owned(),
+        ),
+        ae_runtime::RuntimeError::SemanticRevisionOverflow => (
+            "SEMANTIC_REVISION_OVERFLOW",
+            "semantic revision overflow".to_owned(),
+        ),
+        ae_runtime::RuntimeError::SemanticStateUnchanged => (
+            "SEMANTIC_STATE_UNCHANGED",
+            "semantic transition did not change state".to_owned(),
+        ),
     };
     NativeCoreError::new_err(format!("{code}::{message}"))
 }
 
 fn closed_schema(message: String) -> PyErr {
     NativeCoreError::new_err(format!("CLOSED_SCHEMA::{message}"))
+}
+
+fn semantic_perception_payload(
+    decision: &ae_runtime::PerceptionProposalDecisionV1,
+) -> serde_json::Value {
+    let mut receipt =
+        serde_json::to_value(&decision.receipt).expect("TransitionReceipt is always serializable");
+    if let Some(receipt_object) = receipt.as_object_mut() {
+        // The canonical root receipt keeps ActionContract for G0 compatibility,
+        // but SPC1's Python contract is an explicit closed allow-list.
+        const CLOSED_RECEIPT_FIELDS: &[&str] = &[
+            "schema_version",
+            "formula_digest",
+            "scope_digest",
+            "event_digest",
+            "authority_digest",
+            "base_revision",
+            "next_revision",
+            "state_before",
+            "state_after",
+            "graph_after",
+            "active_nodes",
+            "active_edges",
+            "residuals",
+            "status",
+        ];
+        receipt_object.retain(|key, _| CLOSED_RECEIPT_FIELDS.contains(&key.as_str()));
+    }
+    serde_json::json!({
+        "schema": "astrembodiment.semantic-perception-closure.v1",
+        "receipt": receipt,
+        "revision": decision.revision,
+        "deduplicated": decision.deduplicated,
+    })
+}
+
+fn parse_semantic_proposal_json(proposal_json: &str) -> Result<PerceptionProposalV1, &'static str> {
+    serde_json::from_str(proposal_json).map_err(|_| "invalid perception proposal")
 }
 
 #[derive(Deserialize)]
@@ -196,6 +255,52 @@ fn apply_event(scope_json: &str, event_json: &str) -> PyResult<String> {
         .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
 }
 
+/// Return the content-free cursor for the separate SPC1 semantic lane.
+#[pyfunction]
+fn semantic_revision_v1(scope_json: &str) -> PyResult<String> {
+    let scope: FfiScope = serde_json::from_str(scope_json)
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let scope_ref = scope
+        .scope_ref()
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let revision = runtime
+        .semantic_revision_v1(&scope_ref)
+        .map_err(map_error)?;
+    let payload = serde_json::json!({
+        "schema": "astrembodiment.semantic-revision.v1",
+        "revision": revision,
+    });
+    serde_json::to_string(&payload)
+        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+}
+
+/// Apply one closed SPC1 perception proposal.  The result intentionally
+/// exposes only the receipt, semantic revision, and deduplication flag.
+#[pyfunction]
+fn apply_perception_proposal_v1(scope_json: &str, proposal_json: &str) -> PyResult<String> {
+    let scope: FfiScope = serde_json::from_str(scope_json)
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let scope_ref = scope
+        .scope_ref()
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let proposal = parse_semantic_proposal_json(proposal_json)
+        .map_err(|message| closed_schema(message.to_owned()))?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let decision = runtime
+        .apply_perception_proposal_v1(&scope_ref, &proposal)
+        .map_err(map_error)?;
+    let payload = semantic_perception_payload(&decision);
+    serde_json::to_string(&payload)
+        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+}
+
 /// Content-free observatory projection for one (Bot, Persona) binding.
 #[pyfunction]
 fn inspect(scope_json: &str) -> PyResult<String> {
@@ -272,6 +377,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(open, module)?)?;
     module.add_function(wrap_pyfunction!(ensure_genesis, module)?)?;
     module.add_function(wrap_pyfunction!(apply_event, module)?)?;
+    module.add_function(wrap_pyfunction!(semantic_revision_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_perception_proposal_v1, module)?)?;
     module.add_function(wrap_pyfunction!(inspect, module)?)?;
     module.add_function(wrap_pyfunction!(verify_replay, module)?)?;
     module.add_function(wrap_pyfunction!(flush_and_close, module)?)?;
@@ -283,6 +390,27 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod native_private_projection_absence_tests {
     use super::*;
     use pyo3::types::PyModule;
+    use std::collections::BTreeSet;
+
+    fn semantic_test_receipt() -> ae_contracts::TransitionReceipt {
+        ae_contracts::TransitionReceipt {
+            schema_version: 1,
+            formula_digest: [1; 32],
+            scope_digest: [2; 32],
+            event_digest: [3; 32],
+            authority_digest: [4; 32],
+            base_revision: 0,
+            next_revision: 1,
+            state_before: [5; 32],
+            state_after: [6; 32],
+            graph_after: [7; 32],
+            action_contract: None,
+            active_nodes: 1,
+            active_edges: 0,
+            residuals: ae_contracts::InvariantResiduals::default(),
+            status: ae_contracts::CommitStatus::Committed,
+        }
+    }
 
     #[test]
     fn private_projection_failure_maps_to_one_fixed_non_payload_error() {
@@ -303,6 +431,8 @@ mod native_private_projection_absence_tests {
             let module = PyModule::new(py, "_native").expect("test module");
             _native(&module).expect("legacy module registration");
             assert!(module.getattr("apply_event").is_ok());
+            assert!(module.getattr("semantic_revision_v1").is_ok());
+            assert!(module.getattr("apply_perception_proposal_v1").is_ok());
             for forbidden in [
                 "apply_user_stimulus_with_private_projection_wire_v1",
                 "R7PreOutputProjectionInputV1",
@@ -336,5 +466,74 @@ mod native_private_projection_absence_tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn semantic_perception_output_and_errors_are_closed() {
+        let decision = ae_runtime::PerceptionProposalDecisionV1 {
+            receipt: semantic_test_receipt(),
+            revision: 1,
+            deduplicated: false,
+        };
+        let payload = semantic_perception_payload(&decision);
+        let object = payload.as_object().expect("object payload");
+        assert_eq!(object.len(), 4);
+        assert!(object.contains_key("schema"));
+        assert!(object.contains_key("receipt"));
+        assert!(object.contains_key("revision"));
+        assert!(object.contains_key("deduplicated"));
+        assert!(payload.get("contract").is_none());
+        let receipt_keys = payload["receipt"]
+            .as_object()
+            .expect("receipt object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            receipt_keys,
+            [
+                "schema_version",
+                "formula_digest",
+                "scope_digest",
+                "event_digest",
+                "authority_digest",
+                "base_revision",
+                "next_revision",
+                "state_before",
+                "state_after",
+                "graph_after",
+                "active_nodes",
+                "active_edges",
+                "residuals",
+                "status",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+
+        let serialized = serde_json::to_string(&payload).expect("serialize payload");
+        for forbidden in [
+            "RAW_TEXT_SENTINEL",
+            "PROVIDER_PAYLOAD_SENTINEL",
+            "REQUEST_NONCE_SENTINEL",
+            "WIRE_BYTES_SENTINEL",
+            "event_bytes",
+            "provider_payload",
+            "request_nonce_digest",
+            "action_contract",
+            "private_wire",
+            "ActionContract",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "semantic output leaked forbidden material: {forbidden}"
+            );
+        }
+
+        let malformed = r#"{"schema_version":1,"event_id":"RAW_TEXT_SENTINEL"}"#;
+        let parse_error = parse_semantic_proposal_json(malformed).expect_err("malformed proposal");
+        assert_eq!(parse_error, "invalid perception proposal");
+        assert!(!parse_error.contains("RAW_TEXT_SENTINEL"));
     }
 }
