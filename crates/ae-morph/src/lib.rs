@@ -43,6 +43,14 @@ const PROHIBITED_TOKEN_FRAGMENTS: &[&str] = &[
     "effect_payload",
 ];
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeMorphEffectorStateV1 {
+    revision: u64,
+    identity_constitution_digest: Digest,
+    source_state_digest: Digest,
+    effector_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum MorphErrorV1 {
     #[error("{field} bound must be nonzero")]
@@ -93,6 +101,97 @@ pub enum MorphErrorV1 {
     StateBindingMismatch { index: usize },
     #[error("effector at index {index} is bound to another classification vocabulary")]
     VocabularyBindingMismatch { index: usize },
+}
+
+impl NativeMorphEffectorStateV1 {
+    pub fn new(
+        revision: u64,
+        identity_constitution_digest: Digest,
+        source_state_digest: Digest,
+        effector_ids: Vec<String>,
+    ) -> Result<Self, MorphErrorV1> {
+        require_digest(
+            "identity_constitution_digest",
+            &identity_constitution_digest,
+        )?;
+        require_digest("source_state_digest", &source_state_digest)?;
+        if effector_ids.is_empty() {
+            return Err(MorphErrorV1::EmptyCatalog);
+        }
+        for id in &effector_ids {
+            require_token("effector_id", id, 64)?;
+        }
+        for pair in effector_ids.windows(2) {
+            if pair[0] >= pair[1] {
+                return Err(if pair[0] == pair[1] {
+                    MorphErrorV1::DuplicateEffector { index: 1 }
+                } else {
+                    MorphErrorV1::NonCanonicalEffectorOrder { index: 1 }
+                });
+            }
+        }
+        Ok(Self {
+            revision,
+            identity_constitution_digest,
+            source_state_digest,
+            effector_ids,
+        })
+    }
+}
+
+pub fn produce_native_morph_catalog_v1(
+    source: NativeMorphEffectorStateV1,
+    catalog_ref: String,
+    max_ref_bytes: u16,
+) -> Result<MorphAffordanceCatalogV1, MorphErrorV1> {
+    let vocabulary = MorphClassificationVocabularyV1::new(
+        MorphClassificationVocabularyInputV1 {
+            capability_classes: vec!["capability_a".into()],
+            safety_classes: vec!["safety_a".into()],
+            reliability_classes: vec!["reliability_a".into()],
+            side_effect_classes: vec!["side_effect_a".into()],
+            latency_classes: vec!["latency_a".into()],
+            cost_classes: vec!["cost_a".into()],
+            reversibility_classes: vec!["reversibility_a".into()],
+        },
+        MorphVocabularyBoundsV1::new(1, 32)?,
+    )?;
+    let binding = MorphStateBindingV1::new(
+        source.revision,
+        source.identity_constitution_digest,
+        source.source_state_digest,
+    )?;
+    let effectors = source
+        .effector_ids
+        .into_iter()
+        .map(|effector_id| {
+            MorphEffectorV1::new(
+                MorphEffectorInputV1 {
+                    effector_id,
+                    capability_class: "capability_a".into(),
+                    availability: MorphAvailabilityV1::Available,
+                    safety_class: "safety_a".into(),
+                    reliability_class: "reliability_a".into(),
+                    side_effect_class: "side_effect_a".into(),
+                    confirmation_requirement: MorphConfirmationRequirementV1::Required,
+                    latency_class: "latency_a".into(),
+                    cost_class: "cost_a".into(),
+                    reversibility_class: "reversibility_a".into(),
+                },
+                64,
+                &vocabulary,
+                &binding,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    MorphAffordanceCatalogV1::new(
+        catalog_ref,
+        max_ref_bytes,
+        binding,
+        vocabulary,
+        effectors,
+        MORPH_AFFORDANCE_MAX_ITEMS_V1,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

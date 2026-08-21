@@ -25,6 +25,20 @@ pub const SOMA_STATE_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/soma-state-v1";
 const SOMA_SIGNAL_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/soma-signal-v1";
 const SOMA_FIELD_SET_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/soma-field-set-v1";
 
+/// The only accepted SOMA producer input: a committed native semantic source.
+/// It intentionally has no default constructor or caller classification field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeSomaSourceV1 {
+    revision: u64,
+    identity_constitution_digest: Digest,
+    source_state_digest: Digest,
+    metabolism: SomaFieldSetV1,
+    autonomic_regulation: SomaFieldSetV1,
+    endocrine_fields: SomaFieldSetV1,
+    immune_repair: SomaFieldSetV1,
+    rhythm: SomaFieldSetV1,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum SomaErrorV1 {
     #[error("{field} bound must be nonzero")]
@@ -78,6 +92,55 @@ pub enum SomaErrorV1 {
     IdentityBindingMismatch,
     #[error("typed subjective projection rejected the classifications")]
     ProjectionRejected,
+}
+
+impl NativeSomaSourceV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        revision: u64,
+        identity_constitution_digest: Digest,
+        source_state_digest: Digest,
+        metabolism: SomaFieldSetV1,
+        autonomic_regulation: SomaFieldSetV1,
+        endocrine_fields: SomaFieldSetV1,
+        immune_repair: SomaFieldSetV1,
+        rhythm: SomaFieldSetV1,
+    ) -> Result<Self, SomaErrorV1> {
+        require_digest(
+            "identity_constitution_digest",
+            &identity_constitution_digest,
+        )?;
+        require_digest("source_state_digest", &source_state_digest)?;
+        Ok(Self {
+            revision,
+            identity_constitution_digest,
+            source_state_digest,
+            metabolism,
+            autonomic_regulation,
+            endocrine_fields,
+            immune_repair,
+            rhythm,
+        })
+    }
+}
+
+pub fn produce_native_soma_snapshot_v1(
+    source: NativeSomaSourceV1,
+    soma_ref: String,
+    max_ref_bytes: u16,
+) -> Result<SomaStateV1, SomaErrorV1> {
+    SomaStateV1::new_bound_to_source_state(
+        soma_ref,
+        max_ref_bytes,
+        source.revision,
+        source.identity_constitution_digest,
+        source.metabolism,
+        source.autonomic_regulation,
+        source.endocrine_fields,
+        source.immune_repair,
+        source.rhythm,
+        source.source_state_digest,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,10 +1,31 @@
 use ae_contracts::r7::Digest;
 use ae_morph::{
-    MorphAffordanceCatalogV1, MorphAvailabilityV1, MorphClassificationVocabularyInputV1,
-    MorphClassificationVocabularyV1, MorphConfirmationRequirementV1, MorphEffectorInputV1,
-    MorphEffectorV1, MorphErrorV1, MorphStateBindingV1, MorphVocabularyBoundsV1,
+    produce_native_morph_catalog_v1, MorphAffordanceCatalogV1, MorphAvailabilityV1,
+    MorphClassificationVocabularyInputV1, MorphClassificationVocabularyV1,
+    MorphConfirmationRequirementV1, MorphEffectorInputV1, MorphEffectorV1, MorphErrorV1,
+    MorphStateBindingV1, MorphVocabularyBoundsV1, NativeMorphEffectorStateV1,
     MORPH_AFFORDANCE_MAX_ITEMS_V1,
 };
+
+#[test]
+fn native_producer_uses_fixed_vocabulary_and_committed_binding() {
+    let source =
+        NativeMorphEffectorStateV1::new(17, digest(7), digest(8), vec!["effector.alpha".into()])
+            .expect("native effector state");
+    let first =
+        produce_native_morph_catalog_v1(source.clone(), "morph.catalog.native.v1".into(), 32)
+            .expect("native catalog");
+    let second = produce_native_morph_catalog_v1(source, "morph.catalog.native.v1".into(), 32)
+        .expect("deterministic native catalog");
+    assert_eq!(first, second);
+    assert_eq!(first.revision(), 17);
+    assert_eq!(first.identity_constitution_digest(), &digest(7));
+    assert_eq!(first.source_state_digest(), &digest(8));
+    assert_eq!(
+        first.classification_vocabulary().capability_classes(),
+        &["capability_a".to_owned()]
+    );
+}
 
 fn digest(tag: u8) -> Digest {
     [tag; 32]
