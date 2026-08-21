@@ -664,6 +664,93 @@ macro_rules! durable_semantic_authority_test_contents {
         }
 
         #[test]
+        fn hydrate_rejects_older_semantic_row_without_snapshot_even_with_later_snapshot() {
+            let request = request(72);
+            let database = unique_database("semantic-older-missing-snapshot");
+            let mut runtime = AstrRuntime::open(&database).expect("open runtime");
+            runtime.ensure_genesis(&request).expect("commit genesis");
+            drop(runtime);
+
+            let mut store = Store::open(&database).expect("open store");
+            let committed = store
+                .lookup_bound_genesis(
+                    &request.source.scope.bot_token,
+                    &request.source.scope.persona_token,
+                )
+                .expect("lookup bound genesis")
+                .expect("genesis");
+            let scope = ScopeRef {
+                bot_token: request.source.scope.bot_token,
+                persona_token: request.source.scope.persona_token,
+                relation_token: None,
+                session_token: [0; 16],
+            };
+            let semantic_scope = semantic_persona_scope(&scope);
+            let legacy_scope =
+                wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+            let state_bytes = store
+                .read_snapshot(&legacy_scope, 0)
+                .expect("read genesis snapshot")
+                .expect("genesis snapshot")
+                .state_bytes;
+            let receipt_for = |event: &CanonicalEvent, base_revision| TransitionReceipt {
+                schema_version: 1,
+                formula_digest: committed.receipt.formula_digest,
+                scope_digest: semantic_scope,
+                event_digest: wire::event_digest(event),
+                authority_digest: [74; 32],
+                base_revision,
+                next_revision: base_revision + 1,
+                state_before: committed.receipt.initial_snapshot_digest,
+                state_after: committed.receipt.initial_snapshot_digest,
+                graph_after: committed.receipt.graph_digest,
+                action_contract: None,
+                active_nodes: 0,
+                active_edges: 0,
+                residuals: InvariantResiduals::default(),
+                status: CommitStatus::Committed,
+            };
+            let first_event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
+                event_id: [75; 16],
+                scope: scope.clone(),
+                elapsed_ms: 1,
+            });
+            let (_, first_row) = store
+                .commit_journal(&CommitEnvelope {
+                    event_kind: "time_advance".to_owned(),
+                    event_bytes: wire::encode_event(&first_event),
+                    receipt: receipt_for(&first_event, 0),
+                    chain_seed: committed.receipt.initial_snapshot_digest,
+                    delta_bytes: Vec::new(),
+                })
+                .expect("install older semantic journal row without snapshot");
+            let second_event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
+                event_id: [76; 16],
+                scope: scope.clone(),
+                elapsed_ms: 1,
+            });
+            store
+                .commit_stateful_journal(&StatefulCommit {
+                    journal: CommitEnvelope {
+                        event_kind: "time_advance".to_owned(),
+                        event_bytes: wire::encode_event(&second_event),
+                        receipt: receipt_for(&second_event, 1),
+                        chain_seed: first_row.chain_digest,
+                        delta_bytes: Vec::new(),
+                    },
+                    state_bytes,
+                })
+                .expect("install later semantic journal row and snapshot");
+            drop(store);
+
+            let mut reopened = AstrRuntime::open(&database).expect("reopen runtime");
+            assert!(
+                reopened.current_revision(&scope).is_err(),
+                "hydrate must audit every semantic journal row before selecting latest snapshot"
+            );
+        }
+
+        #[test]
         fn hydrate_replay_close_preserves_committed_semantic_state() {
             let request = request(71);
             let scope = ScopeRef {

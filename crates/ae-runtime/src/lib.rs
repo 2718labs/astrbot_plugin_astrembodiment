@@ -782,6 +782,12 @@ impl AstrRuntime {
         let persona_scope = r7_semantic_persona_scope(&bot_token, &persona_token);
         let legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
         let semantic_revision = self.store.current_revision(&persona_scope)?;
+        self.verify_durable_history_v1(
+            committed.receipt.formula_digest,
+            committed.receipt.initial_snapshot_digest,
+            persona_scope,
+            true,
+        )?;
         let snapshot = if semantic_revision == 0 {
             self.store
                 .read_snapshot(&legacy_persona_scope, 0)?
