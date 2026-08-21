@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use ae_contracts::{wire, ActionContract, ActionVector, Digest, Id128};
+use ae_contracts::r7::{wire as r7_wire, ActionContract, ActionVector};
+use ae_contracts::{wire, Digest, Id128};
 use ae_fixed::Fixed;
 use ae_renorm::Workspace;
 use serde::{Deserialize, Serialize};
@@ -9,10 +10,14 @@ pub const EPISTEMIC_ACTION_POLICY_DOMAIN_V1: &[u8] =
     b"astr-embodiment/r7/epistemic-action-policy-v1";
 pub const EPISTEMIC_ACTION_PROVENANCE_DOMAIN_V1: &[u8] =
     b"astr-embodiment/r7/epistemic-action-provenance-v1";
+pub const EPISTEMIC_SOURCE_PROVENANCE_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/r7/epistemic-source-provenance-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionPolicyErrorV1 {
     MissingEpistemicSource,
+    ZeroSourceDigest,
+    SourceDigestMismatch,
     InvalidPolicyVersion,
     PolicyDigestMismatch,
     ForeignIdentity,
@@ -166,6 +171,23 @@ pub fn compile_epistemic_action_policy_v1(
     if source.turn_id != context.turn_id {
         return Err(ActionPolicyErrorV1::ForeignTurn);
     }
+    let revision = context.revision.to_be_bytes();
+    if source.source_digest == [0; 32] {
+        return Err(ActionPolicyErrorV1::ZeroSourceDigest);
+    }
+    let expected_source_digest = r7_wire::domain_hash(
+        EPISTEMIC_SOURCE_PROVENANCE_DOMAIN_V1,
+        &[
+            &source.state_digest,
+            &source.identity_digest,
+            &source.scope_digest,
+            &source.turn_id,
+            &revision,
+        ],
+    );
+    if source.source_digest != expected_source_digest {
+        return Err(ActionPolicyErrorV1::SourceDigestMismatch);
+    }
     let expires_at_ms = context
         .now_ms
         .checked_add(context.policy.ttl_ms)
@@ -173,8 +195,6 @@ pub fn compile_epistemic_action_policy_v1(
     if context.policy.ttl_ms == 0 || context.now_ms >= expires_at_ms {
         return Err(ActionPolicyErrorV1::Expired);
     }
-
-    let revision = context.revision.to_be_bytes();
     let provenance_digest = wire::domain_hash(
         EPISTEMIC_ACTION_PROVENANCE_DOMAIN_V1,
         &[
@@ -221,7 +241,23 @@ pub fn compile_epistemic_action_policy_v1(
         must_not_seek_reassurance: true,
         expires_at_ms,
     };
-    let contract_digest = wire::action_contract_digest(&contract);
+    let contract_digest = r7_wire::domain_hash(
+        b"astr-embodiment/r7/epistemic-action-contract-v1",
+        &[
+            &contract.action_id,
+            &contract.turn_id,
+            &contract.continuous.answer.raw().to_le_bytes(),
+            &contract.continuous.directness.raw().to_le_bytes(),
+            &contract.continuous.confidence_ceiling.raw().to_le_bytes(),
+            &[contract.must_verify as u8],
+            &[contract.must_acknowledge_error as u8],
+            &[contract.must_correct_claim as u8],
+            &[contract.may_set_boundary as u8],
+            &[contract.may_withdraw as u8],
+            &[contract.must_not_seek_reassurance as u8],
+            &contract.expires_at_ms.to_le_bytes(),
+        ],
+    );
     Ok(EpistemicActionPolicyV1 {
         contract: Some(contract),
         contract_digest,
