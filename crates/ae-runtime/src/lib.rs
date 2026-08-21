@@ -35,6 +35,7 @@ use ae_store::{
 use std::path::Path;
 use thiserror::Error;
 
+mod n2_native_assembly;
 /// Native R7 compatibility projection is an implementation detail of the
 /// durable root runtime, never an alternate production authority.
 #[cfg_attr(not(test), allow(dead_code, unused_imports))]
