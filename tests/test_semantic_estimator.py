@@ -10,6 +10,7 @@ from astr_embodiment.semantic_estimator import (
     DIMENSION_NAMES,
     LOAD_DIMENSIONS,
     SemanticEstimateError,
+    SemanticProposalError,
     build_perception_proposal,
     make_request_nonce_digest,
     parse_estimator_output,
@@ -154,8 +155,8 @@ def test_proposal_contains_only_native_closed_fields_and_raw_integers() -> None:
         scope=_scope(),
         turn=_turn(),
         estimate=parse_estimator_output(_nested_estimate()),
-        base_revision=7,
-        nonce_digest="ab" * 32,
+        base_revision=0,
+        nonce_digest=make_request_nonce_digest(_scope(), _turn()),
     )
 
     assert set(proposal) == {
@@ -169,6 +170,26 @@ def test_proposal_contains_only_native_closed_fields_and_raw_integers() -> None:
         "protocol_version",
         "request_nonce_digest",
     }
-    assert proposal["base_revision"] == 7
+    assert proposal["base_revision"] == 0
     assert all(type(value) is int for value in proposal["dimensions"].values())
     assert "RAW_SENTINEL" not in json.dumps(proposal)
+
+
+def test_proposal_rejects_base_revision_that_is_not_the_frozen_turn_base() -> None:
+    with pytest.raises(SemanticProposalError, match="^INVALID_PROPOSAL$"):
+        build_perception_proposal(
+            scope=_scope(),
+            turn=_turn(),
+            estimate=parse_estimator_output(_nested_estimate()),
+            base_revision=1,
+            nonce_digest=make_request_nonce_digest(_scope(), _turn()),
+        )
+
+
+def test_nonce_digest_is_deterministic_for_the_complete_frozen_binding() -> None:
+    turn = _turn()
+    first = make_request_nonce_digest(_scope(), turn)
+    second = make_request_nonce_digest(_scope(), turn)
+
+    assert first == second
+    assert first != "aa" * 32

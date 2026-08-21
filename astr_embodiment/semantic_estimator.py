@@ -10,9 +10,9 @@ represented by any object in this module.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import inspect
 import json
-import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeAlias
@@ -59,7 +59,7 @@ PROPOSAL_FIELDS = (
 
 _ESTIMATE_NESTED_FIELDS = frozenset({"dimensions", "estimator_confidence"})
 _ESTIMATE_FLAT_FIELDS = frozenset((*DIMENSION_NAMES, "estimator_confidence"))
-_NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-v1"
+_NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-binding-v1"
 
 
 class SemanticEstimateError(ValueError):
@@ -267,26 +267,45 @@ def make_request_nonce_digest(
     *,
     entropy: bytes | None = None,
 ) -> str:
-    """Create a nonzero opaque digest bound to this request's frozen facts."""
+    """Create the deterministic nonce binding for one frozen request.
+
+    ``entropy`` remains an accepted, validated keyword for source compatibility
+    with the first SPC1 draft, but it is intentionally not included in the
+    digest.  The bridge must be able to recompute this value from the fixed
+    scope/turn facts alone; a random salt would make an otherwise closed
+    proposal unverifiable at that boundary.
+    """
 
     _validate_scope(scope)
     _validate_turn(scope, turn)
-    if entropy is None:
-        entropy = secrets.token_bytes(32)
-    if not isinstance(entropy, bytes) or not entropy:
+    if entropy is not None and (not isinstance(entropy, bytes) or not entropy):
         raise _invalid_proposal()
+    # Hex tokens are byte identities; lower-case them before canonicalization
+    # so equivalent JSON/hex spellings produce one bridge-recomputable digest.
+    scope_binding = {
+        "bot_token": scope.bot_token.lower(),
+        "persona_token": scope.persona_token.lower(),
+        "relation_token": (
+            scope.relation_token.lower()
+            if scope.relation_token is not None
+            else None
+        ),
+        "session_token": scope.session_token.lower(),
+    }
     binding = {
-        "scope": scope.scope_json(),
-        "event_id": turn.event_id,
-        "turn_id": turn.turn_id,
+        "scope": scope_binding,
+        "event_id": turn.event_id.lower(),
+        "turn_id": turn.turn_id.lower(),
         "base_revision": turn.base_revision,
         "observed_at_ms": turn.observed_at_ms,
     }
-    digest = hashlib.sha256(_NONCE_DOMAIN + b"\x00" + entropy + _canonical_json(binding)).hexdigest()
+    digest = hashlib.sha256(
+        _NONCE_DOMAIN + b"\x00" + _canonical_json(binding)
+    ).hexdigest()
     if digest == "00" * 32:
         # Cryptographically unreachable for SHA-256, but preserve the
         # nonzero contract even if a test replaces the hash implementation.
-        digest = hashlib.sha256(_NONCE_DOMAIN + b"\x01" + entropy).hexdigest()
+        digest = hashlib.sha256(_NONCE_DOMAIN + b"\x01" + _canonical_json(binding)).hexdigest()
     return digest
 
 
@@ -299,7 +318,51 @@ def _normalise_nonce(value: Any) -> str:
     return value.lower()
 
 
-def _validate_perception_proposal(value: Any) -> dict[str, Any]:
+def _scope_from_binding_value(value: ScopeTokens | Mapping[str, Any]) -> ScopeTokens:
+    if isinstance(value, ScopeTokens):
+        scope = value
+    elif isinstance(value, Mapping):
+        if set(value) != {
+            "bot_token",
+            "persona_token",
+            "relation_token",
+            "session_token",
+        }:
+            raise _invalid_proposal()
+        scope = ScopeTokens(
+            bot_token=value.get("bot_token"),
+            persona_token=value.get("persona_token"),
+            session_token=value.get("session_token"),
+            relation_token=value.get("relation_token"),
+        )
+    else:
+        raise _invalid_proposal()
+    _validate_scope(scope)
+    return scope
+
+
+def _validate_nonce_binding(
+    scope: ScopeTokens,
+    payload: Mapping[str, Any],
+) -> None:
+    turn = FrozenTurn(
+        scope=scope,
+        event_id=payload["event_id"],
+        turn_id=payload["turn_id"],
+        base_revision=payload["base_revision"],
+        observed_at_ms=payload["observed_at_ms"],
+    )
+    expected = make_request_nonce_digest(scope, turn)
+    actual = payload["request_nonce_digest"]
+    if not hmac.compare_digest(actual, expected):
+        raise _invalid_proposal()
+
+
+def _validate_perception_proposal(
+    value: Any,
+    *,
+    scope: ScopeTokens | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Validate and canonicalize the exact native ``PerceptionProposalV1``."""
 
     if isinstance(value, str):
@@ -344,7 +407,7 @@ def _validate_perception_proposal(value: Any) -> dict[str, Any]:
     except SemanticEstimateError:
         raise _invalid_proposal() from None
     nonce = _normalise_nonce(payload.get("request_nonce_digest"))
-    return {
+    canonical = {
         "schema_version": 1,
         "event_id": event_id.lower(),
         "turn_id": turn_id.lower(),
@@ -355,13 +418,20 @@ def _validate_perception_proposal(value: Any) -> dict[str, Any]:
         "protocol_version": 1,
         "request_nonce_digest": nonce,
     }
+    if scope is not None:
+        _validate_nonce_binding(_scope_from_binding_value(scope), canonical)
+    return canonical
 
 
-def validate_perception_proposal(value: Any) -> dict[str, Any]:
+def validate_perception_proposal(
+    value: Any,
+    *,
+    scope: ScopeTokens | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Fail closed for malformed or adversarial mapping implementations."""
 
     try:
-        return _validate_perception_proposal(value)
+        return _validate_perception_proposal(value, scope=scope)
     except SemanticProposalError:
         raise
     except Exception:
@@ -385,6 +455,8 @@ def build_perception_proposal(
     _validate_turn(scope, turn)
     if not _is_raw_integer(base_revision) or base_revision < 0:
         raise _invalid_proposal()
+    if base_revision != turn.base_revision:
+        raise _invalid_proposal()
     if isinstance(estimate, SemanticEstimate):
         canonical_estimate = estimate
     else:
@@ -405,13 +477,17 @@ def build_perception_proposal(
         "protocol_version": 1,
         "request_nonce_digest": nonce_digest,
     }
-    return validate_perception_proposal(proposal)
+    return validate_perception_proposal(proposal, scope=scope)
 
 
-def proposal_to_json(proposal: Mapping[str, Any]) -> str:
+def proposal_to_json(
+    proposal: Mapping[str, Any],
+    *,
+    scope: ScopeTokens | Mapping[str, Any] | None = None,
+) -> str:
     """Return canonical closed JSON suitable for the PyO3 boundary."""
 
-    canonical = validate_perception_proposal(proposal)
+    canonical = validate_perception_proposal(proposal, scope=scope)
     try:
         return json.dumps(
             canonical,

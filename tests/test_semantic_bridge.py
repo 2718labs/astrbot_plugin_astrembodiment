@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
+
+import pytest
 
 from astr_embodiment.bridge import NativeBridge
 from astr_embodiment.contracts import FrozenTurn, ScopeTokens
 from astr_embodiment.coordinator import GenesisCoordinator
-from astr_embodiment.semantic_estimator import DIMENSION_NAMES
+from astr_embodiment.semantic_estimator import (
+    DIMENSION_NAMES,
+    make_request_nonce_digest,
+)
 
 
 def _scope() -> ScopeTokens:
@@ -34,6 +40,72 @@ def _estimate() -> dict:
     return {"dimensions": dimensions, "estimator_confidence": 800_000}
 
 
+def _valid_receipt(
+    *,
+    base_revision: int = 0,
+    next_revision: int = 1,
+    state_before: str = "01" * 32,
+    state_after: str = "02" * 32,
+    status: str = "committed",
+) -> dict:
+    return {
+        "schema_version": 1,
+        "formula_digest": "00" * 32,
+        "scope_digest": "11" * 32,
+        "event_digest": "22" * 32,
+        "authority_digest": "33" * 32,
+        "base_revision": base_revision,
+        "next_revision": next_revision,
+        "state_before": state_before,
+        "state_after": state_after,
+        "graph_after": "44" * 32,
+        "active_nodes": 0,
+        "active_edges": 0,
+        "residuals": {
+            "authority": 0,
+            "continuity": 0,
+            "energy": 0,
+            "renormalization": 0,
+            "capacity": 0,
+        },
+        "status": status,
+    }
+
+
+def _valid_result(**receipt_overrides: object) -> dict:
+    receipt = _valid_receipt(**receipt_overrides)
+    return {
+        "schema": "astrembodiment.semantic-perception-closure.v1",
+        "receipt": receipt,
+        "revision": receipt["next_revision"],
+        "deduplicated": False,
+    }
+
+
+def _proposal(
+    *,
+    scope: ScopeTokens | None = None,
+    turn: FrozenTurn | None = None,
+    nonce: str | None = None,
+) -> dict:
+    scope = scope or _scope()
+    turn = turn or _turn()
+    dimensions = {name: 0 for name in DIMENSION_NAMES}
+    dimensions["positive"] = 1
+    return {
+        "schema_version": 1,
+        "event_id": turn.event_id,
+        "turn_id": turn.turn_id,
+        "observed_at_ms": turn.observed_at_ms,
+        "base_revision": turn.base_revision,
+        "dimensions": dimensions,
+        "estimator_confidence": 1,
+        "protocol_version": 1,
+        "request_nonce_digest": nonce
+        or make_request_nonce_digest(scope, turn),
+    }
+
+
 class FakeNative:
     def __init__(self) -> None:
         self.revision_calls: list[str] = []
@@ -48,12 +120,7 @@ class FakeNative:
     def apply_perception_proposal_v1(self, scope_json: str, proposal_json: str) -> str:
         self.apply_calls.append((scope_json, proposal_json))
         return json.dumps(
-            {
-                "schema": "astrembodiment.semantic-perception-closure.v1",
-                "receipt": {"next_revision": 1},
-                "revision": 1,
-                "deduplicated": False,
-            }
+            _valid_result()
         )
 
 
@@ -70,7 +137,7 @@ def test_bridge_serializes_closed_scope_and_proposal_and_exposes_allowlist() -> 
         "dimensions": {name: 0 for name in DIMENSION_NAMES},
         "estimator_confidence": 800_000,
         "protocol_version": 1,
-        "request_nonce_digest": "aa" * 32,
+        "request_nonce_digest": make_request_nonce_digest(_scope(), _turn()),
     }
     proposal["dimensions"]["positive"] = 500_000
 
@@ -93,7 +160,9 @@ def test_missing_native_semantic_symbols_are_fixed_degraded() -> None:
     bridge._native = object()
 
     cursor = bridge.semantic_revision_v1(_scope().scope_json())
-    result = bridge.apply_perception_proposal_v1(_scope().scope_json(), "{}")
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
 
     assert cursor == {"status": "DEGRADED", "code": "NATIVE_SYMBOL_UNAVAILABLE"}
     assert result == {"status": "DEGRADED", "code": "NATIVE_SYMBOL_UNAVAILABLE"}
@@ -120,7 +189,7 @@ def test_native_exception_is_classified_without_raw_error_or_sentinel() -> None:
         "dimensions": {name: 0 for name in DIMENSION_NAMES},
         "estimator_confidence": 800_000,
         "protocol_version": 1,
-        "request_nonce_digest": "aa" * 32,
+        "request_nonce_digest": make_request_nonce_digest(_scope(), _turn()),
     }
     proposal["dimensions"]["positive"] = 1
     result = bridge.apply_perception_proposal_v1(
@@ -162,7 +231,7 @@ def test_unknown_receipt_fields_are_degraded_before_coordinator_success() -> Non
                 },
                 "estimator_confidence": 1,
                 "protocol_version": 1,
-                "request_nonce_digest": "aa" * 32,
+                "request_nonce_digest": make_request_nonce_digest(_scope(), _turn()),
             }
         ),
     )
@@ -182,12 +251,7 @@ def test_coordinator_preflight_calls_estimator_once_and_keeps_native_order() -> 
 
         def apply_perception_proposal_v1(self, scope_json: dict, proposal_json: str) -> dict:
             self.calls.append(("apply", scope_json, json.loads(proposal_json)))
-            return {
-                "schema": "astrembodiment.semantic-perception-closure.v1",
-                "receipt": {"next_revision": 4},
-                "revision": 4,
-                "deduplicated": False,
-            }
+            return _valid_result(base_revision=3, next_revision=4)
 
     async def run() -> tuple[dict, dict, OrderedBridge, list[str]]:
         bridge = OrderedBridge()
@@ -275,12 +339,7 @@ def test_concurrent_same_request_joins_one_estimator_call() -> None:
             return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
 
         def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
-            return {
-                "schema": "astrembodiment.semantic-perception-closure.v1",
-                "receipt": {"next_revision": 1},
-                "revision": 1,
-                "deduplicated": False,
-            }
+            return _valid_result()
 
     async def run() -> tuple[list[dict], list[str]]:
         coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
@@ -306,3 +365,252 @@ def test_concurrent_same_request_joins_one_estimator_call() -> None:
     results, calls = asyncio.run(run())
     assert calls == ["one"]
     assert results[0] == results[1]
+
+
+@pytest.mark.parametrize(
+    "mutated_turn",
+    [
+        replace(_turn(), event_id="66" * 16),
+        replace(_turn(), turn_id="77" * 16),
+        replace(_turn(), observed_at_ms=1_700_000_000_002),
+        replace(_turn(), base_revision=1),
+    ],
+)
+def test_bridge_rejects_nonce_replayed_across_any_frozen_turn_fact(
+    mutated_turn: FrozenTurn,
+) -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(_valid_result())
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+    original = _turn()
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(),
+        json.dumps(_proposal(turn=mutated_turn, nonce=make_request_nonce_digest(_scope(), original))),
+    )
+
+    assert result == {"status": "DEGRADED", "code": "INVALID_PERCEPTION_PROPOSAL"}
+
+
+def test_bridge_rejects_nonce_replayed_under_a_different_scope() -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(_valid_result())
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+    original_scope = _scope()
+    altered_scope = replace(original_scope, relation_token="44" * 16)
+    result = bridge.apply_perception_proposal_v1(
+        altered_scope.scope_json(),
+        json.dumps(
+            _proposal(
+                scope=altered_scope,
+                nonce=make_request_nonce_digest(original_scope, _turn()),
+            )
+        ),
+    )
+
+    assert result == {"status": "DEGRADED", "code": "INVALID_PERCEPTION_PROPOSAL"}
+
+
+def test_bridge_rejects_arbitrary_nonce_even_when_native_returns_valid_receipt() -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(_valid_result())
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal(nonce="aa" * 32))
+    )
+
+    assert result == {"status": "DEGRADED", "code": "INVALID_PERCEPTION_PROPOSAL"}
+
+
+def test_bridge_zero_load_returns_fixed_noop_without_invoking_native() -> None:
+    class TrapNative:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            raise AssertionError("zero-load must not invoke native")
+
+    bridge = NativeBridge()
+    bridge._native = TrapNative()
+    proposal = _proposal()
+    proposal["dimensions"] = {name: 0 for name in DIMENSION_NAMES}
+    proposal["dimensions"]["affiliation"] = 1
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(proposal)
+    )
+
+    assert result == {"status": "NOOP", "code": "ZERO_LOAD"}
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": {}, "revision": 1, "deduplicated": False},
+        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt(next_revision=1) | {"status": "stale"}, "revision": 1, "deduplicated": False},
+        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt(next_revision=2), "revision": 1, "deduplicated": False},
+        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt(state_before="01" * 32, state_after="01" * 32), "revision": 1, "deduplicated": False},
+        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt() | {"action_contract": None}, "revision": 1, "deduplicated": False},
+    ],
+)
+def test_bridge_rejects_weak_or_non_closed_native_receipts(result: dict) -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(result)
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+    output = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert output == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+
+
+@pytest.mark.parametrize(
+    "native_result",
+    [
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": {},
+            "revision": 1,
+            "deduplicated": False,
+        },
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": _valid_receipt(status="stale"),
+            "revision": 1,
+            "deduplicated": False,
+        },
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": _valid_receipt(next_revision=2),
+            "revision": 1,
+            "deduplicated": False,
+        },
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": _valid_receipt(
+                state_before="01" * 32, state_after="01" * 32
+            ),
+            "revision": 1,
+            "deduplicated": False,
+        },
+    ],
+)
+def test_coordinator_never_promotes_a_weak_receipt_to_success(
+    native_result: dict,
+) -> None:
+    class Bridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            return native_result
+
+    async def run() -> dict:
+        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+
+        async def estimator(_request_text: str) -> dict:
+            return _estimate()
+
+        return await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", estimator
+        )
+
+    result = asyncio.run(run())
+    assert result == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+
+
+def test_coordinator_accepts_a_direct_bridge_zero_load_noop() -> None:
+    class Bridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            return {"status": "NOOP", "code": "ZERO_LOAD"}
+
+    async def run() -> dict:
+        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+
+        async def estimator(_request_text: str) -> dict:
+            return _estimate()
+
+        return await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", estimator
+        )
+
+    assert asyncio.run(run()) == {"status": "NOOP", "code": "ZERO_LOAD"}
+
+
+def test_coordinator_cancellation_keeps_one_shared_attempt_for_later_retry() -> None:
+    class Bridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            return _valid_result()
+
+    async def run() -> tuple[dict, list[str]]:
+        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+        calls: list[str] = []
+        gate = asyncio.Event()
+
+        async def estimator(text: str) -> dict:
+            calls.append(text)
+            await gate.wait()
+            return _estimate()
+
+        cancelled = asyncio.create_task(
+            coordinator.preflight_stimulus(_scope(), _turn(), "cancelled", estimator)
+        )
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+
+        retry = asyncio.create_task(
+            coordinator.preflight_stimulus(_scope(), _turn(), "retry", estimator)
+        )
+        await asyncio.sleep(0)
+        gate.set()
+        return await retry, calls
+
+    result, calls = asyncio.run(run())
+    assert result["status"] == "SUCCESS"
+    assert calls == ["cancelled"]
+
+
+def test_coordinator_key_includes_frozen_base_and_observed_time() -> None:
+    class Bridge:
+        def __init__(self) -> None:
+            self.proposals: list[dict] = []
+
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, proposal_json: str) -> dict:
+            self.proposals.append(json.loads(proposal_json))
+            return _valid_result()
+
+    async def run() -> tuple[list[str], Bridge]:
+        bridge = Bridge()
+        coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
+        calls: list[str] = []
+
+        async def estimator(text: str) -> dict:
+            calls.append(text)
+            return _estimate()
+
+        await coordinator.preflight_stimulus(_scope(), _turn(), "one", estimator)
+        altered = replace(_turn(), base_revision=9, observed_at_ms=1_700_000_000_009)
+        await coordinator.preflight_stimulus(_scope(), altered, "two", estimator)
+        return calls, bridge
+
+    calls, bridge = asyncio.run(run())
+    assert calls == ["one", "two"]
+    assert len(bridge.proposals) == 2

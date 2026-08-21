@@ -18,6 +18,7 @@ from typing import Any
 
 from .contracts import ScopeTokens
 from .semantic_estimator import (
+    LOAD_DIMENSIONS,
     SemanticProposalError,
     proposal_to_json,
     validate_perception_proposal,
@@ -296,12 +297,23 @@ def _closed_json(value: dict[str, Any]) -> str:
 
 def _native_json(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
-        payload = json.loads(value)
+        payload = json.loads(value, object_pairs_hook=_native_pairs_without_duplicates)
     else:
         payload = value
     if not isinstance(payload, dict):
         raise ValueError("native payload")
     return payload
+
+
+def _native_pairs_without_duplicates(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("native payload")
+        result[key] = value
+    return result
 
 
 def _validate_cursor_payload(value: Any) -> dict[str, Any]:
@@ -331,18 +343,19 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
     receipt = payload.get("receipt")
     if not isinstance(receipt, dict):
         raise ValueError("semantic receipt")
-    if set(receipt) - _RECEIPT_FIELDS:
+    if set(receipt) != _RECEIPT_FIELDS:
         raise ValueError("semantic receipt fields")
     if _FORBIDDEN_RECEIPT_KEYS.intersection(receipt):
         raise ValueError("semantic receipt fields")
+    if type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1:
+        raise ValueError("semantic receipt schema")
     integer_fields = {
-        "schema_version",
         "base_revision",
         "next_revision",
         "active_nodes",
         "active_edges",
     }
-    for field in integer_fields.intersection(receipt):
+    for field in integer_fields:
         if type(receipt[field]) is not int or receipt[field] < 0:
             raise ValueError("semantic receipt integer")
     digest_fields = {
@@ -354,7 +367,7 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
         "state_after",
         "graph_after",
     }
-    for field in digest_fields.intersection(receipt):
+    for field in digest_fields:
         digest = receipt[field]
         if (
             not isinstance(digest, str)
@@ -362,23 +375,23 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
             or not _looks_hex(digest)
         ):
             raise ValueError("semantic receipt digest")
-    if "status" in receipt and receipt["status"] not in {
-        "committed",
-        "rejected",
-        "superseded",
-        "stale",
-    }:
+    if receipt["status"] != "committed":
         raise ValueError("semantic receipt status")
-    if "residuals" in receipt:
-        residuals = receipt["residuals"]
-        if not isinstance(residuals, dict) or set(residuals) != _RESIDUAL_FIELDS:
-            raise ValueError("semantic receipt residuals")
-        if any(
-            type(residuals[name]) is not int
-            or not -(1 << 63) <= residuals[name] <= (1 << 63) - 1
-            for name in _RESIDUAL_FIELDS
-        ):
-            raise ValueError("semantic receipt residuals")
+    residuals = receipt["residuals"]
+    if not isinstance(residuals, dict) or set(residuals) != _RESIDUAL_FIELDS:
+        raise ValueError("semantic receipt residuals")
+    if any(
+        type(residuals[name]) is not int
+        or not -(1 << 63) <= residuals[name] <= (1 << 63) - 1
+        for name in _RESIDUAL_FIELDS
+    ):
+        raise ValueError("semantic receipt residuals")
+    if receipt["next_revision"] != revision:
+        raise ValueError("semantic receipt revision")
+    if receipt["base_revision"] + 1 != receipt["next_revision"]:
+        raise ValueError("semantic receipt revision")
+    if receipt["state_before"] == receipt["state_after"]:
+        raise ValueError("semantic receipt transition")
     # Rebuild the outer object so an extension cannot smuggle extra fields or
     # a mutable reference into coordinator state.
     return {
@@ -387,6 +400,12 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
         "revision": revision,
         "deduplicated": deduplicated,
     }
+
+
+def validate_semantic_result(value: Any) -> dict[str, Any]:
+    """Validate the exact closed result emitted by the PyO3 SPC1 surface."""
+
+    return _validate_semantic_result(value)
 
 
 def _bundled_native_package_dir() -> Path:
@@ -590,19 +609,21 @@ class NativeBridge:
         except Exception:
             return _degraded("INVALID_PERCEPTION_SCOPE")
         try:
+            proposal = validate_perception_proposal(proposal_json, scope=scope)
+            encoded_proposal = proposal_to_json(proposal, scope=scope)
+        except SemanticProposalError:
+            return _degraded("INVALID_PERCEPTION_PROPOSAL")
+        except Exception:
+            return _degraded("INVALID_PERCEPTION_PROPOSAL")
+        if all(proposal["dimensions"][name] == 0 for name in LOAD_DIMENSIONS):
+            return {"status": "NOOP", "code": "ZERO_LOAD"}
+        try:
             native = self._require()
         except Exception as exc:
             return _degraded(_semantic_error_code(exc))
         method = getattr(native, "apply_perception_proposal_v1", None)
         if not callable(method):
             return _degraded("NATIVE_SYMBOL_UNAVAILABLE")
-        try:
-            proposal = validate_perception_proposal(proposal_json)
-            encoded_proposal = proposal_to_json(proposal)
-        except SemanticProposalError:
-            return _degraded("INVALID_PERCEPTION_PROPOSAL")
-        except Exception:
-            return _degraded("INVALID_PERCEPTION_PROPOSAL")
         try:
             result = method(_closed_json(scope), encoded_proposal)
             return _validate_semantic_result(result)

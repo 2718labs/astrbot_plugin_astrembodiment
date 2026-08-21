@@ -22,7 +22,7 @@ from .bridge import (
     GenesisUnavailable,
     NativeBridge,
     RetryWait,
-    SEMANTIC_RECEIPT_FIELDS,
+    validate_semantic_result,
 )
 from .contracts import (
     FrozenTurn,
@@ -234,6 +234,8 @@ class GenesisCoordinator:
                 relation,
                 turn.event_id,
                 turn.turn_id,
+                str(turn.base_revision),
+                str(turn.observed_at_ms),
             )
         )
 
@@ -321,38 +323,90 @@ class GenesisCoordinator:
         if previous is not None:
             return copy.deepcopy(previous)
         inflight = self._preflight_inflight.get(key)
-        if inflight is not None and not inflight.done():
-            return copy.deepcopy(await asyncio.shield(inflight))
-
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._preflight_inflight[key] = future
-        try:
-            outcome = await self._run_preflight(
-                scope=scope,
-                frozen_turn=frozen_turn,
-                request_text=request_text,
-                estimator=estimator,
-            )
-            # Store only closed structured data.  A defensive JSON round trip
-            # also prevents a provider-owned mutable object from being cached.
-            try:
-                outcome = json.loads(
-                    json.dumps(outcome, ensure_ascii=False, sort_keys=True)
+        if inflight is None:
+            task = asyncio.create_task(
+                self._run_preflight(
+                    scope=scope,
+                    frozen_turn=frozen_turn,
+                    request_text=request_text,
+                    estimator=estimator,
                 )
-            except Exception:
-                outcome = self._preflight_failure("NATIVE_MALFORMED")
-            self._preflight_results[key] = copy.deepcopy(outcome)
-            future.set_result(outcome)
-        except BaseException as exc:
-            if not future.done():
-                future.set_exception(exc)
+            )
+            self._preflight_inflight[key] = task
+            task.add_done_callback(
+                lambda completed, request_key=key: self._settle_preflight(
+                    request_key, completed
+                )
+            )
+            inflight = task
+
+        # The owner task is independent from this caller.  Shielding means a
+        # cancelled waiter cannot cancel the shared estimator/native attempt.
+        try:
+            outcome = await asyncio.shield(inflight)
+        except asyncio.CancelledError:
+            if inflight.cancelled():
+                # The shared owner itself was cancelled (for example, an
+                # estimator raised CancelledError); expose the same fixed
+                # outcome that the done callback will cache.  A cancellation
+                # of this caller alone leaves the owner task untouched.
+                return copy.deepcopy(
+                    self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+                )
             raise
-        finally:
-            if self._preflight_inflight.get(key) is future:
-                self._preflight_inflight.pop(key, None)
-        return copy.deepcopy(await future)
+        except Exception:
+            # The done callback consumes the task exception and stores a fixed
+            # closed outcome.  Keep this caller fail-closed as well.
+            outcome = self._preflight_failure("NATIVE_ERROR")
+        return copy.deepcopy(outcome)
+
+    def _settle_preflight(
+        self,
+        key: str,
+        task: asyncio.Future,
+    ) -> None:
+        """Consume a shared task exactly once and cache only a closed result."""
+
+        try:
+            outcome = task.result()
+        except asyncio.CancelledError:
+            # Never leave a CancelledError as an unobserved Future exception;
+            # a later caller receives the same fixed degraded outcome.
+            outcome = self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+        except Exception:
+            outcome = self._preflight_failure("NATIVE_ERROR")
+        try:
+            closed = json.loads(
+                json.dumps(
+                    outcome,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+            )
+        except Exception:
+            closed = self._preflight_failure("NATIVE_MALFORMED")
+        self._preflight_results[key] = copy.deepcopy(closed)
+        if self._preflight_inflight.get(key) is task:
+            self._preflight_inflight.pop(key, None)
 
     async def _run_preflight(
+        self,
+        *,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        estimator: PreflightEstimator,
+    ) -> dict[str, Any]:
+        """Execute one owned estimator/native attempt for a frozen key."""
+        return await self._run_preflight_body(
+            scope=scope,
+            frozen_turn=frozen_turn,
+            request_text=request_text,
+            estimator=estimator,
+        )
+
+    async def _run_preflight_body(
         self,
         *,
         scope: ScopeTokens,
@@ -420,7 +474,7 @@ class GenesisCoordinator:
                 base_revision=revision,
                 nonce_digest=nonce,
             )
-            proposal_json = proposal_to_json(proposal)
+            proposal_json = proposal_to_json(proposal, scope=scope)
         except Exception:
             return self._preflight_failure("INVALID_PROPOSAL")
 
@@ -438,18 +492,11 @@ class GenesisCoordinator:
                 if isinstance(native_result.get("code"), str)
                 else "NATIVE_ERROR"
             )
-        if set(native_result) != {"schema", "receipt", "revision", "deduplicated"}:
-            return self._preflight_failure("NATIVE_MALFORMED")
-        if native_result.get("schema") != "astrembodiment.semantic-perception-closure.v1":
-            return self._preflight_failure("NATIVE_MALFORMED")
-        if type(native_result.get("revision")) is not int or native_result["revision"] < 0:
-            return self._preflight_failure("NATIVE_MALFORMED")
-        if type(native_result.get("deduplicated")) is not bool:
-            return self._preflight_failure("NATIVE_MALFORMED")
-        receipt = native_result.get("receipt")
-        if not isinstance(receipt, dict):
-            return self._preflight_failure("NATIVE_MALFORMED")
-        if set(receipt) - SEMANTIC_RECEIPT_FIELDS:
+        if native_result == {"status": SEMANTIC_NOOP, "code": "ZERO_LOAD"}:
+            return self._preflight_noop("ZERO_LOAD")
+        try:
+            native_result = validate_semantic_result(native_result)
+        except Exception:
             return self._preflight_failure("NATIVE_MALFORMED")
         return {
             "status": SEMANTIC_SUCCESS,
