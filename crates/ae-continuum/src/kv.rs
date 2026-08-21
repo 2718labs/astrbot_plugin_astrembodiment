@@ -81,6 +81,10 @@ pub enum NativeKvError {
     RevisionMismatch { expected: u64, actual: u64 },
     ValueDigestMismatch,
     ScanGap { expected: u64, actual: u64 },
+    AmbiguousLogicalStream,
+    RangeIncomplete { expected: u64, actual: Option<u64> },
+    ScanLimitExceeded { requested: u32, available: usize },
+    RevisionOverflow,
     InvalidRange,
 }
 
@@ -135,33 +139,76 @@ impl ContinuumKv for NativeContinuumKv {
         if through_inclusive < from_exclusive {
             return Err(NativeKvError::InvalidRange);
         }
+        let matching: Vec<_> = self
+            .rows
+            .values()
+            .filter(|(key, _)| key.scope_digest == *scope_digest && key.kind == kind)
+            .collect();
+        if matching.len() > 1 {
+            return Err(NativeKvError::AmbiguousLogicalStream);
+        }
+        if through_inclusive == from_exclusive {
+            return Ok(Vec::new());
+        }
+
+        let first_expected = from_exclusive
+            .checked_add(1)
+            .ok_or(NativeKvError::RevisionOverflow)?;
+        let Some((_, rows)) = matching.first() else {
+            return Err(NativeKvError::RangeIncomplete {
+                expected: first_expected,
+                actual: None,
+            });
+        };
+        let mut ordered = rows.clone();
+        ordered.sort_by_key(|value| value.revision);
         let mut out = Vec::new();
-        for (key, rows) in self.rows.values() {
-            // The key is not retained in the value rows; callers use one logical
-            // revision stream per key in this native kernel.  Collecting all rows
-            // is deterministic and lets the authority enforce contiguity.
-            if key.scope_digest != *scope_digest || key.kind != kind {
-                continue;
-            }
-            for value in rows {
-                if value.revision > from_exclusive && value.revision <= through_inclusive {
-                    out.push(value.clone());
-                }
-            }
-        }
-        out.sort_by_key(|value| value.revision);
-        if out.len() > limit as usize {
-            out.truncate(limit as usize);
-        }
-        for pair in out.windows(2) {
-            if pair[1].revision != pair[0].revision + 1 {
-                return Err(NativeKvError::ScanGap {
-                    expected: pair[0].revision + 1,
-                    actual: pair[1].revision,
+        let mut expected = first_expected;
+        let Some(first) = ordered.iter().find(|value| value.revision == expected) else {
+            let actual = ordered
+                .iter()
+                .find(|value| value.revision > expected)
+                .map(|value| value.revision);
+            return Err(NativeKvError::RangeIncomplete { expected, actual });
+        };
+        out.push(first.clone());
+        if expected == through_inclusive {
+            if out.len() > limit as usize {
+                return Err(NativeKvError::ScanLimitExceeded {
+                    requested: limit,
+                    available: out.len(),
                 });
             }
+            return Ok(out);
         }
-        let _ = (scope_digest, kind);
+        loop {
+            expected = expected
+                .checked_add(1)
+                .ok_or(NativeKvError::RevisionOverflow)?;
+            let Some(value) = ordered.iter().find(|value| value.revision == expected) else {
+                let actual = ordered
+                    .iter()
+                    .find(|value| value.revision > expected)
+                    .map(|value| value.revision);
+                if expected == through_inclusive {
+                    return Err(NativeKvError::RangeIncomplete { expected, actual });
+                }
+                return Err(NativeKvError::ScanGap {
+                    expected,
+                    actual: actual.unwrap_or(expected),
+                });
+            };
+            out.push(value.clone());
+            if expected == through_inclusive {
+                break;
+            }
+        }
+        if out.len() > limit as usize {
+            return Err(NativeKvError::ScanLimitExceeded {
+                requested: limit,
+                available: out.len(),
+            });
+        }
         Ok(out)
     }
 
@@ -194,9 +241,13 @@ impl ContinuumKv for NativeContinuumKv {
                 current_value_digest: current.map(|value| value.value_digest),
             });
         }
-        if request.candidate.revision != request.expected_revision + 1 {
+        let expected_next = request
+            .expected_revision
+            .checked_add(1)
+            .ok_or(NativeKvError::RevisionOverflow)?;
+        if request.candidate.revision != expected_next {
             return Err(NativeKvError::RevisionMismatch {
-                expected: request.expected_revision + 1,
+                expected: expected_next,
                 actual: request.candidate.revision,
             });
         }
@@ -312,6 +363,115 @@ mod native_tests {
             kv.compare_and_swap(&stale),
             Ok(CasOutcome::Conflict { .. })
         ));
+    }
+
+    fn second_key() -> ContinuumKey {
+        ContinuumKey {
+            scope_digest: [7; 32],
+            kind: ContinuumObjectKind::Snapshot,
+            logical_id: b"other-state".to_vec(),
+        }
+    }
+
+    #[test]
+    fn scan_rejects_multiple_logical_streams() {
+        let mut kv = NativeContinuumKv::new(11);
+        for (key, bytes) in [(key(), b"a".as_slice()), (second_key(), b"b".as_slice())] {
+            let candidate = candidate(1, bytes);
+            kv.rows
+                .insert(key_digest(&key).unwrap(), (key, vec![candidate]));
+        }
+        assert_eq!(
+            kv.scan_contiguous(&[7; 32], ContinuumObjectKind::Snapshot, 0, 1, 2),
+            Err(NativeKvError::AmbiguousLogicalStream)
+        );
+    }
+
+    #[test]
+    fn scan_rejects_incomplete_range_before_limit_truncation() {
+        let mut kv = NativeContinuumKv::new(11);
+        let k = key();
+        kv.rows.insert(
+            key_digest(&k).unwrap(),
+            (k, vec![candidate(1, b"a"), candidate(3, b"c")]),
+        );
+        assert_eq!(
+            kv.scan_contiguous(&[7; 32], ContinuumObjectKind::Snapshot, 0, 3, 1),
+            Err(NativeKvError::ScanGap {
+                expected: 2,
+                actual: 3,
+            })
+        );
+        assert_eq!(
+            kv.scan_contiguous(&[7; 32], ContinuumObjectKind::Snapshot, 1, 3, 2),
+            Err(NativeKvError::RangeIncomplete {
+                expected: 2,
+                actual: Some(3),
+            })
+        );
+        assert_eq!(
+            kv.scan_contiguous(&[7; 32], ContinuumObjectKind::Snapshot, 0, 4, 4),
+            Err(NativeKvError::ScanGap {
+                expected: 2,
+                actual: 3,
+            })
+        );
+
+        let mut complete_prefix = NativeContinuumKv::new(11);
+        let k = key();
+        complete_prefix.rows.insert(
+            key_digest(&k).unwrap(),
+            (k, vec![candidate(1, b"a"), candidate(2, b"b")]),
+        );
+        assert_eq!(
+            complete_prefix.scan_contiguous(&[7; 32], ContinuumObjectKind::Snapshot, 0, 3, 4,),
+            Err(NativeKvError::RangeIncomplete {
+                expected: 3,
+                actual: None,
+            })
+        );
+    }
+
+    #[test]
+    fn scan_rejects_invalid_bounds_and_excess_limit() {
+        let mut kv = NativeContinuumKv::new(11);
+        let k = key();
+        kv.rows.insert(
+            key_digest(&k).unwrap(),
+            (k, vec![candidate(1, b"a"), candidate(2, b"b")]),
+        );
+        assert_eq!(
+            kv.scan_contiguous(&[7; 32], ContinuumObjectKind::Snapshot, 2, 1, 2),
+            Err(NativeKvError::InvalidRange)
+        );
+        assert_eq!(
+            kv.scan_contiguous(&[7; 32], ContinuumObjectKind::Snapshot, 0, 2, 1),
+            Err(NativeKvError::ScanLimitExceeded {
+                requested: 1,
+                available: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn cas_revision_overflow_is_a_stable_error() {
+        let mut kv = NativeContinuumKv::new(11);
+        let k = key();
+        kv.rows.insert(
+            key_digest(&k).unwrap(),
+            (k.clone(), vec![candidate(u64::MAX, b"max")]),
+        );
+        let request = CompareAndSwap {
+            key: k,
+            expected_revision: u64::MAX,
+            expected_value_digest: Some(value_digest(b"max").unwrap()),
+            fence_epoch: 11,
+            candidate: candidate(0, b"next"),
+        };
+        assert_eq!(
+            kv.compare_and_swap(&request),
+            Err(NativeKvError::RevisionOverflow)
+        );
     }
 }
 
