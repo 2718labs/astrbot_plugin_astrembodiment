@@ -15,8 +15,9 @@ pub mod r7 {
     pub use super::kv::{
         key_digest, validate_canonical_value_len, validate_key, validate_scan_limit,
         validate_value, value_digest, CasOutcome, CompareAndSwap, ContinuumKey, ContinuumKv,
-        ContinuumObjectKind, ContinuumValidationError, VersionedValue, KEY_DOMAIN,
-        MAX_CANONICAL_VALUE_BYTES, MAX_LOGICAL_ID_BYTES, MAX_SCAN_LIMIT, VALUE_DOMAIN,
+        ContinuumObjectKind, ContinuumValidationError, NativeContinuumKv, NativeKvError,
+        VersionedValue, KEY_DOMAIN, MAX_CANONICAL_VALUE_BYTES, MAX_LOGICAL_ID_BYTES,
+        MAX_SCAN_LIMIT, VALUE_DOMAIN,
     };
 }
 
