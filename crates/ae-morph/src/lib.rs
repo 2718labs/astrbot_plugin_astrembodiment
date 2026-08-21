@@ -24,6 +24,7 @@ const MORPH_CLASS_SET_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/morph-class-set-v1
 const MORPH_VOCABULARY_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/morph-vocabulary-v1";
 const MORPH_EFFECTOR_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/morph-effector-v1";
 const MORPH_CATALOG_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/morph-affordance-catalog-v1";
+const MORPH_NATIVE_SOURCE_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/morph-native-source-v1";
 
 const PROHIBITED_TOKEN_FRAGMENTS: &[&str] = &[
     "raw_user_text",
@@ -53,6 +54,8 @@ pub struct NativeMorphEffectorStateV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum MorphErrorV1 {
+    #[error("native source revision must be nonzero")]
+    ZeroRevision,
     #[error("{field} bound must be nonzero")]
     ZeroBound { field: &'static str },
     #[error("{field} must not be empty")]
@@ -101,6 +104,23 @@ pub enum MorphErrorV1 {
     StateBindingMismatch { index: usize },
     #[error("effector at index {index} is bound to another classification vocabulary")]
     VocabularyBindingMismatch { index: usize },
+    #[error("native source state digest does not match its canonical effector state")]
+    SourceStateDigestMismatch,
+}
+
+pub fn native_morph_source_state_digest_v1(
+    revision: u64,
+    identity_constitution_digest: &Digest,
+    effector_ids: &[String],
+) -> Digest {
+    let revision_bytes = revision.to_be_bytes();
+    let count = (effector_ids.len() as u64).to_be_bytes();
+    let mut fields = Vec::with_capacity(effector_ids.len() + 3);
+    fields.push(&revision_bytes[..]);
+    fields.push(identity_constitution_digest);
+    fields.push(&count[..]);
+    fields.extend(effector_ids.iter().map(String::as_bytes));
+    wire::domain_hash(MORPH_NATIVE_SOURCE_DOMAIN_V1, &fields)
 }
 
 impl NativeMorphEffectorStateV1 {
@@ -110,6 +130,9 @@ impl NativeMorphEffectorStateV1 {
         source_state_digest: Digest,
         effector_ids: Vec<String>,
     ) -> Result<Self, MorphErrorV1> {
+        if revision == 0 {
+            return Err(MorphErrorV1::ZeroRevision);
+        }
         require_digest(
             "identity_constitution_digest",
             &identity_constitution_digest,
@@ -120,6 +143,15 @@ impl NativeMorphEffectorStateV1 {
         }
         for id in &effector_ids {
             require_token("effector_id", id, 64)?;
+        }
+        if source_state_digest
+            != native_morph_source_state_digest_v1(
+                revision,
+                &identity_constitution_digest,
+                &effector_ids,
+            )
+        {
+            return Err(MorphErrorV1::SourceStateDigestMismatch);
         }
         for pair in effector_ids.windows(2) {
             if pair[0] >= pair[1] {

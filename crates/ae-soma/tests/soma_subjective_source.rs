@@ -1,7 +1,8 @@
 use ae_soma::{
-    compile_subjective_present_v1, produce_native_soma_snapshot_v1, BoundedSomaSignalV1,
-    CallerProvidedClassificationV1, NativeSomaSourceV1, SomaClassificationIngressV1, SomaErrorV1,
-    SomaFieldSetV1, SomaStateV1, SomaSubjectiveAxisV1,
+    compile_subjective_present_v1, native_soma_source_state_digest_v1,
+    produce_native_soma_snapshot_v1, BoundedSomaSignalV1, CallerProvidedClassificationV1,
+    NativeSomaSourceV1, SomaClassificationIngressV1, SomaErrorV1, SomaFieldSetV1, SomaStateV1,
+    SomaSubjectiveAxisV1,
 };
 use ae_subjective_present::{ConfidenceV1, DisclosureV1, SubjectiveBandV1, SubjectiveTrendV1};
 
@@ -15,15 +16,29 @@ fn digest(seed: u8) -> Digest {
 
 #[test]
 fn native_producer_requires_committed_source_and_all_five_domains() {
+    let metabolism = field(vec![signal("energy_availability", 0.7)]);
+    let autonomic = field(vec![signal("mobilization_balance", 0.6)]);
+    let endocrine = field(vec![signal("endocrine_load", 0.2)]);
+    let immune = field(vec![signal("repair_pressure", 0.3)]);
+    let rhythm = field(vec![signal("circadian_phase", 0.4)]);
+    let source_digest = native_soma_source_state_digest_v1(
+        REVISION,
+        &digest(7),
+        &metabolism,
+        &autonomic,
+        &endocrine,
+        &immune,
+        &rhythm,
+    );
     let source = NativeSomaSourceV1::new(
         REVISION,
         digest(7),
-        digest(8),
-        field(vec![signal("energy_availability", 0.7)]),
-        field(vec![signal("mobilization_balance", 0.6)]),
-        field(vec![signal("endocrine_load", 0.2)]),
-        field(vec![signal("repair_pressure", 0.3)]),
-        field(vec![signal("circadian_phase", 0.4)]),
+        source_digest,
+        metabolism,
+        autonomic,
+        endocrine,
+        immune,
+        rhythm,
     )
     .expect("native source");
     let first =
@@ -32,9 +47,26 @@ fn native_producer_requires_committed_source_and_all_five_domains() {
     let second = produce_native_soma_snapshot_v1(source, "soma.snapshot.native.v1".into(), 128)
         .expect("deterministic native snapshot");
     assert_eq!(first, second);
-    assert_eq!(first.source_state_digest(), Some(&digest(8)));
+    assert_eq!(first.source_state_digest(), Some(&source_digest));
     assert_eq!(first.revision(), REVISION);
     assert_eq!(first.identity_constitution_digest(), &digest(7));
+}
+
+#[test]
+fn native_source_rejects_zero_revision_and_forged_source_digest() {
+    let fields = || {
+        (
+            field(vec![signal("energy_availability", 0.7)]),
+            field(vec![signal("mobilization_balance", 0.6)]),
+            field(vec![signal("endocrine_load", 0.2)]),
+            field(vec![signal("repair_pressure", 0.3)]),
+            field(vec![signal("circadian_phase", 0.4)]),
+        )
+    };
+    let (a, b, c, d, e) = fields();
+    assert!(NativeSomaSourceV1::new(0, digest(7), digest(8), a, b, c, d, e).is_err());
+    let (a, b, c, d, e) = fields();
+    assert!(NativeSomaSourceV1::new(REVISION, digest(7), digest(8), a, b, c, d, e).is_err());
 }
 
 fn signal(id: &str, value: f64) -> BoundedSomaSignalV1 {

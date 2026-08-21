@@ -24,6 +24,7 @@ use thiserror::Error;
 pub const SOMA_STATE_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/soma-state-v1";
 const SOMA_SIGNAL_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/soma-signal-v1";
 const SOMA_FIELD_SET_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/soma-field-set-v1";
+const SOMA_NATIVE_SOURCE_DOMAIN_V1: &[u8] = b"astr-embodiment/r7/soma-native-source-v1";
 
 /// The only accepted SOMA producer input: a committed native semantic source.
 /// It intentionally has no default constructor or caller classification field.
@@ -41,6 +42,8 @@ pub struct NativeSomaSourceV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum SomaErrorV1 {
+    #[error("native source revision must be nonzero")]
+    ZeroRevision,
     #[error("{field} bound must be nonzero")]
     ZeroBound { field: &'static str },
     #[error("{field} must not be empty")]
@@ -92,6 +95,32 @@ pub enum SomaErrorV1 {
     IdentityBindingMismatch,
     #[error("typed subjective projection rejected the classifications")]
     ProjectionRejected,
+    #[error("native source state digest does not match its canonical fields")]
+    SourceStateDigestMismatch,
+}
+
+pub fn native_soma_source_state_digest_v1(
+    revision: u64,
+    identity_constitution_digest: &Digest,
+    metabolism: &SomaFieldSetV1,
+    autonomic_regulation: &SomaFieldSetV1,
+    endocrine_fields: &SomaFieldSetV1,
+    immune_repair: &SomaFieldSetV1,
+    rhythm: &SomaFieldSetV1,
+) -> Digest {
+    let revision_bytes = revision.to_be_bytes();
+    wire::domain_hash(
+        SOMA_NATIVE_SOURCE_DOMAIN_V1,
+        &[
+            &revision_bytes,
+            identity_constitution_digest,
+            &metabolism.content_digest,
+            &autonomic_regulation.content_digest,
+            &endocrine_fields.content_digest,
+            &immune_repair.content_digest,
+            &rhythm.content_digest,
+        ],
+    )
 }
 
 impl NativeSomaSourceV1 {
@@ -106,11 +135,27 @@ impl NativeSomaSourceV1 {
         immune_repair: SomaFieldSetV1,
         rhythm: SomaFieldSetV1,
     ) -> Result<Self, SomaErrorV1> {
+        if revision == 0 {
+            return Err(SomaErrorV1::ZeroRevision);
+        }
         require_digest(
             "identity_constitution_digest",
             &identity_constitution_digest,
         )?;
         require_digest("source_state_digest", &source_state_digest)?;
+        if source_state_digest
+            != native_soma_source_state_digest_v1(
+                revision,
+                &identity_constitution_digest,
+                &metabolism,
+                &autonomic_regulation,
+                &endocrine_fields,
+                &immune_repair,
+                &rhythm,
+            )
+        {
+            return Err(SomaErrorV1::SourceStateDigestMismatch);
+        }
         Ok(Self {
             revision,
             identity_constitution_digest,
