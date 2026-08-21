@@ -12,12 +12,11 @@ use ae_cognitive_envelope::{
     ProviderProfileV1, RelationScopeV1, RelationV1, SourceCapsuleV1, SourceProvenanceV1, TurnV1,
 };
 use ae_contracts::r7::{
-    wire, CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
+    wire, CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate,
 };
 use ae_efference_copy::{EfferenceCopySourceV1, ExpectedDispositionV1, ObservedDispositionV1};
 use ae_epistemic_state::{
-    compile_epistemic_projection_v1, CallerProvidedEpistemicClassificationV1,
-    EpistemicEvidenceGapV1, EpistemicProjectionInputV1, EpistemicSourceBindingV1, VerifierNeedV1,
+    derive_epistemic_projection_v1, EpistemicProjectionEvidenceInputV1, EpistemicSourceBindingV1,
 };
 use ae_fixed::Fixed;
 use ae_genesis::r7::{
@@ -238,16 +237,7 @@ fn epistemic_projection(
         estimator_confidence: Fixed::from_raw(800_000),
         estimator_digest: digest(71),
     };
-    let classification = CallerProvidedEpistemicClassificationV1::new(
-        VerdictKind::ConfirmedSelfError,
-        vec![EpistemicEvidenceGapV1::ConflictingEvidence],
-        VerifierNeedV1::Required,
-        Fixed::from_raw(420_000),
-        true,
-        true,
-    )
-    .expect("caller-provided epistemic classification");
-    compile_epistemic_projection_v1(&EpistemicProjectionInputV1::new(
+    derive_epistemic_projection_v1(&EpistemicProjectionEvidenceInputV1::new(
         binding,
         CausalRef {
             turn_id: TURN_ID,
@@ -257,7 +247,6 @@ fn epistemic_projection(
             base_revision: revision,
         },
         estimate,
-        classification,
     ))
     .expect("typed epistemic projection")
 }

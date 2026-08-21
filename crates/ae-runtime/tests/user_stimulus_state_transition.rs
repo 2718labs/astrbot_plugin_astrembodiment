@@ -18,12 +18,11 @@ macro_rules! user_stimulus_state_transition_test_contents {
             TurnV1,
         };
         use ae_contracts::r7::{
-            CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate, VerdictKind,
+            CausalRef, Digest, EvidenceVector, Id128, ScopeRef, SemanticEstimate,
         };
         use ae_epistemic_state::{
-            compile_epistemic_projection_v1, CallerProvidedEpistemicClassificationV1,
-            EpistemicEvidenceGapV1, EpistemicProjectionInputV1, EpistemicSourceBindingV1,
-            VerifierNeedV1,
+            derive_epistemic_projection_v1, EpistemicProjectionEvidenceInputV1,
+            EpistemicSourceBindingV1,
         };
         use ae_fixed::Fixed;
         use ae_genesis::r7::{
@@ -183,16 +182,7 @@ macro_rules! user_stimulus_state_transition_test_contents {
                 estimator_confidence: Fixed::from_raw(800_000),
                 estimator_digest: digest(71),
             };
-            let classification = CallerProvidedEpistemicClassificationV1::new(
-                VerdictKind::ConfirmedSelfError,
-                vec![EpistemicEvidenceGapV1::ConflictingEvidence],
-                VerifierNeedV1::Required,
-                Fixed::from_raw(420_000),
-                true,
-                true,
-            )
-            .expect("caller-provided epistemic classification");
-            compile_epistemic_projection_v1(&EpistemicProjectionInputV1::new(
+            derive_epistemic_projection_v1(&EpistemicProjectionEvidenceInputV1::new(
                 binding,
                 CausalRef {
                     turn_id,
@@ -202,7 +192,6 @@ macro_rules! user_stimulus_state_transition_test_contents {
                     base_revision: revision,
                 },
                 estimate,
-                classification,
             ))
             .expect("typed epistemic projection")
         }
