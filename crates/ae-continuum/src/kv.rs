@@ -30,6 +30,18 @@ pub struct VersionedValue {
     pub canonical_bytes: Vec<u8>,
 }
 
+/// A digest-only projection of one Continuum KV row.  The revision is kept
+/// solely as an audit cursor for the KV stream; it is deliberately not an N1
+/// semantic revision and cannot be used to advance the Store authority lane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedKvReferenceV1 {
+    pub key_digest: Digest,
+    pub value_digest: Digest,
+    pub canonical_value_digest: Digest,
+    pub canonical_value_len: u64,
+    pub kv_stream_revision: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompareAndSwap {
     pub key: ContinuumKey,
@@ -114,6 +126,36 @@ impl NativeContinuumKv {
     pub fn fence_epoch(&self) -> u64 {
         self.fence_epoch
     }
+
+    /// Verify a KV row without accepting any caller-provided N1 revision or
+    /// authority metadata.  All identity material is recomputed from the
+    /// canonical key/value bytes.
+    pub fn verify_native_kv_reference_v1(
+        key: &ContinuumKey,
+        value: &VersionedValue,
+    ) -> Result<VerifiedKvReferenceV1, NativeKvError> {
+        validate_key(key)?;
+        validate_value(value)?;
+        let key_digest = key_digest(key)?;
+        let canonical_value_digest = value_digest(&value.canonical_bytes)?;
+        Ok(VerifiedKvReferenceV1 {
+            key_digest,
+            value_digest: value.value_digest,
+            canonical_value_digest,
+            canonical_value_len: value.canonical_bytes.len() as u64,
+            kv_stream_revision: value.revision,
+        })
+    }
+}
+
+/// Free-function spelling retained for callers that do not hold a KV
+/// authority instance.  It is the same digest-only verifier as the associated
+/// method above.
+pub fn verify_native_kv_reference_v1(
+    key: &ContinuumKey,
+    value: &VersionedValue,
+) -> Result<VerifiedKvReferenceV1, NativeKvError> {
+    NativeContinuumKv::verify_native_kv_reference_v1(key, value)
 }
 
 impl ContinuumKv for NativeContinuumKv {

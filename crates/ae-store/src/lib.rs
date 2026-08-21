@@ -10,8 +10,9 @@
 
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
-    wire, Digest, GenesisManifest, GenesisReceipt, GenesisStatus, PersonaSourceRef,
+    wire, Digest, GenesisManifest, GenesisReceipt, GenesisStatus, Id128, PersonaSourceRef, ScopeRef,
 };
+use ae_fixed::Fixed;
 use ae_genesis::r7::{
     verify_authority_closure_v1, BootstrapActivationReceiptV1, CustodyDispositionReceiptV1,
     GenesisIdentityPolicyV1, IndependentSolReviewReceiptV1, KeyCeremonyReceiptV1,
@@ -92,6 +93,16 @@ pub enum StoreError {
     R7PolicyRegistryEpochGap,
     #[error("r7 policy registry revocation set rolled back")]
     R7PolicyRevocationRollback,
+    #[error("invalid N1 native semantic bundle: {0}")]
+    N1BundleInvalid(String),
+    #[error("N1 native semantic bundle is not committed")]
+    N1BundleNotFound,
+    #[error("N1 native semantic bundle conflicts with an existing row")]
+    N1BundleConflict,
+    #[error("N1 native semantic revision range is invalid")]
+    N1InvalidRange,
+    #[error("N1 native semantic replay failed: {0}")]
+    N1ReplayInvalid(String),
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -328,6 +339,670 @@ pub struct StatefulCommit {
     pub state_bytes: Vec<u8>,
 }
 
+/// Store-owned typed bindings for one native N1 semantic transition.  These
+/// are intentionally digest-only references; raw user/provider material does
+/// not enter the bundle codec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct N1IdentityBindingV1 {
+    pub incarnation_id: Digest,
+    pub manifest_digest: Digest,
+    pub seed_code_digest: Digest,
+    pub formula_digest: Digest,
+    pub constitution_digest: Digest,
+    pub genesis_receipt_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct N1ScopeBindingV1 {
+    pub scope: ScopeRef,
+    pub writer_scope_digest: Digest,
+    pub turn_scope_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct N1StateBindingV1 {
+    pub base_revision: u64,
+    pub next_revision: u64,
+    pub state_before_digest: Digest,
+    pub state_after_digest: Digest,
+    pub state_bytes_digest: Digest,
+    pub graph_after_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct N1TurnBindingV1 {
+    pub turn_id: Id128,
+    pub turn_binding_digest: Digest,
+    pub session_binding_digest: Digest,
+    pub exact_anchor_set_digest: Digest,
+    pub relation_scope_digest: Digest,
+    pub owner_attestation_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KvReferenceV1 {
+    pub key_digest: Digest,
+    pub value_digest: Digest,
+    pub canonical_value_digest: Digest,
+    pub canonical_value_len: u64,
+    pub kv_stream_revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SomaBindingV1 {
+    pub source_state_digest: Digest,
+    pub soma_state_digest: Digest,
+    pub source_owner_attestation_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MorphBindingV1 {
+    pub source_state_digest: Digest,
+    pub state_binding_digest: Digest,
+    pub catalog_digest: Digest,
+    pub source_owner_attestation_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosedEstimateBindingV1 {
+    pub estimate_digest: Digest,
+    pub evidence_vector_digest: Digest,
+    pub estimator_digest: Digest,
+    pub estimator_confidence: Fixed,
+    pub source_owner_attestation_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyBindingV1 {
+    pub policy_version: u32,
+    pub policy_digest: Digest,
+    pub policy_expires_at_ms: u64,
+    pub policy_owner_attestation_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionBindingV1 {
+    pub action_id: Id128,
+    pub action_contract_digest: Digest,
+    pub action_contract_bytes: Vec<u8>,
+    pub action_owner_attestation_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct N1NativeSemanticBundleV1 {
+    pub schema_version: u16,
+    pub identity: N1IdentityBindingV1,
+    pub scope: N1ScopeBindingV1,
+    pub state: N1StateBindingV1,
+    pub turn: N1TurnBindingV1,
+    pub event_digest: Digest,
+    pub receipt_digest: Digest,
+    pub kv_refs: Vec<KvReferenceV1>,
+    pub soma: SomaBindingV1,
+    pub morph: MorphBindingV1,
+    pub estimate: ClosedEstimateBindingV1,
+    pub policy: PolicyBindingV1,
+    /// Action is optional in the Store-only authority slice.  A present
+    /// action is deliberately rejected until the fixed ActionContractV1
+    /// codec and closed P4 owner are integrated; absence is not represented
+    /// by zero/default bytes.
+    pub action: Option<ActionBindingV1>,
+    pub provenance_digest: Digest,
+    pub bundle_digest: Digest,
+}
+
+#[derive(Clone, Debug)]
+pub struct StatefulNativeSemanticCommitV1 {
+    pub journal: CommitEnvelope,
+    pub state_bytes: Vec<u8>,
+    pub bundle: N1NativeSemanticBundleV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedN1NativeSemanticV1 {
+    pub revision: u64,
+    pub bundle: N1NativeSemanticBundleV1,
+    pub journal: JournalRow,
+    pub state_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedN1AuthorityContextV1 {
+    pub scope: ScopeRef,
+    pub writer_scope_digest: Digest,
+    pub identity: N1IdentityBindingV1,
+    pub current_revision: u64,
+    pub state_bytes: Vec<u8>,
+    pub state_digest: Digest,
+    pub graph_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct N1NativeReplayReportV1 {
+    pub checked: usize,
+    pub ok: bool,
+    pub base_revision: u64,
+    pub final_revision: u64,
+    pub first_error: Option<String>,
+}
+
+type N1StoredBundleIndexRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum N1BundleCodecError {
+    #[error("invalid N1 bundle magic or schema")]
+    Header,
+    #[error("N1 bundle is truncated")]
+    Truncated,
+    #[error("N1 bundle contains a non-canonical value")]
+    NonCanonical,
+    #[error("fixed ActionContractV1 codec/owner is unavailable for this slice")]
+    ActionUnavailable,
+    #[error("N1 bundle contains a zero identity binding")]
+    ZeroBinding,
+    #[error("N1 bundle contains an invalid revision or confidence")]
+    InvalidScalar,
+    #[error("N1 bundle contains too many or oversized fields")]
+    Bounds,
+    #[error("N1 bundle digest mismatch")]
+    DigestMismatch,
+    #[error("N1 bundle has trailing bytes")]
+    TrailingBytes,
+}
+
+const N1_BUNDLE_MAGIC: &[u8] = b"AE-N1-BUNDLE-V1";
+const N1_BUNDLE_DOMAIN: &[u8] = b"astr-embodiment/n1-native-semantic-bundle-v1";
+const N1_MAX_KV_REFS: usize = 256;
+const N1_MAX_ACTION_BYTES: usize = 65_536;
+const N1_MAX_BUNDLE_BYTES: usize = 1_048_576;
+
+fn n1_nonzero_digest(value: &Digest) -> bool {
+    value.iter().any(|byte| *byte != 0)
+}
+
+fn n1_nonzero_id(value: &Id128) -> bool {
+    value.iter().any(|byte| *byte != 0)
+}
+
+fn n1_require_digest(value: &Digest) -> Result<(), N1BundleCodecError> {
+    if n1_nonzero_digest(value) {
+        Ok(())
+    } else {
+        Err(N1BundleCodecError::ZeroBinding)
+    }
+}
+
+fn n1_require_id(value: &Id128) -> Result<(), N1BundleCodecError> {
+    if n1_nonzero_id(value) {
+        Ok(())
+    } else {
+        Err(N1BundleCodecError::ZeroBinding)
+    }
+}
+
+fn validate_n1_bundle(
+    bundle: &N1NativeSemanticBundleV1,
+    check_self_digest: bool,
+) -> Result<(), N1BundleCodecError> {
+    if bundle.schema_version != 1 {
+        return Err(N1BundleCodecError::Header);
+    }
+    for digest in [
+        &bundle.identity.incarnation_id,
+        &bundle.identity.manifest_digest,
+        &bundle.identity.seed_code_digest,
+        &bundle.identity.formula_digest,
+        &bundle.identity.constitution_digest,
+        &bundle.identity.genesis_receipt_digest,
+        &bundle.scope.writer_scope_digest,
+        &bundle.scope.turn_scope_digest,
+        &bundle.state.state_before_digest,
+        &bundle.state.state_after_digest,
+        &bundle.state.state_bytes_digest,
+        &bundle.state.graph_after_digest,
+        &bundle.turn.turn_binding_digest,
+        &bundle.turn.session_binding_digest,
+        &bundle.turn.exact_anchor_set_digest,
+        &bundle.turn.relation_scope_digest,
+        &bundle.turn.owner_attestation_digest,
+        &bundle.event_digest,
+        &bundle.receipt_digest,
+        &bundle.soma.source_state_digest,
+        &bundle.soma.soma_state_digest,
+        &bundle.soma.source_owner_attestation_digest,
+        &bundle.morph.source_state_digest,
+        &bundle.morph.state_binding_digest,
+        &bundle.morph.catalog_digest,
+        &bundle.morph.source_owner_attestation_digest,
+        &bundle.estimate.estimate_digest,
+        &bundle.estimate.evidence_vector_digest,
+        &bundle.estimate.estimator_digest,
+        &bundle.estimate.source_owner_attestation_digest,
+        &bundle.policy.policy_digest,
+        &bundle.policy.policy_owner_attestation_digest,
+        &bundle.provenance_digest,
+    ] {
+        n1_require_digest(digest)?;
+    }
+    if check_self_digest {
+        n1_require_digest(&bundle.bundle_digest)?;
+    }
+    for id in [
+        &bundle.scope.scope.bot_token,
+        &bundle.scope.scope.persona_token,
+        &bundle.scope.scope.session_token,
+    ] {
+        n1_require_id(id)?;
+    }
+    if let Some(relation) = &bundle.scope.scope.relation_token {
+        n1_require_id(relation)?;
+    }
+    n1_require_id(&bundle.turn.turn_id)?;
+    if bundle.state.base_revision.checked_add(1) != Some(bundle.state.next_revision) {
+        return Err(N1BundleCodecError::InvalidScalar);
+    }
+    if !(0..=1_000_000).contains(&bundle.estimate.estimator_confidence.raw()) {
+        return Err(N1BundleCodecError::InvalidScalar);
+    }
+    if bundle.kv_refs.len() > N1_MAX_KV_REFS {
+        return Err(N1BundleCodecError::Bounds);
+    }
+    if let Some(action) = &bundle.action {
+        n1_require_id(&action.action_id)?;
+        n1_require_digest(&action.action_contract_digest)?;
+        n1_require_digest(&action.action_owner_attestation_digest)?;
+        if action.action_contract_bytes.len() > N1_MAX_ACTION_BYTES {
+            return Err(N1BundleCodecError::Bounds);
+        }
+        // The fixed ActionContractV1 owner is not part of this Store-only
+        // slice.  Never accept legacy root bytes as a substitute.
+        return Err(N1BundleCodecError::ActionUnavailable);
+    }
+    let mut previous: Option<Digest> = None;
+    for reference in &bundle.kv_refs {
+        for digest in [
+            &reference.key_digest,
+            &reference.value_digest,
+            &reference.canonical_value_digest,
+        ] {
+            n1_require_digest(digest)?;
+        }
+        if let Some(previous) = previous {
+            if previous >= reference.key_digest {
+                return Err(N1BundleCodecError::NonCanonical);
+            }
+        }
+        previous = Some(reference.key_digest);
+    }
+    Ok(())
+}
+
+struct N1Writer {
+    bytes: Vec<u8>,
+}
+
+impl N1Writer {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn raw(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    fn u16(&mut self, value: u16) {
+        self.raw(&value.to_le_bytes());
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.raw(&value.to_le_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.raw(&value.to_le_bytes());
+    }
+
+    fn i64(&mut self, value: i64) {
+        self.raw(&value.to_le_bytes());
+    }
+
+    fn digest(&mut self, value: &Digest) {
+        self.raw(value);
+    }
+
+    fn id(&mut self, value: &Id128) {
+        self.raw(value);
+    }
+}
+
+struct N1Reader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> N1Reader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], N1BundleCodecError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(N1BundleCodecError::Truncated)?;
+        if end > self.bytes.len() {
+            return Err(N1BundleCodecError::Truncated);
+        }
+        let out = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(out)
+    }
+
+    fn u16(&mut self) -> Result<u16, N1BundleCodecError> {
+        let mut bytes = [0; 2];
+        bytes.copy_from_slice(self.take(2)?);
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn u32(&mut self) -> Result<u32, N1BundleCodecError> {
+        let mut bytes = [0; 4];
+        bytes.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, N1BundleCodecError> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn i64(&mut self) -> Result<i64, N1BundleCodecError> {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(i64::from_le_bytes(bytes))
+    }
+
+    fn digest(&mut self) -> Result<Digest, N1BundleCodecError> {
+        let mut out = [0; 32];
+        out.copy_from_slice(self.take(32)?);
+        Ok(out)
+    }
+
+    fn id(&mut self) -> Result<Id128, N1BundleCodecError> {
+        let mut out = [0; 16];
+        out.copy_from_slice(self.take(16)?);
+        Ok(out)
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.offset)
+    }
+}
+
+fn encode_n1_body(
+    bundle: &N1NativeSemanticBundleV1,
+    self_digest: Digest,
+) -> Result<Vec<u8>, N1BundleCodecError> {
+    validate_n1_bundle(bundle, n1_nonzero_digest(&self_digest))?;
+    let mut writer = N1Writer::new();
+    writer.raw(N1_BUNDLE_MAGIC);
+    writer.u16(bundle.schema_version);
+    for digest in [
+        &bundle.identity.incarnation_id,
+        &bundle.identity.manifest_digest,
+        &bundle.identity.seed_code_digest,
+        &bundle.identity.formula_digest,
+        &bundle.identity.constitution_digest,
+        &bundle.identity.genesis_receipt_digest,
+    ] {
+        writer.digest(digest);
+    }
+    writer.id(&bundle.scope.scope.bot_token);
+    writer.id(&bundle.scope.scope.persona_token);
+    writer.raw(&[u8::from(bundle.scope.scope.relation_token.is_some())]);
+    if let Some(relation) = &bundle.scope.scope.relation_token {
+        writer.id(relation);
+    }
+    writer.id(&bundle.scope.scope.session_token);
+    writer.digest(&bundle.scope.writer_scope_digest);
+    writer.digest(&bundle.scope.turn_scope_digest);
+    writer.u64(bundle.state.base_revision);
+    writer.u64(bundle.state.next_revision);
+    for digest in [
+        &bundle.state.state_before_digest,
+        &bundle.state.state_after_digest,
+        &bundle.state.state_bytes_digest,
+        &bundle.state.graph_after_digest,
+    ] {
+        writer.digest(digest);
+    }
+    writer.id(&bundle.turn.turn_id);
+    for digest in [
+        &bundle.turn.turn_binding_digest,
+        &bundle.turn.session_binding_digest,
+        &bundle.turn.exact_anchor_set_digest,
+        &bundle.turn.relation_scope_digest,
+        &bundle.turn.owner_attestation_digest,
+    ] {
+        writer.digest(digest);
+    }
+    writer.digest(&bundle.event_digest);
+    writer.digest(&bundle.receipt_digest);
+    writer.u16(bundle.kv_refs.len() as u16);
+    for reference in &bundle.kv_refs {
+        writer.digest(&reference.key_digest);
+        writer.digest(&reference.value_digest);
+        writer.digest(&reference.canonical_value_digest);
+        writer.u64(reference.canonical_value_len);
+        writer.u64(reference.kv_stream_revision);
+    }
+    for digest in [
+        &bundle.soma.source_state_digest,
+        &bundle.soma.soma_state_digest,
+        &bundle.soma.source_owner_attestation_digest,
+        &bundle.morph.source_state_digest,
+        &bundle.morph.state_binding_digest,
+        &bundle.morph.catalog_digest,
+        &bundle.morph.source_owner_attestation_digest,
+        &bundle.estimate.estimate_digest,
+        &bundle.estimate.evidence_vector_digest,
+        &bundle.estimate.estimator_digest,
+    ] {
+        writer.digest(digest);
+    }
+    writer.i64(bundle.estimate.estimator_confidence.raw());
+    writer.digest(&bundle.estimate.source_owner_attestation_digest);
+    writer.u32(bundle.policy.policy_version);
+    writer.digest(&bundle.policy.policy_digest);
+    writer.u64(bundle.policy.policy_expires_at_ms);
+    writer.digest(&bundle.policy.policy_owner_attestation_digest);
+    match &bundle.action {
+        None => writer.raw(&[0]),
+        Some(action) => {
+            writer.raw(&[1]);
+            writer.id(&action.action_id);
+            writer.digest(&action.action_contract_digest);
+            writer.u32(action.action_contract_bytes.len() as u32);
+            writer.raw(&action.action_contract_bytes);
+            writer.digest(&action.action_owner_attestation_digest);
+        }
+    }
+    writer.digest(&bundle.provenance_digest);
+    writer.digest(&self_digest);
+    if writer.bytes.len() > N1_MAX_BUNDLE_BYTES {
+        return Err(N1BundleCodecError::Bounds);
+    }
+    Ok(writer.bytes)
+}
+
+/// Compute the digest over canonical bytes with the self-digest field zeroed.
+pub fn n1_native_bundle_digest_v1(
+    bundle: &N1NativeSemanticBundleV1,
+) -> Result<Digest, N1BundleCodecError> {
+    let bytes = encode_n1_body(bundle, [0; 32])?;
+    Ok(wire::domain_hash(N1_BUNDLE_DOMAIN, &[&bytes]))
+}
+
+/// Encode one N1 bundle using a fixed, length-delimited binary layout.
+pub fn encode_n1_native_bundle_v1(
+    bundle: &N1NativeSemanticBundleV1,
+) -> Result<Vec<u8>, N1BundleCodecError> {
+    validate_n1_bundle(bundle, true)?;
+    let expected = n1_native_bundle_digest_v1(bundle)?;
+    if expected != bundle.bundle_digest {
+        return Err(N1BundleCodecError::DigestMismatch);
+    }
+    encode_n1_body(bundle, bundle.bundle_digest)
+}
+
+/// Decode and strictly re-canonicalize one N1 bundle.  Any malformed,
+/// non-canonical, trailing or self-digest-inconsistent input is rejected.
+pub fn decode_n1_native_bundle_v1(
+    bytes: &[u8],
+) -> Result<N1NativeSemanticBundleV1, N1BundleCodecError> {
+    if bytes.len() > N1_MAX_BUNDLE_BYTES {
+        return Err(N1BundleCodecError::Bounds);
+    }
+    let mut reader = N1Reader::new(bytes);
+    if reader.take(N1_BUNDLE_MAGIC.len())? != N1_BUNDLE_MAGIC {
+        return Err(N1BundleCodecError::Header);
+    }
+    let schema_version = reader.u16()?;
+    if schema_version != 1 {
+        return Err(N1BundleCodecError::Header);
+    }
+    let identity = N1IdentityBindingV1 {
+        incarnation_id: reader.digest()?,
+        manifest_digest: reader.digest()?,
+        seed_code_digest: reader.digest()?,
+        formula_digest: reader.digest()?,
+        constitution_digest: reader.digest()?,
+        genesis_receipt_digest: reader.digest()?,
+    };
+    let scope = ScopeRef {
+        bot_token: reader.id()?,
+        persona_token: reader.id()?,
+        relation_token: match reader.take(1)?[0] {
+            0 => None,
+            1 => Some(reader.id()?),
+            _ => return Err(N1BundleCodecError::NonCanonical),
+        },
+        session_token: reader.id()?,
+    };
+    let scope = N1ScopeBindingV1 {
+        scope,
+        writer_scope_digest: reader.digest()?,
+        turn_scope_digest: reader.digest()?,
+    };
+    let state = N1StateBindingV1 {
+        base_revision: reader.u64()?,
+        next_revision: reader.u64()?,
+        state_before_digest: reader.digest()?,
+        state_after_digest: reader.digest()?,
+        state_bytes_digest: reader.digest()?,
+        graph_after_digest: reader.digest()?,
+    };
+    let turn = N1TurnBindingV1 {
+        turn_id: reader.id()?,
+        turn_binding_digest: reader.digest()?,
+        session_binding_digest: reader.digest()?,
+        exact_anchor_set_digest: reader.digest()?,
+        relation_scope_digest: reader.digest()?,
+        owner_attestation_digest: reader.digest()?,
+    };
+    let event_digest = reader.digest()?;
+    let receipt_digest = reader.digest()?;
+    let kv_count = reader.u16()? as usize;
+    if kv_count > N1_MAX_KV_REFS {
+        return Err(N1BundleCodecError::Bounds);
+    }
+    let mut kv_refs = Vec::with_capacity(kv_count);
+    for _ in 0..kv_count {
+        kv_refs.push(KvReferenceV1 {
+            key_digest: reader.digest()?,
+            value_digest: reader.digest()?,
+            canonical_value_digest: reader.digest()?,
+            canonical_value_len: reader.u64()?,
+            kv_stream_revision: reader.u64()?,
+        });
+    }
+    let soma = SomaBindingV1 {
+        source_state_digest: reader.digest()?,
+        soma_state_digest: reader.digest()?,
+        source_owner_attestation_digest: reader.digest()?,
+    };
+    let morph = MorphBindingV1 {
+        source_state_digest: reader.digest()?,
+        state_binding_digest: reader.digest()?,
+        catalog_digest: reader.digest()?,
+        source_owner_attestation_digest: reader.digest()?,
+    };
+    let estimate = ClosedEstimateBindingV1 {
+        estimate_digest: reader.digest()?,
+        evidence_vector_digest: reader.digest()?,
+        estimator_digest: reader.digest()?,
+        estimator_confidence: Fixed::from_raw(reader.i64()?),
+        source_owner_attestation_digest: reader.digest()?,
+    };
+    let policy = PolicyBindingV1 {
+        policy_version: reader.u32()?,
+        policy_digest: reader.digest()?,
+        policy_expires_at_ms: reader.u64()?,
+        policy_owner_attestation_digest: reader.digest()?,
+    };
+    let action = match reader.take(1)?[0] {
+        0 => None,
+        1 => {
+            let action_id = reader.id()?;
+            let action_contract_digest = reader.digest()?;
+            let action_len = reader.u32()? as usize;
+            if action_len > N1_MAX_ACTION_BYTES {
+                return Err(N1BundleCodecError::Bounds);
+            }
+            let action_contract_bytes = reader.take(action_len)?.to_vec();
+            let action_owner_attestation_digest = reader.digest()?;
+            Some(ActionBindingV1 {
+                action_id,
+                action_contract_digest,
+                action_contract_bytes,
+                action_owner_attestation_digest,
+            })
+        }
+        _ => return Err(N1BundleCodecError::NonCanonical),
+    };
+    let provenance_digest = reader.digest()?;
+    let bundle_digest = reader.digest()?;
+    if reader.remaining() != 0 {
+        return Err(N1BundleCodecError::TrailingBytes);
+    }
+    let bundle = N1NativeSemanticBundleV1 {
+        schema_version,
+        identity,
+        scope,
+        state,
+        turn,
+        event_digest,
+        receipt_digest,
+        kv_refs,
+        soma,
+        morph,
+        estimate,
+        policy,
+        action,
+        provenance_digest,
+        bundle_digest,
+    };
+    validate_n1_bundle(&bundle, true)?;
+    if n1_native_bundle_digest_v1(&bundle)? != bundle.bundle_digest {
+        return Err(N1BundleCodecError::DigestMismatch);
+    }
+    let canonical = encode_n1_native_bundle_v1(&bundle)?;
+    if canonical != bytes {
+        return Err(N1BundleCodecError::NonCanonical);
+    }
+    Ok(bundle)
+}
+
 struct ValidatedJournalCommit {
     revision: u64,
     revision_sqlite: i64,
@@ -355,6 +1030,241 @@ fn revision_from_sqlite(revision: i64) -> Result<u64, StoreError> {
 
 fn snapshot_upper_bound_to_sqlite(revision: u64) -> i64 {
     i64::try_from(revision).unwrap_or(i64::MAX)
+}
+
+fn n1_identity_digest_v1(identity: &N1IdentityBindingV1) -> Digest {
+    wire::domain_hash(
+        b"astr-embodiment/n1-identity-binding-v1",
+        &[
+            &identity.incarnation_id,
+            &identity.manifest_digest,
+            &identity.seed_code_digest,
+            &identity.formula_digest,
+            &identity.constitution_digest,
+            &identity.genesis_receipt_digest,
+        ],
+    )
+}
+
+/// Store-owned constitution commitment for the identity material that is
+/// actually persisted by the Genesis schema.  The older Genesis tables do
+/// not carry a caller-facing `IdentityConstitutionV1`; deriving this digest
+/// exclusively from the committed receipt fields prevents a native caller
+/// from selecting an arbitrary constitution digest while keeping the seam
+/// fail-closed until the richer native identity owner is available.
+fn n1_committed_constitution_digest_v1(receipt: &GenesisReceipt) -> Digest {
+    let genesis_digest = wire::genesis_receipt_digest(receipt);
+    wire::domain_hash(
+        b"astr-embodiment/n1/committed-constitution-v1",
+        &[
+            &receipt.incarnation_id,
+            &receipt.manifest_digest,
+            &receipt.seed_code_digest,
+            &receipt.formula_digest,
+            &receipt.persona_source_digest,
+            &receipt.compiler_protocol_digest,
+            &receipt.compiler_model_digest,
+            &receipt.development_seed_digest,
+            &receipt.initial_snapshot_digest,
+            &receipt.graph_digest,
+            &genesis_digest,
+        ],
+    )
+}
+
+/// Canonical digest for the opaque state bytes carried alongside a bundle.
+pub fn n1_state_bytes_digest_v1(state_bytes: &[u8]) -> Digest {
+    wire::domain_hash(b"astr-embodiment/n1-state-bytes-v1", &[state_bytes])
+}
+
+/// Canonical digest for the transition receipt bytes persisted in the journal.
+pub fn n1_transition_receipt_digest_v1(receipt: &ae_contracts::TransitionReceipt) -> Digest {
+    wire::receipt_digest(receipt)
+}
+
+fn validate_n1_typed_action_contract(
+    bundle: &N1NativeSemanticBundleV1,
+    receipt: &ae_contracts::TransitionReceipt,
+) -> Result<(), StoreError> {
+    if bundle.action.is_some() || receipt.action_contract.is_some() {
+        return Err(StoreError::N1BundleInvalid(
+            "fixed ActionContractV1 owner/codec is unavailable; action-bearing N1 commits are rejected"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn n1_event_scope(event: &ae_contracts::CanonicalEvent) -> &ScopeRef {
+    match event {
+        ae_contracts::CanonicalEvent::UserStimulus(value) => &value.scope,
+        ae_contracts::CanonicalEvent::UserReaction(value) => &value.scope,
+        ae_contracts::CanonicalEvent::CorrectionClaim(value) => &value.scope,
+        ae_contracts::CanonicalEvent::CorrectionVerdict(value) => &value.scope,
+        ae_contracts::CanonicalEvent::SelfActionCandidate(value) => &value.scope,
+        ae_contracts::CanonicalEvent::DeliveryOutcome(value) => &value.scope,
+        ae_contracts::CanonicalEvent::SettlementEvidence(value) => &value.scope,
+        ae_contracts::CanonicalEvent::TimeAdvance(value) => &value.scope,
+        ae_contracts::CanonicalEvent::AdminAction(value) => &value.scope,
+    }
+}
+
+fn n1_digest_from_blob(bytes: Vec<u8>, field: &'static str) -> Result<Digest, StoreError> {
+    if bytes.len() != 32 {
+        return Err(StoreError::N1BundleInvalid(format!(
+            "stored {field} has {} bytes",
+            bytes.len()
+        )));
+    }
+    let mut digest = [0; 32];
+    digest.copy_from_slice(&bytes);
+    Ok(digest)
+}
+
+fn validate_n1_identity_against_genesis(
+    bundle: &N1NativeSemanticBundleV1,
+    genesis_receipt: &GenesisReceipt,
+) -> Result<(), StoreError> {
+    if bundle.identity.incarnation_id != genesis_receipt.incarnation_id
+        || bundle.identity.manifest_digest != genesis_receipt.manifest_digest
+        || bundle.identity.seed_code_digest != genesis_receipt.seed_code_digest
+        || bundle.identity.formula_digest != genesis_receipt.formula_digest
+        || bundle.identity.genesis_receipt_digest != wire::genesis_receipt_digest(genesis_receipt)
+        || bundle.identity.constitution_digest
+            != n1_committed_constitution_digest_v1(genesis_receipt)
+    {
+        return Err(StoreError::N1BundleInvalid(
+            "N1 identity does not match the committed Genesis binding".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_n1_scope_binding(bundle: &N1NativeSemanticBundleV1) -> Result<(), StoreError> {
+    let expected_writer_scope = wire::persona_scope_digest(
+        &bundle.scope.scope.bot_token,
+        &bundle.scope.scope.persona_token,
+        bundle.scope.scope.relation_token.as_ref(),
+    );
+    let expected_turn_scope = wire::scope_digest(&bundle.scope.scope);
+    if bundle.scope.writer_scope_digest != expected_writer_scope
+        || bundle.scope.turn_scope_digest != expected_turn_scope
+    {
+        return Err(StoreError::N1BundleInvalid(
+            "N1 scope binding is not derived from its canonical ScopeRef".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate caller-provided identity against the Store-owned active Genesis
+/// binding while the commit transaction is already held.  No N1 row may be
+/// created for a missing or different incarnation.
+fn validate_n1_genesis_identity(
+    tx: &Transaction<'_>,
+    bundle: &N1NativeSemanticBundleV1,
+) -> Result<GenesisReceipt, StoreError> {
+    let stored = tx
+        .query_row(
+            "SELECT a.incarnation_id, i.seed_code_digest, i.manifest_digest, i.formula_digest, i.persona_source_digest, i.compiler_protocol_digest, i.compiler_model_digest, i.development_seed_digest, i.initial_snapshot_digest, i.graph_digest, i.equilibrium_residual, i.energy_residual, i.capacity_residual, i.sample_fit_residual FROM active_bindings a JOIN incarnations i ON i.incarnation_id = a.incarnation_id WHERE a.bot_token = ?1 AND a.persona_token = ?2 AND i.status = 'active'",
+            params![
+                blob(bundle.scope.scope.bot_token),
+                blob(bundle.scope.scope.persona_token),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                    row.get::<_, Vec<u8>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                    row.get::<_, i64>(13)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        incarnation_id_bytes,
+        seed_code_digest_bytes,
+        manifest_digest_bytes,
+        formula_digest_bytes,
+        persona_source_digest_bytes,
+        compiler_protocol_digest_bytes,
+        compiler_model_digest_bytes,
+        development_seed_digest_bytes,
+        initial_snapshot_digest_bytes,
+        graph_digest_bytes,
+        equilibrium_residual,
+        energy_residual,
+        capacity_residual,
+        sample_fit_residual,
+    )) = stored
+    else {
+        return Err(StoreError::GenesisNotFound);
+    };
+    let genesis_receipt = GenesisReceipt {
+        schema_version: 1,
+        seed_code_digest: n1_digest_from_blob(seed_code_digest_bytes, "seed_code_digest")?,
+        manifest_digest: n1_digest_from_blob(manifest_digest_bytes, "manifest_digest")?,
+        incarnation_id: n1_digest_from_blob(incarnation_id_bytes, "incarnation_id")?,
+        formula_digest: n1_digest_from_blob(formula_digest_bytes, "formula_digest")?,
+        persona_source_digest: n1_digest_from_blob(
+            persona_source_digest_bytes,
+            "persona_source_digest",
+        )?,
+        compiler_protocol_digest: n1_digest_from_blob(
+            compiler_protocol_digest_bytes,
+            "compiler_protocol_digest",
+        )?,
+        compiler_model_digest: n1_digest_from_blob(
+            compiler_model_digest_bytes,
+            "compiler_model_digest",
+        )?,
+        development_seed_digest: n1_digest_from_blob(
+            development_seed_digest_bytes,
+            "development_seed_digest",
+        )?,
+        initial_snapshot_digest: n1_digest_from_blob(
+            initial_snapshot_digest_bytes,
+            "initial_snapshot_digest",
+        )?,
+        graph_digest: n1_digest_from_blob(graph_digest_bytes, "graph_digest")?,
+        equilibrium_residual: Fixed::from_raw(equilibrium_residual),
+        energy_residual: Fixed::from_raw(energy_residual),
+        capacity_residual: Fixed::from_raw(capacity_residual),
+        sample_fit_residual: Fixed::from_raw(sample_fit_residual),
+        status: GenesisStatus::Committed,
+    };
+    validate_n1_identity_against_genesis(bundle, &genesis_receipt)?;
+    let state_digest_bytes: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT state_digest FROM snapshots WHERE scope_digest = ?1 AND revision = ?2",
+            params![
+                blob(bundle.scope.writer_scope_digest),
+                revision_to_sqlite(bundle.state.base_revision)?,
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(state_digest_bytes) = state_digest_bytes else {
+        return Err(StoreError::SnapshotNotFound);
+    };
+    if n1_digest_from_blob(state_digest_bytes, "snapshot state_digest")?
+        != bundle.state.state_before_digest
+    {
+        return Err(StoreError::N1BundleInvalid(
+            "state_before does not match the Store snapshot".to_owned(),
+        ));
+    }
+    Ok(genesis_receipt)
 }
 
 impl Store {
@@ -460,6 +1370,20 @@ impl Store {
                 state_bytes BLOB NOT NULL,
                 PRIMARY KEY (revision, scope_digest)
             );
+            CREATE TABLE IF NOT EXISTS n1_native_semantic_bundles_v1 (
+                writer_scope_digest BLOB NOT NULL,
+                logical_revision INTEGER NOT NULL,
+                bundle_digest BLOB NOT NULL,
+                canonical_bytes BLOB NOT NULL,
+                receipt_digest BLOB NOT NULL,
+                identity_digest BLOB NOT NULL,
+                state_after_digest BLOB NOT NULL,
+                turn_id BLOB NOT NULL,
+                provenance_digest BLOB NOT NULL,
+                PRIMARY KEY (writer_scope_digest, logical_revision)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS n1_native_semantic_bundle_digest_v1
+                ON n1_native_semantic_bundles_v1(bundle_digest);
             CREATE TABLE IF NOT EXISTS r7_policy_bindings_v1 (
                 bot_token BLOB NOT NULL,
                 persona_token BLOB NOT NULL,
@@ -1122,17 +2046,13 @@ impl Store {
             .query_row(
                 "SELECT incarnation_id, revision FROM active_bindings WHERE bot_token = ?1 AND persona_token = ?2",
                 params![blob(*bot_token), blob(*persona_token)],
-                |row| {
-                    let bytes: Vec<u8> = row.get(0)?;
-                    let mut incarnation = [0u8; 32];
-                    incarnation.copy_from_slice(&bytes);
-                    Ok((incarnation, row.get::<_, i64>(1)?))
-                },
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?;
-        let Some((incarnation_id, revision)) = stored else {
+        let Some((incarnation_bytes, revision)) = stored else {
             return Ok(None);
         };
+        let incarnation_id = n1_digest_from_blob(incarnation_bytes, "active incarnation_id")?;
         Ok(Some(BindingRow {
             bot_token: *bot_token,
             persona_token: *persona_token,
@@ -1154,7 +2074,7 @@ impl Store {
         let conn = self.connection()?;
         let Some((manifest_digest_bytes, nonce_bytes, formula_bytes, snapshot_bytes, graph_bytes, dev_bytes, persona_bytes, protocol_bytes, model_bytes, eq, en, cap, fit, born_at, seed_bytes, canonical, source_json)) =
             conn.query_row(
-                "SELECT i.manifest_digest, i.nonce_digest, i.formula_digest, i.initial_snapshot_digest, i.graph_digest, i.development_seed_digest, i.persona_source_digest, i.compiler_protocol_digest, i.compiler_model_digest, i.equilibrium_residual, i.energy_residual, i.capacity_residual, i.sample_fit_residual, i.born_at_ms, m.seed_code_digest, m.canonical_bytes, m.source_json FROM incarnations i JOIN genesis_manifests m ON i.manifest_digest = m.manifest_digest WHERE i.incarnation_id = ?1",
+                "SELECT i.manifest_digest, i.nonce_digest, i.formula_digest, i.initial_snapshot_digest, i.graph_digest, i.development_seed_digest, i.persona_source_digest, i.compiler_protocol_digest, i.compiler_model_digest, i.equilibrium_residual, i.energy_residual, i.capacity_residual, i.sample_fit_residual, i.born_at_ms, m.seed_code_digest, m.canonical_bytes, m.source_json FROM incarnations i JOIN genesis_manifests m ON i.manifest_digest = m.manifest_digest WHERE i.incarnation_id = ?1 AND i.status = 'active'",
                 params![blob(binding.incarnation_id)],
                 |row| {
                     Ok((
@@ -1181,26 +2101,18 @@ impl Store {
         else {
             return Ok(None);
         };
-        let mut manifest_digest = [0u8; 32];
-        manifest_digest.copy_from_slice(&manifest_digest_bytes);
-        let mut incarnation_nonce = [0u8; 32];
-        incarnation_nonce.copy_from_slice(&nonce_bytes);
-        let mut formula_digest = [0u8; 32];
-        formula_digest.copy_from_slice(&formula_bytes);
-        let mut initial_snapshot_digest = [0u8; 32];
-        initial_snapshot_digest.copy_from_slice(&snapshot_bytes);
-        let mut graph_digest = [0u8; 32];
-        graph_digest.copy_from_slice(&graph_bytes);
-        let mut development_seed_digest = [0u8; 32];
-        development_seed_digest.copy_from_slice(&dev_bytes);
-        let mut persona_source_digest = [0u8; 32];
-        persona_source_digest.copy_from_slice(&persona_bytes);
-        let mut compiler_protocol_digest = [0u8; 32];
-        compiler_protocol_digest.copy_from_slice(&protocol_bytes);
-        let mut compiler_model_digest = [0u8; 32];
-        compiler_model_digest.copy_from_slice(&model_bytes);
-        let mut seed_code_digest = [0u8; 32];
-        seed_code_digest.copy_from_slice(&seed_bytes);
+        let manifest_digest = n1_digest_from_blob(manifest_digest_bytes, "manifest_digest")?;
+        let incarnation_nonce = n1_digest_from_blob(nonce_bytes, "incarnation_nonce")?;
+        let formula_digest = n1_digest_from_blob(formula_bytes, "formula_digest")?;
+        let initial_snapshot_digest =
+            n1_digest_from_blob(snapshot_bytes, "initial_snapshot_digest")?;
+        let graph_digest = n1_digest_from_blob(graph_bytes, "graph_digest")?;
+        let development_seed_digest = n1_digest_from_blob(dev_bytes, "development_seed_digest")?;
+        let persona_source_digest = n1_digest_from_blob(persona_bytes, "persona_source_digest")?;
+        let compiler_protocol_digest =
+            n1_digest_from_blob(protocol_bytes, "compiler_protocol_digest")?;
+        let compiler_model_digest = n1_digest_from_blob(model_bytes, "compiler_model_digest")?;
+        let seed_code_digest = n1_digest_from_blob(seed_bytes, "seed_code_digest")?;
         let source: PersonaSourceRef = serde_json::from_str(&source_json).map_err(|error| {
             StoreError::Sqlite(format!("source deserialization failed: {error}"))
         })?;
@@ -1256,11 +2168,9 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(bytes.map(|b| {
-            let mut digest = [0u8; 32];
-            digest.copy_from_slice(&b);
-            digest
-        }))
+        bytes
+            .map(|bytes| n1_digest_from_blob(bytes, "journal chain_digest"))
+            .transpose()
     }
 
     pub fn lookup_event(
@@ -1316,10 +2226,8 @@ impl Store {
         else {
             return Ok(None);
         };
-        let mut event_digest = [0u8; 32];
-        event_digest.copy_from_slice(&event_digest_bytes);
-        let mut chain_digest = [0u8; 32];
-        chain_digest.copy_from_slice(&chain_bytes);
+        let event_digest = n1_digest_from_blob(event_digest_bytes, "journal event_digest")?;
+        let chain_digest = n1_digest_from_blob(chain_bytes, "journal chain_digest")?;
         Ok(Some(JournalRow {
             revision,
             scope_digest: *scope_digest,
@@ -1361,10 +2269,8 @@ impl Store {
             chain_bytes,
         ) in stored_rows
         {
-            let mut event_digest = [0u8; 32];
-            event_digest.copy_from_slice(&event_digest_bytes);
-            let mut chain_digest = [0u8; 32];
-            chain_digest.copy_from_slice(&chain_bytes);
+            let event_digest = n1_digest_from_blob(event_digest_bytes, "journal event_digest")?;
+            let chain_digest = n1_digest_from_blob(chain_bytes, "journal chain_digest")?;
             rows.push(JournalRow {
                 revision: revision_from_sqlite(revision)?,
                 scope_digest: *scope_digest,
@@ -1426,6 +2332,484 @@ impl Store {
             validated.revision,
             Self::journal_row(&commit.journal, validated),
         ))
+    }
+
+    /// Atomically commit the typed N1 semantic bundle together with its
+    /// journal, applied-event marker and state snapshot.  The bundle table is
+    /// an indexed projection; the canonical bytes remain the authority and
+    /// are decoded again on every read.
+    pub fn commit_stateful_n1_native_semantic_v1(
+        &mut self,
+        commit: &StatefulNativeSemanticCommitV1,
+    ) -> Result<CommittedN1NativeSemanticV1, StoreError> {
+        if commit.state_bytes.is_empty() {
+            return Err(StoreError::EmptyStateBytes);
+        }
+        let canonical = encode_n1_native_bundle_v1(&commit.bundle)
+            .map_err(|error| StoreError::N1BundleInvalid(error.to_string()))?;
+        let receipt = &commit.journal.receipt;
+        let event = wire::decode_event(&commit.journal.event_bytes).map_err(|error| {
+            StoreError::N1BundleInvalid(format!("event decode failed: {error}"))
+        })?;
+        let event_scope = n1_event_scope(&event);
+        validate_n1_typed_action_contract(&commit.bundle, receipt)?;
+        validate_n1_scope_binding(&commit.bundle)?;
+        if commit.bundle.scope.writer_scope_digest != receipt.scope_digest
+            || event_scope != &commit.bundle.scope.scope
+            || wire::persona_scope_digest(
+                &event_scope.bot_token,
+                &event_scope.persona_token,
+                event_scope.relation_token.as_ref(),
+            ) != receipt.scope_digest
+            || commit.bundle.event_digest != receipt.event_digest
+            || commit.bundle.state.base_revision != receipt.base_revision
+            || commit.bundle.state.next_revision != receipt.next_revision
+            || commit.bundle.state.state_before_digest != receipt.state_before
+            || commit.bundle.state.state_after_digest != receipt.state_after
+            || commit.bundle.state.graph_after_digest != receipt.graph_after
+            || commit.bundle.identity.formula_digest != receipt.formula_digest
+            || commit.bundle.receipt_digest != n1_transition_receipt_digest_v1(receipt)
+            || commit.bundle.state.state_bytes_digest
+                != n1_state_bytes_digest_v1(&commit.state_bytes)
+        {
+            return Err(StoreError::N1BundleInvalid(
+                "bundle and transition receipt bindings disagree".to_owned(),
+            ));
+        }
+        let writer_scope_digest = commit.bundle.scope.writer_scope_digest;
+        let logical_revision = revision_to_sqlite(commit.bundle.state.next_revision)?;
+        let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let genesis_receipt = validate_n1_genesis_identity(&tx, &commit.bundle)?;
+        if commit.bundle.state.base_revision == 0
+            && commit.journal.chain_seed != genesis_receipt.initial_snapshot_digest
+        {
+            return Err(StoreError::N1BundleInvalid(
+                "first N1 journal chain seed does not match committed Genesis snapshot".to_owned(),
+            ));
+        }
+
+        let existing: Option<(Vec<u8>, i64)> = tx
+            .query_row(
+                "SELECT canonical_bytes, logical_revision FROM n1_native_semantic_bundles_v1 WHERE writer_scope_digest = ?1 AND logical_revision = ?2",
+                params![blob(writer_scope_digest), logical_revision],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_bytes, existing_revision)) = existing {
+            if existing_bytes != canonical {
+                return Err(StoreError::N1BundleConflict);
+            }
+            let revision = revision_from_sqlite(existing_revision)?;
+            tx.rollback()?;
+            let bundle = self
+                .read_n1_native_semantic_v1(&writer_scope_digest, revision)?
+                .ok_or(StoreError::N1BundleNotFound)?;
+            let journal = self
+                .read_journal_row(&writer_scope_digest, revision)?
+                .ok_or(StoreError::N1BundleNotFound)?;
+            let state_bytes = self
+                .read_snapshot(&writer_scope_digest, revision)?
+                .ok_or(StoreError::N1BundleNotFound)?
+                .state_bytes;
+            return Ok(CommittedN1NativeSemanticV1 {
+                revision,
+                bundle,
+                journal,
+                state_bytes,
+            });
+        }
+
+        let validated = Self::validate_journal_commit(&tx, &commit.journal)?;
+        if validated.revision != commit.bundle.state.next_revision {
+            return Err(StoreError::N1BundleInvalid(
+                "bundle revision does not match Store high-water mark".to_owned(),
+            ));
+        }
+        Self::insert_journal_row(&tx, &commit.journal, &validated)?;
+        Self::insert_applied_event(&tx, &commit.journal, &validated)?;
+        tx.execute(
+            "INSERT INTO snapshots (revision, scope_digest, state_digest, state_bytes) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                validated.revision_sqlite,
+                blob(receipt.scope_digest),
+                blob(receipt.state_after),
+                commit.state_bytes.as_slice(),
+            ],
+        )?;
+        let identity_digest = n1_identity_digest_v1(&commit.bundle.identity);
+        tx.execute(
+            "INSERT INTO n1_native_semantic_bundles_v1 (writer_scope_digest, logical_revision, bundle_digest, canonical_bytes, receipt_digest, identity_digest, state_after_digest, turn_id, provenance_digest) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                blob(writer_scope_digest),
+                logical_revision,
+                blob(commit.bundle.bundle_digest),
+                canonical,
+                blob(commit.bundle.receipt_digest),
+                blob(identity_digest),
+                blob(commit.bundle.state.state_after_digest),
+                blob(commit.bundle.turn.turn_id),
+                blob(commit.bundle.provenance_digest),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(CommittedN1NativeSemanticV1 {
+            revision: validated.revision,
+            bundle: commit.bundle.clone(),
+            journal: Self::journal_row(&commit.journal, validated),
+            state_bytes: commit.state_bytes.clone(),
+        })
+    }
+
+    /// Read one committed N1 bundle and verify both its canonical bytes and
+    /// indexed columns.  A corrupt row fails closed rather than hydrating.
+    pub fn read_n1_native_semantic_v1(
+        &self,
+        writer_scope_digest: &Digest,
+        logical_revision: u64,
+    ) -> Result<Option<N1NativeSemanticBundleV1>, StoreError> {
+        let revision = revision_to_sqlite(logical_revision)?;
+        let conn = self.connection()?;
+        let row: Option<N1StoredBundleIndexRow> = conn
+            .query_row(
+                "SELECT canonical_bytes, receipt_digest, identity_digest, state_after_digest, turn_id, provenance_digest FROM n1_native_semantic_bundles_v1 WHERE writer_scope_digest = ?1 AND logical_revision = ?2",
+                params![blob(*writer_scope_digest), revision],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .optional()?;
+        let Some((
+            canonical,
+            receipt_digest,
+            identity_digest,
+            state_after_digest,
+            turn_id,
+            provenance_digest,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let bundle = decode_n1_native_bundle_v1(&canonical)
+            .map_err(|error| StoreError::N1BundleInvalid(error.to_string()))?;
+        if bundle.state.next_revision != logical_revision
+            || bundle.scope.writer_scope_digest != *writer_scope_digest
+            || bundle.receipt_digest.as_slice() != receipt_digest.as_slice()
+            || n1_identity_digest_v1(&bundle.identity).as_slice() != identity_digest.as_slice()
+            || bundle.state.state_after_digest.as_slice() != state_after_digest.as_slice()
+            || bundle.turn.turn_id.as_slice() != turn_id.as_slice()
+            || bundle.provenance_digest.as_slice() != provenance_digest.as_slice()
+        {
+            return Err(StoreError::N1BundleInvalid(
+                "N1 indexed columns disagree with canonical bundle".to_owned(),
+            ));
+        }
+        let journal = self
+            .read_journal_row(writer_scope_digest, logical_revision)?
+            .ok_or(StoreError::N1BundleNotFound)?;
+        let receipt = journal
+            .decode_receipt()
+            .map_err(|error| StoreError::N1BundleInvalid(error.to_string()))?;
+        let event = wire::decode_event(&journal.event_bytes)
+            .map_err(|error| StoreError::N1BundleInvalid(error.to_string()))?;
+        if receipt.scope_digest != *writer_scope_digest
+            || receipt.event_digest != bundle.event_digest
+            || receipt.base_revision != bundle.state.base_revision
+            || receipt.next_revision != bundle.state.next_revision
+            || receipt.state_before != bundle.state.state_before_digest
+            || receipt.state_after != bundle.state.state_after_digest
+            || receipt.graph_after != bundle.state.graph_after_digest
+            || receipt.formula_digest != bundle.identity.formula_digest
+            || n1_event_scope(&event) != &bundle.scope.scope
+            || wire::event_digest(&event) != bundle.event_digest
+            || n1_transition_receipt_digest_v1(&receipt) != bundle.receipt_digest
+        {
+            return Err(StoreError::N1BundleInvalid(
+                "N1 journal receipt/event disagrees with canonical bundle".to_owned(),
+            ));
+        }
+        validate_n1_scope_binding(&bundle)?;
+        if wire::persona_scope_digest(
+            &n1_event_scope(&event).bot_token,
+            &n1_event_scope(&event).persona_token,
+            n1_event_scope(&event).relation_token.as_ref(),
+        ) != *writer_scope_digest
+        {
+            return Err(StoreError::N1BundleInvalid(
+                "N1 event scope is not on the committed writer lane".to_owned(),
+            ));
+        }
+        let genesis = self
+            .lookup_bound_genesis(
+                &bundle.scope.scope.bot_token,
+                &bundle.scope.scope.persona_token,
+            )?
+            .ok_or(StoreError::GenesisNotFound)?;
+        validate_n1_identity_against_genesis(&bundle, &genesis.receipt)?;
+        validate_n1_typed_action_contract(&bundle, &receipt)?;
+        let snapshot = self
+            .read_snapshot(writer_scope_digest, logical_revision)?
+            .ok_or(StoreError::SnapshotNotFound)?;
+        if snapshot.state_digest != bundle.state.state_after_digest
+            || n1_state_bytes_digest_v1(&snapshot.state_bytes) != bundle.state.state_bytes_digest
+        {
+            return Err(StoreError::N1BundleInvalid(
+                "N1 snapshot disagrees with canonical bundle".to_owned(),
+            ));
+        }
+        let base_snapshot = self
+            .read_snapshot(writer_scope_digest, bundle.state.base_revision)?
+            .ok_or(StoreError::SnapshotNotFound)?;
+        if base_snapshot.state_digest != bundle.state.state_before_digest {
+            return Err(StoreError::N1BundleInvalid(
+                "N1 state_before does not match the preceding Store snapshot".to_owned(),
+            ));
+        }
+        Ok(Some(bundle))
+    }
+
+    /// Read a contiguous half-open range `(from_exclusive, through_inclusive]`.
+    pub fn read_n1_native_semantic_range_v1(
+        &self,
+        writer_scope_digest: &Digest,
+        from_exclusive: u64,
+        through_inclusive: u64,
+    ) -> Result<Vec<N1NativeSemanticBundleV1>, StoreError> {
+        if through_inclusive < from_exclusive {
+            return Err(StoreError::N1InvalidRange);
+        }
+        if through_inclusive == from_exclusive {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let mut statement = conn.prepare(
+            "SELECT logical_revision, canonical_bytes FROM n1_native_semantic_bundles_v1 WHERE writer_scope_digest = ?1 AND logical_revision > ?2 AND logical_revision <= ?3 ORDER BY logical_revision ASC",
+        )?;
+        let rows = statement
+            .query_map(
+                params![
+                    blob(*writer_scope_digest),
+                    revision_to_sqlite(from_exclusive)?,
+                    revision_to_sqlite(through_inclusive)?,
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut expected = from_exclusive
+            .checked_add(1)
+            .ok_or_else(|| StoreError::N1ReplayInvalid("revision overflow".to_owned()))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (revision, _canonical) in rows {
+            let revision = revision_from_sqlite(revision)?;
+            if revision != expected {
+                return Err(StoreError::N1ReplayInvalid(format!(
+                    "revision gap: expected {expected}, found {revision}"
+                )));
+            }
+            let bundle = self
+                .read_n1_native_semantic_v1(writer_scope_digest, revision)?
+                .ok_or(StoreError::N1BundleNotFound)?;
+            out.push(bundle);
+            expected = expected
+                .checked_add(1)
+                .ok_or_else(|| StoreError::N1ReplayInvalid("revision overflow".to_owned()))?;
+        }
+        if expected != through_inclusive.saturating_add(1) {
+            return Err(StoreError::N1ReplayInvalid(format!(
+                "range incomplete: expected through {through_inclusive}"
+            )));
+        }
+        Ok(out)
+    }
+
+    /// Read-only replay report for the N1 semantic lane.
+    pub fn replay_n1_native_semantic_v1(
+        &self,
+        writer_scope_digest: &Digest,
+        through_inclusive: u64,
+    ) -> Result<N1NativeReplayReportV1, StoreError> {
+        if through_inclusive == 0 {
+            return Ok(N1NativeReplayReportV1 {
+                checked: 0,
+                ok: true,
+                base_revision: 0,
+                final_revision: 0,
+                first_error: None,
+            });
+        }
+        match self.read_n1_native_semantic_range_v1(writer_scope_digest, 0, through_inclusive) {
+            Ok(bundles) => {
+                let mut first_error = None;
+                if let Some(first) = bundles.first() {
+                    for pair in bundles.windows(2) {
+                        if pair[1].state.state_before_digest != pair[0].state.state_after_digest
+                            || pair[1].identity != first.identity
+                            || pair[1].scope.writer_scope_digest != first.scope.writer_scope_digest
+                            || pair[1].scope.turn_scope_digest != first.scope.turn_scope_digest
+                        {
+                            first_error = Some("N1 state/identity link mismatch".to_owned());
+                            break;
+                        }
+                    }
+                    if first_error.is_none() {
+                        for bundle in &bundles {
+                            if let Err(error) = self
+                                .read_snapshot(writer_scope_digest, bundle.state.next_revision)
+                                .and_then(|snapshot| {
+                                    let snapshot = snapshot.ok_or(StoreError::SnapshotNotFound)?;
+                                    if snapshot.state_digest != bundle.state.state_after_digest
+                                        || n1_state_bytes_digest_v1(&snapshot.state_bytes)
+                                            != bundle.state.state_bytes_digest
+                                    {
+                                        return Err(StoreError::N1BundleInvalid(
+                                            "snapshot continuity mismatch".to_owned(),
+                                        ));
+                                    }
+                                    Ok(snapshot)
+                                })
+                            {
+                                first_error = Some(error.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    if first_error.is_none() {
+                        let genesis = self
+                            .lookup_bound_genesis(
+                                &first.scope.scope.bot_token,
+                                &first.scope.scope.persona_token,
+                            )
+                            .map_err(|error| error.to_string());
+                        match genesis {
+                            Ok(Some(genesis)) => {
+                                let rows = self
+                                    .read_journal(writer_scope_digest)
+                                    .map_err(|error| error.to_string());
+                                match rows {
+                                    Ok(rows) => {
+                                        let rows = rows
+                                            .into_iter()
+                                            .take_while(|row| row.revision <= through_inclusive)
+                                            .collect::<Vec<_>>();
+                                        let verified = ae_continuum::verify_replay(
+                                            genesis.receipt.initial_snapshot_digest,
+                                            &rows,
+                                        );
+                                        if !verified.ok
+                                            || verified.final_revision != through_inclusive
+                                        {
+                                            first_error = verified.first_error.or_else(|| {
+                                                Some("journal chain does not verify".to_owned())
+                                            });
+                                        }
+                                    }
+                                    Err(error) => first_error = Some(error),
+                                }
+                            }
+                            Ok(None) => {
+                                first_error = Some("committed Genesis is missing".to_owned())
+                            }
+                            Err(error) => first_error = Some(error),
+                        }
+                    }
+                }
+                Ok(N1NativeReplayReportV1 {
+                    checked: bundles.len(),
+                    ok: first_error.is_none(),
+                    base_revision: bundles
+                        .first()
+                        .map(|bundle| bundle.state.base_revision)
+                        .unwrap_or(0),
+                    final_revision: bundles
+                        .last()
+                        .map(|bundle| bundle.state.next_revision)
+                        .unwrap_or(0),
+                    first_error,
+                })
+            }
+            Err(error) => Ok(N1NativeReplayReportV1 {
+                checked: 0,
+                ok: false,
+                base_revision: 0,
+                final_revision: 0,
+                first_error: Some(error.to_string()),
+            }),
+        }
+    }
+
+    /// Resolve a Store-returned authority context from the committed Genesis
+    /// and the latest native bundle.  The first native transition is allowed
+    /// to start from the Store-owned revision-zero snapshot; callers never
+    /// supply identity, constitution, or a synthetic state capsule.
+    pub fn read_n1_authority_context_v1(
+        &self,
+        scope: &ScopeRef,
+    ) -> Result<CommittedN1AuthorityContextV1, StoreError> {
+        let writer_scope_digest = wire::persona_scope_digest(
+            &scope.bot_token,
+            &scope.persona_token,
+            scope.relation_token.as_ref(),
+        );
+        let genesis = self
+            .lookup_bound_genesis(&scope.bot_token, &scope.persona_token)?
+            .ok_or(StoreError::GenesisNotFound)?;
+        let identity = N1IdentityBindingV1 {
+            incarnation_id: genesis.receipt.incarnation_id,
+            manifest_digest: genesis.receipt.manifest_digest,
+            seed_code_digest: genesis.receipt.seed_code_digest,
+            formula_digest: genesis.receipt.formula_digest,
+            constitution_digest: n1_committed_constitution_digest_v1(&genesis.receipt),
+            genesis_receipt_digest: wire::genesis_receipt_digest(&genesis.receipt),
+        };
+        let conn = self.connection()?;
+        let latest: Option<i64> = conn.query_row(
+            "SELECT MAX(logical_revision) FROM n1_native_semantic_bundles_v1 WHERE writer_scope_digest = ?1",
+            params![blob(writer_scope_digest)],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        let Some(latest) = latest else {
+            let snapshot = self
+                .read_snapshot(&writer_scope_digest, 0)?
+                .ok_or(StoreError::SnapshotNotFound)?;
+            if snapshot.state_digest != genesis.receipt.initial_snapshot_digest {
+                return Err(StoreError::N1BundleInvalid(
+                    "Genesis revision-zero snapshot does not match the committed receipt"
+                        .to_owned(),
+                ));
+            }
+            return Ok(CommittedN1AuthorityContextV1 {
+                scope: scope.clone(),
+                writer_scope_digest,
+                identity,
+                current_revision: 0,
+                state_bytes: snapshot.state_bytes,
+                state_digest: snapshot.state_digest,
+                graph_digest: genesis.receipt.graph_digest,
+            });
+        };
+        let revision = revision_from_sqlite(latest)?;
+        let bundle = self
+            .read_n1_native_semantic_v1(&writer_scope_digest, revision)?
+            .ok_or(StoreError::N1BundleNotFound)?;
+        let snapshot = self
+            .read_snapshot(&writer_scope_digest, revision)?
+            .ok_or(StoreError::N1BundleNotFound)?;
+        if snapshot.state_digest != bundle.state.state_after_digest
+            || n1_state_bytes_digest_v1(&snapshot.state_bytes) != bundle.state.state_bytes_digest
+        {
+            return Err(StoreError::N1BundleInvalid(
+                "snapshot bytes/digest disagree with the committed bundle".to_owned(),
+            ));
+        }
+        Ok(CommittedN1AuthorityContextV1 {
+            scope: bundle.scope.scope,
+            writer_scope_digest,
+            identity: bundle.identity,
+            current_revision: revision,
+            state_bytes: snapshot.state_bytes,
+            state_digest: snapshot.state_digest,
+            graph_digest: bundle.state.graph_after_digest,
+        })
     }
 
     fn validate_journal_commit(
@@ -1588,23 +2972,23 @@ impl Store {
     ) -> Result<Option<SnapshotRow>, StoreError> {
         let revision_sqlite = revision_to_sqlite(revision)?;
         let conn = self.connection()?;
-        conn.query_row(
+        let stored = conn
+            .query_row(
             "SELECT state_digest, state_bytes FROM snapshots WHERE scope_digest = ?1 AND revision = ?2",
             params![blob(*scope_digest), revision_sqlite],
-            |row| {
-                let bytes: Vec<u8> = row.get(0)?;
-                let mut state_digest = [0u8; 32];
-                state_digest.copy_from_slice(&bytes);
-                Ok(SnapshotRow {
-                    revision,
-                    scope_digest: *scope_digest,
-                    state_digest,
-                    state_bytes: row.get(1)?,
-                })
-            },
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
-        .optional()
-        .map_err(StoreError::from)
+        .optional()?;
+        let Some((state_digest_bytes, state_bytes)) = stored else {
+            return Ok(None);
+        };
+        let state_digest = n1_digest_from_blob(state_digest_bytes, "snapshot state_digest")?;
+        Ok(Some(SnapshotRow {
+            revision,
+            scope_digest: *scope_digest,
+            state_digest,
+            state_bytes,
+        }))
     }
 
     pub fn read_latest_snapshot(
@@ -1632,8 +3016,7 @@ impl Store {
         let Some((revision, state_digest_bytes, state_bytes)) = stored else {
             return Ok(None);
         };
-        let mut state_digest = [0u8; 32];
-        state_digest.copy_from_slice(&state_digest_bytes);
+        let state_digest = n1_digest_from_blob(state_digest_bytes, "snapshot state_digest")?;
         Ok(Some(SnapshotRow {
             revision: revision_from_sqlite(revision)?,
             scope_digest: *scope_digest,
