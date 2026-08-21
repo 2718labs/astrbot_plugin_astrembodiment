@@ -1121,6 +1121,73 @@ impl AstrRuntime {
             .ok_or(RuntimeError::PersonaGenesisRequired)
     }
 
+    fn durable_g0_metadata_v1(
+        &self,
+        legacy_scope: &Digest,
+        legacy_revision: u64,
+        formula_digest: &Digest,
+        initial_snapshot_digest: &Digest,
+        genesis_graph_digest: &Digest,
+    ) -> Result<(Digest, Digest, u32, u32), RuntimeError> {
+        let snapshot = self
+            .store
+            .read_latest_snapshot(legacy_scope, legacy_revision)?
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        if snapshot.revision > legacy_revision {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+
+        let rows = self.store.read_journal(legacy_scope)?;
+        let mut expected_revision = 0_u64;
+        let mut expected_state = *initial_snapshot_digest;
+        let mut expected_graph = *genesis_graph_digest;
+        for row in rows.iter().filter(|row| row.revision <= legacy_revision) {
+            let next_revision = expected_revision
+                .checked_add(1)
+                .ok_or(RuntimeError::InvalidNeuralState)?;
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if row.revision != next_revision
+                || receipt.next_revision != row.revision
+                || row.base_revision != receipt.base_revision
+                || receipt.base_revision != expected_revision
+                || row.scope_digest != *legacy_scope
+                || receipt.scope_digest != *legacy_scope
+                || receipt.formula_digest != *formula_digest
+                || receipt.state_before != expected_state
+            {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+            expected_revision = row.revision;
+            expected_state = receipt.state_after;
+            expected_graph = receipt.graph_after;
+        }
+        if expected_revision != legacy_revision || snapshot.state_digest != expected_state {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+
+        // G0 snapshots are rooted at Genesis.  The latest durable G0 receipt
+        // supplies the graph digest to verify when the cursor is non-zero;
+        // this keeps semantic snapshots and hot state out of the metadata path.
+        let (field, graph) = decode_hot_state_v1(
+            &snapshot.state_bytes,
+            formula_digest,
+            &snapshot.state_digest,
+            &expected_graph,
+        )?;
+        let decoded_graph_digest = graph_digest(&graph);
+        if decoded_graph_digest != expected_graph {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        Ok((
+            snapshot.state_digest,
+            decoded_graph_digest,
+            field.active_node_count(),
+            graph.edges.len() as u32,
+        ))
+    }
+
     // --------------------------------------------------------------- events
 
     /// Apply one canonical event through the G0 no-op lane and commit it.
@@ -1160,9 +1227,6 @@ impl AstrRuntime {
             formula_digest,
             manifest_digest,
             initial_snapshot_digest,
-            graph_after,
-            active_nodes,
-            active_edges,
         ) = {
             let hot = self.hot_for(scope)?;
             (
@@ -1173,19 +1237,24 @@ impl AstrRuntime {
                 hot.formula_digest,
                 hot.identity.manifest_digest,
                 hot.initial_snapshot_digest,
-                graph_digest(&hot.graph),
-                hot.field.active_node_count(),
-                hot.graph.edges.len() as u32,
             )
         };
-        // G0 is a separate no-op lane. Its receipt state chain starts from
-        // the latest durable G0 snapshot, not from semantic hot state that
-        // another lane may have hydrated into the shared in-memory brain.
-        let state_before = self
+        let committed = self
             .store
-            .read_latest_snapshot(&legacy_persona_scope, legacy_revision)?
-            .map(|snapshot| snapshot.state_digest)
-            .unwrap_or(initial_snapshot_digest);
+            .lookup_bound_genesis(&hot_bot_token, &hot_persona_token)?
+            .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        if committed.receipt.formula_digest != formula_digest
+            || committed.receipt.initial_snapshot_digest != initial_snapshot_digest
+        {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let (state_before, graph_after, active_nodes, active_edges) = self.durable_g0_metadata_v1(
+            &legacy_persona_scope,
+            legacy_revision,
+            &formula_digest,
+            &initial_snapshot_digest,
+            &committed.receipt.graph_digest,
+        )?;
         let event_scope = match event {
             CanonicalEvent::UserStimulus(e) => &e.scope,
             CanonicalEvent::DeliveryOutcome(e) => &e.scope,
@@ -1519,6 +1588,28 @@ impl AstrRuntime {
         scope: &ScopeRef,
         proposal: &PerceptionProposalV1,
     ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
+        self.apply_perception_proposal_v1_inner(scope, proposal, || {})
+    }
+
+    #[cfg(test)]
+    fn apply_perception_proposal_v1_with_pre_commit_hook(
+        &mut self,
+        scope: &ScopeRef,
+        proposal: &PerceptionProposalV1,
+        before_commit: &mut dyn FnMut(),
+    ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
+        self.apply_perception_proposal_v1_inner(scope, proposal, before_commit)
+    }
+
+    fn apply_perception_proposal_v1_inner<F>(
+        &mut self,
+        scope: &ScopeRef,
+        proposal: &PerceptionProposalV1,
+        mut before_commit: F,
+    ) -> Result<PerceptionProposalDecisionV1, RuntimeError>
+    where
+        F: FnMut(),
+    {
         validate_perception_scope(scope)?;
         proposal
             .validate_v1()
@@ -1638,6 +1729,7 @@ impl AstrRuntime {
             state_bytes,
         };
 
+        before_commit();
         match self.store.commit_stateful_journal(&commit) {
             Ok((revision, _row)) => {
                 if let Some(hot) = self.hot.as_mut() {
@@ -1664,6 +1756,41 @@ impl AstrRuntime {
                     .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
                 if receipt.action_contract.is_some() {
                     return Err(RuntimeError::SemanticIdentityConflict);
+                }
+                self.bind_hot(scope.bot_token, scope.persona_token)?;
+                Ok(PerceptionProposalDecisionV1 {
+                    receipt,
+                    revision,
+                    deduplicated: true,
+                })
+            }
+            Err(stale @ StoreError::StaleRevision { .. }) => {
+                let Some(row) = self
+                    .store
+                    .lookup_event(&semantic_persona_scope, &event_digest)?
+                else {
+                    return Err(RuntimeError::Store(stale));
+                };
+                if row.event_digest != event_digest || row.scope_digest != semantic_persona_scope {
+                    return Err(RuntimeError::InvalidNeuralState);
+                }
+                let revision = row.revision;
+                let receipt = row
+                    .decode_receipt()
+                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+                if receipt.action_contract.is_some() {
+                    return Err(RuntimeError::SemanticIdentityConflict);
+                }
+                if receipt.scope_digest != semantic_persona_scope
+                    || receipt.event_digest != event_digest
+                    || receipt.formula_digest != formula_digest
+                    || receipt.schema_version != 1
+                    || receipt.status != CommitStatus::Committed
+                    || receipt.next_revision != revision
+                    || receipt.base_revision >= receipt.next_revision
+                    || receipt.base_revision.checked_add(1) != Some(receipt.next_revision)
+                {
+                    return Err(RuntimeError::InvalidNeuralState);
                 }
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
                 Ok(PerceptionProposalDecisionV1 {
@@ -2036,6 +2163,7 @@ mod tests {
 mod spc1_native_ingress_red_tests {
     use super::*;
     use ae_contracts::r7::{EvidenceVector, PerceptionProposalV1};
+    use ae_contracts::{CausalRef, SemanticEstimate, UserStimulus};
     use ae_fixed::Fixed;
     use std::collections::BTreeSet;
 
@@ -2158,6 +2286,35 @@ mod spc1_native_ingress_red_tests {
         let genesis = super::tests::request(seed);
         runtime.ensure_genesis(&genesis).expect("genesis");
         (runtime, scope(seed, 90))
+    }
+
+    fn cleanup_database(name: &str) {
+        let root = std::path::PathBuf::from(
+            r"G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\test-runs\spc1-native-ingress",
+        );
+        let path = root.join(format!("{name}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn g0_stimulus(seed: u8, revision: u64, session: u8) -> CanonicalEvent {
+        CanonicalEvent::UserStimulus(UserStimulus {
+            event_id: [seed.wrapping_add(10); 16],
+            scope: scope(seed, session),
+            causal: CausalRef {
+                turn_id: [seed.wrapping_add(11); 16],
+                action_id: None,
+                delivery_id: None,
+                claim_id: None,
+                base_revision: revision,
+            },
+            observed_at_ms: 1_700_000_000_100,
+            evidence: SemanticEstimate {
+                schema_version: 1,
+                dimensions: ae_contracts::EvidenceVector::default(),
+                estimator_confidence: Fixed::ZERO,
+                estimator_digest: [0; 32],
+            },
+        })
     }
 
     #[test]
@@ -2476,6 +2633,182 @@ mod spc1_native_ingress_red_tests {
         drop(first_runtime);
         drop(second_runtime);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stale_exact_proposal_resolves_to_the_persisted_winner() {
+        let path = database("stale-exact-race");
+        let genesis = super::tests::request(111);
+        let request_scope = scope(111, 210);
+        let mut winner_runtime = AstrRuntime::open(&path).expect("open winner runtime");
+        winner_runtime.ensure_genesis(&genesis).expect("genesis");
+        let mut loser_runtime = AstrRuntime::open(&path).expect("open loser runtime");
+        assert_eq!(
+            loser_runtime
+                .semantic_revision_v1(&request_scope)
+                .expect("loser initial cursor"),
+            0
+        );
+
+        let candidate = proposal(121, 0);
+        let mut winner = None;
+        let mut commit_winner = || {
+            winner = Some(
+                winner_runtime
+                    .apply_perception_proposal_v1(&request_scope, &candidate)
+                    .expect("winner commit"),
+            );
+        };
+        let resolved = loser_runtime
+            .apply_perception_proposal_v1_with_pre_commit_hook(
+                &request_scope,
+                &candidate,
+                &mut commit_winner,
+            )
+            .expect("stale exact proposal resolves to winner");
+        let winner = winner.expect("winner decision");
+        assert!(!winner.deduplicated);
+        assert!(resolved.deduplicated);
+        assert_eq!(resolved.revision, winner.revision);
+        assert_eq!(resolved.receipt, winner.receipt);
+        assert_eq!(resolved.receipt.action_contract, None);
+        assert_eq!(
+            loser_runtime
+                .semantic_revision_v1(&request_scope)
+                .expect("loser hydrated cursor"),
+            winner.revision
+        );
+
+        loser_runtime.flush_and_close().expect("close loser");
+        winner_runtime.flush_and_close().expect("close winner");
+        drop(loser_runtime);
+        drop(winner_runtime);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stale_different_proposal_preserves_cas_error_and_revision() {
+        let path = database("stale-different-race");
+        let genesis = super::tests::request(112);
+        let request_scope = scope(112, 211);
+        let mut winner_runtime = AstrRuntime::open(&path).expect("open winner runtime");
+        winner_runtime.ensure_genesis(&genesis).expect("genesis");
+        let mut loser_runtime = AstrRuntime::open(&path).expect("open loser runtime");
+        assert_eq!(
+            loser_runtime.semantic_revision_v1(&request_scope).unwrap(),
+            0
+        );
+
+        let winner_proposal = proposal(122, 0);
+        let stale_proposal = proposal(123, 0);
+        let mut commit_winner = || {
+            winner_runtime
+                .apply_perception_proposal_v1(&request_scope, &winner_proposal)
+                .expect("winner commit");
+        };
+        let error = loser_runtime
+            .apply_perception_proposal_v1_with_pre_commit_hook(
+                &request_scope,
+                &stale_proposal,
+                &mut commit_winner,
+            )
+            .expect_err("different event must remain stale");
+        assert!(matches!(
+            error,
+            RuntimeError::Store(StoreError::StaleRevision {
+                expected: 0,
+                actual: 1
+            })
+        ));
+        let semantic_scope =
+            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
+        let winner_event = canonical_event_from_r7(&r7_perception_event(
+            &request_scope,
+            &winner_proposal,
+            winner_proposal.estimator_digest_v1(&r7_scope_from_root(&request_scope)),
+        ))
+        .expect("winner event");
+        let winner_digest = wire::event_digest(&winner_event);
+        assert_eq!(
+            loser_runtime
+                .store
+                .current_revision(&semantic_scope)
+                .expect("durable semantic cursor"),
+            1
+        );
+        let rows = loser_runtime
+            .store
+            .read_journal(&semantic_scope)
+            .expect("semantic rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_digest, winner_digest);
+
+        loser_runtime.flush_and_close().expect("close loser");
+        winner_runtime.flush_and_close().expect("close winner");
+        drop(loser_runtime);
+        drop(winner_runtime);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn g0_receipt_metadata_is_identical_after_semantic_hydration() {
+        let (mut clean_runtime, clean_scope) = runtime_for(131, "g0-clean-metadata");
+        let (mut semantic_runtime, semantic_scope) = runtime_for(131, "g0-semantic-metadata");
+        assert_eq!(clean_scope, semantic_scope);
+
+        let baseline_event = g0_stimulus(131, 0, 90);
+        clean_runtime
+            .apply_event(&clean_scope, &baseline_event)
+            .expect("clean baseline G0 event");
+        semantic_runtime
+            .apply_event(&semantic_scope, &baseline_event)
+            .expect("semantic baseline G0 event");
+        semantic_runtime
+            .apply_perception_proposal_v1(&semantic_scope, &proposal(141, 0))
+            .expect("semantic commit");
+        let mut event = g0_stimulus(131, 1, 90);
+        if let CanonicalEvent::UserStimulus(stimulus) = &mut event {
+            stimulus.event_id = [142; 16];
+            stimulus.causal.turn_id = [143; 16];
+        }
+        let clean = clean_runtime
+            .apply_event(&clean_scope, &event)
+            .expect("clean G0 event");
+        let after_semantic = semantic_runtime
+            .apply_event(&semantic_scope, &event)
+            .expect("G0 event after semantic hydration");
+
+        assert_eq!(
+            after_semantic.receipt.state_before,
+            clean.receipt.state_before
+        );
+        assert_eq!(
+            after_semantic.receipt.state_after,
+            clean.receipt.state_after
+        );
+        assert_eq!(
+            after_semantic.receipt.graph_after,
+            clean.receipt.graph_after
+        );
+        assert_eq!(
+            after_semantic.receipt.active_nodes,
+            clean.receipt.active_nodes
+        );
+        assert_eq!(
+            after_semantic.receipt.active_edges,
+            clean.receipt.active_edges
+        );
+
+        clean_runtime
+            .flush_and_close()
+            .expect("close clean runtime");
+        semantic_runtime
+            .flush_and_close()
+            .expect("close semantic runtime");
+        drop(clean_runtime);
+        drop(semantic_runtime);
+        cleanup_database("g0-clean-metadata");
+        cleanup_database("g0-semantic-metadata");
     }
 
     #[test]
