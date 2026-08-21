@@ -28,7 +28,10 @@ use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph, Synapse,
     EDGE_CAPACITY, NEURON_SLOTS,
 };
-use ae_store::{ClaimOutcome, GenesisCommit, StatefulCommit, Store, StoreError};
+use ae_store::{
+    ClaimOutcome, GenesisCommit, R7PolicyBindingKeyV1, R7PolicyCommitOutcomeV1,
+    R7PolicyValidationContextV1, R7PublicPolicyBundleV1, StatefulCommit, Store, StoreError,
+};
 use std::path::Path;
 use thiserror::Error;
 
@@ -123,6 +126,15 @@ pub struct InspectReport {
     pub last_chain_digest: Option<Digest>,
     pub journal_count: u64,
     pub observatory_genesis_unavailable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum R7HydrationOutcomeV1 {
+    /// No R7 state was changed; callers continue on the committed G0 lane.
+    G0Only,
+    /// The public chain was accepted and durably CAS-recorded.  A later
+    /// producer may construct typed R7 state from this validated boundary.
+    Validated { sequence: u64 },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -471,6 +483,65 @@ impl AstrRuntime {
             store: Store::open(path)?,
             hot: None,
         })
+    }
+
+    /// Explicit post-G0, pre-R7 public-material boundary.  Missing, malformed,
+    /// stale, revoked, conflicting, or persistence-failed material collapses
+    /// to deterministic G0-only behavior; `hot` and committed G0 rows are not
+    /// touched on those paths.
+    pub fn hydrate_r7_public_policy(
+        &mut self,
+        key: &R7PolicyBindingKeyV1,
+        bundle: Option<&R7PublicPolicyBundleV1>,
+    ) -> Result<R7HydrationOutcomeV1, RuntimeError> {
+        self.hydrate_r7_public_policy_with_context(key, bundle, None)
+    }
+
+    pub fn hydrate_r7_public_policy_with_context(
+        &mut self,
+        key: &R7PolicyBindingKeyV1,
+        bundle: Option<&R7PublicPolicyBundleV1>,
+        context: Option<&R7PolicyValidationContextV1>,
+    ) -> Result<R7HydrationOutcomeV1, RuntimeError> {
+        let Some(bundle) = bundle else {
+            return Ok(R7HydrationOutcomeV1::G0Only);
+        };
+        let Some(context) = context else {
+            return Ok(R7HydrationOutcomeV1::G0Only);
+        };
+        let committed = match self
+            .store
+            .lookup_bound_genesis(&key.bot_token, &key.persona_token)
+        {
+            Ok(Some(committed)) => committed,
+            Ok(None) | Err(_) => return Ok(R7HydrationOutcomeV1::G0Only),
+        };
+        if committed.receipt.incarnation_id != key.committed_g0_incarnation_id
+            || context.committed_g0_incarnation_id != key.committed_g0_incarnation_id
+            || context.committed_g0_manifest_digest != committed.receipt.manifest_digest
+            || context.committed_g0_seed_code_digest != committed.receipt.seed_code_digest
+            || context.committed_g0_persona_source_digest != committed.receipt.persona_source_digest
+            || context.committed_g0_genesis_receipt_digest
+                != wire::genesis_receipt_digest(&committed.receipt)
+            || bundle.policy.g0_manifest_digest != committed.receipt.manifest_digest
+            || bundle.policy.g0_seed_code_digest != committed.receipt.seed_code_digest
+            || bundle.policy.g0_persona_source_digest != committed.receipt.persona_source_digest
+            || bundle.policy.g0_genesis_receipt_digest
+                != wire::genesis_receipt_digest(&committed.receipt)
+        {
+            return Ok(R7HydrationOutcomeV1::G0Only);
+        }
+        match self
+            .store
+            .compare_and_commit_r7_policy_with_context(key, bundle, context)
+        {
+            Ok(R7PolicyCommitOutcomeV1::Inserted)
+            | Ok(R7PolicyCommitOutcomeV1::Replay)
+            | Ok(R7PolicyCommitOutcomeV1::Successor) => Ok(R7HydrationOutcomeV1::Validated {
+                sequence: bundle.policy.incarnation_sequence,
+            }),
+            Err(_) => Ok(R7HydrationOutcomeV1::G0Only),
+        }
     }
 
     /// Rust-only additive R7 ingress.  It takes the authority's closed typed

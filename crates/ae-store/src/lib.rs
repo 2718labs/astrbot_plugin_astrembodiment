@@ -12,6 +12,11 @@ use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
     wire, Digest, GenesisManifest, GenesisReceipt, GenesisStatus, PersonaSourceRef,
 };
+use ae_genesis::r7::{
+    verify_authority_closure_v1, BootstrapActivationReceiptV1, CustodyDispositionReceiptV1,
+    GenesisIdentityPolicyV1, IndependentSolReviewReceiptV1, KeyCeremonyReceiptV1,
+    PolicyAttestationV1, ReleaseTrustRootV1, RootRegistrySnapshotV1, UserDelegationReceiptV1,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -67,6 +72,26 @@ pub enum StoreError {
     SnapshotNotFound,
     #[error("store is closed")]
     Closed,
+    #[error("r7 policy material is invalid: {0}")]
+    R7PolicyInvalid(String),
+    #[error("r7 policy sequence gap: expected {expected}, found {actual}")]
+    R7PolicySequenceGap { expected: u64, actual: u64 },
+    #[error("r7 policy sequence conflict")]
+    R7PolicySequenceConflict,
+    #[error("r7 policy sequence is stale: stored {stored}, found {actual}")]
+    R7PolicySequenceStale { stored: u64, actual: u64 },
+    #[error("r7 policy sequence overflow")]
+    R7PolicySequenceOverflow,
+    #[error("r7 policy G0 binding is not the committed incarnation")]
+    R7PolicyG0BindingMismatch,
+    #[error("r7 policy validation context is required")]
+    R7PolicyValidationContextRequired,
+    #[error("r7 policy registry predecessor is invalid")]
+    R7PolicyRegistryPredecessor,
+    #[error("r7 policy registry epoch is not the immediate successor")]
+    R7PolicyRegistryEpochGap,
+    #[error("r7 policy registry revocation set rolled back")]
+    R7PolicyRevocationRollback,
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -198,6 +223,103 @@ pub struct SnapshotRow {
     pub state_digest: Digest,
     pub state_bytes: Vec<u8>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R7PolicyBindingKeyV1 {
+    pub bot_token: [u8; 16],
+    pub persona_token: [u8; 16],
+    pub committed_g0_incarnation_id: Digest,
+    pub identity_scope_id: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R7PublicPolicyBundleV1 {
+    pub delegation: UserDelegationReceiptV1,
+    pub ceremony: KeyCeremonyReceiptV1,
+    pub root_custody: CustodyDispositionReceiptV1,
+    pub policy_custody: CustodyDispositionReceiptV1,
+    pub reviewer_custody: CustodyDispositionReceiptV1,
+    pub policy: GenesisIdentityPolicyV1,
+    pub root: ReleaseTrustRootV1,
+    pub registry: RootRegistrySnapshotV1,
+    pub review: IndependentSolReviewReceiptV1,
+    pub attestation: PolicyAttestationV1,
+    pub activation: BootstrapActivationReceiptV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R7PolicyValidationContextV1 {
+    pub native_source_identity_digest: Digest,
+    pub plugin_source_identity_digest: Digest,
+    pub control_evidence_set_digest: Digest,
+    pub g0_binding_contract_digest: Digest,
+    pub g0_only_fallback_contract_digest: Digest,
+    pub committed_g0_incarnation_id: Digest,
+    pub committed_g0_manifest_digest: Digest,
+    pub committed_g0_seed_code_digest: Digest,
+    pub committed_g0_persona_source_digest: Digest,
+    pub committed_g0_genesis_receipt_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R7PolicyBindingRowV1 {
+    pub key: R7PolicyBindingKeyV1,
+    pub highest_accepted_sequence: u64,
+    pub policy_body_digest: Digest,
+    pub policy_attestation_digest: Digest,
+    pub attested_registry_epoch: u64,
+    pub attested_registry_snapshot_digest: Digest,
+    pub policy_bytes: Vec<u8>,
+    pub root_bytes: Vec<u8>,
+    pub registry_bytes: Vec<u8>,
+    pub review_bytes: Vec<u8>,
+    pub attestation_bytes: Vec<u8>,
+    pub activation_bytes: Vec<u8>,
+    pub delegation_bytes: Vec<u8>,
+    pub ceremony_bytes: Vec<u8>,
+    pub root_custody_bytes: Vec<u8>,
+    pub policy_custody_bytes: Vec<u8>,
+    pub reviewer_custody_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum R7PolicyCommitOutcomeV1 {
+    Inserted,
+    Replay,
+    Successor,
+}
+
+type R7EncodedBundleRowV1 = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+);
+type R7StoredPolicyRowV1 = (
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+);
 
 /// A journal transition and the opaque semantic state it commits.
 #[derive(Clone, Debug)]
@@ -338,6 +460,29 @@ impl Store {
                 state_bytes BLOB NOT NULL,
                 PRIMARY KEY (revision, scope_digest)
             );
+            CREATE TABLE IF NOT EXISTS r7_policy_bindings_v1 (
+                bot_token BLOB NOT NULL,
+                persona_token BLOB NOT NULL,
+                committed_g0_incarnation_id BLOB NOT NULL,
+                identity_scope_id INTEGER NOT NULL,
+                highest_accepted_sequence INTEGER NOT NULL,
+                policy_body_digest BLOB NOT NULL,
+                policy_attestation_digest BLOB NOT NULL,
+                attested_registry_epoch INTEGER NOT NULL,
+                attested_registry_snapshot_digest BLOB NOT NULL,
+                policy_bytes BLOB NOT NULL,
+                root_bytes BLOB NOT NULL,
+                registry_bytes BLOB NOT NULL,
+                review_bytes BLOB NOT NULL,
+                attestation_bytes BLOB NOT NULL,
+                activation_bytes BLOB NOT NULL,
+                delegation_bytes BLOB NOT NULL,
+                ceremony_bytes BLOB NOT NULL,
+                root_custody_bytes BLOB NOT NULL,
+                policy_custody_bytes BLOB NOT NULL,
+                reviewer_custody_bytes BLOB NOT NULL,
+                PRIMARY KEY (bot_token, persona_token, committed_g0_incarnation_id, identity_scope_id)
+            );
             "#,
         )?;
         if !Self::journal_has_logical_revision(&tx)? {
@@ -346,6 +491,32 @@ impl Store {
                 [],
             )?;
             Self::backfill_scope_local_revisions(&tx)?;
+        }
+        for (name, ddl) in [
+            (
+                "delegation_bytes",
+                "ALTER TABLE r7_policy_bindings_v1 ADD COLUMN delegation_bytes BLOB NOT NULL DEFAULT X''",
+            ),
+            (
+                "ceremony_bytes",
+                "ALTER TABLE r7_policy_bindings_v1 ADD COLUMN ceremony_bytes BLOB NOT NULL DEFAULT X''",
+            ),
+            (
+                "root_custody_bytes",
+                "ALTER TABLE r7_policy_bindings_v1 ADD COLUMN root_custody_bytes BLOB NOT NULL DEFAULT X''",
+            ),
+            (
+                "policy_custody_bytes",
+                "ALTER TABLE r7_policy_bindings_v1 ADD COLUMN policy_custody_bytes BLOB NOT NULL DEFAULT X''",
+            ),
+            (
+                "reviewer_custody_bytes",
+                "ALTER TABLE r7_policy_bindings_v1 ADD COLUMN reviewer_custody_bytes BLOB NOT NULL DEFAULT X''",
+            ),
+        ] {
+            if !Self::r7_policy_column_exists(&tx, name)? {
+                tx.execute(ddl, [])?;
+            }
         }
         tx.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS journal_scope_logical_revision ON journal (scope_digest, logical_revision);
@@ -364,6 +535,17 @@ impl Store {
         let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
         for column in columns {
             if column? == "logical_revision" {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn r7_policy_column_exists(tx: &Transaction<'_>, name: &str) -> Result<bool, StoreError> {
+        let mut statement = tx.prepare("PRAGMA table_info(r7_policy_bindings_v1)")?;
+        let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for column in columns {
+            if column? == name {
                 return Ok(true);
             }
         }
@@ -1460,6 +1642,370 @@ impl Store {
         }))
     }
 
+    fn validate_r7_successor_guard(
+        stored_sequence: u64,
+        candidate_sequence: u64,
+        stored_registry_epoch: u64,
+        stored_registry_snapshot_digest: Digest,
+        stored_registry: &RootRegistrySnapshotV1,
+        candidate_registry: &RootRegistrySnapshotV1,
+    ) -> Result<(), StoreError> {
+        if stored_sequence == u64::MAX {
+            return Err(StoreError::R7PolicySequenceOverflow);
+        }
+        if candidate_sequence != stored_sequence + 1 {
+            return Err(StoreError::R7PolicySequenceGap {
+                expected: stored_sequence.saturating_add(1),
+                actual: candidate_sequence,
+            });
+        }
+        let expected_epoch = stored_registry_epoch
+            .checked_add(1)
+            .ok_or(StoreError::R7PolicySequenceOverflow)?;
+        if candidate_registry.registry_epoch != expected_epoch {
+            return Err(StoreError::R7PolicyRegistryEpochGap);
+        }
+        if candidate_registry.previous_snapshot_digest != Some(stored_registry_snapshot_digest) {
+            return Err(StoreError::R7PolicyRegistryPredecessor);
+        }
+        if stored_registry
+            .revocations
+            .iter()
+            .any(|revocation| !candidate_registry.revocations.contains(revocation))
+        {
+            return Err(StoreError::R7PolicyRevocationRollback);
+        }
+        Ok(())
+    }
+
+    fn validate_r7_context_fields(
+        bundle: &R7PublicPolicyBundleV1,
+        context: &R7PolicyValidationContextV1,
+    ) -> Result<(), StoreError> {
+        if bundle.policy.g0_incarnation_id != context.committed_g0_incarnation_id
+            || bundle.policy.g0_manifest_digest != context.committed_g0_manifest_digest
+            || bundle.policy.g0_seed_code_digest != context.committed_g0_seed_code_digest
+            || bundle.policy.g0_persona_source_digest != context.committed_g0_persona_source_digest
+            || bundle.policy.g0_genesis_receipt_digest
+                != context.committed_g0_genesis_receipt_digest
+            || bundle.review.message.policy_body_digest != bundle.policy.policy_body_digest
+            || bundle.attestation.message.policy_body_digest != bundle.policy.policy_body_digest
+            || bundle.activation.message.policy_body_digest != bundle.policy.policy_body_digest
+            || bundle.activation.message.policy_spec_normalized_sha256
+                != bundle.review.message.policy_spec_normalized_sha256
+            || bundle.review.message.native_source_identity_digest
+                != context.native_source_identity_digest
+            || bundle.review.message.plugin_source_identity_digest
+                != context.plugin_source_identity_digest
+            || bundle.review.message.control_evidence_set_digest
+                != context.control_evidence_set_digest
+            || bundle.activation.message.native_source_identity_digest
+                != context.native_source_identity_digest
+            || bundle.activation.message.plugin_source_identity_digest
+                != context.plugin_source_identity_digest
+            || bundle.activation.message.control_evidence_set_digest
+                != context.control_evidence_set_digest
+            || bundle.activation.message.g0_binding_contract_digest
+                != context.g0_binding_contract_digest
+            || bundle.activation.message.g0_only_fallback_contract_digest
+                != context.g0_only_fallback_contract_digest
+        {
+            return Err(StoreError::R7PolicyInvalid(
+                "public authority context mismatch".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_r7_bundle(
+        bundle: &R7PublicPolicyBundleV1,
+        context: &R7PolicyValidationContextV1,
+    ) -> Result<(), StoreError> {
+        let canonical_policy = GenesisIdentityPolicyV1::decode(&bundle.policy.encode())
+            .map_err(|error| StoreError::R7PolicyInvalid(error.to_string()))?;
+        if canonical_policy != bundle.policy {
+            return Err(StoreError::R7PolicyInvalid(
+                "public authority DTO is not canonical".to_owned(),
+            ));
+        }
+        verify_authority_closure_v1(
+            &bundle.delegation,
+            &bundle.ceremony,
+            &bundle.root_custody,
+            &bundle.policy_custody,
+            &bundle.reviewer_custody,
+            &bundle.root,
+            &bundle.registry,
+            &bundle.review,
+            &bundle.attestation,
+            &bundle.activation,
+        )
+        .map_err(|error| StoreError::R7PolicyInvalid(error.to_string()))?;
+
+        Self::validate_r7_context_fields(bundle, context)?;
+        Ok(())
+    }
+
+    pub fn lookup_r7_policy_binding(
+        &self,
+        key: &R7PolicyBindingKeyV1,
+    ) -> Result<Option<R7PolicyBindingRowV1>, StoreError> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT highest_accepted_sequence, policy_body_digest, policy_attestation_digest, attested_registry_epoch, attested_registry_snapshot_digest, policy_bytes, root_bytes, registry_bytes, review_bytes, attestation_bytes, activation_bytes, delegation_bytes, ceremony_bytes, root_custody_bytes, policy_custody_bytes, reviewer_custody_bytes FROM r7_policy_bindings_v1 WHERE bot_token = ?1 AND persona_token = ?2 AND committed_g0_incarnation_id = ?3 AND identity_scope_id = ?4",
+            params![blob(key.bot_token), blob(key.persona_token), blob(key.committed_g0_incarnation_id), i64::from(key.identity_scope_id)],
+            |row| {
+                let digest = |index: usize| -> rusqlite::Result<Digest> {
+                    let bytes: Vec<u8> = row.get(index)?;
+                    bytes.try_into().map_err(|_| rusqlite::Error::InvalidQuery)
+                };
+                Ok(R7PolicyBindingRowV1 {
+                    key: key.clone(),
+                    highest_accepted_sequence: revision_from_sqlite(row.get(0)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    policy_body_digest: digest(1)?,
+                    policy_attestation_digest: digest(2)?,
+                    attested_registry_epoch: revision_from_sqlite(row.get(3)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    attested_registry_snapshot_digest: digest(4)?,
+                    policy_bytes: row.get(5)?,
+                    root_bytes: row.get(6)?,
+                    registry_bytes: row.get(7)?,
+                    review_bytes: row.get(8)?,
+                    attestation_bytes: row.get(9)?,
+                    activation_bytes: row.get(10)?,
+                    delegation_bytes: row.get(11)?,
+                    ceremony_bytes: row.get(12)?,
+                    root_custody_bytes: row.get(13)?,
+                    policy_custody_bytes: row.get(14)?,
+                    reviewer_custody_bytes: row.get(15)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
+    }
+
+    fn decode_r7_bundle(row: &R7EncodedBundleRowV1) -> Result<R7PublicPolicyBundleV1, StoreError> {
+        let error =
+            |error: ae_genesis::r7::PolicyErrorV1| StoreError::R7PolicyInvalid(error.to_string());
+        Ok(R7PublicPolicyBundleV1 {
+            delegation: UserDelegationReceiptV1::decode(&row.6).map_err(error)?,
+            ceremony: KeyCeremonyReceiptV1::decode(&row.7).map_err(error)?,
+            root_custody: CustodyDispositionReceiptV1::decode(&row.8).map_err(error)?,
+            policy_custody: CustodyDispositionReceiptV1::decode(&row.9).map_err(error)?,
+            reviewer_custody: CustodyDispositionReceiptV1::decode(&row.10).map_err(error)?,
+            policy: GenesisIdentityPolicyV1::decode(&row.0).map_err(error)?,
+            root: ReleaseTrustRootV1::decode(&row.1).map_err(error)?,
+            registry: RootRegistrySnapshotV1::decode(&row.2).map_err(error)?,
+            review: IndependentSolReviewReceiptV1::decode(&row.3).map_err(error)?,
+            attestation: PolicyAttestationV1::decode(&row.4).map_err(error)?,
+            activation: BootstrapActivationReceiptV1::decode(&row.5).map_err(error)?,
+        })
+    }
+
+    /// Persist one fully verified public policy chain under the exact native
+    /// Bot/Persona/G0-incarnation/scope key.  The transaction is a monotonic
+    /// sequence CAS: no gap, replay conflict, stale row, or overflow can write.
+    pub fn compare_and_commit_r7_policy(
+        &mut self,
+        key: &R7PolicyBindingKeyV1,
+        bundle: &R7PublicPolicyBundleV1,
+    ) -> Result<R7PolicyCommitOutcomeV1, StoreError> {
+        let _ = (key, bundle);
+        Err(StoreError::R7PolicyValidationContextRequired)
+    }
+
+    pub fn compare_and_commit_r7_policy_with_context(
+        &mut self,
+        key: &R7PolicyBindingKeyV1,
+        bundle: &R7PublicPolicyBundleV1,
+        context: &R7PolicyValidationContextV1,
+    ) -> Result<R7PolicyCommitOutcomeV1, StoreError> {
+        if key.identity_scope_id != 1 {
+            return Err(StoreError::R7PolicyInvalid(
+                "unsupported identity scope".to_owned(),
+            ));
+        }
+        if context.committed_g0_incarnation_id != key.committed_g0_incarnation_id {
+            return Err(StoreError::R7PolicyG0BindingMismatch);
+        }
+        Self::validate_r7_bundle(bundle, context)?;
+        let candidate_sequence = bundle.policy.incarnation_sequence;
+        if candidate_sequence == 0 {
+            return Err(StoreError::R7PolicyInvalid(
+                "zero policy sequence".to_owned(),
+            ));
+        }
+        let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let bound_incarnation: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT incarnation_id FROM active_bindings WHERE bot_token = ?1 AND persona_token = ?2",
+                params![blob(key.bot_token), blob(key.persona_token)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if !bound_incarnation
+            .as_ref()
+            .is_some_and(|value| value.as_slice() == key.committed_g0_incarnation_id.as_slice())
+        {
+            return Err(StoreError::R7PolicyG0BindingMismatch);
+        }
+        let existing: Option<R7StoredPolicyRowV1> = tx
+            .query_row(
+                "SELECT highest_accepted_sequence, policy_body_digest, policy_attestation_digest, attested_registry_epoch, attested_registry_snapshot_digest, policy_bytes, root_bytes, registry_bytes, review_bytes, attestation_bytes, activation_bytes, delegation_bytes, ceremony_bytes, root_custody_bytes, policy_custody_bytes, reviewer_custody_bytes FROM r7_policy_bindings_v1 WHERE bot_token = ?1 AND persona_token = ?2 AND committed_g0_incarnation_id = ?3 AND identity_scope_id = ?4",
+                params![blob(key.bot_token), blob(key.persona_token), blob(key.committed_g0_incarnation_id), i64::from(key.identity_scope_id)],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                        row.get(14)?,
+                        row.get(15)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let policy_bytes = bundle.policy.encode();
+        let root_bytes = bundle.root.encode();
+        let registry_bytes = bundle.registry.encode();
+        let review_bytes = bundle.review.encode();
+        let attestation_bytes = bundle.attestation.encode();
+        let activation_bytes = bundle.activation.encode();
+        let delegation_bytes = bundle.delegation.encode();
+        let ceremony_bytes = bundle.ceremony.encode();
+        let root_custody_bytes = bundle.root_custody.encode();
+        let policy_custody_bytes = bundle.policy_custody.encode();
+        let reviewer_custody_bytes = bundle.reviewer_custody.encode();
+        let outcome = match existing {
+            None => {
+                if candidate_sequence != 1 {
+                    return Err(StoreError::R7PolicySequenceGap {
+                        expected: 1,
+                        actual: candidate_sequence,
+                    });
+                }
+                tx.execute(
+                    "INSERT INTO r7_policy_bindings_v1 (bot_token, persona_token, committed_g0_incarnation_id, identity_scope_id, highest_accepted_sequence, policy_body_digest, policy_attestation_digest, attested_registry_epoch, attested_registry_snapshot_digest, policy_bytes, root_bytes, registry_bytes, review_bytes, attestation_bytes, activation_bytes, delegation_bytes, ceremony_bytes, root_custody_bytes, policy_custody_bytes, reviewer_custody_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                    params![blob(key.bot_token), blob(key.persona_token), blob(key.committed_g0_incarnation_id), i64::from(key.identity_scope_id), revision_to_sqlite(candidate_sequence)?, blob(bundle.policy.policy_body_digest), blob(bundle.attestation.policy_attestation_digest), revision_to_sqlite(bundle.registry.registry_epoch)?, blob(bundle.registry.registry_snapshot_digest), policy_bytes, root_bytes, registry_bytes, review_bytes, attestation_bytes, activation_bytes, delegation_bytes, ceremony_bytes, root_custody_bytes, policy_custody_bytes, reviewer_custody_bytes],
+                )?;
+                R7PolicyCommitOutcomeV1::Inserted
+            }
+            Some((
+                stored_sequence,
+                stored_body,
+                stored_attestation,
+                stored_epoch,
+                stored_registry,
+                stored_policy,
+                stored_root,
+                stored_snapshot,
+                stored_review,
+                stored_attestation_bytes,
+                stored_activation,
+                stored_delegation,
+                stored_ceremony,
+                stored_root_custody,
+                stored_policy_custody,
+                stored_reviewer_custody,
+            )) => {
+                let stored_sequence = revision_from_sqlite(stored_sequence)?;
+                let stored_epoch = revision_from_sqlite(stored_epoch)?;
+                if candidate_sequence == stored_sequence {
+                    if stored_body != bundle.policy.policy_body_digest.as_slice()
+                        || stored_attestation
+                            != bundle.attestation.policy_attestation_digest.as_slice()
+                        || stored_epoch != bundle.registry.registry_epoch
+                        || stored_registry != bundle.registry.registry_snapshot_digest.as_slice()
+                        || stored_policy != policy_bytes
+                        || stored_root != root_bytes
+                        || stored_snapshot != registry_bytes
+                        || stored_review != review_bytes
+                        || stored_attestation_bytes != attestation_bytes
+                        || stored_activation != activation_bytes
+                        || stored_delegation != delegation_bytes
+                        || stored_ceremony != ceremony_bytes
+                        || stored_root_custody != root_custody_bytes
+                        || stored_policy_custody != policy_custody_bytes
+                        || stored_reviewer_custody != reviewer_custody_bytes
+                    {
+                        return Err(StoreError::R7PolicySequenceConflict);
+                    }
+                    let current = Self::decode_r7_bundle(&(
+                        stored_policy,
+                        stored_root,
+                        stored_snapshot,
+                        stored_review,
+                        stored_attestation_bytes,
+                        stored_activation,
+                        stored_delegation,
+                        stored_ceremony,
+                        stored_root_custody,
+                        stored_policy_custody,
+                        stored_reviewer_custody,
+                    ))?;
+                    Self::validate_r7_bundle(&current, context)?;
+                    R7PolicyCommitOutcomeV1::Replay
+                } else if candidate_sequence < stored_sequence {
+                    return Err(StoreError::R7PolicySequenceStale {
+                        stored: stored_sequence,
+                        actual: candidate_sequence,
+                    });
+                } else if stored_sequence == u64::MAX {
+                    return Err(StoreError::R7PolicySequenceOverflow);
+                } else if candidate_sequence != stored_sequence + 1 {
+                    return Err(StoreError::R7PolicySequenceGap {
+                        expected: stored_sequence + 1,
+                        actual: candidate_sequence,
+                    });
+                } else {
+                    let current = Self::decode_r7_bundle(&(
+                        stored_policy,
+                        stored_root,
+                        stored_snapshot,
+                        stored_review,
+                        stored_attestation_bytes,
+                        stored_activation,
+                        stored_delegation,
+                        stored_ceremony,
+                        stored_root_custody,
+                        stored_policy_custody,
+                        stored_reviewer_custody,
+                    ))?;
+                    Self::validate_r7_bundle(&current, context)?;
+                    Self::validate_r7_successor_guard(
+                        stored_sequence,
+                        candidate_sequence,
+                        stored_epoch,
+                        current.registry.registry_snapshot_digest,
+                        &current.registry,
+                        &bundle.registry,
+                    )?;
+                    let updated = tx.execute(
+                        "UPDATE r7_policy_bindings_v1 SET highest_accepted_sequence = ?5, policy_body_digest = ?6, policy_attestation_digest = ?7, attested_registry_epoch = ?8, attested_registry_snapshot_digest = ?9, policy_bytes = ?10, root_bytes = ?11, registry_bytes = ?12, review_bytes = ?13, attestation_bytes = ?14, activation_bytes = ?15, delegation_bytes = ?16, ceremony_bytes = ?17, root_custody_bytes = ?18, policy_custody_bytes = ?19, reviewer_custody_bytes = ?20 WHERE bot_token = ?1 AND persona_token = ?2 AND committed_g0_incarnation_id = ?3 AND identity_scope_id = ?4 AND highest_accepted_sequence = ?21",
+                        params![blob(key.bot_token), blob(key.persona_token), blob(key.committed_g0_incarnation_id), i64::from(key.identity_scope_id), revision_to_sqlite(candidate_sequence)?, blob(bundle.policy.policy_body_digest), blob(bundle.attestation.policy_attestation_digest), revision_to_sqlite(bundle.registry.registry_epoch)?, blob(bundle.registry.registry_snapshot_digest), policy_bytes, root_bytes, registry_bytes, review_bytes, attestation_bytes, activation_bytes, delegation_bytes, ceremony_bytes, root_custody_bytes, policy_custody_bytes, reviewer_custody_bytes, revision_to_sqlite(stored_sequence)?],
+                    )?;
+                    if updated != 1 {
+                        return Err(StoreError::R7PolicySequenceConflict);
+                    }
+                    R7PolicyCommitOutcomeV1::Successor
+                }
+            }
+        };
+        tx.commit()?;
+        Ok(outcome)
+    }
+
     pub fn flush(&mut self) -> Result<(), StoreError> {
         let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
         conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
@@ -2260,5 +2806,568 @@ mod tests {
             panic!()
         };
         assert_eq!(nonce, [21; 32]);
+    }
+
+    fn gv3_hex(value: &str) -> Vec<u8> {
+        assert_eq!(value.len() % 2, 0);
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap();
+                let low = (pair[1] as char).to_digit(16).unwrap();
+                ((high << 4) | low) as u8
+            })
+            .collect()
+    }
+
+    fn gv3_digest(value: &str) -> Digest {
+        gv3_hex(value).try_into().unwrap()
+    }
+
+    fn gv3_byte_digest(value: u8) -> Digest {
+        let mut digest = [0; 32];
+        digest[0] = value;
+        digest
+    }
+
+    fn gv3_signature(value: &str) -> [u8; 64] {
+        gv3_hex(value).try_into().unwrap()
+    }
+
+    fn gv3_token(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+
+    fn gv3_policy_with_attested_vector_digest() -> GenesisIdentityPolicyV1 {
+        let mut policy = GenesisIdentityPolicyV1::new(
+            gv3_byte_digest(1),
+            gv3_byte_digest(2),
+            gv3_byte_digest(3),
+            gv3_byte_digest(4),
+            gv3_byte_digest(5),
+        )
+        .unwrap();
+        // GV3-01 uses D(20) as a synthetic signed-body input.  The test
+        // deliberately retains that attested digest while mutating the
+        // public policy DTO below; canonical policy decoding must reject it.
+        policy.policy_body_digest = gv3_byte_digest(20);
+        policy
+    }
+
+    fn gv3_public_policy_bundle() -> R7PublicPolicyBundleV1 {
+        use ae_genesis::r7::{
+            domain_hash_sha256, BootstrapActivationMessageV1, IndependentSolReviewMessageV1,
+            KeyCeremonyReceiptV1, PolicyAttestationMessageV1, RegistryGrantV1,
+            UserDelegationReceiptV1, ATTESTATION_RECORD_DOMAIN_V1,
+            BOOTSTRAP_ACTIVATION_RECORD_DOMAIN_V1, CEREMONY_RECEIPT_DOMAIN_V1,
+            CUSTODY_RECEIPT_DOMAIN_V1, DELEGATION_RECEIPT_DOMAIN_V1, REGISTRY_BODY_DOMAIN_V1,
+            RELEASE_TRUST_ROOT_DOMAIN_V1, REVIEW_RECEIPT_RECORD_DOMAIN_V1,
+        };
+
+        let root_key =
+            gv3_digest("D75A980182B10AB7D54BFED3C964073A0EE172F3DAA62325AF021A68F707511A");
+        let root_fingerprint =
+            gv3_digest("A6119B0D03A43C07A6464B05ECC019F19CFCB1FA8D659FED14A722BFC75086FD");
+        let reviewer_key =
+            gv3_digest("3D4017C3E843895A92B70AA74D1B7EBC9C982CCF2EC4968CC0CD55F12AF4660C");
+        let reviewer_fingerprint =
+            gv3_digest("AEEA0411DB59CCF998D802A60C11D34D97C895E0A977F59C75771915374A0E56");
+        let delegation_digest =
+            gv3_digest("91BDDB2ACB94473149BBAD56846E5D2E3BC5F5254C849B2825E6000A2569E269");
+        let ceremony_digest =
+            gv3_digest("1D11C1AF65F6D1BB288BF91451E112ECCC8B04FDD269B99484320A79AE9FE911");
+        let normalized_digest = gv3_byte_digest(19);
+        let signed_policy_digest = gv3_byte_digest(20);
+        let native_source_digest = gv3_byte_digest(21);
+        let plugin_source_digest = gv3_byte_digest(22);
+        let control_evidence_digest = gv3_byte_digest(23);
+        let g0_binding_digest = gv3_byte_digest(24);
+        let g0_fallback_digest = gv3_byte_digest(25);
+
+        let mut delegation_body = Vec::new();
+        delegation_body.extend_from_slice(b"UDR1");
+        delegation_body.extend_from_slice(&1u16.to_le_bytes());
+        gv3_token(&mut delegation_body, "astr_embodiment");
+        gv3_token(&mut delegation_body, "1.0.0-rc1");
+        gv3_token(&mut delegation_body, "test_delegator");
+        delegation_body.push(1);
+        gv3_token(&mut delegation_body, "00000000-0000-0000-0000-000000000001");
+        gv3_token(&mut delegation_body, "host_user_message_1");
+        delegation_body.extend_from_slice(&gv3_byte_digest(11));
+        delegation_body.extend_from_slice(&gv3_byte_digest(12));
+        gv3_token(&mut delegation_body, "independent_sol_policy_authority");
+        delegation_body.extend_from_slice(&0x0000_001Fu32.to_le_bytes());
+        delegation_body.extend_from_slice(&gv3_byte_digest(13));
+        delegation_body.extend_from_slice(&gv3_byte_digest(14));
+        delegation_body.extend_from_slice(&gv3_byte_digest(15));
+        delegation_body.extend_from_slice(&gv3_byte_digest(16));
+        delegation_body.extend_from_slice(&1u64.to_le_bytes());
+        delegation_body.push(1);
+        let delegation_receipt_digest =
+            domain_hash_sha256(DELEGATION_RECEIPT_DOMAIN_V1, &delegation_body);
+        assert_eq!(delegation_receipt_digest, delegation_digest);
+        delegation_body.extend_from_slice(&delegation_receipt_digest);
+        let delegation = UserDelegationReceiptV1::decode(&delegation_body).unwrap();
+
+        let mut root_custody_body = Vec::new();
+        root_custody_body.extend_from_slice(b"CDR1");
+        root_custody_body.extend_from_slice(&1u16.to_le_bytes());
+        gv3_token(&mut root_custody_body, "test_root_policy_custody");
+        gv3_token(&mut root_custody_body, "test_root_policy_signer");
+        gv3_token(&mut root_custody_body, "ae_rc1_identity_policy_signer_v1");
+        root_custody_body.extend_from_slice(&1u32.to_le_bytes());
+        root_custody_body.extend_from_slice(&root_fingerprint);
+        root_custody_body.extend_from_slice(&[1, 1, 0, 0]);
+        let root_custody_digest = domain_hash_sha256(CUSTODY_RECEIPT_DOMAIN_V1, &root_custody_body);
+        assert_eq!(
+            root_custody_digest,
+            gv3_digest("F152DA92296A45197DCA80543161660BC30251E4D9F6B3702AAC207A8671E9D2")
+        );
+        root_custody_body.extend_from_slice(&root_custody_digest);
+        let root_custody = CustodyDispositionReceiptV1::decode(&root_custody_body).unwrap();
+
+        let mut reviewer_custody_body = Vec::new();
+        reviewer_custody_body.extend_from_slice(b"CDR1");
+        reviewer_custody_body.extend_from_slice(&1u16.to_le_bytes());
+        gv3_token(&mut reviewer_custody_body, "test_reviewer_custody");
+        gv3_token(&mut reviewer_custody_body, "test_reviewer_signer");
+        gv3_token(&mut reviewer_custody_body, "test_reviewer_key");
+        reviewer_custody_body.extend_from_slice(&1u32.to_le_bytes());
+        reviewer_custody_body.extend_from_slice(&reviewer_fingerprint);
+        reviewer_custody_body.extend_from_slice(&[1, 1, 0, 0]);
+        let reviewer_custody_digest =
+            domain_hash_sha256(CUSTODY_RECEIPT_DOMAIN_V1, &reviewer_custody_body);
+        assert_eq!(
+            reviewer_custody_digest,
+            gv3_digest("34C0209E7E44F73FC8EAFBCEB74CCAB29451D8A892E43C7C95160FC06B4BD6BD")
+        );
+        reviewer_custody_body.extend_from_slice(&reviewer_custody_digest);
+        let reviewer_custody = CustodyDispositionReceiptV1::decode(&reviewer_custody_body).unwrap();
+        let policy_custody = root_custody.clone();
+
+        let mut ceremony_body = Vec::new();
+        ceremony_body.extend_from_slice(b"KCR1");
+        ceremony_body.extend_from_slice(&1u16.to_le_bytes());
+        ceremony_body.extend_from_slice(&delegation_receipt_digest);
+        ceremony_body.extend_from_slice(&1u64.to_le_bytes());
+        ceremony_body.push(1);
+        gv3_token(&mut ceremony_body, "ae_rc1_identity_policy_signer_v1");
+        ceremony_body.extend_from_slice(&1u32.to_le_bytes());
+        ceremony_body.extend_from_slice(&root_key);
+        ceremony_body.extend_from_slice(&root_fingerprint);
+        gv3_token(&mut ceremony_body, "ae_rc1_identity_policy_signer_v1");
+        ceremony_body.extend_from_slice(&1u32.to_le_bytes());
+        ceremony_body.extend_from_slice(&root_key);
+        ceremony_body.extend_from_slice(&root_fingerprint);
+        gv3_token(&mut ceremony_body, "test_reviewer_key");
+        ceremony_body.extend_from_slice(&1u32.to_le_bytes());
+        ceremony_body.extend_from_slice(&reviewer_key);
+        ceremony_body.extend_from_slice(&reviewer_fingerprint);
+        ceremony_body.push(1);
+        gv3_token(&mut ceremony_body, "delegated_bootstrap_operator");
+        gv3_token(&mut ceremony_body, "test_ceremony_operator");
+        ceremony_body.extend_from_slice(&gv3_byte_digest(17));
+        ceremony_body.extend_from_slice(&gv3_byte_digest(18));
+        ceremony_body.extend_from_slice(&root_custody_digest);
+        ceremony_body.extend_from_slice(&root_custody_digest);
+        ceremony_body.extend_from_slice(&reviewer_custody_digest);
+        ceremony_body.extend_from_slice(&[0, 0, 1, 0, 0, 1, 0, 0, 1]);
+        let ceremony_receipt_digest =
+            domain_hash_sha256(CEREMONY_RECEIPT_DOMAIN_V1, &ceremony_body);
+        assert_eq!(ceremony_receipt_digest, ceremony_digest);
+        ceremony_body.extend_from_slice(&ceremony_receipt_digest);
+        ceremony_body.extend_from_slice(&gv3_signature(
+            "265C7D092EBE9F37B99DFC67CF03322E39ECC1290A4A25B95FC55D1AEBDC91EF3C18687794517075AF0F6D46A423835A63823CABEF08BA9C90A961FC8CA9C20D",
+        ));
+        ceremony_body.extend_from_slice(&gv3_signature(
+            "F6B0977ECA32224ACABFECD080052E647FA52D51CD498AC8C4CF70488354B58171E879B7C556B8F957C4AB5D1FD3B8FBB13CEB5F134D240539C4B07DA0A16C07",
+        ));
+        ceremony_body.extend_from_slice(&gv3_signature(
+            "1C5C91A32C8E9839AF0BED9B3527BFA48F96AF46B454CF9EAEB1F31021C55441214DD91E560E59934299EF672358521F110CB236E17F3CC56E430111198E910B",
+        ));
+        let ceremony = KeyCeremonyReceiptV1::decode(&ceremony_body).unwrap();
+
+        let mut root_body = Vec::new();
+        root_body.extend_from_slice(b"RTR1");
+        root_body.extend_from_slice(&1u16.to_le_bytes());
+        root_body.push(1);
+        gv3_token(&mut root_body, "ae_rc1_identity_policy_signer_v1");
+        root_body.extend_from_slice(&1u32.to_le_bytes());
+        root_body.extend_from_slice(&root_key);
+        root_body.extend_from_slice(&root_fingerprint);
+        root_body.extend_from_slice(&delegation_digest);
+        root_body.extend_from_slice(&ceremony_digest);
+        root_body.extend_from_slice(&1u64.to_le_bytes());
+        let root_digest = domain_hash_sha256(RELEASE_TRUST_ROOT_DOMAIN_V1, &root_body);
+        assert_eq!(
+            root_digest,
+            gv3_digest("99BCD5E5667E5C47B0FDC536B1A0A607DAD2412660F52D9B24BEE21DC5073A6E")
+        );
+        root_body.extend_from_slice(&root_digest);
+        let root = ReleaseTrustRootV1::decode(&root_body).unwrap();
+
+        let role1 = RegistryGrantV1 {
+            subject_ref: "ae_rc1_product_identity_authority".to_owned(),
+            grant_ref: "ae_rc1_identity_policy_approval_v1".to_owned(),
+            grant_role_id: 1,
+            key_id: "ae_rc1_identity_policy_signer_v1".to_owned(),
+            key_version: 1,
+            public_key: root_key,
+            public_key_fingerprint: root_fingerprint,
+        };
+        let role2 = RegistryGrantV1 {
+            subject_ref: "test_independent_sol_reviewer".to_owned(),
+            grant_ref: "test_review_grant".to_owned(),
+            grant_role_id: 2,
+            key_id: "test_reviewer_key".to_owned(),
+            key_version: 1,
+            public_key: reviewer_key,
+            public_key_fingerprint: reviewer_fingerprint,
+        };
+        let mut registry_body = Vec::new();
+        registry_body.extend_from_slice(b"RGS1");
+        registry_body.extend_from_slice(&1u16.to_le_bytes());
+        gv3_token(&mut registry_body, "ae_rc1_identity_policy_signer_v1");
+        registry_body.extend_from_slice(&1u32.to_le_bytes());
+        registry_body.extend_from_slice(&1u64.to_le_bytes());
+        registry_body.extend_from_slice(&root.release_trust_root_digest);
+        registry_body.extend_from_slice(&delegation_digest);
+        registry_body.extend_from_slice(&ceremony_digest);
+        registry_body.extend_from_slice(&1u64.to_le_bytes());
+        gv3_token(&mut registry_body, "product_constitution_authority");
+        registry_body.push(0);
+        registry_body.extend_from_slice(&2u16.to_le_bytes());
+        registry_body.extend_from_slice(&role2.encode());
+        registry_body.extend_from_slice(&role1.encode());
+        registry_body.extend_from_slice(&0u16.to_le_bytes());
+        let registry_digest = domain_hash_sha256(REGISTRY_BODY_DOMAIN_V1, &registry_body);
+        assert_eq!(
+            registry_digest,
+            gv3_digest("62FB535AC07826534218B069E655B7EE4E97D9F4677B249417E919B7652C64CD")
+        );
+        registry_body.extend_from_slice(&registry_digest);
+        registry_body.extend_from_slice(&gv3_signature(
+            "4DD577E257544E23B1D11B93CC47EF1FBFE998397874E62CE76BBD6A98F46B20644DCD8D70CE059C0863E3B4CC4F7F222438AA0C1D668C79FBF846728B59E80E",
+        ));
+        let registry = RootRegistrySnapshotV1::decode(&registry_body).unwrap();
+        registry.verify_with_root(&root).unwrap();
+
+        let review_message = IndependentSolReviewMessageV1 {
+            reviewer_authority_ref: "test_independent_sol_reviewer".to_owned(),
+            reviewer_grant_ref: "test_review_grant".to_owned(),
+            reviewer_key_id: "test_reviewer_key".to_owned(),
+            reviewer_key_version: 1,
+            approval: 1,
+            policy_spec_normalized_sha256: normalized_digest,
+            policy_body_digest: signed_policy_digest,
+            registry_snapshot_digest: registry.registry_snapshot_digest,
+            native_source_identity_digest: native_source_digest,
+            plugin_source_identity_digest: plugin_source_digest,
+            control_evidence_set_digest: control_evidence_digest,
+            delegation_receipt_digest: delegation_digest,
+            key_ceremony_receipt_digest: ceremony_digest,
+            release_trust_root_digest: root.release_trust_root_digest,
+            root_public_key_fingerprint: root_fingerprint,
+            reviewer_public_key_fingerprint: reviewer_fingerprint,
+            approval_origin: 1,
+            approval_actor: 1,
+        };
+        let review_message_bytes = review_message.encode();
+        let mut review_outer = Vec::new();
+        review_outer.extend_from_slice(b"IRR1");
+        review_outer.extend_from_slice(&(review_message_bytes.len() as u16).to_le_bytes());
+        review_outer.extend_from_slice(&review_message_bytes);
+        review_outer.extend_from_slice(&gv3_signature(
+            "D5B0FCD0D91B63F1B8836A564385006AA94C2AF7DAC86177087E7351809752F3C07A6ECB242BAFA273E84DE6D2EC169F01B2108C9739B2E83E22F7ADD02C7F0D",
+        ));
+        let review_digest = domain_hash_sha256(REVIEW_RECEIPT_RECORD_DOMAIN_V1, &review_outer);
+        assert_eq!(
+            review_digest,
+            gv3_digest("D57A5512AA6A007B6B74CE2CA6329FC16A133597653602F50E2AB0502776F580")
+        );
+        review_outer.extend_from_slice(&review_digest);
+        let review = IndependentSolReviewReceiptV1::decode(&review_outer).unwrap();
+        review.verify(&reviewer_key).unwrap();
+
+        let attestation_message = PolicyAttestationMessageV1 {
+            scheme_id: 1,
+            role_id: 1,
+            registry_epoch: 1,
+            policy_body_digest: signed_policy_digest,
+            review_receipt_digest: review.review_receipt_digest,
+            registry_snapshot_digest: registry.registry_snapshot_digest,
+            release_trust_root_digest: root.release_trust_root_digest,
+            delegation_receipt_digest: delegation_digest,
+            key_ceremony_receipt_digest: ceremony_digest,
+            policy_public_key_fingerprint: root_fingerprint,
+            policy_spec_normalized_sha256: normalized_digest,
+            policy_owner_ref: "ae_rc1_product_identity_authority".to_owned(),
+            authorization_grant_ref: "ae_rc1_identity_policy_approval_v1".to_owned(),
+            attestation_key_id: "ae_rc1_identity_policy_signer_v1".to_owned(),
+            attestation_key_version: 1,
+        };
+        let attestation_message_bytes = attestation_message.encode();
+        let mut attestation_outer = Vec::new();
+        attestation_outer.extend_from_slice(b"PAT1");
+        attestation_outer
+            .extend_from_slice(&(attestation_message_bytes.len() as u16).to_le_bytes());
+        attestation_outer.extend_from_slice(&attestation_message_bytes);
+        attestation_outer.extend_from_slice(&gv3_signature(
+            "539998D100ACD62A828329F25D45D1346388BC92F29732D9B8092EDCF4D4D41F2C4218B9D0193ED916BCA26568E59A7A567A8934923DCD3C5A99C7EE74FF8104",
+        ));
+        let attestation_digest =
+            domain_hash_sha256(ATTESTATION_RECORD_DOMAIN_V1, &attestation_outer);
+        assert_eq!(
+            attestation_digest,
+            gv3_digest("1D92CB8652D52375B94EFBF02321030C263662EF5C9719DAB7AEB4B46F13D172")
+        );
+        attestation_outer.extend_from_slice(&attestation_digest);
+        let attestation = PolicyAttestationV1::decode(&attestation_outer).unwrap();
+        attestation.verify(&root_key).unwrap();
+
+        let activation_message = BootstrapActivationMessageV1 {
+            approval_origin: 1,
+            approval_actor: 1,
+            user_direct_fingerprint_approval: 0,
+            delegated_fingerprint_approval: 1,
+            release_disposition: 1,
+            delegation_receipt_digest: delegation_digest,
+            key_ceremony_receipt_digest: ceremony_digest,
+            release_trust_root_digest: root.release_trust_root_digest,
+            root_public_key_fingerprint: root_fingerprint,
+            registry_snapshot_digest: registry.registry_snapshot_digest,
+            registry_epoch: 1,
+            policy_spec_normalized_sha256: normalized_digest,
+            policy_body_digest: signed_policy_digest,
+            review_receipt_digest: review.review_receipt_digest,
+            policy_attestation_digest: attestation.policy_attestation_digest,
+            native_source_identity_digest: native_source_digest,
+            plugin_source_identity_digest: plugin_source_digest,
+            control_evidence_set_digest: control_evidence_digest,
+            g0_binding_contract_digest: g0_binding_digest,
+            g0_only_fallback_contract_digest: g0_fallback_digest,
+            reviewer_authority_ref: "test_independent_sol_reviewer".to_owned(),
+            reviewer_grant_ref: "test_review_grant".to_owned(),
+            reviewer_key_id: "test_reviewer_key".to_owned(),
+            reviewer_key_version: 1,
+            reviewer_public_key_fingerprint: reviewer_fingerprint,
+            activation_sequence: 1,
+        };
+        let activation_message_bytes = activation_message.encode();
+        let mut activation_outer = Vec::new();
+        activation_outer.extend_from_slice(b"BAR1");
+        activation_outer.extend_from_slice(&(activation_message_bytes.len() as u16).to_le_bytes());
+        activation_outer.extend_from_slice(&activation_message_bytes);
+        activation_outer.extend_from_slice(&gv3_signature(
+            "2C82A6E3A6B30A3C360819802159704EEB89B874EB4494960DBBBC86C717D53A84570B8B10CAB4095DB2BEB080B383D5A589708FC9EE0BDED82ABF6A3C9CE903",
+        ));
+        let activation_digest =
+            domain_hash_sha256(BOOTSTRAP_ACTIVATION_RECORD_DOMAIN_V1, &activation_outer);
+        assert_eq!(
+            activation_digest,
+            gv3_digest("B5E3F602FA36DC35DE059E3515ACCA0E04FF97A8B9EE67F8DEC096FC117C6BE3")
+        );
+        activation_outer.extend_from_slice(&activation_digest);
+        let activation = BootstrapActivationReceiptV1::decode(&activation_outer).unwrap();
+        activation.verify(&reviewer_key).unwrap();
+
+        R7PublicPolicyBundleV1 {
+            delegation,
+            ceremony,
+            root_custody,
+            policy_custody,
+            reviewer_custody,
+            policy: gv3_policy_with_attested_vector_digest(),
+            root,
+            registry,
+            review,
+            attestation,
+            activation,
+        }
+    }
+
+    fn gv3_validation_context() -> R7PolicyValidationContextV1 {
+        R7PolicyValidationContextV1 {
+            native_source_identity_digest: gv3_byte_digest(21),
+            plugin_source_identity_digest: gv3_byte_digest(22),
+            control_evidence_set_digest: gv3_byte_digest(23),
+            g0_binding_contract_digest: gv3_byte_digest(24),
+            g0_only_fallback_contract_digest: gv3_byte_digest(25),
+            committed_g0_incarnation_id: gv3_byte_digest(3),
+            committed_g0_manifest_digest: gv3_byte_digest(1),
+            committed_g0_seed_code_digest: gv3_byte_digest(2),
+            committed_g0_persona_source_digest: gv3_byte_digest(4),
+            committed_g0_genesis_receipt_digest: gv3_byte_digest(5),
+        }
+    }
+
+    #[test]
+    fn r7_store_rejects_mutated_policy_with_stale_attested_digest() {
+        let mut bundle = gv3_public_policy_bundle();
+        let before = bundle.policy.encode();
+        bundle.policy.operational_commitments[0] = "mutated_public_policy_term".to_owned();
+        let after = bundle.policy.encode();
+        assert_ne!(before, after);
+        assert!(GenesisIdentityPolicyV1::decode(&after).is_err());
+        assert!(
+            Store::validate_r7_bundle(&bundle, &gv3_validation_context()).is_err(),
+            "Store accepted a public policy DTO whose bytes no longer match the attested canonical body"
+        );
+    }
+
+    #[test]
+    fn r7_authority_closure_requires_delegation_ceremony_custody_and_bar_identity() {
+        let bundle = gv3_public_policy_bundle();
+        let closure = ae_genesis::r7::verify_authority_closure_v1(
+            &bundle.delegation,
+            &bundle.ceremony,
+            &bundle.root_custody,
+            &bundle.policy_custody,
+            &bundle.reviewer_custody,
+            &bundle.root,
+            &bundle.registry,
+            &bundle.review,
+            &bundle.attestation,
+            &bundle.activation,
+        )
+        .expect("GV3 authority closure");
+        assert_eq!(closure.role1_grant.grant_role_id, 1);
+        assert_eq!(closure.role2_grant.grant_role_id, 2);
+
+        let mut bar = bundle.activation.clone();
+        bar.message.reviewer_key_id = "wrong_reviewer_key".to_owned();
+        assert!(ae_genesis::r7::verify_authority_closure_v1(
+            &bundle.delegation,
+            &bundle.ceremony,
+            &bundle.root_custody,
+            &bundle.policy_custody,
+            &bundle.reviewer_custody,
+            &bundle.root,
+            &bundle.registry,
+            &bundle.review,
+            &bundle.attestation,
+            &bar,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn r7_context_cas_requires_registry_predecessor_epoch_and_revocations() {
+        use ae_genesis::r7::RegistryRevocationV1;
+
+        let bundle = gv3_public_policy_bundle();
+        let mut stored_registry = bundle.registry.clone();
+        stored_registry.revocations.push(RegistryRevocationV1 {
+            key_id: "old_revoked_key".to_owned(),
+            key_version: 1,
+            revocation_epoch: 1,
+            status: 1,
+        });
+        let mut successor_registry = bundle.registry.clone();
+        successor_registry.registry_epoch = 2;
+        successor_registry.previous_snapshot_digest =
+            Some(stored_registry.registry_snapshot_digest);
+
+        assert!(Store::validate_r7_successor_guard(
+            1,
+            2,
+            1,
+            stored_registry.registry_snapshot_digest,
+            &stored_registry,
+            &successor_registry,
+        )
+        .is_err());
+
+        successor_registry.revocations = stored_registry.revocations.clone();
+        assert!(Store::validate_r7_successor_guard(
+            1,
+            2,
+            1,
+            stored_registry.registry_snapshot_digest,
+            &stored_registry,
+            &successor_registry,
+        )
+        .is_ok());
+
+        successor_registry.registry_epoch = 3;
+        assert!(matches!(
+            Store::validate_r7_successor_guard(
+                1,
+                2,
+                1,
+                stored_registry.registry_snapshot_digest,
+                &stored_registry,
+                &successor_registry,
+            ),
+            Err(StoreError::R7PolicyRegistryEpochGap)
+        ));
+    }
+
+    #[test]
+    fn r7_context_rejects_source_g0_and_fallback_mutations() {
+        let bundle = gv3_public_policy_bundle();
+        let context = gv3_validation_context();
+        assert!(Store::validate_r7_context_fields(&bundle, &context).is_ok());
+
+        let mut source_mismatch = context.clone();
+        source_mismatch.native_source_identity_digest[0] ^= 1;
+        assert!(Store::validate_r7_context_fields(&bundle, &source_mismatch).is_err());
+
+        let mut g0_mismatch = context.clone();
+        g0_mismatch.committed_g0_manifest_digest[0] ^= 1;
+        assert!(Store::validate_r7_context_fields(&bundle, &g0_mismatch).is_err());
+
+        let mut fallback_mismatch = context;
+        fallback_mismatch.g0_only_fallback_contract_digest[0] ^= 1;
+        assert!(Store::validate_r7_context_fields(&bundle, &fallback_mismatch).is_err());
+    }
+
+    #[test]
+    fn r7_old_schema_migration_adds_public_evidence_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE r7_policy_bindings_v1 (
+                bot_token BLOB NOT NULL,
+                persona_token BLOB NOT NULL,
+                committed_g0_incarnation_id BLOB NOT NULL,
+                identity_scope_id INTEGER NOT NULL,
+                highest_accepted_sequence INTEGER NOT NULL,
+                policy_body_digest BLOB NOT NULL,
+                policy_attestation_digest BLOB NOT NULL,
+                attested_registry_epoch INTEGER NOT NULL,
+                attested_registry_snapshot_digest BLOB NOT NULL,
+                policy_bytes BLOB NOT NULL,
+                root_bytes BLOB NOT NULL,
+                registry_bytes BLOB NOT NULL,
+                review_bytes BLOB NOT NULL,
+                attestation_bytes BLOB NOT NULL,
+                activation_bytes BLOB NOT NULL,
+                PRIMARY KEY (bot_token, persona_token, committed_g0_incarnation_id, identity_scope_id)
+            );
+            "#,
+        )
+        .unwrap();
+
+        Store::migrate(&mut conn).unwrap();
+        let mut statement = conn
+            .prepare("PRAGMA table_info(r7_policy_bindings_v1)")
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for expected in [
+            "delegation_bytes",
+            "ceremony_bytes",
+            "root_custody_bytes",
+            "policy_custody_bytes",
+            "reviewer_custody_bytes",
+        ] {
+            assert!(columns.iter().any(|column| column == expected));
+        }
     }
 }
