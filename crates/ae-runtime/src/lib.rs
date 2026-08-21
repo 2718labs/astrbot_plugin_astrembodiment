@@ -1179,6 +1179,12 @@ impl AstrRuntime {
                 CanonicalEvent::TimeAdvance(value) => &value.scope,
                 _ => return Err(RuntimeError::InvalidNeuralState),
             };
+            let event_causal_base = match &event {
+                CanonicalEvent::UserStimulus(value) => Some(value.causal.base_revision),
+                CanonicalEvent::DeliveryOutcome(value) => Some(value.causal.base_revision),
+                CanonicalEvent::TimeAdvance(_) => None,
+                _ => unreachable!(),
+            };
             let event_scope_digest = wire::persona_scope_digest(
                 &event_scope.bot_token,
                 &event_scope.persona_token,
@@ -1200,6 +1206,9 @@ impl AstrRuntime {
                 || receipt.next_revision != row.revision
                 || row.base_revision != receipt.base_revision
                 || receipt.base_revision != expected_revision
+                || event_causal_base
+                    .map(|base_revision| base_revision != expected_revision)
+                    .unwrap_or(false)
                 || row.scope_digest != *legacy_scope
                 || receipt.scope_digest != *legacy_scope
                 || event_scope_digest != *legacy_scope
@@ -2453,6 +2462,63 @@ finally:
         })
     }
 
+    fn install_legacy_row(
+        runtime: &mut AstrRuntime,
+        event: &CanonicalEvent,
+        previous: &TransitionReceipt,
+        base_revision: u64,
+    ) {
+        let event_digest = wire::event_digest(event);
+        let manifest_digest = runtime
+            .hot
+            .as_ref()
+            .expect("hot after genesis")
+            .identity
+            .manifest_digest;
+        let turn_id = match event {
+            CanonicalEvent::UserStimulus(value) => value.causal.turn_id,
+            CanonicalEvent::DeliveryOutcome(value) => value.causal.turn_id,
+            CanonicalEvent::TimeAdvance(value) => value.event_id,
+            _ => unreachable!("G0 fixture event must be supported"),
+        };
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: previous.formula_digest,
+            scope_digest: previous.scope_digest,
+            event_digest,
+            authority_digest: authority_projection_digest(event),
+            base_revision,
+            next_revision: base_revision + 1,
+            state_before: previous.state_after,
+            state_after: previous.state_after,
+            graph_after: previous.graph_after,
+            action_contract: Some(wire::action_contract_digest(&noop_action_contract(
+                &manifest_digest,
+                &event_digest,
+                turn_id,
+            ))),
+            active_nodes: previous.active_nodes,
+            active_edges: previous.active_edges,
+            residuals: fixed_zero_vector(),
+            status: CommitStatus::Committed,
+        };
+        let chain_seed = runtime
+            .store
+            .last_chain_digest(&previous.scope_digest)
+            .expect("read chain tip")
+            .expect("previous row chain tip");
+        runtime
+            .store
+            .commit_journal(&CommitEnvelope {
+                event_kind: wire::event_kind_name(event).to_owned(),
+                event_bytes: wire::encode_event(event),
+                receipt,
+                chain_seed,
+                delta_bytes: Vec::new(),
+            })
+            .expect("install legacy fixture row");
+    }
+
     #[test]
     fn g0_append_rejects_tampered_legacy_chain_and_does_not_append() {
         let path = database("g0-chain-tamper");
@@ -2608,6 +2674,40 @@ finally:
         runtime.flush_and_close().expect("close runtime");
         drop(runtime);
         cleanup_database("g0-event-scope-tamper");
+    }
+
+    #[test]
+    fn g0_append_rejects_persisted_event_causal_base_mismatch_and_does_not_append() {
+        let path = database("g0-causal-base-tamper");
+        let seed = 162;
+        let session = 102;
+        let genesis = super::tests::request(seed);
+        let request_scope = scope(seed, session);
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        runtime.ensure_genesis(&genesis).expect("genesis");
+        let first = runtime
+            .apply_event(&request_scope, &g0_stimulus(seed, 0, session))
+            .expect("valid first G0 row");
+
+        let mut causal_event = g0_stimulus(seed, 1, session);
+        if let CanonicalEvent::UserStimulus(value) = &mut causal_event {
+            value.causal.base_revision = 77;
+        }
+        install_legacy_row(&mut runtime, &causal_event, &first.receipt, 1);
+        let legacy_scope = first.receipt.scope_digest;
+        let rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
+        assert_eq!(rows_before.len(), 2);
+
+        let result = runtime.apply_event(&request_scope, &g0_stimulus(seed, 2, session));
+        assert!(
+            matches!(result, Err(RuntimeError::InvalidNeuralState)),
+            "causal-base-mismatched persisted event must fail closed before append: {result:?}"
+        );
+        let rows_after = runtime.store.read_journal(&legacy_scope).unwrap();
+        assert_eq!(rows_after, rows_before);
+        runtime.flush_and_close().expect("close runtime");
+        drop(runtime);
+        cleanup_database("g0-causal-base-tamper");
     }
 
     #[test]
