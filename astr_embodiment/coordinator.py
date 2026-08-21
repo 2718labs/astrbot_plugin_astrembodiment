@@ -33,6 +33,7 @@ from .contracts import (
 from .semantic_estimator import (
     SemanticEstimate,
     SemanticEstimateError,
+    _canonical_nonzero_hex,
     build_perception_proposal,
     make_request_nonce_digest,
     parse_estimator_output,
@@ -225,15 +226,19 @@ class GenesisCoordinator:
     def _preflight_key(scope: ScopeTokens, turn: FrozenTurn) -> str:
         """Build a cache key from opaque facts only (never request text)."""
 
-        relation = scope.relation_token or "-"
+        relation = (
+            _canonical_nonzero_hex(scope.relation_token, 16)
+            if scope.relation_token is not None
+            else "-"
+        )
         return ":".join(
             (
-                scope.bot_token,
-                scope.persona_token,
-                scope.session_token,
+                _canonical_nonzero_hex(scope.bot_token, 16),
+                _canonical_nonzero_hex(scope.persona_token, 16),
+                _canonical_nonzero_hex(scope.session_token, 16),
                 relation,
-                turn.event_id,
-                turn.turn_id,
+                _canonical_nonzero_hex(turn.event_id, 16),
+                _canonical_nonzero_hex(turn.turn_id, 16),
                 str(turn.base_revision),
                 str(turn.observed_at_ms),
             )
@@ -249,32 +254,39 @@ class GenesisCoordinator:
 
     @staticmethod
     def _valid_frozen_turn(scope: ScopeTokens, turn: FrozenTurn) -> bool:
-        if not isinstance(scope, ScopeTokens):
+        if type(scope) is not ScopeTokens or type(turn) is not FrozenTurn:
             return False
-        for token in (scope.bot_token, scope.persona_token, scope.session_token):
-            try:
-                decoded = bytes.fromhex(token)
-            except (TypeError, ValueError):
-                return False
-            if len(decoded) != 16 or not any(decoded):
-                return False
-        if scope.relation_token is not None:
-            try:
-                relation = bytes.fromhex(scope.relation_token)
-            except (TypeError, ValueError):
-                return False
-            if len(relation) != 16 or not any(relation):
-                return False
-        if not isinstance(turn, FrozenTurn) or turn.scope != scope:
-            return False
-        if not isinstance(turn.event_id, str) or not isinstance(turn.turn_id, str):
+        if type(turn.scope) is not ScopeTokens:
             return False
         try:
-            event = bytes.fromhex(turn.event_id)
-            turn_bytes = bytes.fromhex(turn.turn_id)
+            canonical_scope = ScopeTokens(
+                bot_token=_canonical_nonzero_hex(scope.bot_token, 16),
+                persona_token=_canonical_nonzero_hex(scope.persona_token, 16),
+                session_token=_canonical_nonzero_hex(scope.session_token, 16),
+                relation_token=(
+                    _canonical_nonzero_hex(scope.relation_token, 16)
+                    if scope.relation_token is not None
+                    else None
+                ),
+            )
+            turn_scope = ScopeTokens(
+                bot_token=_canonical_nonzero_hex(turn.scope.bot_token, 16),
+                persona_token=_canonical_nonzero_hex(turn.scope.persona_token, 16),
+                session_token=_canonical_nonzero_hex(turn.scope.session_token, 16),
+                relation_token=(
+                    _canonical_nonzero_hex(turn.scope.relation_token, 16)
+                    if turn.scope.relation_token is not None
+                    else None
+                ),
+            )
         except (TypeError, ValueError):
             return False
-        if len(event) != 16 or len(turn_bytes) != 16 or not any(event) or not any(turn_bytes):
+        if turn_scope != canonical_scope:
+            return False
+        try:
+            _canonical_nonzero_hex(turn.event_id, 16)
+            _canonical_nonzero_hex(turn.turn_id, 16)
+        except (TypeError, ValueError):
             return False
         return (
             type(turn.base_revision) is int
@@ -354,11 +366,14 @@ class GenesisCoordinator:
                     self._preflight_failure("ESTIMATOR_UNAVAILABLE")
                 )
             raise
-        except Exception:
+        except BaseException:
             # The done callback consumes the task exception and stores a fixed
             # closed outcome.  Keep this caller fail-closed as well.
             outcome = self._preflight_failure("NATIVE_ERROR")
-        return copy.deepcopy(outcome)
+        try:
+            return copy.deepcopy(outcome)
+        except BaseException:
+            return self._preflight_failure("NATIVE_MALFORMED")
 
     def _settle_preflight(
         self,
@@ -367,28 +382,51 @@ class GenesisCoordinator:
     ) -> None:
         """Consume a shared task exactly once and cache only a closed result."""
 
+        closed: dict[str, Any] = self._preflight_failure("NATIVE_ERROR")
         try:
-            outcome = task.result()
-        except asyncio.CancelledError:
-            # Never leave a CancelledError as an unobserved Future exception;
-            # a later caller receives the same fixed degraded outcome.
-            outcome = self._preflight_failure("ESTIMATOR_UNAVAILABLE")
-        except Exception:
-            outcome = self._preflight_failure("NATIVE_ERROR")
-        try:
-            closed = json.loads(
-                json.dumps(
-                    outcome,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    allow_nan=False,
+            try:
+                outcome = task.result()
+            except asyncio.CancelledError:
+                # Never leave a CancelledError as an unobserved Future
+                # exception; a later caller receives the same fixed outcome.
+                outcome = self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+            except BaseException:
+                outcome = self._preflight_failure("NATIVE_ERROR")
+            try:
+                candidate = json.loads(
+                    json.dumps(
+                        outcome,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        allow_nan=False,
+                    )
                 )
-            )
-        except Exception:
-            closed = self._preflight_failure("NATIVE_MALFORMED")
-        self._preflight_results[key] = copy.deepcopy(closed)
-        if self._preflight_inflight.get(key) is task:
-            self._preflight_inflight.pop(key, None)
+                if type(candidate) is not dict:
+                    raise ValueError("closed outcome")
+                closed = candidate
+            except BaseException:
+                closed = self._preflight_failure("NATIVE_MALFORMED")
+            try:
+                self._preflight_results[key] = copy.deepcopy(closed)
+            except BaseException:
+                self._preflight_results[key] = self._preflight_failure(
+                    "NATIVE_MALFORMED"
+                )
+        except BaseException:
+            # A done callback must never leak provider/native exception details
+            # into the event loop; retain a fixed closed result if possible.
+            try:
+                self._preflight_results[key] = self._preflight_failure(
+                    "NATIVE_MALFORMED"
+                )
+            except BaseException:
+                pass
+        finally:
+            try:
+                if self._preflight_inflight.get(key) is task:
+                    self._preflight_inflight.pop(key, None)
+            except BaseException:
+                pass
 
     async def _run_preflight(
         self,
@@ -399,12 +437,17 @@ class GenesisCoordinator:
         estimator: PreflightEstimator,
     ) -> dict[str, Any]:
         """Execute one owned estimator/native attempt for a frozen key."""
-        return await self._run_preflight_body(
-            scope=scope,
-            frozen_turn=frozen_turn,
-            request_text=request_text,
-            estimator=estimator,
-        )
+        try:
+            return await self._run_preflight_body(
+                scope=scope,
+                frozen_turn=frozen_turn,
+                request_text=request_text,
+                estimator=estimator,
+            )
+        except asyncio.CancelledError:
+            return self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+        except BaseException:
+            return self._preflight_failure("NATIVE_ERROR")
 
     async def _run_preflight_body(
         self,
@@ -420,11 +463,13 @@ class GenesisCoordinator:
             return self._preflight_noop("EMPTY_REQUEST")
         try:
             raw_estimate = await self._invoke_preflight_estimator(estimator, request_text)
+        except asyncio.CancelledError:
+            return self._preflight_failure("ESTIMATOR_UNAVAILABLE")
         except SemanticEstimateError as exc:
             return self._preflight_failure(
                 exc.code if exc.code in {"ESTIMATOR_MALFORMED", "ESTIMATOR_UNAVAILABLE"} else "ESTIMATOR_UNAVAILABLE"
             )
-        except Exception:
+        except BaseException:
             # Provider exception details are deliberately discarded.
             return self._preflight_failure("ESTIMATOR_UNAVAILABLE")
 
@@ -434,11 +479,11 @@ class GenesisCoordinator:
                 if isinstance(raw_estimate, SemanticEstimate)
                 else parse_estimator_output(raw_estimate)
             )
-        except Exception:
+        except BaseException:
             return self._preflight_failure("ESTIMATOR_MALFORMED")
         try:
             is_load_noop = estimate.is_load_noop
-        except Exception:
+        except BaseException:
             return self._preflight_failure("ESTIMATOR_MALFORMED")
         if is_load_noop:
             # This is a fixed no-op: no nonce, cursor read, or native commit.
@@ -448,9 +493,9 @@ class GenesisCoordinator:
         # base revision is frozen, so G0's separate revision lane is untouched.
         try:
             cursor = self._bridge.semantic_revision_v1(scope.scope_json())
-        except Exception:
+        except BaseException:
             return self._preflight_failure("NATIVE_ERROR")
-        if not isinstance(cursor, dict):
+        if type(cursor) is not dict:
             return self._preflight_failure("NATIVE_MALFORMED")
         if cursor.get("status") == SEMANTIC_DEGRADED:
             return self._preflight_failure(
@@ -475,16 +520,16 @@ class GenesisCoordinator:
                 nonce_digest=nonce,
             )
             proposal_json = proposal_to_json(proposal, scope=scope)
-        except Exception:
+        except BaseException:
             return self._preflight_failure("INVALID_PROPOSAL")
 
         try:
             native_result = self._bridge.apply_perception_proposal_v1(
                 scope.scope_json(), proposal_json
             )
-        except Exception:
+        except BaseException:
             return self._preflight_failure("NATIVE_ERROR")
-        if not isinstance(native_result, dict):
+        if type(native_result) is not dict:
             return self._preflight_failure("NATIVE_MALFORMED")
         if native_result.get("status") == SEMANTIC_DEGRADED:
             return self._preflight_failure(
@@ -495,8 +540,11 @@ class GenesisCoordinator:
         if native_result == {"status": SEMANTIC_NOOP, "code": "ZERO_LOAD"}:
             return self._preflight_noop("ZERO_LOAD")
         try:
-            native_result = validate_semantic_result(native_result)
-        except Exception:
+            native_result = validate_semantic_result(
+                native_result,
+                expected_base_revision=proposal["base_revision"],
+            )
+        except BaseException:
             return self._preflight_failure("NATIVE_MALFORMED")
         return {
             "status": SEMANTIC_SUCCESS,

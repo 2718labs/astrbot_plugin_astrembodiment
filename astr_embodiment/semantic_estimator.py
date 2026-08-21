@@ -9,6 +9,7 @@ represented by any object in this module.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import inspect
@@ -60,6 +61,9 @@ PROPOSAL_FIELDS = (
 _ESTIMATE_NESTED_FIELDS = frozenset({"dimensions", "estimator_confidence"})
 _ESTIMATE_FLAT_FIELDS = frozenset((*DIMENSION_NAMES, "estimator_confidence"))
 _NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-binding-v1"
+_SCOPE_FIELDS = frozenset(
+    {"bot_token", "persona_token", "relation_token", "session_token"}
+)
 
 
 class SemanticEstimateError(ValueError):
@@ -132,7 +136,7 @@ def _pairs_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _decode_json_object(value: Any) -> Mapping[str, Any]:
-    if isinstance(value, str):
+    if type(value) is str:
         try:
             decoded = json.loads(
                 value,
@@ -143,7 +147,7 @@ def _decode_json_object(value: Any) -> Mapping[str, Any]:
             raise _invalid_estimate() from None
     else:
         decoded = value
-    if not isinstance(decoded, Mapping):
+    if type(decoded) is not dict:
         raise _invalid_estimate()
     return decoded
 
@@ -154,9 +158,9 @@ def _is_raw_integer(value: Any) -> bool:
 
 
 def _validate_dimension_map(value: Any) -> dict[str, int]:
-    if not isinstance(value, Mapping):
+    if type(value) is not dict:
         raise _invalid_estimate()
-    if set(value) != set(DIMENSION_NAMES):
+    if any(type(key) is not str for key in value) or set(value) != set(DIMENSION_NAMES):
         raise _invalid_estimate()
     dimensions: dict[str, int] = {}
     for name in DIMENSION_NAMES:
@@ -208,7 +212,7 @@ def parse_estimator_output(value: Any) -> SemanticEstimate:
         return _parse_estimator_output(value)
     except SemanticEstimateError:
         raise
-    except Exception:
+    except BaseException:
         raise SemanticEstimateError() from None
 
 
@@ -230,35 +234,101 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
         raise _invalid_proposal() from None
 
 
-def _is_hex_token(value: Any, byte_length: int) -> bool:
-    if not isinstance(value, str) or len(value) != byte_length * 2:
-        return False
+def _canonical_hex(value: Any, bytes_len: int) -> str:
+    """Decode a plain hex token and return a fresh lowercase representation."""
+
+    if type(value) is not str or len(value) != bytes_len * 2:
+        raise ValueError("hex token")
     try:
         decoded = bytes.fromhex(value)
-    except ValueError:
+    except (TypeError, ValueError):
+        raise ValueError("hex token") from None
+    if len(decoded) != bytes_len:
+        raise ValueError("hex token")
+    return decoded.hex()
+
+
+def _canonical_nonzero_hex(value: Any, bytes_len: int) -> str:
+    canonical = _canonical_hex(value, bytes_len)
+    if not any(bytes.fromhex(canonical)):
+        raise ValueError("hex token")
+    return canonical
+
+
+def _is_hex_token(value: Any, byte_length: int) -> bool:
+    try:
+        _canonical_nonzero_hex(value, byte_length)
+    except (TypeError, ValueError):
         return False
-    return len(decoded) == byte_length and any(decoded)
+    return True
 
 
-def _validate_scope(scope: ScopeTokens) -> None:
-    if not isinstance(scope, ScopeTokens):
+def _canonical_scope(scope: ScopeTokens | Mapping[str, Any]) -> ScopeTokens:
+    """Return a plain ``ScopeTokens`` with byte-canonical token strings."""
+
+    if type(scope) is ScopeTokens:
+        payload: dict[str, Any] = {
+            "bot_token": scope.bot_token,
+            "persona_token": scope.persona_token,
+            "relation_token": scope.relation_token,
+            "session_token": scope.session_token,
+        }
+    elif type(scope) is dict:
+        payload = scope
+    else:
         raise _invalid_proposal()
-    for token in (scope.bot_token, scope.persona_token, scope.session_token):
-        if not _is_hex_token(token, 16):
-            raise _invalid_proposal()
-    if scope.relation_token is not None and not _is_hex_token(scope.relation_token, 16):
+    if any(type(key) is not str for key in payload) or set(payload) != _SCOPE_FIELDS:
         raise _invalid_proposal()
+    relation = payload["relation_token"]
+    if relation is not None and type(relation) is not str:
+        raise _invalid_proposal()
+    try:
+        return ScopeTokens(
+            bot_token=_canonical_nonzero_hex(payload["bot_token"], 16),
+            persona_token=_canonical_nonzero_hex(payload["persona_token"], 16),
+            session_token=_canonical_nonzero_hex(payload["session_token"], 16),
+            relation_token=(
+                _canonical_nonzero_hex(relation, 16) if relation is not None else None
+            ),
+        )
+    except (TypeError, ValueError):
+        raise _invalid_proposal() from None
 
 
-def _validate_turn(scope: ScopeTokens, turn: FrozenTurn) -> None:
-    if not isinstance(turn, FrozenTurn) or turn.scope != scope:
+def _canonical_turn(scope: ScopeTokens, turn: FrozenTurn) -> FrozenTurn:
+    canonical_scope = _canonical_scope(scope)
+    if type(turn) is not FrozenTurn:
         raise _invalid_proposal()
-    if not _is_hex_token(turn.turn_id, 16) or not _is_hex_token(turn.event_id, 16):
+    try:
+        turn_scope = _canonical_scope(turn.scope)
+    except SemanticProposalError:
+        raise
+    if turn_scope != canonical_scope:
         raise _invalid_proposal()
-    if not _is_raw_integer(turn.base_revision) or turn.base_revision < 0:
+    if type(turn.base_revision) is not int or turn.base_revision < 0:
         raise _invalid_proposal()
-    if not _is_raw_integer(turn.observed_at_ms) or turn.observed_at_ms <= 0:
+    if type(turn.observed_at_ms) is not int or turn.observed_at_ms <= 0:
         raise _invalid_proposal()
+    try:
+        event_id = _canonical_nonzero_hex(turn.event_id, 16)
+        turn_id = _canonical_nonzero_hex(turn.turn_id, 16)
+    except (TypeError, ValueError):
+        raise _invalid_proposal() from None
+    return FrozenTurn(
+        scope=canonical_scope,
+        turn_id=turn_id,
+        event_id=event_id,
+        base_revision=turn.base_revision,
+        observed_at_ms=turn.observed_at_ms,
+    )
+
+
+def _validate_scope(scope: ScopeTokens) -> ScopeTokens:
+    return _canonical_scope(scope)
+
+
+def _validate_turn(scope: ScopeTokens, turn: FrozenTurn) -> FrozenTurn:
+    return _canonical_turn(scope, turn)
 
 
 def make_request_nonce_digest(
@@ -276,28 +346,28 @@ def make_request_nonce_digest(
     proposal unverifiable at that boundary.
     """
 
-    _validate_scope(scope)
-    _validate_turn(scope, turn)
+    canonical_scope = _validate_scope(scope)
+    canonical_turn = _validate_turn(canonical_scope, turn)
     if entropy is not None and (not isinstance(entropy, bytes) or not entropy):
         raise _invalid_proposal()
-    # Hex tokens are byte identities; lower-case them before canonicalization
-    # so equivalent JSON/hex spellings produce one bridge-recomputable digest.
+    # Hex tokens are byte identities; canonicalize from decoded bytes so no
+    # overridable ``str.lower`` implementation can alter the bound bytes.
     scope_binding = {
-        "bot_token": scope.bot_token.lower(),
-        "persona_token": scope.persona_token.lower(),
+        "bot_token": canonical_scope.bot_token,
+        "persona_token": canonical_scope.persona_token,
         "relation_token": (
-            scope.relation_token.lower()
-            if scope.relation_token is not None
+            canonical_scope.relation_token
+            if canonical_scope.relation_token is not None
             else None
         ),
-        "session_token": scope.session_token.lower(),
+        "session_token": canonical_scope.session_token,
     }
     binding = {
         "scope": scope_binding,
-        "event_id": turn.event_id.lower(),
-        "turn_id": turn.turn_id.lower(),
-        "base_revision": turn.base_revision,
-        "observed_at_ms": turn.observed_at_ms,
+        "event_id": canonical_turn.event_id,
+        "turn_id": canonical_turn.turn_id,
+        "base_revision": canonical_turn.base_revision,
+        "observed_at_ms": canonical_turn.observed_at_ms,
     }
     digest = hashlib.sha256(
         _NONCE_DOMAIN + b"\x00" + _canonical_json(binding)
@@ -313,32 +383,14 @@ request_nonce_digest = make_request_nonce_digest
 
 
 def _normalise_nonce(value: Any) -> str:
-    if not _is_hex_token(value, 32):
-        raise _invalid_proposal()
-    return value.lower()
+    try:
+        return _canonical_nonzero_hex(value, 32)
+    except (TypeError, ValueError):
+        raise _invalid_proposal() from None
 
 
 def _scope_from_binding_value(value: ScopeTokens | Mapping[str, Any]) -> ScopeTokens:
-    if isinstance(value, ScopeTokens):
-        scope = value
-    elif isinstance(value, Mapping):
-        if set(value) != {
-            "bot_token",
-            "persona_token",
-            "relation_token",
-            "session_token",
-        }:
-            raise _invalid_proposal()
-        scope = ScopeTokens(
-            bot_token=value.get("bot_token"),
-            persona_token=value.get("persona_token"),
-            session_token=value.get("session_token"),
-            relation_token=value.get("relation_token"),
-        )
-    else:
-        raise _invalid_proposal()
-    _validate_scope(scope)
-    return scope
+    return _canonical_scope(value)
 
 
 def _validate_nonce_binding(
@@ -365,7 +417,7 @@ def _validate_perception_proposal(
 ) -> dict[str, Any]:
     """Validate and canonicalize the exact native ``PerceptionProposalV1``."""
 
-    if isinstance(value, str):
+    if type(value) is str:
         try:
             payload = json.loads(
                 value,
@@ -376,7 +428,9 @@ def _validate_perception_proposal(
             raise _invalid_proposal() from None
     else:
         payload = value
-    if not isinstance(payload, Mapping) or set(payload) != set(PROPOSAL_FIELDS):
+    if type(payload) is not dict or any(type(key) is not str for key in payload):
+        raise _invalid_proposal()
+    if set(payload) != set(PROPOSAL_FIELDS):
         raise _invalid_proposal()
 
     schema = payload.get("schema_version")
@@ -386,10 +440,11 @@ def _validate_perception_proposal(
     if not _is_raw_integer(protocol) or protocol != 1:
         raise _invalid_proposal()
 
-    event_id = payload.get("event_id")
-    turn_id = payload.get("turn_id")
-    if not _is_hex_token(event_id, 16) or not _is_hex_token(turn_id, 16):
-        raise _invalid_proposal()
+    try:
+        event_id = _canonical_nonzero_hex(payload.get("event_id"), 16)
+        turn_id = _canonical_nonzero_hex(payload.get("turn_id"), 16)
+    except (TypeError, ValueError):
+        raise _invalid_proposal() from None
 
     observed_at_ms = payload.get("observed_at_ms")
     base_revision = payload.get("base_revision")
@@ -409,8 +464,8 @@ def _validate_perception_proposal(
     nonce = _normalise_nonce(payload.get("request_nonce_digest"))
     canonical = {
         "schema_version": 1,
-        "event_id": event_id.lower(),
-        "turn_id": turn_id.lower(),
+        "event_id": event_id,
+        "turn_id": turn_id,
         "observed_at_ms": observed_at_ms,
         "base_revision": base_revision,
         "dimensions": {name: dimensions[name] for name in DIMENSION_NAMES},
@@ -434,7 +489,7 @@ def validate_perception_proposal(
         return _validate_perception_proposal(value, scope=scope)
     except SemanticProposalError:
         raise
-    except Exception:
+    except BaseException:
         raise SemanticProposalError() from None
 
 
@@ -451,11 +506,11 @@ def build_perception_proposal(
 ) -> dict[str, Any]:
     """Bind a validated local estimate to opaque turn facts for native use."""
 
-    _validate_scope(scope)
-    _validate_turn(scope, turn)
+    canonical_scope = _validate_scope(scope)
+    canonical_turn = _validate_turn(canonical_scope, turn)
     if not _is_raw_integer(base_revision) or base_revision < 0:
         raise _invalid_proposal()
-    if base_revision != turn.base_revision:
+    if base_revision != canonical_turn.base_revision:
         raise _invalid_proposal()
     if isinstance(estimate, SemanticEstimate):
         canonical_estimate = estimate
@@ -466,9 +521,9 @@ def build_perception_proposal(
             raise _invalid_proposal() from None
     proposal = {
         "schema_version": 1,
-        "event_id": turn.event_id,
-        "turn_id": turn.turn_id,
-        "observed_at_ms": turn.observed_at_ms,
+        "event_id": canonical_turn.event_id,
+        "turn_id": canonical_turn.turn_id,
+        "observed_at_ms": canonical_turn.observed_at_ms,
         "base_revision": base_revision,
         "dimensions": {
             name: canonical_estimate.dimensions[name] for name in DIMENSION_NAMES
@@ -477,7 +532,7 @@ def build_perception_proposal(
         "protocol_version": 1,
         "request_nonce_digest": nonce_digest,
     }
-    return validate_perception_proposal(proposal, scope=scope)
+    return validate_perception_proposal(proposal, scope=canonical_scope)
 
 
 def proposal_to_json(
@@ -521,7 +576,9 @@ class SemanticEstimator:
             result = provider(request_text)
             if inspect.isawaitable(result):
                 result = await result
-        except Exception:
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
             raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE") from None
         try:
             return parse_estimator_output(result)

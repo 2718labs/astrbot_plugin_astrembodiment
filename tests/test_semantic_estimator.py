@@ -193,3 +193,14 @@ def test_nonce_digest_is_deterministic_for_the_complete_frozen_binding() -> None
 
     assert first == second
     assert first != "aa" * 32
+
+
+def test_nonce_binding_rejects_str_subclass_before_overridable_lower() -> None:
+    class EvilStr(str):
+        def lower(self) -> str:
+            return "ab" * 16
+
+    hostile = replace(_scope(), bot_token=EvilStr("01" * 16))
+
+    with pytest.raises(SemanticProposalError, match="^INVALID_PROPOSAL$"):
+        make_request_nonce_digest(hostile, _turn())

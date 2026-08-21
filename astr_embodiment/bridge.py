@@ -20,6 +20,8 @@ from .contracts import ScopeTokens
 from .semantic_estimator import (
     LOAD_DIMENSIONS,
     SemanticProposalError,
+    _canonical_hex,
+    _canonical_nonzero_hex,
     proposal_to_json,
     validate_perception_proposal,
 )
@@ -224,20 +226,27 @@ def _semantic_error_code(error: BaseException) -> str:
 
 
 def _scope_payload(scope: ScopeTokens | str | dict[str, Any]) -> dict[str, Any]:
-    if isinstance(scope, ScopeTokens):
-        payload = scope.scope_json()
-    elif isinstance(scope, str):
+    if type(scope) is ScopeTokens:
+        payload: dict[str, Any] = {
+            "bot_token": scope.bot_token,
+            "persona_token": scope.persona_token,
+            "relation_token": scope.relation_token,
+            "session_token": scope.session_token,
+        }
+    elif type(scope) is str:
         try:
             payload = json.loads(
                 scope, object_pairs_hook=_scope_pairs_without_duplicates
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("scope") from exc
-        if not isinstance(payload, dict):
+        if type(payload) is not dict:
             raise ValueError("scope")
-    elif isinstance(scope, dict):
-        payload = dict(scope)
+    elif type(scope) is dict:
+        payload = scope
     else:
+        raise ValueError("scope")
+    if any(type(key) is not str for key in payload):
         raise ValueError("scope")
     if set(payload) != {
         "bot_token",
@@ -246,24 +255,20 @@ def _scope_payload(scope: ScopeTokens | str | dict[str, Any]) -> dict[str, Any]:
         "session_token",
     }:
         raise ValueError("scope")
-    for name in ("bot_token", "persona_token", "session_token"):
-        value = payload.get(name)
-        if (
-            not isinstance(value, str)
-            or len(value) != 32
-            or not _looks_hex(value)
-            or not any(bytes.fromhex(value))
-        ):
+    try:
+        relation = payload["relation_token"]
+        if relation is not None and type(relation) is not str:
             raise ValueError("scope")
-    relation = payload.get("relation_token")
-    if relation is not None and (
-        not isinstance(relation, str)
-        or len(relation) != 32
-        or not _looks_hex(relation)
-        or not any(bytes.fromhex(relation))
-    ):
-        raise ValueError("scope")
-    return payload
+        return {
+            "bot_token": _canonical_nonzero_hex(payload["bot_token"], 16),
+            "persona_token": _canonical_nonzero_hex(payload["persona_token"], 16),
+            "relation_token": (
+                _canonical_nonzero_hex(relation, 16) if relation is not None else None
+            ),
+            "session_token": _canonical_nonzero_hex(payload["session_token"], 16),
+        }
+    except (TypeError, ValueError):
+        raise ValueError("scope") from None
 
 
 def _scope_pairs_without_duplicates(
@@ -277,14 +282,6 @@ def _scope_pairs_without_duplicates(
     return result
 
 
-def _looks_hex(value: str) -> bool:
-    try:
-        decoded = bytes.fromhex(value)
-    except (TypeError, ValueError):
-        return False
-    return len(decoded) == len(value) // 2
-
-
 def _closed_json(value: dict[str, Any]) -> str:
     return json.dumps(
         value,
@@ -296,11 +293,11 @@ def _closed_json(value: dict[str, Any]) -> str:
 
 
 def _native_json(value: Any) -> dict[str, Any]:
-    if isinstance(value, str):
+    if type(value) is str:
         payload = json.loads(value, object_pairs_hook=_native_pairs_without_duplicates)
     else:
         payload = value
-    if not isinstance(payload, dict):
+    if type(payload) is not dict or any(type(key) is not str for key in payload):
         raise ValueError("native payload")
     return payload
 
@@ -328,11 +325,15 @@ def _validate_cursor_payload(value: Any) -> dict[str, Any]:
     return {"schema": _SEMANTIC_CURSOR_SCHEMA, "revision": revision}
 
 
-def _validate_semantic_result(value: Any) -> dict[str, Any]:
+def _validate_semantic_result(
+    value: Any,
+    *,
+    expected_base_revision: int | None = None,
+) -> dict[str, Any]:
     payload = _native_json(value)
     if set(payload) != _SEMANTIC_RESULT_FIELDS:
         raise ValueError("semantic payload")
-    if payload.get("schema") != _SEMANTIC_RESULT_SCHEMA:
+    if type(payload.get("schema")) is not str or payload.get("schema") != _SEMANTIC_RESULT_SCHEMA:
         raise ValueError("semantic schema")
     revision = payload.get("revision")
     if type(revision) is not int or revision < 0:
@@ -341,7 +342,7 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
     if type(deduplicated) is not bool:
         raise ValueError("semantic deduplication")
     receipt = payload.get("receipt")
-    if not isinstance(receipt, dict):
+    if type(receipt) is not dict or any(type(key) is not str for key in receipt):
         raise ValueError("semantic receipt")
     if set(receipt) != _RECEIPT_FIELDS:
         raise ValueError("semantic receipt fields")
@@ -358,7 +359,7 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
     for field in integer_fields:
         if type(receipt[field]) is not int or receipt[field] < 0:
             raise ValueError("semantic receipt integer")
-    digest_fields = {
+    digest_fields = (
         "formula_digest",
         "scope_digest",
         "event_digest",
@@ -366,19 +367,22 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
         "state_before",
         "state_after",
         "graph_after",
-    }
+    )
+    canonical_digests: dict[str, str] = {}
     for field in digest_fields:
-        digest = receipt[field]
-        if (
-            not isinstance(digest, str)
-            or len(digest) != 64
-            or not _looks_hex(digest)
-        ):
+        try:
+            canonical_digests[field] = _canonical_hex(receipt[field], 32)
+        except (TypeError, ValueError):
             raise ValueError("semantic receipt digest")
-    if receipt["status"] != "committed":
+    if canonical_digests["state_before"] == canonical_digests["state_after"]:
+        raise ValueError("semantic receipt transition")
+    status = receipt["status"]
+    if type(status) is not str or status != "committed":
         raise ValueError("semantic receipt status")
     residuals = receipt["residuals"]
-    if not isinstance(residuals, dict) or set(residuals) != _RESIDUAL_FIELDS:
+    if type(residuals) is not dict or any(type(key) is not str for key in residuals):
+        raise ValueError("semantic receipt residuals")
+    if set(residuals) != _RESIDUAL_FIELDS:
         raise ValueError("semantic receipt residuals")
     if any(
         type(residuals[name]) is not int
@@ -390,22 +394,52 @@ def _validate_semantic_result(value: Any) -> dict[str, Any]:
         raise ValueError("semantic receipt revision")
     if receipt["base_revision"] + 1 != receipt["next_revision"]:
         raise ValueError("semantic receipt revision")
-    if receipt["state_before"] == receipt["state_after"]:
-        raise ValueError("semantic receipt transition")
-    # Rebuild the outer object so an extension cannot smuggle extra fields or
-    # a mutable reference into coordinator state.
+    if expected_base_revision is not None:
+        if type(expected_base_revision) is not int or expected_base_revision < 0:
+            raise ValueError("semantic receipt base")
+        if receipt["base_revision"] != expected_base_revision:
+            raise ValueError("semantic receipt base")
+    canonical_residuals = {
+        name: residuals[name]
+        for name in ("authority", "continuity", "energy", "renormalization", "capacity")
+    }
+    canonical_receipt = {
+        "schema_version": 1,
+        "formula_digest": canonical_digests["formula_digest"],
+        "scope_digest": canonical_digests["scope_digest"],
+        "event_digest": canonical_digests["event_digest"],
+        "authority_digest": canonical_digests["authority_digest"],
+        "base_revision": receipt["base_revision"],
+        "next_revision": receipt["next_revision"],
+        "state_before": canonical_digests["state_before"],
+        "state_after": canonical_digests["state_after"],
+        "graph_after": canonical_digests["graph_after"],
+        "active_nodes": receipt["active_nodes"],
+        "active_edges": receipt["active_edges"],
+        "residuals": canonical_residuals,
+        "status": "committed",
+    }
+    # Rebuild every accepted field into fresh plain dictionaries so an
+    # extension cannot smuggle extra fields or a mutable reference onward.
     return {
         "schema": _SEMANTIC_RESULT_SCHEMA,
-        "receipt": json.loads(_closed_json(receipt)),
+        "receipt": canonical_receipt,
         "revision": revision,
         "deduplicated": deduplicated,
     }
 
 
-def validate_semantic_result(value: Any) -> dict[str, Any]:
+def validate_semantic_result(
+    value: Any,
+    *,
+    expected_base_revision: int | None = None,
+) -> dict[str, Any]:
     """Validate the exact closed result emitted by the PyO3 SPC1 surface."""
 
-    return _validate_semantic_result(value)
+    return _validate_semantic_result(
+        value,
+        expected_base_revision=expected_base_revision,
+    )
 
 
 def _bundled_native_package_dir() -> Path:
@@ -626,7 +660,10 @@ class NativeBridge:
             return _degraded("NATIVE_SYMBOL_UNAVAILABLE")
         try:
             result = method(_closed_json(scope), encoded_proposal)
-            return _validate_semantic_result(result)
+            return _validate_semantic_result(
+                result,
+                expected_base_revision=proposal["base_revision"],
+            )
         except Exception as exc:
             if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
                 return _degraded("NATIVE_MALFORMED")

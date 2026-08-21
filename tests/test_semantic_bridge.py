@@ -614,3 +614,203 @@ def test_coordinator_key_includes_frozen_base_and_observed_time() -> None:
     calls, bridge = asyncio.run(run())
     assert calls == ["one", "two"]
     assert len(bridge.proposals) == 2
+
+
+def test_bridge_rejects_scope_dict_and_str_subclasses_before_nonce_binding() -> None:
+    class EvilStr(str):
+        def lower(self) -> str:
+            return "ab" * 16
+
+    class ScopeDict(dict):
+        pass
+
+    class Native:
+        def __init__(self) -> None:
+            self.apply_calls = 0
+
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            self.apply_calls += 1
+            return json.dumps(_valid_result())
+
+    native = Native()
+    bridge = NativeBridge()
+    bridge._native = native
+    hostile_scope = ScopeDict(
+        {
+            "bot_token": EvilStr("11" * 16),
+            "persona_token": "22" * 16,
+            "relation_token": None,
+            "session_token": "33" * 16,
+        }
+    )
+    nonce_scope = replace(_scope(), bot_token="ab" * 16)
+    nonce_turn = replace(_turn(), scope=nonce_scope)
+
+    result = bridge.apply_perception_proposal_v1(
+        hostile_scope,
+        json.dumps(
+            _proposal(
+                nonce=make_request_nonce_digest(nonce_scope, nonce_turn),
+            )
+        ),
+    )
+
+    assert result == {"status": "DEGRADED", "code": "INVALID_PERCEPTION_SCOPE"}
+    assert native.apply_calls == 0
+
+
+def test_coordinator_consumes_baseexception_and_caches_fixed_retry_result() -> None:
+    class Bridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            raise AssertionError("fatal estimator must stop before native")
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            raise AssertionError("fatal estimator must stop before native")
+
+    class FatalProvider(BaseException):
+        pass
+
+    async def run() -> tuple[dict, dict, list[str], GenesisCoordinator]:
+        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+        calls: list[str] = []
+
+        async def estimator(text: str) -> dict:
+            calls.append(text)
+            raise FatalProvider("RAW_SENTINEL")
+
+        first = await coordinator.preflight_stimulus(
+            _scope(), _turn(), "first", estimator
+        )
+        second = await coordinator.preflight_stimulus(
+            _scope(), _turn(), "second", estimator
+        )
+        return first, second, calls, coordinator
+
+    first, second, calls, coordinator = asyncio.run(run())
+
+    assert first == {"status": "DEGRADED", "code": "ESTIMATOR_UNAVAILABLE"}
+    assert second == first
+    assert calls == ["first"]
+    assert coordinator._preflight_inflight == {}
+    assert len(coordinator._preflight_results) == 1
+    assert "RAW_SENTINEL" not in json.dumps(second)
+
+
+def test_bridge_rejects_hidden_receipt_mapping_and_forbidden_payload() -> None:
+    class Hidden(dict):
+        def __iter__(self):
+            return (key for key in super().__iter__() if key != "raw_text")
+
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> dict:
+            receipt = Hidden(_valid_receipt())
+            receipt["raw_text"] = "RAW_SENTINEL"
+            return {
+                "schema": "astrembodiment.semantic-perception-closure.v1",
+                "receipt": receipt,
+                "revision": 1,
+                "deduplicated": False,
+            }
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+    assert "RAW_SENTINEL" not in json.dumps(result)
+
+
+def test_bridge_rejects_case_equivalent_state_transition() -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(
+                _valid_result(state_before="AA" * 32, state_after="aa" * 32)
+            )
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+
+
+def test_coordinator_rejects_receipt_base_not_bound_to_proposal() -> None:
+    class Bridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            return _valid_result(base_revision=9, next_revision=10)
+
+    async def run() -> dict:
+        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+
+        async def estimator(_request_text: str) -> dict:
+            return _estimate()
+
+        return await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", estimator
+        )
+
+    assert asyncio.run(run()) == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+
+
+def test_coordinator_deduplicates_case_equivalent_hex_identity() -> None:
+    class Bridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            return _valid_result()
+
+    async def run() -> tuple[list[str], dict, dict]:
+        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+        calls: list[str] = []
+        lower_scope = ScopeTokens(
+            bot_token="ab" * 16,
+            persona_token="cd" * 16,
+            session_token="ef" * 16,
+        )
+        lower_turn = FrozenTurn(
+            scope=lower_scope,
+            turn_id="a4" * 16,
+            event_id="b5" * 16,
+            base_revision=0,
+            observed_at_ms=1_700_000_000_010,
+        )
+        upper_scope = replace(
+            lower_scope,
+            bot_token=lower_scope.bot_token.upper(),
+            persona_token=lower_scope.persona_token.upper(),
+            session_token=lower_scope.session_token.upper(),
+        )
+        upper_turn = FrozenTurn(
+            scope=upper_scope,
+            turn_id=lower_turn.turn_id.upper(),
+            event_id=lower_turn.event_id.upper(),
+            base_revision=lower_turn.base_revision,
+            observed_at_ms=lower_turn.observed_at_ms,
+        )
+
+        async def estimator(text: str) -> dict:
+            calls.append(text)
+            return _estimate()
+
+        first = await coordinator.preflight_stimulus(
+            lower_scope, lower_turn, "lower", estimator
+        )
+        second = await coordinator.preflight_stimulus(
+            upper_scope, upper_turn, "upper", estimator
+        )
+        return calls, first, second
+
+    calls, first, second = asyncio.run(run())
+
+    assert calls == ["lower"]
+    assert second == first
