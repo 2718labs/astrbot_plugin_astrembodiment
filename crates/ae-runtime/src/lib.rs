@@ -1126,9 +1126,35 @@ impl AstrRuntime {
         legacy_scope: &Digest,
         legacy_revision: u64,
         formula_digest: &Digest,
+        manifest_digest: &Digest,
         initial_snapshot_digest: &Digest,
         genesis_graph_digest: &Digest,
     ) -> Result<(Digest, Digest, u32, u32), RuntimeError> {
+        // The G0 append path must audit the complete legacy journal before it
+        // asks Store for the current chain tip.  Store's CAS guard verifies
+        // only the supplied tip, so trusting last_chain_digest without this
+        // replay would allow a corrupt row to seed the next append.
+        let current_revision = self.store.current_revision(legacy_scope)?;
+        if current_revision != legacy_revision {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+
+        let rows = self.store.read_journal(legacy_scope)?;
+        let row_count = u64::try_from(rows.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
+        if row_count != current_revision {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let report = ae_continuum::verify_replay(*initial_snapshot_digest, &rows);
+        let last_chain_digest = self.store.last_chain_digest(legacy_scope)?;
+        if !report.ok
+            || report.checked != rows.len()
+            || report.final_revision != current_revision
+            || (current_revision == 0 && last_chain_digest.is_some())
+            || (current_revision > 0 && last_chain_digest != Some(report.final_chain_digest))
+        {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+
         let snapshot = self
             .store
             .read_latest_snapshot(legacy_scope, legacy_revision)?
@@ -1137,25 +1163,57 @@ impl AstrRuntime {
             return Err(RuntimeError::InvalidNeuralState);
         }
 
-        let rows = self.store.read_journal(legacy_scope)?;
         let mut expected_revision = 0_u64;
         let mut expected_state = *initial_snapshot_digest;
         let mut expected_graph = *genesis_graph_digest;
-        for row in rows.iter().filter(|row| row.revision <= legacy_revision) {
+        for row in &rows {
             let next_revision = expected_revision
                 .checked_add(1)
                 .ok_or(RuntimeError::InvalidNeuralState)?;
+            let event = wire::decode_event(&row.event_bytes)
+                .map_err(|_| RuntimeError::InvalidNeuralState)?;
+            let event_kind = wire::event_kind_name(&event);
+            let event_scope = match &event {
+                CanonicalEvent::UserStimulus(value) => &value.scope,
+                CanonicalEvent::DeliveryOutcome(value) => &value.scope,
+                CanonicalEvent::TimeAdvance(value) => &value.scope,
+                _ => return Err(RuntimeError::InvalidNeuralState),
+            };
+            let event_scope_digest = wire::persona_scope_digest(
+                &event_scope.bot_token,
+                &event_scope.persona_token,
+                None,
+            );
+            let event_digest = wire::event_digest(&event);
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            let turn_id = match &event {
+                CanonicalEvent::UserStimulus(value) => value.causal.turn_id,
+                CanonicalEvent::DeliveryOutcome(value) => value.causal.turn_id,
+                CanonicalEvent::TimeAdvance(value) => value.event_id,
+                _ => unreachable!(),
+            };
+            let expected_contract = noop_action_contract(manifest_digest, &event_digest, turn_id);
             if row.revision != next_revision
+                || row.event_kind != event_kind
                 || receipt.next_revision != row.revision
                 || row.base_revision != receipt.base_revision
                 || receipt.base_revision != expected_revision
                 || row.scope_digest != *legacy_scope
                 || receipt.scope_digest != *legacy_scope
+                || event_scope_digest != *legacy_scope
+                || event_digest != row.event_digest
+                || receipt.event_digest != row.event_digest
                 || receipt.formula_digest != *formula_digest
                 || receipt.state_before != expected_state
+                || receipt.state_after != expected_state
+                || receipt.graph_after != expected_graph
+                || receipt.schema_version != 1
+                || receipt.status != CommitStatus::Committed
+                || receipt.action_contract != Some(wire::action_contract_digest(&expected_contract))
+                || receipt.authority_digest != authority_projection_digest(&event)
+                || receipt.residuals != fixed_zero_vector()
             {
                 return Err(RuntimeError::InvalidNeuralState);
             }
@@ -1167,9 +1225,9 @@ impl AstrRuntime {
             return Err(RuntimeError::InvalidNeuralState);
         }
 
-        // G0 snapshots are rooted at Genesis.  The latest durable G0 receipt
-        // supplies the graph digest to verify when the cursor is non-zero;
-        // this keeps semantic snapshots and hot state out of the metadata path.
+        // G0 snapshots are rooted at Genesis.  The audited no-op rows must
+        // preserve the Genesis graph, so decode against the recomputed graph
+        // digest rather than any semantic hot state.
         let (field, graph) = decode_hot_state_v1(
             &snapshot.state_bytes,
             formula_digest,
@@ -1180,11 +1238,22 @@ impl AstrRuntime {
         if decoded_graph_digest != expected_graph {
             return Err(RuntimeError::InvalidNeuralState);
         }
+        let active_nodes = field.active_node_count();
+        let active_edges =
+            u32::try_from(graph.edges.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
+        for row in &rows {
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if receipt.active_nodes != active_nodes || receipt.active_edges != active_edges {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+        }
         Ok((
             snapshot.state_digest,
             decoded_graph_digest,
-            field.active_node_count(),
-            graph.edges.len() as u32,
+            active_nodes,
+            active_edges,
         ))
     }
 
@@ -1252,6 +1321,7 @@ impl AstrRuntime {
             &legacy_persona_scope,
             legacy_revision,
             &formula_digest,
+            &manifest_digest,
             &initial_snapshot_digest,
             &committed.receipt.graph_digest,
         )?;
@@ -2296,6 +2366,72 @@ mod spc1_native_ingress_red_tests {
         let _ = std::fs::remove_file(path);
     }
 
+    fn tamper_legacy_chain_digest(path: &std::path::Path, revision: u64) {
+        let script = r#"
+import sqlite3
+import sys
+path, revision = sys.argv[1], int(sys.argv[2])
+connection = sqlite3.connect(path)
+try:
+    cursor = connection.execute(
+        "UPDATE journal SET chain_digest = ? WHERE logical_revision = ?",
+        (bytes([0xA5]) * 32, revision),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError(f"expected one row, got {cursor.rowcount}")
+    connection.commit()
+finally:
+    connection.close()
+"#;
+        let output = std::process::Command::new("python")
+            .args([
+                "-c",
+                script,
+                path.to_str().expect("UTF-8 database path"),
+                &revision.to_string(),
+            ])
+            .output()
+            .expect("launch Python SQLite tamper fixture");
+        assert!(
+            output.status.success(),
+            "SQLite tamper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn tamper_legacy_event_digest(path: &std::path::Path, revision: u64) {
+        let script = r#"
+import sqlite3
+import sys
+path, revision = sys.argv[1], int(sys.argv[2])
+connection = sqlite3.connect(path)
+try:
+    cursor = connection.execute(
+        "UPDATE journal SET event_digest = ? WHERE logical_revision = ?",
+        (bytes([0xA6]) * 32, revision),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError(f"expected one row, got {cursor.rowcount}")
+    connection.commit()
+finally:
+    connection.close()
+"#;
+        let output = std::process::Command::new("python")
+            .args([
+                "-c",
+                script,
+                path.to_str().expect("UTF-8 database path"),
+                &revision.to_string(),
+            ])
+            .output()
+            .expect("launch Python SQLite tamper fixture");
+        assert!(
+            output.status.success(),
+            "SQLite tamper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn g0_stimulus(seed: u8, revision: u64, session: u8) -> CanonicalEvent {
         CanonicalEvent::UserStimulus(UserStimulus {
             event_id: [seed.wrapping_add(10); 16],
@@ -2315,6 +2451,261 @@ mod spc1_native_ingress_red_tests {
                 estimator_digest: [0; 32],
             },
         })
+    }
+
+    #[test]
+    fn g0_append_rejects_tampered_legacy_chain_and_does_not_append() {
+        let path = database("g0-chain-tamper");
+        let genesis = super::tests::request(151);
+        let request_scope = scope(151, 90);
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        runtime.ensure_genesis(&genesis).expect("genesis");
+        runtime
+            .apply_event(&request_scope, &g0_stimulus(151, 0, 90))
+            .expect("valid first G0 row");
+        assert_eq!(
+            runtime
+                .store
+                .read_journal(&runtime.hot.as_ref().unwrap().legacy_persona_scope)
+                .unwrap()
+                .len(),
+            1
+        );
+        runtime.flush_and_close().expect("close before tamper");
+        drop(runtime);
+
+        tamper_legacy_chain_digest(&path, 1);
+
+        let mut reopened = AstrRuntime::open(&path).expect("reopen tampered runtime");
+        let rows_before = reopened
+            .store
+            .read_journal(&wire::persona_scope_digest(
+                &request_scope.bot_token,
+                &request_scope.persona_token,
+                None,
+            ))
+            .expect("read tampered rows");
+        assert_eq!(rows_before.len(), 1);
+        let next_event = g0_stimulus(151, 1, 90);
+        let result = reopened.apply_event(&request_scope, &next_event);
+        assert!(
+            matches!(result, Err(RuntimeError::InvalidNeuralState)),
+            "tampered chain must fail closed before append: {result:?}"
+        );
+        let rows_after = reopened
+            .store
+            .read_journal(&wire::persona_scope_digest(
+                &request_scope.bot_token,
+                &request_scope.persona_token,
+                None,
+            ))
+            .expect("read rows after rejection");
+        assert_eq!(rows_after, rows_before);
+        drop(reopened);
+        cleanup_database("g0-chain-tamper");
+    }
+
+    #[test]
+    fn g0_append_rejects_tampered_legacy_event_digest_and_does_not_append() {
+        let path = database("g0-event-digest-tamper");
+        let genesis = super::tests::request(153);
+        let request_scope = scope(153, 92);
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        runtime.ensure_genesis(&genesis).expect("genesis");
+        runtime
+            .apply_event(&request_scope, &g0_stimulus(153, 0, 92))
+            .expect("valid first G0 row");
+        runtime.flush_and_close().expect("close before tamper");
+        drop(runtime);
+
+        tamper_legacy_event_digest(&path, 1);
+
+        let mut reopened = AstrRuntime::open(&path).expect("reopen tampered runtime");
+        let legacy_scope = wire::persona_scope_digest(
+            &request_scope.bot_token,
+            &request_scope.persona_token,
+            None,
+        );
+        let rows_before = reopened
+            .store
+            .read_journal(&legacy_scope)
+            .expect("read tampered rows");
+        assert_eq!(rows_before.len(), 1);
+        let result = reopened.apply_event(&request_scope, &g0_stimulus(153, 1, 92));
+        assert!(
+            matches!(result, Err(RuntimeError::InvalidNeuralState)),
+            "tampered event digest must fail closed before append: {result:?}"
+        );
+        let rows_after = reopened
+            .store
+            .read_journal(&legacy_scope)
+            .expect("read rows after rejection");
+        assert_eq!(rows_after, rows_before);
+        drop(reopened);
+        cleanup_database("g0-event-digest-tamper");
+    }
+
+    #[test]
+    fn g0_append_rejects_legacy_event_scope_binding_and_does_not_append() {
+        let path = database("g0-event-scope-tamper");
+        let genesis = super::tests::request(152);
+        let request_scope = scope(152, 91);
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        let genesis_receipt = runtime.ensure_genesis(&genesis).expect("genesis");
+        runtime
+            .apply_event(&request_scope, &g0_stimulus(152, 0, 91))
+            .expect("valid first G0 row");
+
+        let legacy_scope = wire::persona_scope_digest(
+            &request_scope.bot_token,
+            &request_scope.persona_token,
+            None,
+        );
+        let foreign_event = g0_stimulus(202, 1, 91);
+        let foreign_event_digest = wire::event_digest(&foreign_event);
+        let foreign_receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: genesis_receipt.formula_digest,
+            scope_digest: legacy_scope,
+            event_digest: foreign_event_digest,
+            authority_digest: authority_projection_digest(&foreign_event),
+            base_revision: 1,
+            next_revision: 2,
+            state_before: genesis_receipt.initial_snapshot_digest,
+            state_after: genesis_receipt.initial_snapshot_digest,
+            graph_after: genesis_receipt.graph_digest,
+            action_contract: Some([0xC2; 32]),
+            active_nodes: 0,
+            active_edges: 0,
+            residuals: fixed_zero_vector(),
+            status: CommitStatus::Committed,
+        };
+        let chain_seed = runtime
+            .store
+            .last_chain_digest(&legacy_scope)
+            .expect("read chain tip")
+            .expect("first row chain tip");
+        runtime
+            .store
+            .commit_journal(&CommitEnvelope {
+                event_kind: wire::event_kind_name(&foreign_event).to_owned(),
+                event_bytes: wire::encode_event(&foreign_event),
+                receipt: foreign_receipt,
+                chain_seed,
+                delta_bytes: Vec::new(),
+            })
+            .expect("install event-scope-corrupt row");
+        assert_eq!(runtime.store.read_journal(&legacy_scope).unwrap().len(), 2);
+
+        let rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
+        let result = runtime.apply_event(&request_scope, &g0_stimulus(152, 2, 91));
+        assert!(
+            matches!(result, Err(RuntimeError::InvalidNeuralState)),
+            "event scope mismatch must fail closed before append: {result:?}"
+        );
+        let rows_after = runtime.store.read_journal(&legacy_scope).unwrap();
+        assert_eq!(rows_after, rows_before);
+        runtime.flush_and_close().expect("close runtime");
+        drop(runtime);
+        cleanup_database("g0-event-scope-tamper");
+    }
+
+    #[test]
+    fn g0_append_rejects_legacy_receipt_shape_variants_and_does_not_append() {
+        type ReceiptMutation = fn(&mut TransitionReceipt);
+
+        fn schema_variant(receipt: &mut TransitionReceipt) {
+            receipt.schema_version = 2;
+        }
+        fn status_variant(receipt: &mut TransitionReceipt) {
+            receipt.status = CommitStatus::Rejected;
+        }
+        fn action_contract_variant(receipt: &mut TransitionReceipt) {
+            receipt.action_contract = None;
+        }
+
+        let variants: [(&str, ReceiptMutation); 3] = [
+            ("schema", schema_variant),
+            ("status", status_variant),
+            ("action-contract", action_contract_variant),
+        ];
+        for (label, mutate) in variants {
+            let database_name = format!("g0-receipt-shape-{label}");
+            let path = database(&database_name);
+            let seed = 154 + u8::try_from(label.len()).expect("small label length");
+            let session = seed.wrapping_add(1);
+            let genesis = super::tests::request(seed);
+            let request_scope = scope(seed, session);
+            let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+            runtime.ensure_genesis(&genesis).expect("genesis");
+            let first = runtime
+                .apply_event(&request_scope, &g0_stimulus(seed, 0, session))
+                .expect("valid first G0 row");
+
+            let second_event = g0_stimulus(seed, 1, session);
+            let second_event_digest = wire::event_digest(&second_event);
+            let manifest_digest = runtime
+                .hot
+                .as_ref()
+                .expect("hot after genesis")
+                .identity
+                .manifest_digest;
+            let second_turn_id = match &second_event {
+                CanonicalEvent::UserStimulus(value) => value.causal.turn_id,
+                _ => unreachable!(),
+            };
+            let mut malformed = TransitionReceipt {
+                schema_version: 1,
+                formula_digest: first.receipt.formula_digest,
+                scope_digest: first.receipt.scope_digest,
+                event_digest: second_event_digest,
+                authority_digest: authority_projection_digest(&second_event),
+                base_revision: 1,
+                next_revision: 2,
+                state_before: first.receipt.state_after,
+                state_after: first.receipt.state_after,
+                graph_after: first.receipt.graph_after,
+                action_contract: Some(wire::action_contract_digest(&noop_action_contract(
+                    &manifest_digest,
+                    &second_event_digest,
+                    second_turn_id,
+                ))),
+                active_nodes: first.receipt.active_nodes,
+                active_edges: first.receipt.active_edges,
+                residuals: fixed_zero_vector(),
+                status: CommitStatus::Committed,
+            };
+            mutate(&mut malformed);
+            let chain_seed = runtime
+                .store
+                .last_chain_digest(&first.receipt.scope_digest)
+                .expect("read chain tip")
+                .expect("first row chain tip");
+            runtime
+                .store
+                .commit_journal(&CommitEnvelope {
+                    event_kind: wire::event_kind_name(&second_event).to_owned(),
+                    event_bytes: wire::encode_event(&second_event),
+                    receipt: malformed,
+                    chain_seed,
+                    delta_bytes: Vec::new(),
+                })
+                .expect("install receipt-shape-corrupt row");
+            let legacy_scope = first.receipt.scope_digest;
+            let rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
+            assert_eq!(rows_before.len(), 2);
+
+            let result = runtime.apply_event(&request_scope, &g0_stimulus(seed, 2, session));
+            assert!(
+                matches!(result, Err(RuntimeError::InvalidNeuralState)),
+                "{label} receipt shape must fail closed before append: {result:?}"
+            );
+            let rows_after = runtime.store.read_journal(&legacy_scope).unwrap();
+            assert_eq!(rows_after, rows_before);
+            runtime.flush_and_close().expect("close runtime");
+            drop(runtime);
+            cleanup_database(&database_name);
+        }
     }
 
     #[test]
