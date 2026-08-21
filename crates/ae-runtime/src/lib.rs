@@ -961,6 +961,7 @@ impl AstrRuntime {
         self.verify_durable_history_v1(
             committed.receipt.formula_digest,
             committed.receipt.initial_snapshot_digest,
+            committed.receipt.graph_digest,
             persona_scope,
             true,
         )?;
@@ -1003,6 +1004,7 @@ impl AstrRuntime {
         if snapshot.state_digest != expected_state_digest {
             return Err(RuntimeError::InvalidNeuralState);
         }
+        let mut expected_state_before = expected_state_digest;
         for row in rows.iter().filter(|row| row.revision > snapshot.revision) {
             let receipt = row
                 .decode_receipt()
@@ -1011,10 +1013,11 @@ impl AstrRuntime {
                 || row.base_revision != receipt.base_revision
                 || receipt.scope_digest != persona_scope
                 || receipt.formula_digest != committed.receipt.formula_digest
-                || receipt.state_before != receipt.state_after
+                || receipt.state_before != expected_state_before
             {
                 return Err(RuntimeError::InvalidNeuralState);
             }
+            expected_state_before = receipt.state_after;
             let snapshot = self
                 .store
                 .read_snapshot(&persona_scope, row.revision)?
@@ -1059,6 +1062,59 @@ impl AstrRuntime {
             .unwrap_or(false);
         if !matches {
             self.bind_hot(scope.bot_token, scope.persona_token)?;
+        } else {
+            let (
+                legacy_persona_scope,
+                persona_scope,
+                hot_legacy_revision,
+                hot_semantic_revision,
+                formula_digest,
+                field,
+                graph,
+            ) = {
+                let hot = self
+                    .hot
+                    .as_ref()
+                    .ok_or(RuntimeError::PersonaGenesisRequired)?;
+                (
+                    hot.legacy_persona_scope,
+                    hot.persona_scope,
+                    hot.legacy_revision,
+                    hot.semantic_revision,
+                    hot.formula_digest,
+                    hot.field.clone(),
+                    hot.graph.clone(),
+                )
+            };
+            let store_legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
+            let store_semantic_revision = self.store.current_revision(&persona_scope)?;
+            let mut needs_hydration = hot_legacy_revision != store_legacy_revision
+                || hot_semantic_revision != store_semantic_revision;
+            if !needs_hydration {
+                let snapshot = if store_semantic_revision == 0 {
+                    self.store.read_snapshot(&legacy_persona_scope, 0)?
+                } else {
+                    self.store
+                        .read_latest_snapshot(&persona_scope, store_semantic_revision)?
+                };
+                needs_hydration = match snapshot {
+                    Some(snapshot) => {
+                        snapshot.revision != store_semantic_revision
+                            || snapshot.state_digest != state_digest(&field, &formula_digest)
+                            || decode_hot_state_v1(
+                                &snapshot.state_bytes,
+                                &formula_digest,
+                                &snapshot.state_digest,
+                                &graph_digest(&graph),
+                            )
+                            .is_err()
+                    }
+                    None => true,
+                };
+            }
+            if needs_hydration {
+                self.bind_hot(scope.bot_token, scope.persona_token)?;
+            }
         }
         self.hot
             .as_mut()
@@ -1104,7 +1160,6 @@ impl AstrRuntime {
             formula_digest,
             manifest_digest,
             initial_snapshot_digest,
-            state_before,
             graph_after,
             active_nodes,
             active_edges,
@@ -1118,12 +1173,19 @@ impl AstrRuntime {
                 hot.formula_digest,
                 hot.identity.manifest_digest,
                 hot.initial_snapshot_digest,
-                state_digest(&hot.field, &hot.formula_digest),
                 graph_digest(&hot.graph),
                 hot.field.active_node_count(),
                 hot.graph.edges.len() as u32,
             )
         };
+        // G0 is a separate no-op lane. Its receipt state chain starts from
+        // the latest durable G0 snapshot, not from semantic hot state that
+        // another lane may have hydrated into the shared in-memory brain.
+        let state_before = self
+            .store
+            .read_latest_snapshot(&legacy_persona_scope, legacy_revision)?
+            .map(|snapshot| snapshot.state_digest)
+            .unwrap_or(initial_snapshot_digest);
         let event_scope = match event {
             CanonicalEvent::UserStimulus(e) => &e.scope,
             CanonicalEvent::DeliveryOutcome(e) => &e.scope,
@@ -1284,14 +1346,18 @@ impl AstrRuntime {
         &self,
         formula_digest: Digest,
         initial_snapshot_digest: Digest,
+        initial_graph_digest: Digest,
         persona_scope: Digest,
         requires_semantic_snapshots: bool,
     ) -> Result<ReplayReport, RuntimeError> {
         let rows = self.store.read_journal(&persona_scope)?;
+        let current_revision = self.store.current_revision(&persona_scope)?;
         let report = ae_continuum::verify_replay(initial_snapshot_digest, &rows);
-        if !report.ok || report.final_revision != self.store.current_revision(&persona_scope)? {
+        if !report.ok || report.final_revision != current_revision {
             return Err(RuntimeError::InvalidNeuralState);
         }
+        let mut expected_state_digest = initial_snapshot_digest;
+        let mut expected_graph_digest = initial_graph_digest;
         for row in &rows {
             let receipt = row
                 .decode_receipt()
@@ -1300,14 +1366,14 @@ impl AstrRuntime {
                 || row.base_revision != receipt.base_revision
                 || receipt.formula_digest != formula_digest
                 || receipt.scope_digest != persona_scope
+                || receipt.state_before != expected_state_digest
             {
                 return Err(RuntimeError::InvalidNeuralState);
             }
+            expected_state_digest = receipt.state_after;
+            expected_graph_digest = receipt.graph_after;
             let snapshot = self.store.read_snapshot(&persona_scope, row.revision)?;
-            if requires_semantic_snapshots
-                || receipt.state_before != receipt.state_after
-                || snapshot.is_some()
-            {
+            if requires_semantic_snapshots {
                 let snapshot = snapshot.ok_or(RuntimeError::InvalidNeuralState)?;
                 if snapshot.state_digest != receipt.state_after {
                     return Err(RuntimeError::InvalidNeuralState);
@@ -1318,6 +1384,34 @@ impl AstrRuntime {
                     &receipt.state_after,
                     &receipt.graph_after,
                 )?;
+            } else if let Some(snapshot) = snapshot {
+                if snapshot.state_digest != receipt.state_after {
+                    return Err(RuntimeError::InvalidNeuralState);
+                }
+                let _ = decode_hot_state_v1(
+                    &snapshot.state_bytes,
+                    &formula_digest,
+                    &receipt.state_after,
+                    &receipt.graph_after,
+                )?;
+            }
+        }
+        if current_revision > 0 {
+            let latest_snapshot = self
+                .store
+                .read_latest_snapshot(&persona_scope, current_revision)?;
+            if let Some(snapshot) = latest_snapshot {
+                if snapshot.state_digest != expected_state_digest {
+                    return Err(RuntimeError::InvalidNeuralState);
+                }
+                let _ = decode_hot_state_v1(
+                    &snapshot.state_bytes,
+                    &formula_digest,
+                    &expected_state_digest,
+                    &expected_graph_digest,
+                )?;
+            } else if requires_semantic_snapshots {
+                return Err(RuntimeError::InvalidNeuralState);
             }
         }
         Ok(report)
@@ -1337,6 +1431,7 @@ impl AstrRuntime {
         self.verify_durable_history_v1(
             committed.receipt.formula_digest,
             committed.receipt.initial_snapshot_digest,
+            committed.receipt.graph_digest,
             legacy_persona_scope,
             false,
         )
@@ -1360,6 +1455,7 @@ impl AstrRuntime {
             self.verify_durable_history_v1(
                 committed.receipt.formula_digest,
                 committed.receipt.initial_snapshot_digest,
+                committed.receipt.graph_digest,
                 persona_scope,
                 persona_scope == semantic_persona_scope,
             )?;
@@ -1470,6 +1566,7 @@ impl AstrRuntime {
             if receipt.action_contract.is_some() {
                 return Err(RuntimeError::SemanticIdentityConflict);
             }
+            self.bind_hot(scope.bot_token, scope.persona_token)?;
             return Ok(PerceptionProposalDecisionV1 {
                 receipt,
                 revision: row.revision,
@@ -1559,12 +1656,16 @@ impl AstrRuntime {
                     .store
                     .lookup_event(&semantic_persona_scope, &event_digest)?
                     .ok_or(RuntimeError::RetryWait)?;
+                if row.revision != revision {
+                    return Err(RuntimeError::InvalidNeuralState);
+                }
                 let receipt = row
                     .decode_receipt()
                     .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
                 if receipt.action_contract.is_some() {
                     return Err(RuntimeError::SemanticIdentityConflict);
                 }
+                self.bind_hot(scope.bot_token, scope.persona_token)?;
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
                     revision,
@@ -2310,6 +2411,137 @@ mod spc1_native_ingress_red_tests {
         assert_eq!(third.revision, 3);
         assert_eq!(reopened.current_revision(&request_scope).unwrap(), 0);
         reopened.flush_and_close().expect("close reopened");
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shared_runtime_instances_reconcile_semantic_hydration_and_continue() {
+        let path = database("shared-runtime");
+        let genesis = super::tests::request(91);
+        let request_scope = scope(91, 190);
+        let mut first_runtime = AstrRuntime::open(&path).expect("open first runtime");
+        first_runtime.ensure_genesis(&genesis).expect("genesis");
+        let mut second_runtime = AstrRuntime::open(&path).expect("open second runtime");
+        assert_eq!(
+            second_runtime
+                .semantic_revision_v1(&request_scope)
+                .expect("second runtime initial cursor"),
+            0
+        );
+
+        let first_proposal = proposal(101, 0);
+        let first = first_runtime
+            .apply_perception_proposal_v1(&request_scope, &first_proposal)
+            .expect("first runtime commit");
+        assert_eq!(first.revision, 1);
+        assert_eq!(
+            second_runtime
+                .semantic_revision_v1(&request_scope)
+                .expect("second runtime reconciles durable cursor"),
+            1
+        );
+
+        let duplicate = second_runtime
+            .apply_perception_proposal_v1(&request_scope, &first_proposal)
+            .expect("second runtime exact retry");
+        assert!(duplicate.deduplicated);
+        assert_eq!(duplicate.revision, 1);
+        assert_eq!(duplicate.receipt, first.receipt);
+
+        let second_proposal = proposal(102, 1);
+        let second = second_runtime
+            .apply_perception_proposal_v1(&request_scope, &second_proposal)
+            .expect("second runtime continues from hydrated winner");
+        assert_eq!(second.revision, 2);
+        assert!(!second.deduplicated);
+        assert_eq!(
+            second_runtime
+                .semantic_revision_v1(&request_scope)
+                .expect("second runtime final cursor"),
+            2
+        );
+        assert_eq!(
+            first_runtime
+                .semantic_revision_v1(&request_scope)
+                .expect("first runtime reconciles second commit"),
+            2
+        );
+        first_runtime
+            .flush_and_close()
+            .expect("close first runtime");
+        second_runtime
+            .flush_and_close()
+            .expect("close second runtime");
+        drop(first_runtime);
+        drop(second_runtime);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn durable_audit_rejects_tampered_state_before_continuity() {
+        let path = database("tampered-state-before");
+        let genesis = super::tests::request(93);
+        let request_scope = scope(93, 192);
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        let genesis_receipt = runtime.ensure_genesis(&genesis).expect("genesis");
+        drop(runtime);
+
+        let mut store = Store::open(&path).expect("open store");
+        let semantic_scope =
+            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
+        let legacy_scope = wire::persona_scope_digest(
+            &request_scope.bot_token,
+            &request_scope.persona_token,
+            None,
+        );
+        let genesis_snapshot = store
+            .read_snapshot(&legacy_scope, 0)
+            .expect("read genesis snapshot")
+            .expect("genesis snapshot");
+        let event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
+            event_id: [111; 16],
+            scope: request_scope.clone(),
+            elapsed_ms: 1,
+        });
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: genesis_receipt.formula_digest,
+            scope_digest: semantic_scope,
+            event_digest: wire::event_digest(&event),
+            authority_digest: authority_projection_digest(&event),
+            base_revision: 0,
+            next_revision: 1,
+            state_before: [0xA5; 32],
+            state_after: genesis_receipt.initial_snapshot_digest,
+            graph_after: genesis_receipt.graph_digest,
+            action_contract: None,
+            active_nodes: 0,
+            active_edges: 0,
+            residuals: fixed_zero_vector(),
+            status: CommitStatus::Committed,
+        };
+        store
+            .commit_stateful_journal(&StatefulCommit {
+                journal: CommitEnvelope {
+                    event_kind: wire::event_kind_name(&event).to_owned(),
+                    event_bytes: wire::encode_event(&event),
+                    receipt,
+                    chain_seed: genesis_receipt.initial_snapshot_digest,
+                    delta_bytes: Vec::new(),
+                },
+                state_bytes: genesis_snapshot.state_bytes,
+            })
+            .expect("install tampered but otherwise self-consistent row");
+        drop(store);
+
+        let mut reopened = AstrRuntime::open(&path).expect("reopen tampered runtime");
+        assert!(
+            reopened
+                .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token,)
+                .is_err(),
+            "audit must reject a state-before chain break"
+        );
         drop(reopened);
         let _ = std::fs::remove_file(&path);
     }
