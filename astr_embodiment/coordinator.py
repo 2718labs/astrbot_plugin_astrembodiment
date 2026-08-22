@@ -31,6 +31,7 @@ from .contracts import (
     build_user_stimulus_json,
 )
 from .semantic_estimator import (
+    DIMENSION_NAMES,
     SemanticEstimate,
     SemanticEstimateError,
     _canonical_nonzero_hex,
@@ -245,12 +246,100 @@ class GenesisCoordinator:
         )
 
     @staticmethod
-    def _preflight_failure(code: str) -> dict[str, str]:
-        return {"status": SEMANTIC_DEGRADED, "code": code}
+    def _preflight_estimate_values(
+        estimate: SemanticEstimate | None,
+    ) -> tuple[dict[str, int] | None, int | None]:
+        """Project only a parsed closed estimate into observatory-safe values."""
 
-    @staticmethod
-    def _preflight_noop(code: str) -> dict[str, str]:
-        return {"status": SEMANTIC_NOOP, "code": code}
+        if type(estimate) is not SemanticEstimate:
+            return None, None
+        try:
+            dimensions = {
+                name: estimate.dimensions[name] for name in DIMENSION_NAMES
+            }
+            confidence = estimate.estimator_confidence
+            if (
+                set(estimate.dimensions) != set(DIMENSION_NAMES)
+                or type(confidence) is not int
+                or not 1 <= confidence <= 1_000_000
+                or any(
+                    type(value) is not int or not 0 <= value <= 1_000_000
+                    for value in dimensions.values()
+                )
+            ):
+                raise ValueError("closed estimate")
+        except BaseException:
+            return None, None
+        return dimensions, confidence
+
+    @classmethod
+    def _preflight_diagnostic(
+        cls,
+        *,
+        stage: str,
+        commit_state: str,
+        values_state: str,
+        estimate: SemanticEstimate | None = None,
+        base_revision: int | None = None,
+        revision: int | None = None,
+        deduplicated: bool | None = None,
+        receipt_status: str | None = None,
+    ) -> dict[str, Any]:
+        dimensions, confidence = cls._preflight_estimate_values(estimate)
+        if dimensions is None:
+            values_state = "UNAVAILABLE"
+        return {
+            "stage": stage,
+            "commit_state": commit_state,
+            "values_state": values_state,
+            "dimensions_fxp6": dimensions,
+            "estimator_confidence_fxp6": confidence,
+            "base_revision": base_revision,
+            "revision": revision,
+            "deduplicated": deduplicated,
+            "receipt_status": receipt_status,
+        }
+
+    @classmethod
+    def _preflight_failure(
+        cls,
+        code: str,
+        *,
+        stage: str = "INTERNAL",
+        commit_state: str = "UNKNOWN",
+        estimate: SemanticEstimate | None = None,
+        base_revision: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": SEMANTIC_DEGRADED,
+            "code": code,
+            "diagnostic": cls._preflight_diagnostic(
+                stage=stage,
+                commit_state=commit_state,
+                values_state="ESTIMATED_NOT_CONFIRMED",
+                estimate=estimate,
+                base_revision=base_revision,
+            ),
+        }
+
+    @classmethod
+    def _preflight_noop(
+        cls,
+        code: str,
+        *,
+        stage: str,
+        estimate: SemanticEstimate | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": SEMANTIC_NOOP,
+            "code": code,
+            "diagnostic": cls._preflight_diagnostic(
+                stage=stage,
+                commit_state="NOT_ATTEMPTED",
+                values_state="ESTIMATED_NOT_COMMITTED",
+                estimate=estimate,
+            ),
+        }
 
     @staticmethod
     def _valid_frozen_turn(scope: ScopeTokens, turn: FrozenTurn) -> bool:
@@ -329,7 +418,9 @@ class GenesisCoordinator:
         """
 
         if not self._valid_frozen_turn(scope, frozen_turn):
-            return self._preflight_failure("INVALID_TURN")
+            return self._preflight_failure(
+                "INVALID_TURN", stage="INPUT", commit_state="NOT_ATTEMPTED"
+            )
         key = self._preflight_key(scope, frozen_turn)
         previous = self._preflight_results.get(key)
         if previous is not None:
@@ -458,20 +549,34 @@ class GenesisCoordinator:
         estimator: PreflightEstimator,
     ) -> dict[str, Any]:
         if not isinstance(request_text, str):
-            return self._preflight_failure("ESTIMATOR_MALFORMED")
+            return self._preflight_failure(
+                "ESTIMATOR_MALFORMED", stage="INPUT", commit_state="NOT_ATTEMPTED"
+            )
         if not request_text.strip():
-            return self._preflight_noop("EMPTY_REQUEST")
+            return self._preflight_noop("EMPTY_REQUEST", stage="INPUT")
         try:
             raw_estimate = await self._invoke_preflight_estimator(estimator, request_text)
         except asyncio.CancelledError:
-            return self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+            return self._preflight_failure(
+                "ESTIMATOR_UNAVAILABLE",
+                stage="ESTIMATOR",
+                commit_state="NOT_ATTEMPTED",
+            )
         except SemanticEstimateError as exc:
             return self._preflight_failure(
-                exc.code if exc.code in {"ESTIMATOR_MALFORMED", "ESTIMATOR_UNAVAILABLE"} else "ESTIMATOR_UNAVAILABLE"
+                exc.code
+                if exc.code in {"ESTIMATOR_MALFORMED", "ESTIMATOR_UNAVAILABLE"}
+                else "ESTIMATOR_UNAVAILABLE",
+                stage="ESTIMATOR",
+                commit_state="NOT_ATTEMPTED",
             )
         except BaseException:
             # Provider exception details are deliberately discarded.
-            return self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+            return self._preflight_failure(
+                "ESTIMATOR_UNAVAILABLE",
+                stage="ESTIMATOR",
+                commit_state="NOT_ATTEMPTED",
+            )
 
         try:
             estimate = (
@@ -480,34 +585,67 @@ class GenesisCoordinator:
                 else parse_estimator_output(raw_estimate)
             )
         except BaseException:
-            return self._preflight_failure("ESTIMATOR_MALFORMED")
+            return self._preflight_failure(
+                "ESTIMATOR_MALFORMED",
+                stage="ESTIMATOR",
+                commit_state="NOT_ATTEMPTED",
+            )
         try:
             is_load_noop = estimate.is_load_noop
         except BaseException:
-            return self._preflight_failure("ESTIMATOR_MALFORMED")
+            return self._preflight_failure(
+                "ESTIMATOR_MALFORMED",
+                stage="ESTIMATOR",
+                commit_state="NOT_ATTEMPTED",
+            )
         if is_load_noop:
             # This is a fixed no-op: no nonce, cursor read, or native commit.
-            return self._preflight_noop("ZERO_LOAD")
+            return self._preflight_noop(
+                "ZERO_LOAD", stage="ESTIMATOR", estimate=estimate
+            )
 
         # The semantic cursor is content-free.  It is read before the proposal
         # base revision is frozen, so G0's separate revision lane is untouched.
         try:
             cursor = self._bridge.semantic_revision_v1(scope.scope_json())
         except BaseException:
-            return self._preflight_failure("NATIVE_ERROR")
+            return self._preflight_failure(
+                "NATIVE_ERROR",
+                stage="CURSOR",
+                commit_state="NOT_ATTEMPTED",
+                estimate=estimate,
+            )
         if type(cursor) is not dict:
-            return self._preflight_failure("NATIVE_MALFORMED")
+            return self._preflight_failure(
+                "NATIVE_MALFORMED",
+                stage="CURSOR",
+                commit_state="NOT_ATTEMPTED",
+                estimate=estimate,
+            )
         if cursor.get("status") == SEMANTIC_DEGRADED:
             return self._preflight_failure(
                 cursor.get("code")
-                if isinstance(cursor.get("code"), str)
-                else "NATIVE_ERROR"
+                if type(cursor.get("code")) is str
+                else "NATIVE_ERROR",
+                stage="CURSOR",
+                commit_state="NOT_ATTEMPTED",
+                estimate=estimate,
             )
         if set(cursor) != {"schema", "revision"} or cursor.get("schema") != "astrembodiment.semantic-revision.v1":
-            return self._preflight_failure("NATIVE_MALFORMED")
+            return self._preflight_failure(
+                "NATIVE_MALFORMED",
+                stage="CURSOR",
+                commit_state="NOT_ATTEMPTED",
+                estimate=estimate,
+            )
         revision = cursor.get("revision")
         if type(revision) is not int or revision < 0:
-            return self._preflight_failure("NATIVE_MALFORMED")
+            return self._preflight_failure(
+                "NATIVE_MALFORMED",
+                stage="CURSOR",
+                commit_state="NOT_ATTEMPTED",
+                estimate=estimate,
+            )
 
         try:
             bound_turn = replace(frozen_turn, base_revision=revision)
@@ -521,36 +659,75 @@ class GenesisCoordinator:
             )
             proposal_json = proposal_to_json(proposal, scope=scope)
         except BaseException:
-            return self._preflight_failure("INVALID_PROPOSAL")
+            return self._preflight_failure(
+                "INVALID_PROPOSAL",
+                stage="PROPOSAL",
+                commit_state="NOT_ATTEMPTED",
+                estimate=estimate,
+            )
 
         try:
             native_result = self._bridge.apply_perception_proposal_v1(
                 scope.scope_json(), proposal_json
             )
         except BaseException:
-            return self._preflight_failure("NATIVE_ERROR")
+            return self._preflight_failure(
+                "NATIVE_ERROR",
+                stage="NATIVE_APPLY",
+                estimate=estimate,
+                base_revision=revision,
+            )
         if type(native_result) is not dict:
-            return self._preflight_failure("NATIVE_MALFORMED")
+            return self._preflight_failure(
+                "NATIVE_MALFORMED",
+                stage="RECEIPT",
+                estimate=estimate,
+                base_revision=revision,
+            )
         if native_result.get("status") == SEMANTIC_DEGRADED:
             return self._preflight_failure(
                 native_result.get("code")
-                if isinstance(native_result.get("code"), str)
-                else "NATIVE_ERROR"
+                if type(native_result.get("code")) is str
+                else "NATIVE_ERROR",
+                stage="NATIVE_APPLY",
+                estimate=estimate,
+                base_revision=revision,
             )
         if native_result == {"status": SEMANTIC_NOOP, "code": "ZERO_LOAD"}:
-            return self._preflight_noop("ZERO_LOAD")
+            return self._preflight_noop(
+                "ZERO_LOAD", stage="ESTIMATOR", estimate=estimate
+            )
         try:
             native_result = validate_semantic_result(
                 native_result,
                 expected_base_revision=proposal["base_revision"],
             )
         except BaseException:
-            return self._preflight_failure("NATIVE_MALFORMED")
+            return self._preflight_failure(
+                "NATIVE_MALFORMED",
+                stage="RECEIPT",
+                estimate=estimate,
+                base_revision=revision,
+            )
         return {
             "status": SEMANTIC_SUCCESS,
             "code": "SEMANTIC_COMMITTED",
             "proposal": proposal,
             "result": copy.deepcopy(native_result),
+            "diagnostic": self._preflight_diagnostic(
+                stage="RECEIPT",
+                commit_state=(
+                    "CONFIRMED_EXISTING"
+                    if native_result["deduplicated"]
+                    else "CONFIRMED_NEW"
+                ),
+                values_state="COMMITTED",
+                estimate=estimate,
+                base_revision=proposal["base_revision"],
+                revision=native_result["revision"],
+                deduplicated=native_result["deduplicated"],
+                receipt_status=native_result["receipt"]["status"],
+            ),
         }
 
     async def apply_delivery(

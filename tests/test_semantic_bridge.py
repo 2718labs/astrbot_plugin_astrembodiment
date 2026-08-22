@@ -40,6 +40,35 @@ def _estimate() -> dict:
     return {"dimensions": dimensions, "estimator_confidence": 800_000}
 
 
+def _diagnostic(
+    *,
+    stage: str,
+    commit_state: str,
+    values_state: str,
+    dimensions: dict[str, int] | None = None,
+    estimator_confidence: int | None = None,
+    base_revision: int | None = None,
+    revision: int | None = None,
+    deduplicated: bool | None = None,
+    receipt_status: str | None = None,
+) -> dict:
+    return {
+        "stage": stage,
+        "commit_state": commit_state,
+        "values_state": values_state,
+        "dimensions_fxp6": dict(dimensions) if dimensions is not None else None,
+        "estimator_confidence_fxp6": estimator_confidence,
+        "base_revision": base_revision,
+        "revision": revision,
+        "deduplicated": deduplicated,
+        "receipt_status": receipt_status,
+    }
+
+
+def _outcome(status: str, code: str, diagnostic: dict) -> dict:
+    return {"status": status, "code": code, "diagnostic": diagnostic}
+
+
 def _valid_receipt(
     *,
     base_revision: int = 0,
@@ -72,13 +101,13 @@ def _valid_receipt(
     }
 
 
-def _valid_result(**receipt_overrides: object) -> dict:
+def _valid_result(*, deduplicated: bool = False, **receipt_overrides: object) -> dict:
     receipt = _valid_receipt(**receipt_overrides)
     return {
         "schema": "astrembodiment.semantic-perception-closure.v1",
         "receipt": receipt,
         "revision": receipt["next_revision"],
-        "deduplicated": False,
+        "deduplicated": deduplicated,
     }
 
 
@@ -273,6 +302,17 @@ def test_coordinator_preflight_calls_estimator_once_and_keeps_native_order() -> 
     first, second, bridge, calls = asyncio.run(run())
 
     assert first["status"] == "SUCCESS"
+    assert first["diagnostic"] == _diagnostic(
+        stage="RECEIPT",
+        commit_state="CONFIRMED_NEW",
+        values_state="COMMITTED",
+        dimensions=_estimate()["dimensions"],
+        estimator_confidence=800_000,
+        base_revision=3,
+        revision=4,
+        deduplicated=False,
+        receipt_status="committed",
+    )
     assert second == first
     assert calls == ["CURRENT_REQUEST_RAW_SENTINEL"]
     assert [call[0] for call in bridge.calls] == ["revision", "apply"]
@@ -306,7 +346,19 @@ def test_zero_load_is_fixed_noop_and_never_calls_native_or_provider() -> None:
         return result, calls
 
     result, calls = asyncio.run(run())
-    assert result == {"status": "NOOP", "code": "ZERO_LOAD"}
+    expected_dimensions = {name: 0 for name in DIMENSION_NAMES}
+    expected_dimensions["affiliation"] = 1
+    assert result == _outcome(
+        "NOOP",
+        "ZERO_LOAD",
+        _diagnostic(
+            stage="ESTIMATOR",
+            commit_state="NOT_ATTEMPTED",
+            values_state="ESTIMATED_NOT_COMMITTED",
+            dimensions=expected_dimensions,
+            estimator_confidence=1,
+        ),
+    )
     assert calls == ["request"]
 
 
@@ -329,7 +381,15 @@ def test_malformed_provider_result_is_degraded_and_does_not_call_native() -> Non
         )
 
     result = asyncio.run(run())
-    assert result == {"status": "DEGRADED", "code": "ESTIMATOR_MALFORMED"}
+    assert result == _outcome(
+        "DEGRADED",
+        "ESTIMATOR_MALFORMED",
+        _diagnostic(
+            stage="ESTIMATOR",
+            commit_state="NOT_ATTEMPTED",
+            values_state="UNAVAILABLE",
+        ),
+    )
     assert "RAW_SENTINEL" not in json.dumps(result)
 
 
@@ -523,7 +583,18 @@ def test_coordinator_never_promotes_a_weak_receipt_to_success(
         )
 
     result = asyncio.run(run())
-    assert result == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+    assert result == _outcome(
+        "DEGRADED",
+        "NATIVE_MALFORMED",
+        _diagnostic(
+            stage="RECEIPT",
+            commit_state="UNKNOWN",
+            values_state="ESTIMATED_NOT_CONFIRMED",
+            dimensions=_estimate()["dimensions"],
+            estimator_confidence=800_000,
+            base_revision=0,
+        ),
+    )
 
 
 def test_coordinator_accepts_a_direct_bridge_zero_load_noop() -> None:
@@ -544,7 +615,17 @@ def test_coordinator_accepts_a_direct_bridge_zero_load_noop() -> None:
             _scope(), _turn(), "request", estimator
         )
 
-    assert asyncio.run(run()) == {"status": "NOOP", "code": "ZERO_LOAD"}
+    assert asyncio.run(run()) == _outcome(
+        "NOOP",
+        "ZERO_LOAD",
+        _diagnostic(
+            stage="ESTIMATOR",
+            commit_state="NOT_ATTEMPTED",
+            values_state="ESTIMATED_NOT_COMMITTED",
+            dimensions=_estimate()["dimensions"],
+            estimator_confidence=800_000,
+        ),
+    )
 
 
 def test_coordinator_cancellation_keeps_one_shared_attempt_for_later_retry() -> None:
@@ -688,7 +769,15 @@ def test_coordinator_consumes_baseexception_and_caches_fixed_retry_result() -> N
 
     first, second, calls, coordinator = asyncio.run(run())
 
-    assert first == {"status": "DEGRADED", "code": "ESTIMATOR_UNAVAILABLE"}
+    assert first == _outcome(
+        "DEGRADED",
+        "ESTIMATOR_UNAVAILABLE",
+        _diagnostic(
+            stage="ESTIMATOR",
+            commit_state="NOT_ATTEMPTED",
+            values_state="UNAVAILABLE",
+        ),
+    )
     assert second == first
     assert calls == ["first"]
     assert coordinator._preflight_inflight == {}
@@ -758,7 +847,105 @@ def test_coordinator_rejects_receipt_base_not_bound_to_proposal() -> None:
             _scope(), _turn(), "request", estimator
         )
 
-    assert asyncio.run(run()) == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+    assert asyncio.run(run()) == _outcome(
+        "DEGRADED",
+        "NATIVE_MALFORMED",
+        _diagnostic(
+            stage="RECEIPT",
+            commit_state="UNKNOWN",
+            values_state="ESTIMATED_NOT_CONFIRMED",
+            dimensions=_estimate()["dimensions"],
+            estimator_confidence=800_000,
+            base_revision=0,
+        ),
+    )
+
+
+def test_coordinator_exposes_confirmed_existing_receipt_diagnostic() -> None:
+    class Bridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            return _valid_result(deduplicated=True)
+
+    async def run() -> dict:
+        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+        return await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", lambda _request: _estimate()
+        )
+
+    result = asyncio.run(run())
+    assert result["diagnostic"] == _diagnostic(
+        stage="RECEIPT",
+        commit_state="CONFIRMED_EXISTING",
+        values_state="COMMITTED",
+        dimensions=_estimate()["dimensions"],
+        estimator_confidence=800_000,
+        base_revision=0,
+        revision=1,
+        deduplicated=True,
+        receipt_status="committed",
+    )
+
+
+def test_coordinator_keeps_valid_estimate_when_native_apply_fails() -> None:
+    class FailingBridge:
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            raise RuntimeError("NATIVE_APPLY_RAW_SENTINEL")
+
+    async def run() -> dict:
+        coordinator = GenesisCoordinator(FailingBridge())  # type: ignore[arg-type]
+        return await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", lambda _request: _estimate()
+        )
+
+    result = asyncio.run(run())
+    assert result == _outcome(
+        "DEGRADED",
+        "NATIVE_ERROR",
+        _diagnostic(
+            stage="NATIVE_APPLY",
+            commit_state="UNKNOWN",
+            values_state="ESTIMATED_NOT_CONFIRMED",
+            dimensions=_estimate()["dimensions"],
+            estimator_confidence=800_000,
+            base_revision=0,
+        ),
+    )
+    assert "NATIVE_APPLY_RAW_SENTINEL" not in json.dumps(result)
+
+
+def test_coordinator_marks_unlocatable_shared_task_failure_internal() -> None:
+    class ExplodingCoordinator(GenesisCoordinator):
+        async def _run_preflight(self, **_kwargs: object) -> dict:
+            raise RuntimeError("OUTER_RAW_SENTINEL")
+
+    async def run() -> tuple[dict, dict]:
+        coordinator = ExplodingCoordinator(object())  # type: ignore[arg-type]
+        first = await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", lambda _request: _estimate()
+        )
+        second = await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", lambda _request: _estimate()
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+    assert first == _outcome(
+        "DEGRADED",
+        "NATIVE_ERROR",
+        _diagnostic(
+            stage="INTERNAL",
+            commit_state="UNKNOWN",
+            values_state="UNAVAILABLE",
+        ),
+    )
+    assert second == first
+    assert "OUTER_RAW_SENTINEL" not in json.dumps(first)
 
 
 def test_coordinator_deduplicates_case_equivalent_hex_identity() -> None:
