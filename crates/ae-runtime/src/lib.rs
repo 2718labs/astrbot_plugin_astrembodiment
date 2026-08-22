@@ -47,6 +47,8 @@ mod r7;
 
 const CANONICAL_HOT_STATE_MAGIC_V1: [u8; 8] = *b"AEHOTST\0";
 const CANONICAL_HOT_STATE_SCHEMA_V1: u16 = 1;
+const SEMANTIC_SNAPSHOT_MAGIC_V2: [u8; 8] = *b"AESEMV2\0";
+const SEMANTIC_SNAPSHOT_SCHEMA_V2: u16 = 2;
 const CANONICAL_HOT_STATE_VECTOR_COUNT: usize = 8;
 const SYNAPSE_WIRE_BYTES: usize = 16;
 const R7_SEMANTIC_PERSONA_SCOPE_DOMAIN_V1: &[u8] =
@@ -84,6 +86,8 @@ pub enum RuntimeError {
     SemanticRevisionOverflow,
     #[error("semantic transition did not change state")]
     SemanticStateUnchanged,
+    #[error("legacy semantic transition has no v2 full-vector attestation")]
+    LegacySemanticUnattested,
 }
 
 impl From<r7::RuntimeError> for RuntimeError {
@@ -107,7 +111,8 @@ pub struct ApplyDecision {
 #[derive(Clone, Debug)]
 pub struct PerceptionProposalDecisionV1 {
     pub receipt: TransitionReceipt,
-    /// Independent, non-persisted proof of this full-vector semantic turn.
+    /// Canonical full-vector proof. Its exact v2 bytes are atomically stored in
+    /// the semantic snapshot and returned verbatim-by-codec on deduplication.
     /// The legacy receipt above retains its exact v1 codec and journal shape.
     pub semantic_vector_receipt: TransitionReceiptV2,
     pub node_observability: NodeObservabilityProjectionV1,
@@ -620,6 +625,100 @@ fn decode_hot_state_v1(
     Ok((field, graph))
 }
 
+/// Persist a full-vector semantic receipt beside, but never inside, the stable
+/// v1 hot-state codec.  The inner state remains byte-for-byte `AEHOTST\0` so
+/// legacy G0 decoding is unaffected; only semantic snapshots use this closed
+/// envelope.
+fn encode_semantic_snapshot_v2(
+    formula_digest: &Digest,
+    field: &NeuralField,
+    graph: &SparseGraph,
+    receipt: &TransitionReceiptV2,
+) -> Result<Vec<u8>, RuntimeError> {
+    if !receipt.validate()
+        || receipt.formula_digest != *formula_digest
+        || receipt.state_after != state_digest(field, formula_digest)
+        || receipt.graph_after != graph_digest(graph)
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let hot_state_bytes = encode_hot_state_v1(formula_digest, field, graph);
+    let receipt_bytes = wire::encode_transition_receipt_v2(receipt);
+    let hot_state_len =
+        u32::try_from(hot_state_bytes.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let receipt_len =
+        u32::try_from(receipt_bytes.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let capacity = SEMANTIC_SNAPSHOT_MAGIC_V2
+        .len()
+        .checked_add(2)
+        .and_then(|total| total.checked_add(4))
+        .and_then(|total| total.checked_add(hot_state_bytes.len()))
+        .and_then(|total| total.checked_add(4))
+        .and_then(|total| total.checked_add(receipt_bytes.len()))
+        .ok_or(RuntimeError::InvalidNeuralState)?;
+    let mut encoded = Vec::with_capacity(capacity);
+    encoded.extend_from_slice(&SEMANTIC_SNAPSHOT_MAGIC_V2);
+    encoded.extend_from_slice(&SEMANTIC_SNAPSHOT_SCHEMA_V2.to_le_bytes());
+    encoded.extend_from_slice(&hot_state_len.to_le_bytes());
+    encoded.extend_from_slice(&hot_state_bytes);
+    encoded.extend_from_slice(&receipt_len.to_le_bytes());
+    encoded.extend_from_slice(&receipt_bytes);
+    Ok(encoded)
+}
+
+/// Decode one semantic snapshot. A plain v1 hot-state is deliberately kept
+/// readable as historical state, but it carries no v2 proof and therefore
+/// returns `None` instead of being retrospectively attested.
+fn decode_semantic_snapshot_v2(
+    bytes: &[u8],
+    expected_formula_digest: &Digest,
+    expected_state_digest: &Digest,
+    expected_graph_digest: &Digest,
+    legacy_receipt: Option<&TransitionReceipt>,
+) -> Result<(NeuralField, SparseGraph, Option<TransitionReceiptV2>), RuntimeError> {
+    if !bytes.starts_with(&SEMANTIC_SNAPSHOT_MAGIC_V2) {
+        let (field, graph) = decode_hot_state_v1(
+            bytes,
+            expected_formula_digest,
+            expected_state_digest,
+            expected_graph_digest,
+        )?;
+        return Ok((field, graph, None));
+    }
+
+    let mut cursor = HotStateCursor::new(bytes);
+    if cursor.take(SEMANTIC_SNAPSHOT_MAGIC_V2.len())? != SEMANTIC_SNAPSHOT_MAGIC_V2
+        || cursor.read_u16()? != SEMANTIC_SNAPSHOT_SCHEMA_V2
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let hot_state_len =
+        usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let hot_state_bytes = cursor.take(hot_state_len)?;
+    let receipt_len =
+        usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let receipt_bytes = cursor.take(receipt_len)?;
+    if !cursor.is_at_eof() {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let (field, graph) = decode_hot_state_v1(
+        hot_state_bytes,
+        expected_formula_digest,
+        expected_state_digest,
+        expected_graph_digest,
+    )?;
+    let receipt = wire::decode_transition_receipt_v2(receipt_bytes)
+        .map_err(|_| RuntimeError::InvalidNeuralState)?;
+    if wire::encode_transition_receipt_v2(&receipt) != receipt_bytes
+        || !receipt.validate()
+        || legacy_receipt
+            .is_some_and(|legacy| !semantic_v2_matches_legacy_receipt(&receipt, legacy))
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    Ok((field, graph, Some(receipt)))
+}
+
 fn encode_legacy_g0_state_1_0_4(field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
     let mut bytes = Vec::new();
     for values in [
@@ -882,6 +981,31 @@ fn semantic_vector_receipt_v2(
         },
     )
     .ok_or(RuntimeError::InvalidNeuralState)
+}
+
+fn semantic_v2_matches_legacy_receipt(
+    semantic_receipt: &TransitionReceiptV2,
+    legacy_receipt: &TransitionReceipt,
+) -> bool {
+    legacy_receipt.schema_version == 1
+        && legacy_receipt.status == CommitStatus::Committed
+        && legacy_receipt.action_contract.is_none()
+        && legacy_receipt.residuals == fixed_zero_vector()
+        && semantic_receipt.validate()
+        && semantic_receipt.formula_digest == legacy_receipt.formula_digest
+        && semantic_receipt.scope_digest == legacy_receipt.scope_digest
+        && semantic_receipt.event_digest == legacy_receipt.event_digest
+        && semantic_receipt.authority_digest == legacy_receipt.authority_digest
+        && semantic_receipt.base_revision == legacy_receipt.base_revision
+        && semantic_receipt.next_revision == legacy_receipt.next_revision
+        && semantic_receipt.state_before == legacy_receipt.state_before
+        && semantic_receipt.state_after == legacy_receipt.state_after
+        && semantic_receipt.graph_after == legacy_receipt.graph_after
+        && semantic_receipt.action_contract == legacy_receipt.action_contract
+        && semantic_receipt.active_nodes == legacy_receipt.active_nodes
+        && semantic_receipt.active_edges == legacy_receipt.active_edges
+        && semantic_receipt.residuals == legacy_receipt.residuals
+        && semantic_receipt.status == legacy_receipt.status
 }
 
 fn mean_fxp6(sum: i128, count: usize) -> Result<i64, RuntimeError> {
@@ -1595,11 +1719,12 @@ impl AstrRuntime {
             if snapshot.state_digest != receipt.state_after {
                 return Err(RuntimeError::InvalidNeuralState);
             }
-            let _ = decode_hot_state_v1(
+            let _ = decode_semantic_snapshot_v2(
                 &snapshot.state_bytes,
                 &committed.receipt.formula_digest,
                 &receipt.state_after,
                 &receipt.graph_after,
+                Some(&receipt),
             )?;
         }
         let (field, graph) = if semantic_revision == 0 {
@@ -1612,12 +1737,21 @@ impl AstrRuntime {
                 &committed.receipt.development_seed_digest,
             )?
         } else {
-            decode_hot_state_v1(
+            let row = rows
+                .iter()
+                .find(|row| row.revision == snapshot.revision)
+                .ok_or(RuntimeError::InvalidNeuralState)?;
+            let receipt = row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            let (field, graph, _) = decode_semantic_snapshot_v2(
                 &snapshot.state_bytes,
                 &committed.receipt.formula_digest,
                 &expected_state_digest,
                 &expected_graph_digest,
-            )?
+                Some(&receipt),
+            )?;
+            (field, graph)
         };
         self.hot = Some(HotBrain {
             bot_token,
@@ -1684,26 +1818,40 @@ impl AstrRuntime {
                 };
                 needs_hydration = match snapshot {
                     Some(snapshot) => {
-                        snapshot.revision != store_semantic_revision
+                        if snapshot.revision != store_semantic_revision
                             || snapshot.state_digest != state_digest(&field, &formula_digest)
-                            || (if store_semantic_revision == 0 {
-                                decode_root_g0_snapshot_v1(
-                                    &snapshot.state_bytes,
-                                    &formula_digest,
-                                    &snapshot.state_digest,
-                                    &graph_digest(&graph),
-                                    &genesis_manifest,
-                                    &development_seed_digest,
-                                )
-                            } else {
-                                decode_hot_state_v1(
-                                    &snapshot.state_bytes,
-                                    &formula_digest,
-                                    &snapshot.state_digest,
-                                    &graph_digest(&graph),
-                                )
-                            })
+                        {
+                            true
+                        } else if store_semantic_revision == 0 {
+                            decode_root_g0_snapshot_v1(
+                                &snapshot.state_bytes,
+                                &formula_digest,
+                                &snapshot.state_digest,
+                                &graph_digest(&graph),
+                                &genesis_manifest,
+                                &development_seed_digest,
+                            )
                             .is_err()
+                        } else {
+                            let receipt = self
+                                .store
+                                .read_journal(&persona_scope)?
+                                .into_iter()
+                                .find(|row| row.revision == snapshot.revision)
+                                .ok_or(RuntimeError::InvalidNeuralState)?
+                                .decode_receipt()
+                                .map_err(|error| {
+                                    RuntimeError::Store(StoreError::Sqlite(error.to_string()))
+                                })?;
+                            decode_semantic_snapshot_v2(
+                                &snapshot.state_bytes,
+                                &formula_digest,
+                                &snapshot.state_digest,
+                                &graph_digest(&graph),
+                                Some(&receipt),
+                            )
+                            .is_err()
+                        }
                     }
                     None => true,
                 };
@@ -2120,11 +2268,12 @@ impl AstrRuntime {
                 if snapshot.state_digest != receipt.state_after {
                     return Err(RuntimeError::InvalidNeuralState);
                 }
-                let _ = decode_hot_state_v1(
+                let _ = decode_semantic_snapshot_v2(
                     &snapshot.state_bytes,
                     &genesis_receipt.formula_digest,
                     &receipt.state_after,
                     &receipt.graph_after,
+                    Some(&receipt),
                 )?;
             } else if let Some(snapshot) = snapshot {
                 if snapshot.state_digest != receipt.state_after {
@@ -2149,11 +2298,18 @@ impl AstrRuntime {
                 if snapshot.state_digest != expected_state_digest {
                     return Err(RuntimeError::InvalidNeuralState);
                 }
-                let _ = decode_hot_state_v1(
+                let receipt = rows
+                    .iter()
+                    .find(|row| row.revision == snapshot.revision)
+                    .ok_or(RuntimeError::InvalidNeuralState)?
+                    .decode_receipt()
+                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+                let _ = decode_semantic_snapshot_v2(
                     &snapshot.state_bytes,
                     &genesis_receipt.formula_digest,
                     &expected_state_digest,
                     &expected_graph_digest,
+                    Some(&receipt),
                 )?;
             } else if let Some(snapshot) = latest_snapshot {
                 if snapshot.state_digest != expected_state_digest {
@@ -2285,13 +2441,64 @@ impl AstrRuntime {
         if snapshot.revision != revision || snapshot.state_digest != *expected_state_digest {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let (field, _) = decode_hot_state_v1(
+        let receipt = self
+            .store
+            .read_journal(semantic_scope)?
+            .into_iter()
+            .find(|row| row.revision == revision)
+            .ok_or(RuntimeError::InvalidNeuralState)?
+            .decode_receipt()
+            .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+        if receipt.next_revision != revision
+            || receipt.state_after != *expected_state_digest
+            || receipt.graph_after != *expected_graph_digest
+            || receipt.formula_digest != *formula_digest
+            || receipt.scope_digest != *semantic_scope
+        {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let (field, _, _) = decode_semantic_snapshot_v2(
             &snapshot.state_bytes,
             formula_digest,
             expected_state_digest,
             expected_graph_digest,
+            Some(&receipt),
         )?;
         Ok(field)
+    }
+
+    fn semantic_v2_receipt_from_snapshot(
+        &self,
+        semantic_scope: &Digest,
+        formula_digest: &Digest,
+        receipt: &TransitionReceipt,
+        revision: u64,
+    ) -> Result<TransitionReceiptV2, RuntimeError> {
+        if receipt.schema_version != 1
+            || receipt.status != CommitStatus::Committed
+            || receipt.action_contract.is_some()
+            || receipt.scope_digest != *semantic_scope
+            || receipt.formula_digest != *formula_digest
+            || receipt.next_revision != revision
+            || receipt.base_revision.checked_add(1) != Some(revision)
+        {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let snapshot = self
+            .store
+            .read_snapshot(semantic_scope, revision)?
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        if snapshot.revision != revision || snapshot.state_digest != receipt.state_after {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let (_, _, semantic_receipt) = decode_semantic_snapshot_v2(
+            &snapshot.state_bytes,
+            formula_digest,
+            &receipt.state_after,
+            &receipt.graph_after,
+            Some(receipt),
+        )?;
+        semantic_receipt.ok_or(RuntimeError::LegacySemanticUnattested)
     }
 
     fn node_observability_for_semantic_receipt_v1(
@@ -2397,11 +2604,12 @@ impl AstrRuntime {
         if snapshot.revision != revision || snapshot.state_digest != receipt.state_after {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let (field, _) = decode_hot_state_v1(
+        let (field, _, _) = decode_semantic_snapshot_v2(
             &snapshot.state_bytes,
             formula_digest,
             &receipt.state_after,
             &receipt.graph_after,
+            Some(receipt),
         )?;
         expression_projection_from_field_v1(&field, revision)
     }
@@ -2495,8 +2703,12 @@ impl AstrRuntime {
             if receipt.action_contract.is_some() || receipt.event_digest != event_digest {
                 return Err(RuntimeError::SemanticIdentityConflict);
             }
-            let semantic_vector_receipt =
-                semantic_vector_receipt_v2(&receipt, 15, 15, nonzero_evidence_dimension_count)?;
+            let semantic_vector_receipt = self.semantic_v2_receipt_from_snapshot(
+                &semantic_persona_scope,
+                &formula_digest,
+                &receipt,
+                row.revision,
+            )?;
             let node_observability = self.node_observability_for_semantic_receipt_v1(
                 &semantic_persona_scope,
                 &formula_digest,
@@ -2582,8 +2794,19 @@ impl AstrRuntime {
             next_revision,
             prepared.active_nodes,
         )?;
-        let state_bytes = encode_hot_state_v1(&formula_digest, &prepared.next_field, &graph);
-        let _ = decode_hot_state_v1(&state_bytes, &formula_digest, &state_after, &graph_after)?;
+        let state_bytes = encode_semantic_snapshot_v2(
+            &formula_digest,
+            &prepared.next_field,
+            &graph,
+            &semantic_vector_receipt,
+        )?;
+        let _ = decode_semantic_snapshot_v2(
+            &state_bytes,
+            &formula_digest,
+            &state_after,
+            &graph_after,
+            Some(&receipt),
+        )?;
         let chain_seed = self
             .store
             .last_chain_digest(&semantic_persona_scope)?
@@ -2632,8 +2855,12 @@ impl AstrRuntime {
                 if receipt.action_contract.is_some() {
                     return Err(RuntimeError::SemanticIdentityConflict);
                 }
-                let semantic_vector_receipt =
-                    semantic_vector_receipt_v2(&receipt, 15, 15, nonzero_evidence_dimension_count)?;
+                let semantic_vector_receipt = self.semantic_v2_receipt_from_snapshot(
+                    &semantic_persona_scope,
+                    &formula_digest,
+                    &receipt,
+                    revision,
+                )?;
                 let node_observability = self.node_observability_for_semantic_receipt_v1(
                     &semantic_persona_scope,
                     &formula_digest,
@@ -2692,8 +2919,12 @@ impl AstrRuntime {
                     &receipt,
                     revision,
                 )?;
-                let semantic_vector_receipt =
-                    semantic_vector_receipt_v2(&receipt, 15, 15, nonzero_evidence_dimension_count)?;
+                let semantic_vector_receipt = self.semantic_v2_receipt_from_snapshot(
+                    &semantic_persona_scope,
+                    &formula_digest,
+                    &receipt,
+                    revision,
+                )?;
                 let node_observability = self.node_observability_for_semantic_receipt_v1(
                     &semantic_persona_scope,
                     &formula_digest,
