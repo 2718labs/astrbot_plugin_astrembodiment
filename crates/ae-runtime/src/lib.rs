@@ -2734,14 +2734,46 @@ mod spc1_native_ingress_red_tests {
         ae_contracts::r7::wire::domain_hash(PerceptionProposalV1::DIGEST_DOMAIN_V1, &fields)
     }
 
-    fn database(name: &str) -> std::path::PathBuf {
-        let root = std::path::PathBuf::from(
-            r"G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\test-runs\spc1-native-ingress",
+    fn database_root_from_base(base: std::path::PathBuf) -> std::path::PathBuf {
+        assert!(
+            base.is_absolute(),
+            "test temp root must be absolute: {base:?}"
         );
-        std::fs::create_dir_all(&root).expect("test root");
-        let path = root.join(format!("{name}-{}.db", std::process::id()));
+        base.join("spc1-native-ingress")
+    }
+
+    fn database_root() -> std::path::PathBuf {
+        let base = std::env::var_os("AE_RC1_TASK_TEMP")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = database_root_from_base(base);
+        std::fs::create_dir_all(&root)
+            .unwrap_or_else(|error| panic!("create test root {root:?}: {error}"));
+        root
+    }
+
+    fn database_path(name: &str) -> std::path::PathBuf {
+        database_root().join(format!("{name}-{}.db", std::process::id()))
+    }
+
+    fn database(name: &str) -> std::path::PathBuf {
+        let path = database_path(name);
         let _ = std::fs::remove_file(&path);
         path
+    }
+
+    #[test]
+    fn database_uses_task_temp_or_standard_temp_root() {
+        let name = "database-uses-task-temp-or-standard-temp-root";
+        let base = std::env::var_os("AE_RC1_TASK_TEMP")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let expected = base
+            .join("spc1-native-ingress")
+            .join(format!("{name}-{}.db", std::process::id()));
+
+        assert_eq!(database(name), expected);
+        cleanup_database(name);
     }
 
     fn runtime_for(seed: u8, name: &str) -> (AstrRuntime, ScopeRef) {
@@ -2753,10 +2785,7 @@ mod spc1_native_ingress_red_tests {
     }
 
     fn cleanup_database(name: &str) {
-        let root = std::path::PathBuf::from(
-            r"G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\test-runs\spc1-native-ingress",
-        );
-        let path = root.join(format!("{name}-{}.db", std::process::id()));
+        let path = database_path(name);
         let _ = std::fs::remove_file(path);
     }
 
