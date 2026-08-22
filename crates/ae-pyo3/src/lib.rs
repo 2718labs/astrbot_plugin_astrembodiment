@@ -86,6 +86,10 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
             "SEMANTIC_STATE_UNCHANGED",
             "semantic transition did not change state",
         ),
+        ae_runtime::RuntimeError::LegacySemanticUnattested => (
+            "LEGACY_UNATTESTED",
+            "legacy semantic transition is unattested",
+        ),
     };
     NativeCoreError::new_err(format!("{code}::{message}"))
 }
@@ -119,9 +123,23 @@ fn semantic_perception_payload(
         ];
         receipt_object.retain(|key, _| CLOSED_RECEIPT_FIELDS.contains(&key.as_str()));
     }
+    let semantic_vector = &decision.semantic_vector_receipt.semantic_vector;
+    let node_observability = serde_json::to_value(&decision.node_observability)?;
     Ok(serde_json::json!({
         "schema": "astrembodiment.semantic-perception-closure.v1",
         "receipt": receipt,
+        "semantic_vector_receipt": {
+            "schema": ae_contracts::SEMANTIC_VECTOR_RECEIPT_SCHEMA_V2,
+            "formula": semantic_vector.formula,
+            "dimension_slot_count": semantic_vector.dimension_slot_count,
+            "evaluated_dimension_count": semantic_vector.evaluated_dimension_count,
+            "injected_dimension_count": semantic_vector.injected_dimension_count,
+            "nonzero_evidence_dimension_count": semantic_vector.nonzero_evidence_dimension_count,
+            "neutral_baseline_dimension_count": semantic_vector.neutral_baseline_dimension_count,
+            "unavailable_dimension_count": semantic_vector.unavailable_dimension_count,
+            "state_changed": semantic_vector.state_changed,
+        },
+        "node_observability": node_observability,
         "revision": decision.revision,
         "deduplicated": decision.deduplicated,
         "expression_projection": {
@@ -425,10 +443,86 @@ mod native_private_projection_absence_tests {
             state_after: [6; 32],
             graph_after: [7; 32],
             action_contract: None,
-            active_nodes: 1,
+            active_nodes: 2_048,
             active_edges: 0,
             residuals: ae_contracts::InvariantResiduals::default(),
             status: ae_contracts::CommitStatus::Committed,
+        }
+    }
+
+    fn semantic_test_vector_receipt() -> ae_contracts::TransitionReceiptV2 {
+        ae_contracts::TransitionReceiptV2::from_legacy(
+            &semantic_test_receipt(),
+            ae_contracts::SemanticVectorReceiptV2 {
+                schema_version: 2,
+                formula: ae_contracts::SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1,
+                dimension_slot_count: 15,
+                evaluated_dimension_count: 15,
+                injected_dimension_count: 15,
+                nonzero_evidence_dimension_count: 3,
+                neutral_baseline_dimension_count: 12,
+                unavailable_dimension_count: 0,
+                state_changed: true,
+            },
+        )
+        .expect("test v2 receipt")
+    }
+
+    fn semantic_test_node_observability() -> ae_runtime::NodeObservabilityProjectionV1 {
+        let regions = [
+            ("interoception_allostasis", 2_048_u32),
+            ("affective_valuation", 2_048_u32),
+            ("salience", 1_024_u32),
+            ("epistemic_fallibility", 2_048_u32),
+            ("social_boundary", 2_048_u32),
+            ("temper_inhibitory", 1_024_u32),
+            ("world_model_imagination", 4_096_u32),
+            ("global_workspace", 1_024_u32),
+            ("action_expression", 1_024_u32),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(region_id, (region_name, node_capacity))| {
+            let selected_node_count = if region_id == 0 { 2_048 } else { 0 };
+            let component = ae_runtime::NodeObservabilityComponentV1 {
+                before_mean_fxp6: 0,
+                after_mean_fxp6: i64::from(selected_node_count > 0),
+                delta_mean_fxp6: i64::from(selected_node_count > 0),
+                changed_node_count: selected_node_count,
+                nonzero_after_count: selected_node_count,
+            };
+            ae_runtime::NodeObservabilityRegionV1 {
+                region_id: region_id as u8,
+                region_name,
+                node_capacity,
+                selected_node_count,
+                activated_node_count: selected_node_count,
+                changed_node_count: selected_node_count,
+                potential: component.clone(),
+                excitation: component,
+            }
+        })
+        .collect();
+        ae_runtime::NodeObservabilityProjectionV1 {
+            schema: ae_runtime::NODE_OBSERVABILITY_SCHEMA_V1,
+            formula: ae_runtime::NODE_OBSERVABILITY_FORMULA_V1,
+            revision: 1,
+            field_node_capacity: 16_384,
+            region_layout: "regions-v1",
+            counts: ae_runtime::NodeObservabilityCountsV1 {
+                selected_node_count: 2_048,
+                activated_node_count: 2_048,
+                changed_node_count: 2_048,
+                potential_nonzero_after_count: 2_048,
+                excitation_nonzero_after_count: 2_048,
+                signal_nonzero_after_count: 2_048,
+            },
+            residuals: ae_runtime::NodeObservabilityResidualsV1 {
+                state: ae_runtime::NodeObservabilityResidualStateV1::NotComputed,
+                formula: None,
+                values_fxp6: None,
+            },
+            regions,
         }
     }
 
@@ -489,9 +583,11 @@ mod native_private_projection_absence_tests {
     }
 
     #[test]
-    fn semantic_perception_output_and_errors_are_closed() {
+    fn semantic_perception_payload_exposes_bounded_v2_receipt_and_observability() {
         let decision = ae_runtime::PerceptionProposalDecisionV1 {
             receipt: semantic_test_receipt(),
+            semantic_vector_receipt: semantic_test_vector_receipt(),
+            node_observability: semantic_test_node_observability(),
             revision: 1,
             deduplicated: false,
             expression_projection: ae_runtime::ExpressionProjectionV1 {
@@ -508,9 +604,11 @@ mod native_private_projection_absence_tests {
         };
         let payload = semantic_perception_payload(&decision).expect("closed receipt payload");
         let object = payload.as_object().expect("object payload");
-        assert_eq!(object.len(), 5);
+        assert_eq!(object.len(), 7);
         assert!(object.contains_key("schema"));
         assert!(object.contains_key("receipt"));
+        assert!(object.contains_key("semantic_vector_receipt"));
+        assert!(object.contains_key("node_observability"));
         assert!(object.contains_key("revision"));
         assert!(object.contains_key("deduplicated"));
         assert!(object.contains_key("expression_projection"));
@@ -558,8 +656,55 @@ mod native_private_projection_absence_tests {
             .map(str::to_owned)
             .collect()
         );
+        assert_eq!(
+            payload["semantic_vector_receipt"],
+            serde_json::json!({
+                "schema": "astr-embodiment.semantic-vector-receipt.v2",
+                "formula": "full-vector-route-neutral-relaxation-v1",
+                "dimension_slot_count": 15,
+                "evaluated_dimension_count": 15,
+                "injected_dimension_count": 15,
+                "nonzero_evidence_dimension_count": 3,
+                "neutral_baseline_dimension_count": 12,
+                "unavailable_dimension_count": 0,
+                "state_changed": true,
+            })
+        );
+        let vector_receipt_keys = payload["semantic_vector_receipt"]
+            .as_object()
+            .expect("closed v2 semantic vector receipt")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            vector_receipt_keys,
+            [
+                "schema",
+                "formula",
+                "dimension_slot_count",
+                "evaluated_dimension_count",
+                "injected_dimension_count",
+                "nonzero_evidence_dimension_count",
+                "neutral_baseline_dimension_count",
+                "unavailable_dimension_count",
+                "state_changed",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+        assert_eq!(
+            payload["node_observability"]["schema"],
+            ae_runtime::NODE_OBSERVABILITY_SCHEMA_V1
+        );
+        assert_eq!(payload["node_observability"]["regions"].as_array().map(Vec::len), Some(9));
+        assert_eq!(
+            payload["node_observability"]["residuals"],
+            serde_json::json!({"state": "NOT_COMPUTED", "formula": null, "values_fxp6": null})
+        );
 
         let serialized = serde_json::to_string(&payload).expect("serialize payload");
+        assert!(serialized.len() <= 16_384);
         for forbidden in [
             "RAW_TEXT_SENTINEL",
             "PROVIDER_PAYLOAD_SENTINEL",
@@ -571,6 +716,9 @@ mod native_private_projection_absence_tests {
             "action_contract",
             "private_wire",
             "ActionContract",
+            "node_id",
+            "node_values",
+            "node_deltas",
         ] {
             assert!(
                 !serialized.contains(forbidden),

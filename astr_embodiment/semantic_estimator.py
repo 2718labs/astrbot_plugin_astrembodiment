@@ -60,6 +60,9 @@ PROPOSAL_FIELDS = (
 
 _ESTIMATE_NESTED_FIELDS = frozenset({"dimensions", "estimator_confidence"})
 _ESTIMATE_FLAT_FIELDS = frozenset((*DIMENSION_NAMES, "estimator_confidence"))
+SEMANTIC_ESTIMATE_V2_SCHEMA = "astr-embodiment.semantic-estimate.v2"
+_ESTIMATE_V2_FIELDS = frozenset({"schema", "dimensions", "estimator_confidence"})
+_DIMENSION_SLOT_FIELDS = frozenset({"state", "value_fxp6"})
 _NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-binding-v1"
 _SCOPE_FIELDS = frozenset(
     {"bot_token", "persona_token", "relation_token", "session_token"}
@@ -87,18 +90,56 @@ class SemanticProposalError(ValueError):
 class SemanticEstimate:
     """A closed fifteen-coordinate raw fixed-point estimate."""
 
-    dimensions: dict[str, int]
+    dimensions: dict[str, int | None]
     estimator_confidence: int
+    schema: str | None = None
 
     @property
     def is_load_noop(self) -> bool:
-        return all(self.dimensions[name] == 0 for name in LOAD_DIMENSIONS)
+        # A fully available vector is always a semantic calculation.  In
+        # particular, fifteen literal zeroes are neutral inputs that must
+        # reach native dynamics rather than an estimator-level no-op.
+        return False
 
     @property
     def confidence(self) -> int:
         return self.estimator_confidence
 
+    @property
+    def is_complete(self) -> bool:
+        return all(self.dimensions[name] is not None for name in DIMENSION_NAMES)
+
+    @property
+    def dimension_summary(self) -> dict[str, int]:
+        available = [
+            self.dimensions[name]
+            for name in DIMENSION_NAMES
+            if self.dimensions[name] is not None
+        ]
+        return {
+            "evaluated_dimension_count": len(available),
+            "nonzero_evidence_dimension_count": sum(value != 0 for value in available),
+            "neutral_baseline_dimension_count": sum(value == 0 for value in available),
+            "unavailable_dimension_count": len(DIMENSION_NAMES) - len(available),
+        }
+
     def as_json(self) -> dict[str, Any]:
+        if self.schema == SEMANTIC_ESTIMATE_V2_SCHEMA:
+            return {
+                "schema": SEMANTIC_ESTIMATE_V2_SCHEMA,
+                "dimensions": {
+                    name: (
+                        {"state": "UNAVAILABLE", "value_fxp6": None}
+                        if self.dimensions[name] is None
+                        else {
+                            "state": "AVAILABLE",
+                            "value_fxp6": self.dimensions[name],
+                        }
+                    )
+                    for name in DIMENSION_NAMES
+                },
+                "estimator_confidence": self.estimator_confidence,
+            }
         return {
             "dimensions": {name: self.dimensions[name] for name in DIMENSION_NAMES},
             "estimator_confidence": self.estimator_confidence,
@@ -166,8 +207,31 @@ def _validate_dimension_map(value: Any) -> dict[str, int]:
         if not _is_raw_integer(raw) or not 0 <= raw <= FXP6_SCALE:
             raise _invalid_estimate()
         dimensions[name] = raw
-    if all(raw == 0 for raw in dimensions.values()):
+    return dimensions
+
+
+def _validate_dimension_slots_v2(value: Any) -> dict[str, int | None]:
+    if type(value) is not dict:
         raise _invalid_estimate()
+    if any(type(key) is not str for key in value) or set(value) != set(DIMENSION_NAMES):
+        raise _invalid_estimate()
+    dimensions: dict[str, int | None] = {}
+    for name in DIMENSION_NAMES:
+        slot = value.get(name)
+        if type(slot) is not dict or set(slot) != _DIMENSION_SLOT_FIELDS:
+            raise _invalid_estimate()
+        state = slot.get("state")
+        raw = slot.get("value_fxp6")
+        if state == "AVAILABLE":
+            if not _is_raw_integer(raw) or not 0 <= raw <= FXP6_SCALE:
+                raise _invalid_estimate()
+            dimensions[name] = raw
+        elif state == "UNAVAILABLE":
+            if raw is not None:
+                raise _invalid_estimate()
+            dimensions[name] = None
+        else:
+            raise _invalid_estimate()
     return dimensions
 
 
@@ -193,14 +257,26 @@ def _parse_estimator_output(value: Any) -> SemanticEstimate:
     if keys == _ESTIMATE_NESTED_FIELDS:
         dimensions_payload = payload.get("dimensions")
         confidence_payload = payload.get("estimator_confidence")
+        dimensions = _validate_dimension_map(dimensions_payload)
+        schema = None
     elif keys == _ESTIMATE_FLAT_FIELDS:
         dimensions_payload = {name: payload.get(name) for name in DIMENSION_NAMES}
         confidence_payload = payload.get("estimator_confidence")
+        dimensions = _validate_dimension_map(dimensions_payload)
+        schema = None
+    elif keys == _ESTIMATE_V2_FIELDS and payload.get("schema") == SEMANTIC_ESTIMATE_V2_SCHEMA:
+        dimensions_payload = payload.get("dimensions")
+        confidence_payload = payload.get("estimator_confidence")
+        dimensions = _validate_dimension_slots_v2(dimensions_payload)
+        schema = SEMANTIC_ESTIMATE_V2_SCHEMA
     else:
         raise _invalid_estimate()
-    dimensions = _validate_dimension_map(dimensions_payload)
     confidence = _validate_confidence(confidence_payload)
-    return SemanticEstimate(dimensions=dimensions, estimator_confidence=confidence)
+    return SemanticEstimate(
+        dimensions=dimensions,
+        estimator_confidence=confidence,
+        schema=schema,
+    )
 
 
 def parse_estimator_output(value: Any) -> SemanticEstimate:
@@ -519,6 +595,8 @@ def build_perception_proposal(
             canonical_estimate = parse_estimator_output(estimate)
         except SemanticEstimateError:
             raise _invalid_proposal() from None
+    if not canonical_estimate.is_complete:
+        raise _invalid_proposal()
     proposal = {
         "schema_version": 1,
         "event_id": canonical_turn.event_id,

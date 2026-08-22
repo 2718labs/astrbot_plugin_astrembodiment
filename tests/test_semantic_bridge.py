@@ -145,6 +145,91 @@ def _valid_result(*, deduplicated: bool = False, **receipt_overrides: object) ->
     }
 
 
+_NODE_REGION_LAYOUT = (
+    ("interoception_allostasis", 2_048),
+    ("affective_valuation", 2_048),
+    ("salience", 1_024),
+    ("epistemic_fallibility", 2_048),
+    ("social_boundary", 2_048),
+    ("temper_inhibitory", 1_024),
+    ("world_model_imagination", 4_096),
+    ("global_workspace", 1_024),
+    ("action_expression", 1_024),
+)
+
+
+def _valid_node_observability(*, revision: int = 1, state_changed: bool = True) -> dict:
+    regions = []
+    for region_id, (region_name, capacity) in enumerate(_NODE_REGION_LAYOUT):
+        selected = 1 if state_changed and region_id == 0 else 0
+        aggregate = {
+            "before_mean_fxp6": 0,
+            "after_mean_fxp6": 1 if selected else 0,
+            "delta_mean_fxp6": 1 if selected else 0,
+            "changed_node_count": selected,
+            "nonzero_after_count": selected,
+        }
+        regions.append(
+            {
+                "region_id": region_id,
+                "region_name": region_name,
+                "node_capacity": capacity,
+                "selected_node_count": selected,
+                "activated_node_count": selected,
+                "changed_node_count": selected,
+                "potential": dict(aggregate),
+                "excitation": dict(aggregate),
+            }
+        )
+    return {
+        "schema": "astr-embodiment.node-observability.v1",
+        "formula": "spc1-node-observability-v1",
+        "revision": revision,
+        "field_node_capacity": 16_384,
+        "region_layout": "regions-v1",
+        "counts": {
+            "selected_node_count": 1 if state_changed else 0,
+            "activated_node_count": 1 if state_changed else 0,
+            "changed_node_count": 1 if state_changed else 0,
+            "potential_nonzero_after_count": 1 if state_changed else 0,
+            "excitation_nonzero_after_count": 1 if state_changed else 0,
+            "signal_nonzero_after_count": 1 if state_changed else 0,
+        },
+        "residuals": {
+            "state": "NOT_COMPUTED",
+            "formula": None,
+            "values_fxp6": None,
+        },
+        "regions": regions,
+    }
+
+
+def _valid_full_vector_result(
+    *, deduplicated: bool = False, state_changed: bool = True
+) -> dict:
+    receipt = _valid_receipt(
+        state_after=("02" * 32 if state_changed else "01" * 32)
+    ) | {"active_nodes": 1 if state_changed else 0}
+    return {
+        "schema": "astrembodiment.semantic-perception-closure.v1",
+        "receipt": receipt,
+        "semantic_vector_receipt": {
+            "schema": "astr-embodiment.semantic-vector-receipt.v2",
+            "formula": "full-vector-route-neutral-relaxation-v1",
+            "dimension_slot_count": 15,
+            "evaluated_dimension_count": 15,
+            "injected_dimension_count": 15,
+            "nonzero_evidence_dimension_count": 2,
+            "neutral_baseline_dimension_count": 13,
+            "unavailable_dimension_count": 0,
+            "state_changed": state_changed,
+        },
+        "node_observability": _valid_node_observability(state_changed=state_changed),
+        "revision": receipt["next_revision"],
+        "deduplicated": deduplicated,
+    }
+
+
 def _valid_expression_projection(*, revision: int = 1) -> dict:
     return {
         "schema": "astr-embodiment.expression-projection.v1",
@@ -302,6 +387,98 @@ def test_bridge_marks_missing_expression_as_unavailable() -> None:
     )
 
     assert result == _valid_result()
+
+
+def test_bridge_rebuilds_full_vector_receipt_and_node_observability() -> None:
+    raw_result = _valid_full_vector_result()
+
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(raw_result)
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == raw_result | {
+        "full_vector_state": "FULL_VECTOR_CONFIRMED",
+        "node_observability_state": "CONFIRMED",
+    }
+    assert result["receipt"]["active_nodes"] == 1
+    assert result["node_observability"]["counts"]["selected_node_count"] == 1
+    assert result["semantic_vector_receipt"] == raw_result["semantic_vector_receipt"]
+
+
+def test_bridge_accepts_committed_all_zero_full_vector_without_state_change() -> None:
+    raw_result = _valid_full_vector_result(state_changed=False)
+
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(raw_result)
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+    proposal = _proposal()
+    proposal["dimensions"] = {name: 0 for name in DIMENSION_NAMES}
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(proposal)
+    )
+
+    assert result == raw_result | {
+        "full_vector_state": "FULL_VECTOR_CONFIRMED",
+        "node_observability_state": "CONFIRMED",
+    }
+    assert result["receipt"]["active_nodes"] == 0
+    assert result["node_observability"]["counts"]["changed_node_count"] == 0
+
+
+def test_bridge_marks_v1_semantic_receipt_legacy_unattested() -> None:
+    raw_result = _valid_result()
+
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(raw_result)
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == raw_result | {
+        "semantic_vector_receipt": None,
+        "node_observability": None,
+        "full_vector_state": "LEGACY_UNATTESTED",
+        "node_observability_state": "UNAVAILABLE",
+    }
+
+
+def test_bridge_discards_invalid_node_projection_as_rejected() -> None:
+    raw_result = _valid_full_vector_result()
+    raw_result["node_observability"] = {"raw_text": "RAW_SENTINEL"}
+
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(raw_result)
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == _valid_full_vector_result() | {
+        "node_observability": None,
+        "full_vector_state": "FULL_VECTOR_CONFIRMED",
+        "node_observability_state": "REJECTED",
+    }
+    assert "RAW_SENTINEL" not in json.dumps(result)
 
 
 def test_missing_native_semantic_symbols_are_fixed_degraded() -> None:
@@ -618,21 +795,26 @@ def test_bridge_rejects_arbitrary_nonce_even_when_native_returns_valid_receipt()
     assert result == {"status": "DEGRADED", "code": "INVALID_PERCEPTION_PROPOSAL"}
 
 
-def test_bridge_zero_load_returns_fixed_noop_without_invoking_native() -> None:
-    class TrapNative:
+def test_bridge_forwards_all_zero_vector_to_native() -> None:
+    class Native:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
-            raise AssertionError("zero-load must not invoke native")
+            self.calls += 1
+            return json.dumps(_valid_result())
 
     bridge = NativeBridge()
-    bridge._native = TrapNative()
+    native = Native()
+    bridge._native = native
     proposal = _proposal()
     proposal["dimensions"] = {name: 0 for name in DIMENSION_NAMES}
-    proposal["dimensions"]["affiliation"] = 1
     result = bridge.apply_perception_proposal_v1(
         _scope().scope_json(), json.dumps(proposal)
     )
 
-    assert result == {"status": "NOOP", "code": "ZERO_LOAD"}
+    assert result == _valid_result()
+    assert native.calls == 1
 
 
 @pytest.mark.parametrize(

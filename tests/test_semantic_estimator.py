@@ -110,22 +110,81 @@ def test_numeric_boundary_is_integer_only_and_fail_closed(
         parse_estimator_output(bad)
 
 
-def test_zero_vector_is_invalid_but_zero_four_load_is_a_valid_noop_candidate() -> None:
+def test_all_zero_legacy_vector_is_a_full_vector_neutral_input() -> None:
     zero = {
         "dimensions": {name: 0 for name in DIMENSION_NAMES},
         "estimator_confidence": 1,
     }
-    with pytest.raises(SemanticEstimateError):
-        parse_estimator_output(zero)
+    estimate = parse_estimator_output(zero)
 
-    other_only = {
-        "dimensions": {name: 0 for name in DIMENSION_NAMES},
+    assert tuple(estimate.dimensions) == DIMENSION_NAMES
+    assert all(estimate.dimensions[name] == 0 for name in DIMENSION_NAMES)
+    assert estimate.is_load_noop is False
+
+
+def test_estimate_v2_distinguishes_available_zero_from_unavailable() -> None:
+    available_payload = {
+        "schema": "astr-embodiment.semantic-estimate.v2",
+        "dimensions": {
+            name: {"state": "AVAILABLE", "value_fxp6": 0}
+            for name in DIMENSION_NAMES
+        },
         "estimator_confidence": 1,
     }
-    other_only["dimensions"]["affiliation"] = 1
-    estimate = parse_estimator_output(other_only)
-    assert all(estimate.dimensions[name] == 0 for name in LOAD_DIMENSIONS)
-    assert estimate.is_load_noop
+    available = parse_estimator_output(available_payload)
+
+    assert available.dimensions == {name: 0 for name in DIMENSION_NAMES}
+    assert available.is_complete is True
+    assert available.dimension_summary == {
+        "evaluated_dimension_count": 15,
+        "nonzero_evidence_dimension_count": 0,
+        "neutral_baseline_dimension_count": 15,
+        "unavailable_dimension_count": 0,
+    }
+    assert available.as_json() == available_payload
+
+    unavailable_payload = {
+        **available_payload,
+        "dimensions": {
+            **available_payload["dimensions"],
+            "affiliation": {"state": "UNAVAILABLE", "value_fxp6": None},
+        },
+    }
+    unavailable = parse_estimator_output(unavailable_payload)
+
+    assert unavailable.dimensions["affiliation"] is None
+    assert unavailable.is_complete is False
+    assert unavailable.dimension_summary == {
+        "evaluated_dimension_count": 14,
+        "nonzero_evidence_dimension_count": 0,
+        "neutral_baseline_dimension_count": 14,
+        "unavailable_dimension_count": 1,
+    }
+    assert unavailable.as_json() == unavailable_payload
+
+
+@pytest.mark.parametrize(
+    "slot",
+    [
+        {"state": "AVAILABLE", "value_fxp6": None},
+        {"state": "UNAVAILABLE", "value_fxp6": 0},
+        {"state": "UNKNOWN", "value_fxp6": None},
+        {"state": "AVAILABLE", "value_fxp6": True},
+    ],
+)
+def test_estimate_v2_rejects_non_closed_dimension_slots(slot: dict) -> None:
+    payload = {
+        "schema": "astr-embodiment.semantic-estimate.v2",
+        "dimensions": {
+            name: {"state": "AVAILABLE", "value_fxp6": 0}
+            for name in DIMENSION_NAMES
+        },
+        "estimator_confidence": 1,
+    }
+    payload["dimensions"]["positive"] = slot
+
+    with pytest.raises(SemanticEstimateError, match="^INVALID_ESTIMATE$"):
+        parse_estimator_output(payload)
 
 
 def test_json_free_text_and_nan_are_rejected_without_provider_payload_echo() -> None:
