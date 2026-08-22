@@ -3,7 +3,6 @@ resolver = "2"
 members = [
   "crates/ae-fixed",
   "crates/ae-contracts",
-  "crates/ae-genesis",
   "crates/ae-authority",
   "crates/ae-attention",
   "crates/ae-neurofield",
@@ -14,10 +13,19 @@ members = [
   "crates/ae-store",
   "crates/ae-runtime",
   "crates/ae-pyo3",
+  "crates/ae-cognitive-envelope",
+  "crates/ae-genesis",
+  "crates/ae-action-contract",
+  "crates/ae-efference-copy",
+  "crates/ae-subjective-present",
+  "crates/ae-soma",
+  "crates/ae-epistemic-state",
+  "crates/ae-organism-runtime",
+  "crates/ae-morph",
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.0-rc1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 authors = ["2718labs"]
@@ -28,6 +36,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 blake3 = "1"
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std"] }
+zeroize = "=1.8.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 pyo3 = { version = "0.29.0", features = ["abi3-py312", "extension-module"] }
 ae-fixed = { path = "crates/ae-fixed" }
@@ -42,3 +52,5 @@ ae-agent = { path = "crates/ae-agent" }
 ae-continuum = { path = "crates/ae-continuum" }
 ae-store = { path = "crates/ae-store" }
 ae-runtime = { path = "crates/ae-runtime" }
+ae-cognitive-envelope = { path = "crates/ae-cognitive-envelope" }
+ae-organism-runtime = { path = "crates/ae-organism-runtime" }

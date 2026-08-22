@@ -16,3 +16,14 @@ ae-contracts.workspace = true
 ae-genesis.workspace = true
 ae-store.workspace = true
 ae-runtime.workspace = true
+
+[dev-dependencies]
+ae-action-contract = { path = "../ae-action-contract" }
+ae-cognitive-envelope = { path = "../ae-cognitive-envelope" }
+ae-efference-copy = { path = "../ae-efference-copy" }
+ae-epistemic-state = { path = "../ae-epistemic-state" }
+ae-fixed.workspace = true
+ae-morph = { path = "../ae-morph" }
+ae-organism-runtime.workspace = true
+ae-soma = { path = "../ae-soma" }
+ae-subjective-present = { path = "../ae-subjective-present" }

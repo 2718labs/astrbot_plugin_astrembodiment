@@ -1,8 +1,8 @@
 name: astrbot_plugin_astrembodiment
 display_name: AstrEmbodiment
-desc: Open-source alpha source snapshot of an incomplete Rust-native embodiment runtime for AstrBot; not a functional release.
-short_desc: Open-source alpha source snapshot; the semantic reaction chain is not implemented.
-version: "v1.0.0-alpha.1"
+desc: 让你的 Bot 不只记住经历，更能延续“Ta是谁”。AstrEmbodiment 以 Rust 原生运行时承载人格连续性，将用户话语转化为 15 维闭合语义证据并提交原生状态，为受控回应与人格演化提供试验性基础。
+short_desc: Rust 原生人格连续性运行时：让用户话语成为可验证、可提交的连续语义证据。
+version: "1.0.0-rc1"
 author: 2718labs
 repo: https://github.com/2718labs/astrbot_plugin_astrembodiment
 astrbot_version: ">=4.16,<5"

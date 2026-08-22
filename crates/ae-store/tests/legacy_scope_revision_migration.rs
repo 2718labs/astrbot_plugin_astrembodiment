@@ -34,6 +34,13 @@ struct LegacyFixture {
     b2_revision: u64,
 }
 
+#[derive(Clone, Copy)]
+struct LegacyReceiptSeeds {
+    formula: u8,
+    authority: u8,
+    state: u8,
+}
+
 fn create_legacy_journal_tables(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
@@ -88,23 +95,21 @@ fn write_legacy_journal_row(
     base_revision: u64,
     next_revision: u64,
     chain_seed: &Digest,
-    formula_seed: u8,
-    authority_seed: u8,
-    state_seed: u8,
+    receipt_seeds: LegacyReceiptSeeds,
 ) -> rusqlite::Result<(Digest, Digest, u64)> {
     let event_bytes = wire::encode_event(event);
     let event_digest = wire::event_digest(event);
     let receipt = TransitionReceipt {
         schema_version: 1,
-        formula_digest: [formula_seed; 32],
+        formula_digest: [receipt_seeds.formula; 32],
         scope_digest: *scope_digest,
         event_digest,
-        authority_digest: [authority_seed; 32],
+        authority_digest: [receipt_seeds.authority; 32],
         base_revision,
         next_revision,
-        state_before: [state_seed; 32],
-        state_after: [state_seed.saturating_add(1); 32],
-        graph_after: [state_seed.saturating_add(2); 32],
+        state_before: [receipt_seeds.state; 32],
+        state_after: [receipt_seeds.state.saturating_add(1); 32],
+        graph_after: [receipt_seeds.state.saturating_add(2); 32],
         action_contract: None,
         active_nodes: 0,
         active_edges: 0,
@@ -156,9 +161,11 @@ fn create_legacy_scope_fixture(path: &std::path::Path) -> rusqlite::Result<Legac
         0,
         1,
         &seed_a,
-        41,
-        51,
-        61,
+        LegacyReceiptSeeds {
+            formula: 41,
+            authority: 51,
+            state: 61,
+        },
     )?;
     let (b1_event_digest, b1_chain, b1_revision) = write_legacy_journal_row(
         &tx,
@@ -167,9 +174,11 @@ fn create_legacy_scope_fixture(path: &std::path::Path) -> rusqlite::Result<Legac
         0,
         1,
         &seed_b,
-        42,
-        52,
-        62,
+        LegacyReceiptSeeds {
+            formula: 42,
+            authority: 52,
+            state: 62,
+        },
     )?;
     let (a2_event_digest, _a2_chain, a2_revision) = write_legacy_journal_row(
         &tx,
@@ -178,9 +187,11 @@ fn create_legacy_scope_fixture(path: &std::path::Path) -> rusqlite::Result<Legac
         1,
         2,
         &a1_chain,
-        43,
-        53,
-        63,
+        LegacyReceiptSeeds {
+            formula: 43,
+            authority: 53,
+            state: 63,
+        },
     )?;
     let (b2_event_digest, _b2_chain, b2_revision) = write_legacy_journal_row(
         &tx,
@@ -189,9 +200,11 @@ fn create_legacy_scope_fixture(path: &std::path::Path) -> rusqlite::Result<Legac
         1,
         2,
         &b1_chain,
-        44,
-        54,
-        64,
+        LegacyReceiptSeeds {
+            formula: 44,
+            authority: 54,
+            state: 64,
+        },
     )?;
     tx.commit()?;
 

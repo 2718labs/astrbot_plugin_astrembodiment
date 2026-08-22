@@ -6,6 +6,9 @@ use ae_fixed::Fixed;
 use ae_renorm::Workspace;
 use serde::{Deserialize, Serialize};
 
+/// R7-only contract builder; the root API remains the alpha/G0 ABI.
+pub mod r7;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionScore {
     pub task: Fixed,

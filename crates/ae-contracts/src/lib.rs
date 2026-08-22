@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
+/// R7 authority types are isolated from the alpha compatibility ABI.
+pub mod r7;
+
 pub mod hex {
     //! Serde helpers: digests and opaque tokens cross the FFI as lowercase hex
     //! strings. The canonical binary wire forms are unaffected.

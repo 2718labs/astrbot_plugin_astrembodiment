@@ -18,7 +18,7 @@
 - 现有 Genesis、SeedCode、Persona、`apply_event` 与响应钩子不能作为“Bot 已具备情绪反应”或生产可用的证据。
 - 本标签仅用于可恢复的源码基线；不得安装、上架、发布或替换现有 AstrBot 插件数据。
 
-## [1.0.0-rc1] - 2026-08-20
+## [1.0.0-rc1] - 2026-08-22
 
 ### 定版
 
@@ -27,6 +27,18 @@
 - README 增加总工作流图、每个核心模块的独立工作流图，以及面向后续适配器的双向逻辑 API 头和闭合 JSON 契约说明。
 - `ae`、`ae_seed`、`on_llm_request`、`on_llm_response` 和 `after_message_sent` 的 AstrBot 展示描述改为中文。
 
+### 发布契约
+
+- 统一发布版本：AstrBot metadata 与 Rust workspace 使用 `1.0.0-rc1`，Python wheel 使用 PEP 440 的 `1.0.0rc1`。
+- 原生 loader 公开 `semantic_revision_v1` 与 `apply_perception_proposal_v1`；打包门禁拒绝缺少任一导出的旧 wheel。
+- 远端 GitHub Release 与 AstrBot Marketplace 上架仍由维护者单独执行，本地候选不自动发布。
+
+### 可观测性
+
+- `observatory_enabled=true` 时，成功的语义注入以 INFO 记录完整 15 维 fxp6 证据、confidence、revision 与去重结果；`ZERO_LOAD` 明确标记为未提交。
+- NOOP 以 INFO、DEGRADED 以 WARNING 记录，并区分 `stage`、`code` 与 `commit_state`；观测日志不包含用户正文、Provider 输出、token、nonce 或 digest。
+- 成功回执额外回显 native 的 `state_changed`、活跃节点/边数和五类 fxp6 残差；失败固定标明计算是未尝试还是未确认。
+
 ### 修复
 
 - `ae_seed` 现在明确支持无 WebUI 直接生成 SeedCode，并通过 AstrBot 配置保存接口持久化；插件重载后可再次用命令查看。
@@ -34,6 +46,7 @@
 - 明确两者共享 LLM/投递钩子，不能在同一 AstrBot 会话中同时启用；迁移不会自动转换 Sylanne 的历史状态。
 - 修复原生交付提交后的 revision 未回写到 Python 镜像，导致下一轮请求报 `STALE_CAUSAL_BASE`。
 - 修复插件热重载后未从持久化原生状态恢复 revision 和 turn 序号，避免复用旧事件标识或提交过期因果基线。
+- 补全 SPC1 辅助模型的精确 15 维 JSON 模板、fxp6 取值范围和维度语义，避免真实 Provider 因无法推断私有闭合协议而返回 `ESTIMATOR_MALFORMED`。
 
 ### 发布
 

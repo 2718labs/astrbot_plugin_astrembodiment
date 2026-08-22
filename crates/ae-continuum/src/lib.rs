@@ -6,6 +6,28 @@
 //! The journal never stores raw text: only event kind, encoded canonical
 //! event bytes, digests and receipts.
 
+// Alpha's persisted journal ABI remains at this crate root. The authority's
+// bounded KV kernel is an additive R7-only namespace so neither side aliases
+// the other at the public boundary.
+mod kv;
+
+pub use kv::{
+    key_digest, value_digest, verify_native_kv_reference_v1, CasOutcome, CompareAndSwap,
+    ContinuumKey, ContinuumKv, ContinuumObjectKind, ContinuumValidationError, NativeContinuumKv,
+    NativeKvError, VerifiedKvReferenceV1, VersionedValue, KEY_DOMAIN, MAX_CANONICAL_VALUE_BYTES,
+    MAX_LOGICAL_ID_BYTES, MAX_SCAN_LIMIT, VALUE_DOMAIN,
+};
+
+pub mod r7 {
+    pub use super::kv::{
+        key_digest, validate_canonical_value_len, validate_key, validate_scan_limit,
+        validate_value, value_digest, verify_native_kv_reference_v1, CasOutcome, CompareAndSwap,
+        ContinuumKey, ContinuumKv, ContinuumObjectKind, ContinuumValidationError,
+        NativeContinuumKv, NativeKvError, VerifiedKvReferenceV1, VersionedValue, KEY_DOMAIN,
+        MAX_CANONICAL_VALUE_BYTES, MAX_LOGICAL_ID_BYTES, MAX_SCAN_LIMIT, VALUE_DOMAIN,
+    };
+}
+
 use ae_contracts::{wire, Digest, TransitionReceipt};
 use serde::{Deserialize, Serialize};
 

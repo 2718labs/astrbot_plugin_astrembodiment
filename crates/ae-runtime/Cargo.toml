@@ -15,4 +15,16 @@ ae-renorm.workspace = true
 ae-agent.workspace = true
 ae-continuum.workspace = true
 ae-store.workspace = true
+ae-action-contract = { path = "../ae-action-contract" }
+ae-cognitive-envelope = { path = "../ae-cognitive-envelope" }
+ae-efference-copy = { path = "../ae-efference-copy" }
+ae-epistemic-state = { path = "../ae-epistemic-state" }
+ae-morph = { path = "../ae-morph" }
+ae-soma = { path = "../ae-soma" }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+ae-subjective-present = { path = "../ae-subjective-present" }

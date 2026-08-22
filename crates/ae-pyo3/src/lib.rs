@@ -7,11 +7,12 @@
 //! residual writers, no import-from-SeedCode entry point. JSON is exchanged
 //! as closed, deny-unknown-field payloads; identity is computed in Rust.
 
+use ae_contracts::r7::PerceptionProposalV1;
 use ae_contracts::{hex, CanonicalEvent, PersonaGenesisRequest, ScopeRef};
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -27,45 +28,112 @@ fn core() -> PyResult<MutexGuard<'static, Option<ae_runtime::AstrRuntime>>> {
 }
 
 fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
-    let (code, message) = match &error {
-        ae_runtime::RuntimeError::Genesis(_) => ("GENESIS_UNAVAILABLE", error.to_string()),
-        ae_runtime::RuntimeError::RetryWait => ("RETRY_WAIT", error.to_string()),
+    let (code, message) = match error {
+        ae_runtime::RuntimeError::Genesis(_) => ("GENESIS_UNAVAILABLE", "genesis unavailable"),
+        ae_runtime::RuntimeError::RetryWait => ("RETRY_WAIT", "retry required"),
         ae_runtime::RuntimeError::Store(ae_store::StoreError::SeedDigestCollision) => {
-            ("SEED_DIGEST_COLLISION", error.to_string())
+            ("SEED_DIGEST_COLLISION", "seed digest collision")
         }
         ae_runtime::RuntimeError::Store(ae_store::StoreError::StaleRevision { .. }) => {
-            ("STALE_REVISION", error.to_string())
+            ("STALE_REVISION", "stale revision")
         }
         ae_runtime::RuntimeError::Store(ae_store::StoreError::DuplicateEvent(_)) => {
-            ("DUPLICATE_EVENT", error.to_string())
+            ("DUPLICATE_EVENT", "duplicate event")
         }
         ae_runtime::RuntimeError::Store(ae_store::StoreError::LeaseConflict) => {
-            ("LEASE_CONFLICT", error.to_string())
+            ("LEASE_CONFLICT", "lease conflict")
         }
         ae_runtime::RuntimeError::Store(ae_store::StoreError::LeaseInFlight) => {
-            ("LEASE_IN_FLIGHT", error.to_string())
+            ("LEASE_IN_FLIGHT", "lease in flight")
         }
         ae_runtime::RuntimeError::Store(ae_store::StoreError::ManifestDigestMismatch)
         | ae_runtime::RuntimeError::Store(ae_store::StoreError::SeedCodeMismatch) => {
-            ("IDENTITY_MISMATCH", error.to_string())
+            ("IDENTITY_MISMATCH", "identity mismatch")
         }
-        ae_runtime::RuntimeError::Store(_) => ("STORAGE", error.to_string()),
-        ae_runtime::RuntimeError::PersonaGenesisRequired => ("GENESIS_REQUIRED", error.to_string()),
+        ae_runtime::RuntimeError::Store(_) => ("STORAGE", "storage unavailable"),
+        ae_runtime::RuntimeError::PersonaGenesisRequired => {
+            ("GENESIS_REQUIRED", "genesis required")
+        }
         ae_runtime::RuntimeError::GenesisManifestMismatch => {
-            ("GENESIS_MANIFEST_MISMATCH", error.to_string())
+            ("GENESIS_MANIFEST_MISMATCH", "genesis manifest mismatch")
         }
         ae_runtime::RuntimeError::StaleCausalBase { .. } => {
-            ("STALE_CAUSAL_BASE", error.to_string())
+            ("STALE_CAUSAL_BASE", "stale causal base")
         }
-        ae_runtime::RuntimeError::UnsupportedEvent(_) => ("UNSUPPORTED_EVENT", error.to_string()),
-        ae_runtime::RuntimeError::Closed => ("CLOSED", error.to_string()),
-        ae_runtime::RuntimeError::InvalidNeuralState => ("INVALID_NEURAL_STATE", error.to_string()),
+        ae_runtime::RuntimeError::UnsupportedEvent(_) => ("UNSUPPORTED_EVENT", "unsupported event"),
+        ae_runtime::RuntimeError::Closed => ("CLOSED", "runtime closed"),
+        ae_runtime::RuntimeError::InvalidNeuralState => {
+            ("INVALID_NEURAL_STATE", "invalid neural state")
+        }
+        ae_runtime::RuntimeError::PrivateProjectionUnavailable => (
+            "PRIVATE_PROJECTION_UNAVAILABLE",
+            "private projection unavailable",
+        ),
+        ae_runtime::RuntimeError::InvalidPerceptionProposal => {
+            ("INVALID_PERCEPTION_PROPOSAL", "invalid perception proposal")
+        }
+        ae_runtime::RuntimeError::InvalidPerceptionScope => {
+            ("INVALID_PERCEPTION_SCOPE", "invalid perception scope")
+        }
+        ae_runtime::RuntimeError::SemanticIdentityConflict => (
+            "SEMANTIC_IDENTITY_CONFLICT",
+            "semantic proposal identity conflict",
+        ),
+        ae_runtime::RuntimeError::SemanticRevisionOverflow => {
+            ("SEMANTIC_REVISION_OVERFLOW", "semantic revision overflow")
+        }
+        ae_runtime::RuntimeError::SemanticStateUnchanged => (
+            "SEMANTIC_STATE_UNCHANGED",
+            "semantic transition did not change state",
+        ),
     };
     NativeCoreError::new_err(format!("{code}::{message}"))
 }
 
 fn closed_schema(message: String) -> PyErr {
     NativeCoreError::new_err(format!("CLOSED_SCHEMA::{message}"))
+}
+
+fn semantic_perception_payload(
+    decision: &ae_runtime::PerceptionProposalDecisionV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut receipt = serde_json::to_value(&decision.receipt)?;
+    if let Some(receipt_object) = receipt.as_object_mut() {
+        // The canonical root receipt keeps ActionContract for G0 compatibility,
+        // but SPC1's Python contract is an explicit closed allow-list.
+        const CLOSED_RECEIPT_FIELDS: &[&str] = &[
+            "schema_version",
+            "formula_digest",
+            "scope_digest",
+            "event_digest",
+            "authority_digest",
+            "base_revision",
+            "next_revision",
+            "state_before",
+            "state_after",
+            "graph_after",
+            "active_nodes",
+            "active_edges",
+            "residuals",
+            "status",
+        ];
+        receipt_object.retain(|key, _| CLOSED_RECEIPT_FIELDS.contains(&key.as_str()));
+    }
+    Ok(serde_json::json!({
+        "schema": "astrembodiment.semantic-perception-closure.v1",
+        "receipt": receipt,
+        "revision": decision.revision,
+        "deduplicated": decision.deduplicated,
+    }))
+}
+
+fn encode_json_for_boundary<T: Serialize>(value: &T) -> PyResult<String> {
+    serde_json::to_string(value)
+        .map_err(|_| NativeCoreError::new_err("ENCODING::serialization failed"))
+}
+
+fn parse_semantic_proposal_json(proposal_json: &str) -> Result<PerceptionProposalV1, &'static str> {
+    serde_json::from_str(proposal_json).map_err(|_| "invalid perception proposal")
 }
 
 #[derive(Deserialize)]
@@ -140,8 +208,8 @@ fn open(data_dir: &str) -> PyResult<()> {
 /// commits the birth. Concurrent callers join the same committed receipt.
 #[pyfunction]
 fn ensure_genesis(request_json: &str) -> PyResult<String> {
-    let request: PersonaGenesisRequest =
-        serde_json::from_str(request_json).map_err(|error| closed_schema(error.to_string()))?;
+    let request: PersonaGenesisRequest = serde_json::from_str(request_json)
+        .map_err(|_| closed_schema("invalid genesis request".to_owned()))?;
     let mut guard = core()?;
     let runtime = guard
         .as_mut()
@@ -156,26 +224,26 @@ fn ensure_genesis(request_json: &str) -> PyResult<String> {
         "seed_code_short": ae_genesis::format_short_seed_code(&receipt.seed_code_digest),
         "incarnation_id": ae_genesis::format_incarnation_id(&receipt.incarnation_id),
     });
-    serde_json::to_string(&payload)
-        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+    encode_json_for_boundary(&payload)
 }
 
 /// Apply one closed canonical event through the deterministic G0 no-op lane.
 #[pyfunction]
 fn apply_event(scope_json: &str, event_json: &str) -> PyResult<String> {
     let scope: FfiScope =
-        serde_json::from_str(scope_json).map_err(|error| closed_schema(error.to_string()))?;
-    let scope_ref = scope.scope_ref().map_err(closed_schema)?;
-    let envelope: FfiEventEnvelope =
-        serde_json::from_str(event_json).map_err(|error| closed_schema(error.to_string()))?;
+        serde_json::from_str(scope_json).map_err(|_| closed_schema("invalid scope".to_owned()))?;
+    let scope_ref = scope
+        .scope_ref()
+        .map_err(|_| closed_schema("invalid scope".to_owned()))?;
+    let envelope: FfiEventEnvelope = serde_json::from_str(event_json)
+        .map_err(|_| closed_schema("invalid event envelope".to_owned()))?;
     if is_known_g0_unsupported_event(&envelope.kind) {
-        return Err(NativeCoreError::new_err(format!(
-            "UNSUPPORTED_EVENT::event kind {} is not supported by the G0 no-op lane",
-            envelope.kind
-        )));
+        return Err(NativeCoreError::new_err(
+            "UNSUPPORTED_EVENT::unsupported event",
+        ));
     }
     let event: CanonicalEvent =
-        serde_json::from_str(event_json).map_err(|error| closed_schema(error.to_string()))?;
+        serde_json::from_str(event_json).map_err(|_| closed_schema("invalid event".to_owned()))?;
     let mut guard = core()?;
     let runtime = guard
         .as_mut()
@@ -188,16 +256,62 @@ fn apply_event(scope_json: &str, event_json: &str) -> PyResult<String> {
         "revision": decision.revision,
         "deduplicated": decision.deduplicated,
     });
-    serde_json::to_string(&payload)
-        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+    encode_json_for_boundary(&payload)
+}
+
+/// Return the content-free cursor for the separate SPC1 semantic lane.
+#[pyfunction]
+fn semantic_revision_v1(scope_json: &str) -> PyResult<String> {
+    let scope: FfiScope = serde_json::from_str(scope_json)
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let scope_ref = scope
+        .scope_ref()
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let revision = runtime
+        .semantic_revision_v1(&scope_ref)
+        .map_err(map_error)?;
+    let payload = serde_json::json!({
+        "schema": "astrembodiment.semantic-revision.v1",
+        "revision": revision,
+    });
+    encode_json_for_boundary(&payload)
+}
+
+/// Apply one closed SPC1 perception proposal.  The result intentionally
+/// exposes only the receipt, semantic revision, and deduplication flag.
+#[pyfunction]
+fn apply_perception_proposal_v1(scope_json: &str, proposal_json: &str) -> PyResult<String> {
+    let scope: FfiScope = serde_json::from_str(scope_json)
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let scope_ref = scope
+        .scope_ref()
+        .map_err(|_| closed_schema("invalid perception scope".to_owned()))?;
+    let proposal = parse_semantic_proposal_json(proposal_json)
+        .map_err(|message| closed_schema(message.to_owned()))?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let decision = runtime
+        .apply_perception_proposal_v1(&scope_ref, &proposal)
+        .map_err(map_error)?;
+    let payload = semantic_perception_payload(&decision)
+        .map_err(|_| NativeCoreError::new_err("ENCODING::serialization failed"))?;
+    encode_json_for_boundary(&payload)
 }
 
 /// Content-free observatory projection for one (Bot, Persona) binding.
 #[pyfunction]
 fn inspect(scope_json: &str) -> PyResult<String> {
     let scope: FfiScope =
-        serde_json::from_str(scope_json).map_err(|error| closed_schema(error.to_string()))?;
-    let scope_ref = scope.scope_ref().map_err(closed_schema)?;
+        serde_json::from_str(scope_json).map_err(|_| closed_schema("invalid scope".to_owned()))?;
+    let scope_ref = scope
+        .scope_ref()
+        .map_err(|_| closed_schema("invalid scope".to_owned()))?;
     let mut guard = core()?;
     let runtime = guard
         .as_mut()
@@ -221,16 +335,17 @@ fn inspect(scope_json: &str) -> PyResult<String> {
             "genesis_unavailable": report.observatory_genesis_unavailable,
         },
     });
-    serde_json::to_string(&payload)
-        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+    encode_json_for_boundary(&payload)
 }
 
 /// Mechanical replay verification of the committed journal.
 #[pyfunction]
 fn verify_replay(scope_json: &str) -> PyResult<String> {
     let scope: FfiScope =
-        serde_json::from_str(scope_json).map_err(|error| closed_schema(error.to_string()))?;
-    let scope_ref = scope.scope_ref().map_err(closed_schema)?;
+        serde_json::from_str(scope_json).map_err(|_| closed_schema("invalid scope".to_owned()))?;
+    let scope_ref = scope
+        .scope_ref()
+        .map_err(|_| closed_schema("invalid scope".to_owned()))?;
     let mut guard = core()?;
     let runtime = guard
         .as_mut()
@@ -247,8 +362,7 @@ fn verify_replay(scope_json: &str) -> PyResult<String> {
         "final_chain_digest": hex::encode32(&report.final_chain_digest),
         "first_error": report.first_error,
     });
-    serde_json::to_string(&payload)
-        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+    encode_json_for_boundary(&payload)
 }
 
 /// Drain the writer: snapshot, WAL checkpoint, close the store.
@@ -268,9 +382,238 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(open, module)?)?;
     module.add_function(wrap_pyfunction!(ensure_genesis, module)?)?;
     module.add_function(wrap_pyfunction!(apply_event, module)?)?;
+    module.add_function(wrap_pyfunction!(semantic_revision_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_perception_proposal_v1, module)?)?;
     module.add_function(wrap_pyfunction!(inspect, module)?)?;
     module.add_function(wrap_pyfunction!(verify_replay, module)?)?;
     module.add_function(wrap_pyfunction!(flush_and_close, module)?)?;
     module.add("NativeCoreError", module.py().get_type::<NativeCoreError>())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod native_private_projection_absence_tests {
+    use super::*;
+    use ae_genesis::GenesisError;
+    use ae_store::StoreError;
+    use pyo3::types::PyModule;
+    use serde::{Serialize, Serializer};
+    use std::collections::BTreeSet;
+
+    fn semantic_test_receipt() -> ae_contracts::TransitionReceipt {
+        ae_contracts::TransitionReceipt {
+            schema_version: 1,
+            formula_digest: [1; 32],
+            scope_digest: [2; 32],
+            event_digest: [3; 32],
+            authority_digest: [4; 32],
+            base_revision: 0,
+            next_revision: 1,
+            state_before: [5; 32],
+            state_after: [6; 32],
+            graph_after: [7; 32],
+            action_contract: None,
+            active_nodes: 1,
+            active_edges: 0,
+            residuals: ae_contracts::InvariantResiduals::default(),
+            status: ae_contracts::CommitStatus::Committed,
+        }
+    }
+
+    #[test]
+    fn private_projection_failure_maps_to_one_fixed_non_payload_error() {
+        Python::initialize();
+        Python::attach(|py| {
+            let error = map_error(ae_runtime::RuntimeError::PrivateProjectionUnavailable);
+            assert_eq!(
+                error.value(py).to_string(),
+                "PRIVATE_PROJECTION_UNAVAILABLE::private projection unavailable"
+            );
+        });
+    }
+
+    #[test]
+    fn python_module_keeps_r7_atomic_and_legacy_raw_sealers_unmounted() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_native").expect("test module");
+            _native(&module).expect("legacy module registration");
+            assert!(module.getattr("apply_event").is_ok());
+            assert!(module.getattr("semantic_revision_v1").is_ok());
+            assert!(module.getattr("apply_perception_proposal_v1").is_ok());
+            for forbidden in [
+                "apply_user_stimulus_with_private_projection_wire_v1",
+                "R7PreOutputProjectionInputV1",
+                "_PrivateProjectionPayloadWireV1",
+                "_PrivateProjectionPayloadProducerV1",
+                "_PrivateProjectionPayloadIngressV1",
+                "_PrivateProjectionTransferV1",
+                "_consume_private_projection_payload_wire_v1",
+                "_discard_private_projection_transfer_v1",
+                "_astrbot_host_private_projection_wire_capability_v1",
+                "PrivateProjectionPayloadWireV1",
+                "PrivateProjectionPayloadProducerV1",
+                "PrivateProjectionPayloadIngressV1",
+                "PrivateProjectionTransferV1",
+                "seal_private_projection_payload_wire_v1",
+                "materialize_private_projection_payload_v1",
+                "private_projection_payload_callback_v1",
+                "repr_private_projection_payload_wire_v1",
+                "pickle_private_projection_payload_wire_v1",
+                "buffer_private_projection_payload_wire_v1",
+                "consume_once",
+                "wire_digest",
+                "to_bytes",
+                "as_bytes",
+                "__bytes__",
+                "__buffer__",
+            ] {
+                assert!(
+                    module.getattr(forbidden).is_err(),
+                    "Python must not expose R7 raw bytes/json/repr or a legacy sealer: {forbidden}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn semantic_perception_output_and_errors_are_closed() {
+        let decision = ae_runtime::PerceptionProposalDecisionV1 {
+            receipt: semantic_test_receipt(),
+            revision: 1,
+            deduplicated: false,
+        };
+        let payload = semantic_perception_payload(&decision).expect("closed receipt payload");
+        let object = payload.as_object().expect("object payload");
+        assert_eq!(object.len(), 4);
+        assert!(object.contains_key("schema"));
+        assert!(object.contains_key("receipt"));
+        assert!(object.contains_key("revision"));
+        assert!(object.contains_key("deduplicated"));
+        assert!(payload.get("contract").is_none());
+        let receipt_keys = payload["receipt"]
+            .as_object()
+            .expect("receipt object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            receipt_keys,
+            [
+                "schema_version",
+                "formula_digest",
+                "scope_digest",
+                "event_digest",
+                "authority_digest",
+                "base_revision",
+                "next_revision",
+                "state_before",
+                "state_after",
+                "graph_after",
+                "active_nodes",
+                "active_edges",
+                "residuals",
+                "status",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+
+        let serialized = serde_json::to_string(&payload).expect("serialize payload");
+        for forbidden in [
+            "RAW_TEXT_SENTINEL",
+            "PROVIDER_PAYLOAD_SENTINEL",
+            "REQUEST_NONCE_SENTINEL",
+            "WIRE_BYTES_SENTINEL",
+            "event_bytes",
+            "provider_payload",
+            "request_nonce_digest",
+            "action_contract",
+            "private_wire",
+            "ActionContract",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "semantic output leaked forbidden material: {forbidden}"
+            );
+        }
+
+        let malformed = r#"{"schema_version":1,"event_id":"RAW_TEXT_SENTINEL"}"#;
+        let parse_error = parse_semantic_proposal_json(malformed).expect_err("malformed proposal");
+        assert_eq!(parse_error, "invalid perception proposal");
+        assert!(!parse_error.contains("RAW_TEXT_SENTINEL"));
+    }
+
+    struct AlwaysFailsSerialization;
+
+    impl Serialize for AlwaysFailsSerialization {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(serde::ser::Error::custom("SERIALIZER_RAW_SENTINEL"))
+        }
+    }
+
+    #[test]
+    fn python_error_boundary_is_fixed_and_encoding_is_fallible() {
+        let cases = [
+            (
+                ae_runtime::RuntimeError::Store(StoreError::Sqlite(
+                    "C:\\secret\\state.db SQL RAW_SENTINEL".to_owned(),
+                )),
+                "STORAGE::storage unavailable",
+            ),
+            (
+                ae_runtime::RuntimeError::Store(StoreError::Io {
+                    context: "opening RAW_PATH_SENTINEL",
+                    source: std::io::Error::other("OS_RAW_SENTINEL"),
+                }),
+                "STORAGE::storage unavailable",
+            ),
+            (
+                ae_runtime::RuntimeError::Genesis(GenesisError::CapsuleInvalid(
+                    "GENESIS_RAW_SENTINEL",
+                )),
+                "GENESIS_UNAVAILABLE::genesis unavailable",
+            ),
+            (
+                ae_runtime::RuntimeError::StaleCausalBase {
+                    expected: 7,
+                    actual: 3,
+                },
+                "STALE_CAUSAL_BASE::stale causal base",
+            ),
+            (
+                ae_runtime::RuntimeError::UnsupportedEvent("RAW_EVENT_SENTINEL"),
+                "UNSUPPORTED_EVENT::unsupported event",
+            ),
+            (
+                ae_runtime::RuntimeError::SemanticIdentityConflict,
+                "SEMANTIC_IDENTITY_CONFLICT::semantic proposal identity conflict",
+            ),
+        ];
+        Python::attach(|py| {
+            for (error, expected) in cases {
+                let mapped = map_error(error);
+                let rendered = mapped.value(py).to_string();
+                assert_eq!(rendered, expected);
+                assert!(!rendered.contains("RAW_SENTINEL"));
+                assert!(!rendered.contains("SQL"));
+                assert!(!rendered.contains("state.db"));
+            }
+
+            let encoding_error = encode_json_for_boundary(&AlwaysFailsSerialization)
+                .expect_err("serializer failure must become a PyErr");
+            assert_eq!(
+                encoding_error.value(py).to_string(),
+                "ENCODING::serialization failed"
+            );
+            assert!(!encoding_error
+                .value(py)
+                .to_string()
+                .contains("SERIALIZER_RAW_SENTINEL"));
+        });
+    }
 }

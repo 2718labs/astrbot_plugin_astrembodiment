@@ -143,11 +143,9 @@ pub fn initial_state_from_manifest(
 
     let mut potential = Vec::with_capacity(NEURON_SLOTS);
     for (index, &(start, count)) in REGION_LAYOUT.iter().enumerate() {
-        debug_assert_eq!(start + count, start + count);
+        debug_assert_eq!(potential.len(), start);
         let value = baseline[index].clamp(Fixed::ZERO, Fixed::ONE);
-        for slot in 0..count {
-            let _ = slot;
-            let _ = (start, count, index);
+        for _ in 0..count {
             potential.push(value);
         }
     }

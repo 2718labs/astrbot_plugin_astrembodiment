@@ -1,0 +1,11 @@
+[package]
+name = "ae-epistemic-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-contracts.workspace = true
+ae-fixed.workspace = true
+ae-genesis.workspace = true
+thiserror.workspace = true
