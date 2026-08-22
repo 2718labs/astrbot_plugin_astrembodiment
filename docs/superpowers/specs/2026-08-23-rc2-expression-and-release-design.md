@@ -1,5 +1,7 @@
 # RC2 Native Expression Projection and Release Automation Design
 
+Chinese review edition: [2026-08-23-rc2-expression-and-release-design.zh-CN.md](2026-08-23-rc2-expression-and-release-design.zh-CN.md)
+
 Date: 2026-08-23
 Target: AstrEmbodiment 1.0.0-rc2 candidate
 Status: user-approved direction; written specification awaiting review
