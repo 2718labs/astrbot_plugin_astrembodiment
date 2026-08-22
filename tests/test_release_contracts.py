@@ -395,7 +395,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
         runtime_dir = tmp_path / "runtime"
         runtime_dir.mkdir()
         health = bridge_module.NativeBridge().open(str(runtime_dir))
-        assert health.version == "1.0.0"
+        assert health.version == "1.0.0-rc1"
         assert (runtime_dir / "astrembodiment.sqlite3").is_file()
         assert main_module.AstrEmbodimentPlugin is not None
     finally:
