@@ -124,6 +124,18 @@ fn semantic_perception_payload(
         "receipt": receipt,
         "revision": decision.revision,
         "deduplicated": decision.deduplicated,
+        "expression_projection": {
+            "schema": ae_runtime::EXPRESSION_PROJECTION_SCHEMA_V1,
+            "revision": decision.expression_projection.revision,
+            "profile_fxp6": {
+                "warmth": decision.expression_projection.profile_fxp6.warmth,
+                "sensitivity": decision.expression_projection.profile_fxp6.sensitivity,
+                "guardedness": decision.expression_projection.profile_fxp6.guardedness,
+                "repair_orientation": decision.expression_projection.profile_fxp6.repair_orientation,
+                "engagement": decision.expression_projection.profile_fxp6.engagement,
+                "epistemic_caution": decision.expression_projection.profile_fxp6.epistemic_caution,
+            },
+        },
     }))
 }
 
@@ -482,15 +494,42 @@ mod native_private_projection_absence_tests {
             receipt: semantic_test_receipt(),
             revision: 1,
             deduplicated: false,
+            expression_projection: ae_runtime::ExpressionProjectionV1 {
+                revision: 1,
+                profile_fxp6: ae_runtime::ExpressionProfileFxP6 {
+                    warmth: 700_000,
+                    sensitivity: 200_000,
+                    guardedness: 100_000,
+                    repair_orientation: 300_000,
+                    engagement: 600_000,
+                    epistemic_caution: 400_000,
+                },
+            },
         };
         let payload = semantic_perception_payload(&decision).expect("closed receipt payload");
         let object = payload.as_object().expect("object payload");
-        assert_eq!(object.len(), 4);
+        assert_eq!(object.len(), 5);
         assert!(object.contains_key("schema"));
         assert!(object.contains_key("receipt"));
         assert!(object.contains_key("revision"));
         assert!(object.contains_key("deduplicated"));
+        assert!(object.contains_key("expression_projection"));
         assert!(payload.get("contract").is_none());
+        assert_eq!(
+            payload["expression_projection"],
+            serde_json::json!({
+                "schema": "astr-embodiment.expression-projection.v1",
+                "revision": 1,
+                "profile_fxp6": {
+                    "warmth": 700_000,
+                    "sensitivity": 200_000,
+                    "guardedness": 100_000,
+                    "repair_orientation": 300_000,
+                    "engagement": 600_000,
+                    "epistemic_caution": 400_000,
+                },
+            })
+        );
         let receipt_keys = payload["receipt"]
             .as_object()
             .expect("receipt object")

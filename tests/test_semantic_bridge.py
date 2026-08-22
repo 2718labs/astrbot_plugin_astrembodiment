@@ -78,7 +78,9 @@ def _diagnostic(
         calculation_state = (
             "CONFIRMED"
             if commit_state in {"CONFIRMED_NEW", "CONFIRMED_EXISTING"}
-            else "UNCONFIRMED" if commit_state == "UNKNOWN" else "NOT_ATTEMPTED"
+            else "UNCONFIRMED"
+            if commit_state == "UNKNOWN"
+            else "NOT_ATTEMPTED"
         )
     if native_calculation is None and calculation_state == "CONFIRMED":
         native_calculation = _calculation()
@@ -143,6 +145,21 @@ def _valid_result(*, deduplicated: bool = False, **receipt_overrides: object) ->
     }
 
 
+def _valid_expression_projection(*, revision: int = 1) -> dict:
+    return {
+        "schema": "astr-embodiment.expression-projection.v1",
+        "revision": revision,
+        "profile_fxp6": {
+            "warmth": 700_000,
+            "sensitivity": 200_000,
+            "guardedness": 100_000,
+            "repair_orientation": 300_000,
+            "engagement": 600_000,
+            "epistemic_caution": 400_000,
+        },
+    }
+
+
 def _proposal(
     *,
     scope: ScopeTokens | None = None,
@@ -162,8 +179,7 @@ def _proposal(
         "dimensions": dimensions,
         "estimator_confidence": 1,
         "protocol_version": 1,
-        "request_nonce_digest": nonce
-        or make_request_nonce_digest(scope, turn),
+        "request_nonce_digest": nonce or make_request_nonce_digest(scope, turn),
     }
 
 
@@ -180,9 +196,7 @@ class FakeNative:
 
     def apply_perception_proposal_v1(self, scope_json: str, proposal_json: str) -> str:
         self.apply_calls.append((scope_json, proposal_json))
-        return json.dumps(
-            _valid_result()
-        )
+        return json.dumps(_valid_result())
 
 
 def test_bridge_serializes_closed_scope_and_proposal_and_exposes_allowlist() -> None:
@@ -214,6 +228,80 @@ def test_bridge_serializes_closed_scope_and_proposal_and_exposes_allowlist() -> 
     assert json.loads(sent_scope) == _scope().scope_json()
     assert json.loads(sent_proposal) == proposal
     assert "RAW_SENTINEL" not in sent_proposal
+
+
+def test_bridge_rebuilds_a_confirmed_closed_expression_projection() -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(
+                _valid_result()
+                | {"expression_projection": _valid_expression_projection()}
+            )
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == _valid_result() | {
+        "expression_projection": _valid_expression_projection(),
+    }
+    assert list(result["expression_projection"]["profile_fxp6"]) == [
+        "warmth",
+        "sensitivity",
+        "guardedness",
+        "repair_orientation",
+        "engagement",
+        "epistemic_caution",
+    ]
+
+
+@pytest.mark.parametrize(
+    "projection",
+    [
+        _valid_expression_projection(revision=2),
+        _valid_expression_projection()
+        | {
+            "profile_fxp6": _valid_expression_projection()["profile_fxp6"]
+            | {"warmth": True}
+        },
+        _valid_expression_projection() | {"profile_fxp6": {"warmth": 1}},
+        _valid_expression_projection() | {"unexpected": "RAW_SENTINEL"},
+    ],
+)
+def test_bridge_marks_malformed_expression_as_rejected(projection: dict) -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(_valid_result() | {"expression_projection": projection})
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == _valid_result() | {
+        "expression_projection": None,
+    }
+    assert "RAW_SENTINEL" not in json.dumps(result)
+
+
+def test_bridge_marks_missing_expression_as_unavailable() -> None:
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(_valid_result())
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == _valid_result()
 
 
 def test_missing_native_semantic_symbols_are_fixed_degraded() -> None:
@@ -310,7 +398,9 @@ def test_coordinator_preflight_calls_estimator_once_and_keeps_native_order() -> 
             self.calls.append(("revision", scope_json))
             return {"schema": "astrembodiment.semantic-revision.v1", "revision": 3}
 
-        def apply_perception_proposal_v1(self, scope_json: dict, proposal_json: str) -> dict:
+        def apply_perception_proposal_v1(
+            self, scope_json: dict, proposal_json: str
+        ) -> dict:
             self.calls.append(("apply", scope_json, json.loads(proposal_json)))
             return _valid_result(base_revision=3, next_revision=4)
 
@@ -480,7 +570,11 @@ def test_bridge_rejects_nonce_replayed_across_any_frozen_turn_fact(
     original = _turn()
     result = bridge.apply_perception_proposal_v1(
         _scope().scope_json(),
-        json.dumps(_proposal(turn=mutated_turn, nonce=make_request_nonce_digest(_scope(), original))),
+        json.dumps(
+            _proposal(
+                turn=mutated_turn, nonce=make_request_nonce_digest(_scope(), original)
+            )
+        ),
     )
 
     assert result == {"status": "DEGRADED", "code": "INVALID_PERCEPTION_PROPOSAL"}
@@ -508,7 +602,9 @@ def test_bridge_rejects_nonce_replayed_under_a_different_scope() -> None:
     assert result == {"status": "DEGRADED", "code": "INVALID_PERCEPTION_PROPOSAL"}
 
 
-def test_bridge_rejects_arbitrary_nonce_even_when_native_returns_valid_receipt() -> None:
+def test_bridge_rejects_arbitrary_nonce_even_when_native_returns_valid_receipt() -> (
+    None
+):
     class Native:
         def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
             return json.dumps(_valid_result())
@@ -542,11 +638,36 @@ def test_bridge_zero_load_returns_fixed_noop_without_invoking_native() -> None:
 @pytest.mark.parametrize(
     "result",
     [
-        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": {}, "revision": 1, "deduplicated": False},
-        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt(next_revision=1) | {"status": "stale"}, "revision": 1, "deduplicated": False},
-        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt(next_revision=2), "revision": 1, "deduplicated": False},
-        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt(state_before="01" * 32, state_after="01" * 32), "revision": 1, "deduplicated": False},
-        {"schema": "astrembodiment.semantic-perception-closure.v1", "receipt": _valid_receipt() | {"action_contract": None}, "revision": 1, "deduplicated": False},
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": {},
+            "revision": 1,
+            "deduplicated": False,
+        },
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": _valid_receipt(next_revision=1) | {"status": "stale"},
+            "revision": 1,
+            "deduplicated": False,
+        },
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": _valid_receipt(next_revision=2),
+            "revision": 1,
+            "deduplicated": False,
+        },
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": _valid_receipt(state_before="01" * 32, state_after="01" * 32),
+            "revision": 1,
+            "deduplicated": False,
+        },
+        {
+            "schema": "astrembodiment.semantic-perception-closure.v1",
+            "receipt": _valid_receipt() | {"action_contract": None},
+            "revision": 1,
+            "deduplicated": False,
+        },
     ],
 )
 def test_bridge_rejects_weak_or_non_closed_native_receipts(result: dict) -> None:
@@ -586,9 +707,7 @@ def test_bridge_rejects_weak_or_non_closed_native_receipts(result: dict) -> None
         },
         {
             "schema": "astrembodiment.semantic-perception-closure.v1",
-            "receipt": _valid_receipt(
-                state_before="01" * 32, state_after="01" * 32
-            ),
+            "receipt": _valid_receipt(state_before="01" * 32, state_after="01" * 32),
             "revision": 1,
             "deduplicated": False,
         },
@@ -706,7 +825,9 @@ def test_coordinator_key_includes_frozen_base_and_observed_time() -> None:
         def semantic_revision_v1(self, _scope: dict) -> dict:
             return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
 
-        def apply_perception_proposal_v1(self, _scope: dict, proposal_json: str) -> dict:
+        def apply_perception_proposal_v1(
+            self, _scope: dict, proposal_json: str
+        ) -> dict:
             self.proposals.append(json.loads(proposal_json))
             return _valid_result()
 

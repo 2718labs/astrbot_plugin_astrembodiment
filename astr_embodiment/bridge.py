@@ -117,9 +117,28 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
 
 _SEMANTIC_CURSOR_SCHEMA = "astrembodiment.semantic-revision.v1"
 _SEMANTIC_RESULT_SCHEMA = "astrembodiment.semantic-perception-closure.v1"
-_SEMANTIC_RESULT_FIELDS = frozenset(
-    {"schema", "receipt", "revision", "deduplicated"}
+_SEMANTIC_RESULT_FIELDS = frozenset({"schema", "receipt", "revision", "deduplicated"})
+_SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS = frozenset(
+    {
+        "schema",
+        "receipt",
+        "revision",
+        "deduplicated",
+        "expression_projection",
+    }
 )
+_EXPRESSION_PROJECTION_SCHEMA = "astr-embodiment.expression-projection.v1"
+_EXPRESSION_PROJECTION_FIELDS = frozenset({"schema", "revision", "profile_fxp6"})
+_EXPRESSION_PROFILE_FIELD_ORDER = (
+    "warmth",
+    "sensitivity",
+    "guardedness",
+    "repair_orientation",
+    "engagement",
+    "epistemic_caution",
+)
+_EXPRESSION_PROFILE_FIELDS = frozenset(_EXPRESSION_PROFILE_FIELD_ORDER)
+_EXPRESSION_FXP6_MAX = 1_000_000
 SEMANTIC_RECEIPT_FIELDS = frozenset(
     {
         "schema_version",
@@ -325,15 +344,52 @@ def _validate_cursor_payload(value: Any) -> dict[str, Any]:
     return {"schema": _SEMANTIC_CURSOR_SCHEMA, "revision": revision}
 
 
+def _validate_expression_projection(
+    value: Any, *, expected_revision: int
+) -> dict[str, Any]:
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        raise ValueError("expression projection")
+    if set(value) != _EXPRESSION_PROJECTION_FIELDS:
+        raise ValueError("expression projection fields")
+    if value["schema"] != _EXPRESSION_PROJECTION_SCHEMA:
+        raise ValueError("expression projection schema")
+    revision = value["revision"]
+    if type(revision) is not int or revision != expected_revision:
+        raise ValueError("expression projection revision")
+    profile = value["profile_fxp6"]
+    if type(profile) is not dict or any(type(key) is not str for key in profile):
+        raise ValueError("expression profile")
+    if set(profile) != _EXPRESSION_PROFILE_FIELDS:
+        raise ValueError("expression profile fields")
+    canonical_profile: dict[str, int] = {}
+    for name in _EXPRESSION_PROFILE_FIELD_ORDER:
+        item = profile[name]
+        if type(item) is not int or not 0 <= item <= _EXPRESSION_FXP6_MAX:
+            raise ValueError("expression profile value")
+        canonical_profile[name] = item
+    return {
+        "schema": _EXPRESSION_PROJECTION_SCHEMA,
+        "revision": revision,
+        "profile_fxp6": canonical_profile,
+    }
+
+
 def _validate_semantic_result(
     value: Any,
     *,
     expected_base_revision: int | None = None,
 ) -> dict[str, Any]:
     payload = _native_json(value)
-    if set(payload) != _SEMANTIC_RESULT_FIELDS:
+    payload_fields = set(payload)
+    if (
+        payload_fields != _SEMANTIC_RESULT_FIELDS
+        and payload_fields != _SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS
+    ):
         raise ValueError("semantic payload")
-    if type(payload.get("schema")) is not str or payload.get("schema") != _SEMANTIC_RESULT_SCHEMA:
+    if (
+        type(payload.get("schema")) is not str
+        or payload.get("schema") != _SEMANTIC_RESULT_SCHEMA
+    ):
         raise ValueError("semantic schema")
     revision = payload.get("revision")
     if type(revision) is not int or revision < 0:
@@ -421,12 +477,20 @@ def _validate_semantic_result(
     }
     # Rebuild every accepted field into fresh plain dictionaries so an
     # extension cannot smuggle extra fields or a mutable reference onward.
-    return {
+    canonical_result = {
         "schema": _SEMANTIC_RESULT_SCHEMA,
         "receipt": canonical_receipt,
         "revision": revision,
         "deduplicated": deduplicated,
     }
+    if "expression_projection" in payload:
+        try:
+            canonical_result["expression_projection"] = _validate_expression_projection(
+                payload["expression_projection"], expected_revision=revision
+            )
+        except (TypeError, ValueError):
+            canonical_result["expression_projection"] = None
+    return canonical_result
 
 
 def validate_semantic_result(
