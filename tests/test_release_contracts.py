@@ -61,6 +61,8 @@ def test_release_version_metadata_and_required_files_are_present() -> None:
     assert pyproject["project"]["version"] == "1.0.0rc2"
     assert cargo["workspace"]["package"]["version"] == "1.0.0-rc2"
     assert "## [1.0.0-rc2] - 2026-08-23" in changelog
+    assert "## [1.0.1]" not in changelog
+    assert "## [1.0.2]" not in changelog
 
     workspace_packages = {
         tomllib.loads((ROOT / member / "Cargo.toml").read_text(encoding="utf-8"))[
