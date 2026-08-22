@@ -905,11 +905,13 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
 
         def exec_module(self, native):
             native.apply_event = lambda *_args: "{}"
+            native.apply_perception_proposal_v1 = lambda *_args: "{}"
             native.ensure_genesis = lambda *_args: "{}"
             native.flush_and_close = lambda: None
             native.health = lambda: "{}"
             native.inspect = lambda *_args: "{}"
             native.open = lambda *_args: None
+            native.semantic_revision_v1 = lambda *_args: "{}"
             native.verify_replay = lambda *_args: "{}"
             native.version = lambda: "compat"
 
@@ -995,8 +997,10 @@ def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-        assert module.version() == "1.0.0"
+        assert module.version() == "1.0.0-rc1"
         assert callable(module.apply_event)
+        assert callable(module.apply_perception_proposal_v1)
+        assert callable(module.semantic_revision_v1)
         assert Path(sys.modules[f"{module_name}._native"].__file__).parts[-3:] == (
             "_bundled",
             build_id,
@@ -1052,7 +1056,9 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
             module.open = lambda _data_dir: None
             module.ensure_genesis = lambda *_args: "{}"
             module.apply_event = lambda *_args: "{}"
+            module.apply_perception_proposal_v1 = lambda *_args: "{}"
             module.inspect = lambda *_args: "{}"
+            module.semantic_revision_v1 = lambda *_args: "{}"
             module.verify_replay = lambda *_args: "{}"
             module.flush_and_close = lambda: None
             module.NativeCoreError = RuntimeError
