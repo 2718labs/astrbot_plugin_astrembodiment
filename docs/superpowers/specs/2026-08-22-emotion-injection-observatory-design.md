@@ -156,11 +156,14 @@ other semantic dimensions are zero.
 ### DEGRADED
 
 The fixed stages are `INPUT`, `ESTIMATOR`, `CURSOR`, `PROPOSAL`, `NATIVE_APPLY`,
-and `RECEIPT`.
+`RECEIPT`, and `INTERNAL`.
 
 - Failures before native apply use `commit_state="NOT_ATTEMPTED"`.
 - Native apply or receipt failures use `commit_state="UNKNOWN"`, because native
   persistence may have occurred before Python received a valid receipt.
+- Shared-task, cache, or projection failures whose original stage cannot be
+  recovered use `stage="INTERNAL"` and `commit_state="UNKNOWN"`; they must not
+  be mislabeled as an estimator or native failure.
 - If a valid estimate already exists, use
   `values_state="ESTIMATED_NOT_CONFIRMED"` and include all 15 values plus
   confidence.
