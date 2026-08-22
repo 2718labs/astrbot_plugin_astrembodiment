@@ -87,7 +87,9 @@ def test_product_readme_and_metadata_match_rc1_contract() -> None:
     assert "SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录" in readme
     assert "positive`、`harm`、`boundary` 和 `epistemic_conflict`" in readme
     assert "受控回应策略和外显人格漂移仍是后续能力" in readme
-    assert "不记录用户消息、Provider 输出、token、nonce、SeedCode 或状态摘要" in readme
+    assert "calculation_state=CONFIRMED" in readme
+    assert "state_changed`、`active_nodes`、`active_edges`" in readme
+    assert "不记录用户消息、Provider 输出、token、nonce、SeedCode、状态 digest 或原始神经节点" in readme
 
     assert (
         "desc: 让你的 Bot 不只记住经历，更能延续“Ta是谁”。AstrEmbodiment 以 Rust 原生运行时承载人格连续性，将用户话语转化为 15 维闭合语义证据并提交原生状态，为受控回应与人格演化提供试验性基础。"
