@@ -1805,6 +1805,50 @@ def test_spc1_observatory_invalid_outcome_semantics_use_fixed_fallback(
     }
 
 
+@pytest.mark.parametrize("code", ["INVALID_TURN", "NATIVE_ERROR"])
+def test_spc1_observatory_local_degraded_preserves_closed_code(
+    monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+
+    instance._emit_semantic_observatory(
+        None, {"status": "DEGRADED", "code": code}
+    )
+
+    assert recorder.info_messages == []
+    assert len(recorder.warning_messages) == 1
+    assert json.loads(recorder.warning_messages[0].split(": ", 1)[1]) == {
+        "schema": "astr-embodiment.observatory.semantic-injection.v1",
+        "status": "DEGRADED",
+        "code": code,
+        "stage": "INTERNAL",
+        "commit_state": "UNKNOWN",
+        "values_state": "UNAVAILABLE",
+        "fxp_scale": 1_000_000,
+        "dimensions_fxp6": None,
+        "estimator_confidence_fxp6": None,
+        "base_revision": None,
+        "revision": None,
+        "deduplicated": None,
+        "receipt_status": None,
+    }
+
+
+def test_spc1_observatory_empty_raw_mapping_still_uses_fixed_fallback() -> None:
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+
+    record = instance._semantic_observatory_record(
+        {}, {"status": "DEGRADED", "code": "INVALID_TURN"}
+    )
+
+    assert record["status"] == "DEGRADED"
+    assert record["code"] == "NATIVE_MALFORMED"
+    assert record["stage"] == "INTERNAL"
+    assert record["dimensions_fxp6"] is None
+
+
 @pytest.mark.parametrize("configured", [False, "true", 1, None])
 def test_spc1_observatory_disabled_or_malformed_config_emits_nothing(
     monkeypatch: pytest.MonkeyPatch, configured: object

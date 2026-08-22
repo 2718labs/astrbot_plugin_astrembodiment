@@ -619,6 +619,16 @@ class AstrEmbodimentPlugin(Star):
         cls, raw_outcome: Any, closed_outcome: dict[str, str]
     ) -> dict[str, Any]:
         try:
+            if raw_outcome is None:
+                if (
+                    type(closed_outcome) is not dict
+                    or cls._closed_semantic_outcome(closed_outcome) != closed_outcome
+                    or closed_outcome.get("status") != "DEGRADED"
+                ):
+                    raise ValueError
+                record = cls._fallback_semantic_observatory_record()
+                record["code"] = closed_outcome["code"]
+                return record
             if type(raw_outcome) is not dict or type(closed_outcome) is not dict:
                 raise TypeError
             diagnostic = raw_outcome.get("diagnostic")
