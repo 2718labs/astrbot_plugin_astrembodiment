@@ -21,6 +21,7 @@ import astr_embodiment.bridge as bridge_module  # noqa: E402
 from astr_embodiment.contracts import FrozenTurn, ScopeTokens  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
 from astr_embodiment.tokens import event_id, turn_id  # noqa: E402
+import main as main_module  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
 
 
@@ -1190,6 +1191,202 @@ def _spc1_genesis_result(scope: ScopeTokens, *, seq: int = 0) -> tuple:
     )
 
 
+class RecordingLogger:
+    def __init__(self) -> None:
+        self.info_messages: list[str] = []
+        self.warning_messages: list[str] = []
+
+    def info(self, template: str, *args: object) -> None:
+        self.info_messages.append(template % args)
+
+    def warning(self, template: str, *args: object) -> None:
+        self.warning_messages.append(template % args)
+
+
+class RaisingLogger:
+    def info(self, _template: str, *_args: object) -> None:
+        raise RuntimeError("LOGGER_RAW_SENTINEL")
+
+    def warning(self, _template: str, *_args: object) -> None:
+        raise RuntimeError("LOGGER_RAW_SENTINEL")
+
+
+def _spc1_dimensions() -> dict[str, int]:
+    names = (
+        "positive",
+        "affiliation",
+        "harm",
+        "boundary",
+        "repair",
+        "repetition",
+        "new_information",
+        "constraint_instability",
+        "epistemic_conflict",
+        "self_responsibility",
+        "other_responsibility",
+        "hostility",
+        "publicness",
+        "engagement",
+        "rejection",
+    )
+    return {name: index * 10_000 for index, name in enumerate(names, start=1)}
+
+
+def _spc1_success_outcome() -> dict:
+    return {
+        "status": "SUCCESS",
+        "code": "SEMANTIC_COMMITTED",
+        "diagnostic": {
+            "stage": "RECEIPT",
+            "commit_state": "CONFIRMED_NEW",
+            "values_state": "COMMITTED",
+            "dimensions_fxp6": _spc1_dimensions(),
+            "estimator_confidence_fxp6": 900_000,
+            "base_revision": 7,
+            "revision": 8,
+            "deduplicated": False,
+            "receipt_status": "committed",
+        },
+    }
+
+
+def test_spc1_observatory_success_emits_all_dimensions_at_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+
+    instance._emit_semantic_observatory(
+        _spc1_success_outcome(),
+        {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+    )
+
+    assert recorder.warning_messages == []
+    assert len(recorder.info_messages) == 1
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert recorder.info_messages[0].startswith(prefix)
+    record = json.loads(recorder.info_messages[0][len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v1"
+    assert record["status"] == "SUCCESS"
+    assert record["code"] == "SEMANTIC_COMMITTED"
+    assert record["fxp_scale"] == 1_000_000
+    assert record["dimensions_fxp6"] == _spc1_dimensions()
+    assert len(record["dimensions_fxp6"]) == 15
+    assert record["estimator_confidence_fxp6"] == 900_000
+    assert record["revision"] == 8
+
+
+def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+    raw = {
+        "status": "DEGRADED",
+        "code": "NATIVE_ERROR",
+        "diagnostic": {
+            "stage": "NATIVE_APPLY",
+            "commit_state": "UNKNOWN",
+            "values_state": "ESTIMATED_NOT_CONFIRMED",
+            "dimensions_fxp6": _spc1_dimensions(),
+            "estimator_confidence_fxp6": 900_000,
+            "base_revision": 7,
+            "revision": None,
+            "deduplicated": None,
+            "receipt_status": None,
+        },
+        "request": "USER_RAW_SENTINEL",
+        "exception": "EXCEPTION_RAW_SENTINEL",
+        "scope_digest": "DIGEST_RAW_SENTINEL",
+    }
+
+    instance._emit_semantic_observatory(
+        raw, {"status": "DEGRADED", "code": "NATIVE_ERROR"}
+    )
+
+    assert recorder.info_messages == []
+    assert len(recorder.warning_messages) == 1
+    encoded = recorder.warning_messages[0]
+    assert "USER_RAW_SENTINEL" not in encoded
+    assert "EXCEPTION_RAW_SENTINEL" not in encoded
+    assert "DIGEST_RAW_SENTINEL" not in encoded
+    record = json.loads(encoded.split(": ", 1)[1])
+    assert record["status"] == "DEGRADED"
+    assert record["stage"] == "NATIVE_APPLY"
+    assert record["commit_state"] == "UNKNOWN"
+    assert record["dimensions_fxp6"] == _spc1_dimensions()
+
+
+@pytest.mark.parametrize("configured", [False, "true", 1, None])
+def test_spc1_observatory_disabled_or_malformed_config_emits_nothing(
+    monkeypatch: pytest.MonkeyPatch, configured: object
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(FakeConfig(observatory_enabled=configured), FakeContext())
+
+    instance._emit_semantic_observatory(
+        _spc1_success_outcome(),
+        {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+    )
+
+    assert recorder.info_messages == []
+    assert recorder.warning_messages == []
+
+
+def test_spc1_observatory_malformed_diagnostic_falls_back_without_raw_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+
+    instance._emit_semantic_observatory(
+        {
+            "diagnostic": {
+                "stage": "INTERNAL_RAW_SENTINEL",
+                "dimensions_fxp6": {"raw": "DIMENSION_RAW_SENTINEL"},
+            }
+        },
+        {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+    )
+
+    assert recorder.info_messages == []
+    assert len(recorder.warning_messages) == 1
+    encoded = recorder.warning_messages[0]
+    assert "INTERNAL_RAW_SENTINEL" not in encoded
+    assert "DIMENSION_RAW_SENTINEL" not in encoded
+    assert json.loads(encoded.split(": ", 1)[1]) == {
+        "schema": "astr-embodiment.observatory.semantic-injection.v1",
+        "status": "DEGRADED",
+        "code": "NATIVE_MALFORMED",
+        "stage": "INTERNAL",
+        "commit_state": "UNKNOWN",
+        "values_state": "UNAVAILABLE",
+        "fxp_scale": 1_000_000,
+        "dimensions_fxp6": None,
+        "estimator_confidence_fxp6": None,
+        "base_revision": None,
+        "revision": None,
+        "deduplicated": None,
+        "receipt_status": None,
+    }
+
+
+def test_spc1_observatory_logger_failure_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "logger", RaisingLogger())
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+
+    instance._emit_semantic_observatory(
+        _spc1_success_outcome(),
+        {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+    )
+
+
 def test_spc1_hook_runs_after_g0_injection_and_passes_only_current_prompt():
     async def run():
         instance = plugin(FakeConfig(), FakeContext())
@@ -1273,9 +1470,14 @@ def test_spc1_estimator_boundary_uses_one_prompt_argument_and_keeps_g0_contract(
     }
 
 
-def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker():
+def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+
     async def run():
-        instance = plugin(FakeConfig(), FakeContext())
+        instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
         scope = _spc1_scope()
         async def run_genesis(*_args, **_kwargs):
             return _spc1_genesis_result(scope)
@@ -1285,7 +1487,7 @@ def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker():
 
         async def preflight(_scope, _turn, request_text, _estimator):
             calls.append(request_text)
-            return {"status": "DEGRADED", "code": "NATIVE_SYMBOL_UNAVAILABLE"}
+            return _spc1_success_outcome()
 
         instance._coordinator.preflight_stimulus = preflight
         event = FakeEvent()
@@ -1299,11 +1501,13 @@ def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker():
 
     assert calls == ["用户原始问题"]
     assert getattr(request, "_astrembodiment_semantic_preflight_v1") == {
-        "status": "DEGRADED",
-        "code": "NATIVE_SYMBOL_UNAVAILABLE",
+        "status": "SUCCESS",
+        "code": "SEMANTIC_COMMITTED",
     }
     assert "CHANGED_RAW_SENTINEL" not in json.dumps(
         getattr(request, "_astrembodiment_semantic_preflight_v1")
     )
     assert event.stopped is False
     assert len(instance._pending) == 1
+    assert len(recorder.info_messages) == 1
+    assert recorder.warning_messages == []

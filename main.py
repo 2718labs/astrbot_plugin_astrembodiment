@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -68,6 +69,7 @@ try:
         PersonaSourceSnapshot,
         compile_with_provider,
     )
+    from .astr_embodiment.semantic_estimator import DIMENSION_NAMES, FXP6_SCALE
     from .astr_embodiment.tokens import (
         bot_token,
         event_id,
@@ -89,6 +91,7 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
         PersonaSourceSnapshot,
         compile_with_provider,
     )
+    from astr_embodiment.semantic_estimator import DIMENSION_NAMES, FXP6_SCALE
     from astr_embodiment.tokens import (
         bot_token,
         event_id,
@@ -131,6 +134,40 @@ _SPC1_OUTCOME_CODES = {
     "STALE_REVISION",
     "STORAGE",
     "ZERO_LOAD",
+}
+_SPC1_OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
+_SPC1_OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v1"
+_SPC1_DIAGNOSTIC_FIELDS = {
+    "stage",
+    "commit_state",
+    "values_state",
+    "dimensions_fxp6",
+    "estimator_confidence_fxp6",
+    "base_revision",
+    "revision",
+    "deduplicated",
+    "receipt_status",
+}
+_SPC1_STAGES = {
+    "INPUT",
+    "ESTIMATOR",
+    "CURSOR",
+    "PROPOSAL",
+    "NATIVE_APPLY",
+    "RECEIPT",
+    "INTERNAL",
+}
+_SPC1_COMMIT_STATES = {
+    "NOT_ATTEMPTED",
+    "UNKNOWN",
+    "CONFIRMED_NEW",
+    "CONFIRMED_EXISTING",
+}
+_SPC1_VALUES_STATES = {
+    "UNAVAILABLE",
+    "ESTIMATED_NOT_COMMITTED",
+    "ESTIMATED_NOT_CONFIRMED",
+    "COMMITTED",
 }
 
 
@@ -452,6 +489,128 @@ class AstrEmbodimentPlugin(Star):
             return {"status": status, "code": code}
         except BaseException:
             return {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+
+    def _observatory_enabled(self) -> bool:
+        value = self._config_values.get("observatory_enabled", True)
+        return type(value) is bool and value
+
+    @staticmethod
+    def _fallback_semantic_observatory_record() -> dict[str, Any]:
+        return {
+            "schema": _SPC1_OBSERVATORY_SCHEMA,
+            "status": "DEGRADED",
+            "code": "NATIVE_MALFORMED",
+            "stage": "INTERNAL",
+            "commit_state": "UNKNOWN",
+            "values_state": "UNAVAILABLE",
+            "fxp_scale": FXP6_SCALE,
+            "dimensions_fxp6": None,
+            "estimator_confidence_fxp6": None,
+            "base_revision": None,
+            "revision": None,
+            "deduplicated": None,
+            "receipt_status": None,
+        }
+
+    @classmethod
+    def _semantic_observatory_record(
+        cls, raw_outcome: Any, closed_outcome: dict[str, str]
+    ) -> dict[str, Any]:
+        try:
+            if type(raw_outcome) is not dict or type(closed_outcome) is not dict:
+                raise TypeError
+            diagnostic = raw_outcome.get("diagnostic")
+            if (
+                type(diagnostic) is not dict
+                or set(diagnostic) != _SPC1_DIAGNOSTIC_FIELDS
+            ):
+                raise ValueError
+            stage = diagnostic.get("stage")
+            commit_state = diagnostic.get("commit_state")
+            values_state = diagnostic.get("values_state")
+            if type(stage) is not str or stage not in _SPC1_STAGES:
+                raise ValueError
+            if type(commit_state) is not str or commit_state not in _SPC1_COMMIT_STATES:
+                raise ValueError
+            if type(values_state) is not str or values_state not in _SPC1_VALUES_STATES:
+                raise ValueError
+
+            dimensions = diagnostic.get("dimensions_fxp6")
+            confidence = diagnostic.get("estimator_confidence_fxp6")
+            if values_state == "UNAVAILABLE":
+                if dimensions is not None or confidence is not None:
+                    raise ValueError
+                closed_dimensions = None
+            else:
+                if type(dimensions) is not dict or set(dimensions) != set(
+                    DIMENSION_NAMES
+                ):
+                    raise ValueError
+                closed_dimensions = {}
+                for name in DIMENSION_NAMES:
+                    value = dimensions.get(name)
+                    if type(value) is not int or not 0 <= value <= FXP6_SCALE:
+                        raise ValueError
+                    closed_dimensions[name] = value
+                if type(confidence) is not int or not 1 <= confidence <= FXP6_SCALE:
+                    raise ValueError
+
+            base_revision = diagnostic.get("base_revision")
+            revision = diagnostic.get("revision")
+            deduplicated = diagnostic.get("deduplicated")
+            receipt_status = diagnostic.get("receipt_status")
+            if base_revision is not None and (
+                type(base_revision) is not int or base_revision < 0
+            ):
+                raise ValueError
+            if revision is not None and (type(revision) is not int or revision < 0):
+                raise ValueError
+            if deduplicated is not None and type(deduplicated) is not bool:
+                raise ValueError
+            if receipt_status not in {None, "committed"}:
+                raise ValueError
+
+            status = closed_outcome.get("status")
+            code = closed_outcome.get("code")
+            if type(status) is not str or type(code) is not str:
+                raise ValueError
+            return {
+                "schema": _SPC1_OBSERVATORY_SCHEMA,
+                "status": status,
+                "code": code,
+                "stage": stage,
+                "commit_state": commit_state,
+                "values_state": values_state,
+                "fxp_scale": FXP6_SCALE,
+                "dimensions_fxp6": closed_dimensions,
+                "estimator_confidence_fxp6": confidence,
+                "base_revision": base_revision,
+                "revision": revision,
+                "deduplicated": deduplicated,
+                "receipt_status": receipt_status,
+            }
+        except BaseException:
+            return cls._fallback_semantic_observatory_record()
+
+    def _emit_semantic_observatory(
+        self, raw_outcome: Any, closed_outcome: dict[str, str]
+    ) -> None:
+        try:
+            if not self._observatory_enabled():
+                return
+            record = self._semantic_observatory_record(raw_outcome, closed_outcome)
+            encoded = json.dumps(
+                record,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            if record["status"] == "DEGRADED":
+                logger.warning("%s%s", _SPC1_OBSERVATORY_PREFIX, encoded)
+            else:
+                logger.info("%s%s", _SPC1_OBSERVATORY_PREFIX, encoded)
+        except BaseException:
+            return
 
     async def _spc1_estimate(self, event: Any, request_text: str) -> Any:
         """Run the bounded semantic provider call with the current text only."""
@@ -801,6 +960,7 @@ class AstrEmbodimentPlugin(Star):
             # SPC1 is request-local and additive.  G0 is fully accepted and
             # injected before this await, so any semantic downgrade leaves the
             # ordinary host request and pending G0 turn intact.
+            raw_outcome: Any = None
             try:
                 provisional_revision = (
                     base_revision
@@ -838,6 +998,7 @@ class AstrEmbodimentPlugin(Star):
                         # Semantic failures are fixed-code diagnostics only;
                         # they must never stop a valid G0 turn or echo details.
                         outcome = {"status": "DEGRADED", "code": "NATIVE_ERROR"}
+            self._emit_semantic_observatory(raw_outcome, outcome)
             try:
                 setattr(request, self._request_semantic_attr, outcome)
             except BaseException:
