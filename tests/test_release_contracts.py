@@ -259,6 +259,28 @@ def test_release_automation_is_pinned_and_tag_gated() -> None:
         assert FRESH_NATIVE_WHEEL_DIR_ENV in workflow
 
 
+def test_rust_quality_pins_cpython_before_pyo3_builds() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    rust_quality = ci.split("  rust-quality:\n", 1)[1].split(
+        "\n  release-contract:", 1
+    )[0]
+    setup_python = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+
+    assert setup_python in rust_quality
+    assert 'python-version: "3.12"' in rust_quality
+    assert rust_quality.index(setup_python) < rust_quality.index("cargo fmt --all")
+
+
+def test_pyo3_extension_linking_is_owned_by_maturin() -> None:
+    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert cargo["workspace"]["dependencies"]["pyo3"]["features"] == ["abi3-py312"]
+    assert pyproject["build-system"]["build-backend"] == "maturin"
+    assert "maturin>=1.14.1,<2.0" in pyproject["build-system"]["requires"]
+    assert pyproject["tool"]["maturin"]["bindings"] == "pyo3"
+
+
 def test_wheel_initializer_is_separate_from_plugin_bundle_loader() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     wheel_initializer = ROOT / "python-wheel" / "astrembodiment_core" / "__init__.py"
