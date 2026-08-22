@@ -661,6 +661,69 @@ def test_zero_load_is_fixed_noop_and_never_calls_native_or_provider() -> None:
     assert calls == ["request"]
 
 
+def test_preflight_fails_closed_when_any_dimension_is_unavailable() -> None:
+    class TrapBridge:
+        def __init__(self) -> None:
+            self.cursor_calls = 0
+            self.apply_calls = 0
+
+        def semantic_revision_v1(self, _scope: dict) -> dict:
+            self.cursor_calls += 1
+            raise AssertionError("unavailable vector must stop before native cursor")
+
+        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            self.apply_calls += 1
+            raise AssertionError("unavailable vector must not apply native")
+
+    async def run() -> tuple[dict, TrapBridge]:
+        bridge = TrapBridge()
+        coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
+
+        async def estimator(_request_text: str) -> dict:
+            dimensions = {
+                name: {"state": "AVAILABLE", "value_fxp6": 0}
+                for name in DIMENSION_NAMES
+            }
+            dimensions["affiliation"] = {
+                "state": "UNAVAILABLE",
+                "value_fxp6": None,
+            }
+            return {
+                "schema": "astr-embodiment.semantic-estimate.v2",
+                "dimensions": dimensions,
+                "estimator_confidence": 800_000,
+            }
+
+        result = await coordinator.preflight_stimulus(
+            _scope(), _turn(), "request", estimator
+        )
+        return result, bridge
+
+    result, bridge = asyncio.run(run())
+
+    assert result == _outcome(
+        "DEGRADED",
+        "SEMANTIC_VECTOR_UNAVAILABLE",
+        _diagnostic(
+            stage="ESTIMATOR",
+            commit_state="NOT_ATTEMPTED",
+            values_state="UNAVAILABLE",
+            estimator_confidence=800_000,
+        )
+        | {
+            "dimension_summary": {
+                "evaluated_dimension_count": 14,
+                "injected_dimension_count": 0,
+                "nonzero_evidence_dimension_count": 0,
+                "neutral_baseline_dimension_count": 14,
+                "unavailable_dimension_count": 1,
+            }
+        },
+    )
+    assert bridge.cursor_calls == 0
+    assert bridge.apply_calls == 0
+
+
 def test_malformed_provider_result_is_degraded_and_does_not_call_native() -> None:
     class TrapBridge:
         def semantic_revision_v1(self, _scope: dict) -> dict:

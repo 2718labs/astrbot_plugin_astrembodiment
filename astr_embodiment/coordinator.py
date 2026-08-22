@@ -268,14 +268,62 @@ class GenesisCoordinator:
                 or type(confidence) is not int
                 or not 1 <= confidence <= 1_000_000
                 or any(
-                    type(value) is not int or not 0 <= value <= 1_000_000
+                    value is not None
+                    and (type(value) is not int or not 0 <= value <= 1_000_000)
                     for value in dimensions.values()
                 )
             ):
                 raise ValueError("closed estimate")
         except BaseException:
             return None, None
-        return dimensions, confidence
+        if any(value is None for value in dimensions.values()):
+            return None, confidence
+        return {name: dimensions[name] for name in DIMENSION_NAMES}, confidence
+
+    @staticmethod
+    def _preflight_dimension_summary(
+        estimate: SemanticEstimate | None,
+        *,
+        injected_dimension_count: int,
+    ) -> dict[str, int] | None:
+        """Return only closed slot counts; unavailable values are never filled."""
+
+        if type(estimate) is not SemanticEstimate:
+            return None
+        if type(injected_dimension_count) is not int or injected_dimension_count not in {
+            0,
+            len(DIMENSION_NAMES),
+        }:
+            return None
+        try:
+            if set(estimate.dimensions) != set(DIMENSION_NAMES):
+                raise ValueError("closed dimensions")
+            values = [estimate.dimensions[name] for name in DIMENSION_NAMES]
+            if any(
+                value is not None
+                and (type(value) is not int or not 0 <= value <= 1_000_000)
+                for value in values
+            ):
+                raise ValueError("closed dimensions")
+            evaluated = sum(value is not None for value in values)
+            nonzero = sum(value not in {None, 0} for value in values)
+            neutral = sum(value == 0 for value in values)
+            unavailable = len(DIMENSION_NAMES) - evaluated
+            if evaluated + unavailable != len(DIMENSION_NAMES):
+                raise ValueError("dimension count")
+            if nonzero + neutral != evaluated:
+                raise ValueError("dimension count")
+            if injected_dimension_count and unavailable:
+                raise ValueError("partial injection")
+        except BaseException:
+            return None
+        return {
+            "evaluated_dimension_count": evaluated,
+            "injected_dimension_count": injected_dimension_count,
+            "nonzero_evidence_dimension_count": nonzero,
+            "neutral_baseline_dimension_count": neutral,
+            "unavailable_dimension_count": unavailable,
+        }
 
     @staticmethod
     def _preflight_calculation(receipt: Any) -> dict[str, Any] | None:
@@ -367,17 +415,21 @@ class GenesisCoordinator:
         commit_state: str = "UNKNOWN",
         estimate: SemanticEstimate | None = None,
         base_revision: int | None = None,
+        dimension_summary: dict[str, int] | None = None,
     ) -> dict[str, Any]:
+        diagnostic = cls._preflight_diagnostic(
+            stage=stage,
+            commit_state=commit_state,
+            values_state="ESTIMATED_NOT_CONFIRMED",
+            estimate=estimate,
+            base_revision=base_revision,
+        )
+        if dimension_summary is not None:
+            diagnostic["dimension_summary"] = dict(dimension_summary)
         return {
             "status": SEMANTIC_DEGRADED,
             "code": code,
-            "diagnostic": cls._preflight_diagnostic(
-                stage=stage,
-                commit_state=commit_state,
-                values_state="ESTIMATED_NOT_CONFIRMED",
-                estimate=estimate,
-                base_revision=base_revision,
-            ),
+            "diagnostic": diagnostic,
         }
 
     @classmethod
@@ -648,18 +700,22 @@ class GenesisCoordinator:
                 stage="ESTIMATOR",
                 commit_state="NOT_ATTEMPTED",
             )
-        try:
-            is_load_noop = estimate.is_load_noop
-        except BaseException:
+        if not estimate.is_complete:
+            dimension_summary = self._preflight_dimension_summary(
+                estimate, injected_dimension_count=0
+            )
+            if dimension_summary is None:
+                return self._preflight_failure(
+                    "ESTIMATOR_MALFORMED",
+                    stage="ESTIMATOR",
+                    commit_state="NOT_ATTEMPTED",
+                )
             return self._preflight_failure(
-                "ESTIMATOR_MALFORMED",
+                "SEMANTIC_VECTOR_UNAVAILABLE",
                 stage="ESTIMATOR",
                 commit_state="NOT_ATTEMPTED",
-            )
-        if is_load_noop:
-            # This is a fixed no-op: no nonce, cursor read, or native commit.
-            return self._preflight_noop(
-                "ZERO_LOAD", stage="ESTIMATOR", estimate=estimate
+                estimate=estimate,
+                dimension_summary=dimension_summary,
             )
 
         # The semantic cursor is content-free.  It is read before the proposal
@@ -753,10 +809,6 @@ class GenesisCoordinator:
                 stage="NATIVE_APPLY",
                 estimate=estimate,
                 base_revision=revision,
-            )
-        if native_result == {"status": SEMANTIC_NOOP, "code": "ZERO_LOAD"}:
-            return self._preflight_noop(
-                "ZERO_LOAD", stage="ESTIMATOR", estimate=estimate
             )
         try:
             native_result = validate_semantic_result(

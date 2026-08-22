@@ -1391,6 +1391,154 @@ def _spc1_success_outcome_with_expression(projection: object) -> dict:
     return outcome
 
 
+def _spc1_full_vector_dimensions() -> dict[str, int]:
+    dimensions = {name: 0 for name in DIMENSION_NAMES}
+    dimensions["positive"] = 350_000
+    dimensions["affiliation"] = 250_000
+    dimensions["engagement"] = 600_000
+    return dimensions
+
+
+_SPC1_NODE_REGIONS = (
+    ("interoception_allostasis", 2_048),
+    ("affective_valuation", 2_048),
+    ("salience", 1_024),
+    ("epistemic_fallibility", 2_048),
+    ("social_boundary", 2_048),
+    ("temper_inhibitory", 1_024),
+    ("world_model_imagination", 4_096),
+    ("global_workspace", 1_024),
+    ("action_expression", 1_024),
+)
+
+
+def _spc1_full_node_observability() -> dict:
+    regions = []
+    for region_id, (region_name, capacity) in enumerate(_SPC1_NODE_REGIONS):
+        selected = 17 if region_id == 1 else 0
+        component = {
+            "before_mean_fxp6": 100,
+            "after_mean_fxp6": 110 if selected else 100,
+            "delta_mean_fxp6": 10 if selected else 0,
+            "changed_node_count": selected,
+            "nonzero_after_count": capacity,
+        }
+        regions.append(
+            {
+                "region_id": region_id,
+                "region_name": region_name,
+                "node_capacity": capacity,
+                "selected_node_count": selected,
+                "activated_node_count": selected,
+                "changed_node_count": selected,
+                "potential": dict(component),
+                "excitation": dict(component),
+            }
+        )
+    return {
+        "schema": "astr-embodiment.node-observability.v1",
+        "formula": "spc1-node-observability-v1",
+        "revision": 8,
+        "field_node_capacity": 16_384,
+        "region_layout": "regions-v1",
+        "counts": {
+            "selected_node_count": 17,
+            "activated_node_count": 17,
+            "changed_node_count": 17,
+            "potential_nonzero_after_count": 16_384,
+            "excitation_nonzero_after_count": 16_384,
+            "signal_nonzero_after_count": 16_384,
+        },
+        "residuals": {
+            "state": "NOT_COMPUTED",
+            "formula": None,
+            "values_fxp6": None,
+        },
+        "regions": regions,
+    }
+
+
+def _spc1_full_vector_success_outcome() -> dict:
+    outcome = _spc1_outcome(
+        "SUCCESS",
+        "SEMANTIC_COMMITTED",
+        _spc1_diagnostic(
+            stage="RECEIPT",
+            commit_state="CONFIRMED_NEW",
+            values_state="COMMITTED",
+            dimensions_fxp6=_spc1_full_vector_dimensions(),
+            estimator_confidence_fxp6=900_000,
+            base_revision=7,
+            revision=8,
+            deduplicated=False,
+            receipt_status="committed",
+        ),
+    )
+    outcome["result"] = {
+        "schema": "astrembodiment.semantic-perception-closure.v1",
+        "receipt": {
+            "schema_version": 1,
+            "formula_digest": "00" * 32,
+            "scope_digest": "11" * 32,
+            "event_digest": "22" * 32,
+            "authority_digest": "33" * 32,
+            "base_revision": 7,
+            "next_revision": 8,
+            "state_before": "44" * 32,
+            "state_after": "55" * 32,
+            "graph_after": "66" * 32,
+            "active_nodes": 17,
+            "active_edges": 23,
+            "residuals": {
+                "authority": 0,
+                "continuity": 0,
+                "energy": 0,
+                "renormalization": 0,
+                "capacity": 0,
+            },
+            "status": "committed",
+        },
+        "semantic_vector_receipt": {
+            "schema": "astr-embodiment.semantic-vector-receipt.v2",
+            "formula": "full-vector-route-neutral-relaxation-v1",
+            "dimension_slot_count": 15,
+            "evaluated_dimension_count": 15,
+            "injected_dimension_count": 15,
+            "nonzero_evidence_dimension_count": 3,
+            "neutral_baseline_dimension_count": 12,
+            "unavailable_dimension_count": 0,
+            "state_changed": True,
+        },
+        "node_observability": _spc1_full_node_observability(),
+        "full_vector_state": "FULL_VECTOR_CONFIRMED",
+        "node_observability_state": "CONFIRMED",
+        "revision": 8,
+        "deduplicated": False,
+    }
+    return outcome
+
+
+def _spc1_unavailable_outcome() -> dict:
+    return _spc1_outcome(
+        "DEGRADED",
+        "SEMANTIC_VECTOR_UNAVAILABLE",
+        _spc1_diagnostic(
+            stage="ESTIMATOR",
+            commit_state="NOT_ATTEMPTED",
+            values_state="UNAVAILABLE",
+        )
+        | {
+            "dimension_summary": {
+                "evaluated_dimension_count": 14,
+                "injected_dimension_count": 0,
+                "nonzero_evidence_dimension_count": 3,
+                "neutral_baseline_dimension_count": 11,
+                "unavailable_dimension_count": 1,
+            }
+        },
+    )
+
+
 async def _run_spc1_request_with_outcome(
     outcome: object,
     *,
@@ -1411,6 +1559,154 @@ async def _run_spc1_request_with_outcome(
     request = request or FakeRequest()
     await instance.on_llm_request(event, request)
     return instance, event, request
+
+
+def test_node_observability_detailed_logging_defaults_false_and_rejects_truthy_values() -> None:
+    schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+
+    assert schema["node_observability_detailed_logging"] == {
+        "description": "输出完整节点可观察性日志",
+        "hint": "默认关闭；关闭时仅记录简洁中文结果，开启时记录包含节点计数与区域聚合的完整 JSON。失败始终记录失败码与阶段。",
+        "type": "bool",
+        "default": False,
+    }
+    assert (
+        plugin(FakeConfig(observatory_enabled=True), FakeContext())._node_observability_detailed_logging_enabled()
+        is False
+    )
+    for invalid in ("true", 1, 0, None, object()):
+        assert (
+            plugin(
+                FakeConfig(
+                    observatory_enabled=True,
+                    node_observability_detailed_logging=invalid,
+                ),
+                FakeContext(),
+            )._node_observability_detailed_logging_enabled()
+            is False
+        )
+    assert (
+        plugin(
+            FakeConfig(
+                observatory_enabled=False,
+                node_observability_detailed_logging=True,
+            ),
+            FakeContext(),
+        )._node_observability_detailed_logging_enabled()
+        is True
+    )
+
+
+def test_compact_success_log_contains_exactly_fifteen_ordered_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+    outcome = _spc1_full_vector_success_outcome()
+
+    instance._emit_semantic_observatory(
+        outcome, {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"}
+    )
+
+    expected_dimensions = ",".join(
+        f"{name}={_spc1_full_vector_dimensions()[name]}" for name in DIMENSION_NAMES
+    )
+    assert recorder.warning_messages == []
+    assert recorder.info_messages == [
+        f"AstrEmbodiment：运算已完成｜十五维：{expected_dimensions}"
+    ]
+
+
+def test_detailed_switch_selects_complete_v3_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(
+        FakeConfig(
+            observatory_enabled=False,
+            node_observability_detailed_logging=True,
+        ),
+        FakeContext(),
+    )
+    outcome = _spc1_full_vector_success_outcome()
+
+    instance._emit_semantic_observatory(
+        outcome, {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"}
+    )
+
+    assert recorder.warning_messages == []
+    assert len(recorder.info_messages) == 1
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert recorder.info_messages[0].startswith(prefix)
+    record = json.loads(recorder.info_messages[0][len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
+    assert record["calculation_state"] == "SUCCEEDED"
+    assert record["full_vector_state"] == "FULL_VECTOR_CONFIRMED"
+    assert record["semantic_vector"] == {
+        "formula": "full-vector-route-neutral-relaxation-v1",
+        "dimension_slot_count": 15,
+        "evaluated_dimension_count": 15,
+        "injected_dimension_count": 15,
+        "nonzero_evidence_dimension_count": 3,
+        "neutral_baseline_dimension_count": 12,
+        "unavailable_dimension_count": 0,
+        "state_changed": True,
+    }
+    assert record["native_calculation"] == {
+        "state_changed": True,
+        "receipt_active_nodes": 17,
+        "active_edges": 23,
+    }
+    assert record["node_observability_state"] == "CONFIRMED"
+    assert record["node_observability"]["counts"] == _spc1_full_node_observability()[
+        "counts"
+    ]
+    assert len(record["node_observability"]["regions"]) == 9
+    assert record["node_observability"]["residuals"] == {
+        "state": "NOT_COMPUTED",
+        "formula": None,
+        "values_fxp6": None,
+    }
+    assert "residuals_fxp6" not in record
+
+
+@pytest.mark.parametrize("detailed", [False, True])
+def test_failure_is_logged_with_code_and_stage_in_both_modes(
+    monkeypatch: pytest.MonkeyPatch, detailed: bool
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(
+        FakeConfig(
+            observatory_enabled=False,
+            node_observability_detailed_logging=detailed,
+        ),
+        FakeContext(),
+    )
+
+    instance._emit_semantic_observatory(
+        _spc1_unavailable_outcome(),
+        {"status": "DEGRADED", "code": "SEMANTIC_VECTOR_UNAVAILABLE"},
+    )
+
+    assert recorder.info_messages == []
+    assert len(recorder.warning_messages) == 1
+    if detailed:
+        prefix = "AstrEmbodiment SPC1 observatory: "
+        assert recorder.warning_messages[0].startswith(prefix)
+        record = json.loads(recorder.warning_messages[0][len(prefix) :])
+        assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
+        assert record["code"] == "SEMANTIC_VECTOR_UNAVAILABLE"
+        assert record["stage"] == "ESTIMATOR"
+        assert record["calculation_state"] == "NOT_EXECUTED"
+        assert record["node_observability_state"] == "NOT_APPLICABLE"
+        assert record["node_observability"] is None
+    else:
+        assert recorder.warning_messages == [
+            "AstrEmbodiment：运算失败｜失败码=SEMANTIC_VECTOR_UNAVAILABLE｜阶段=ESTIMATOR"
+        ]
 
 
 def test_spc1_observatory_success_emits_all_dimensions_at_info(

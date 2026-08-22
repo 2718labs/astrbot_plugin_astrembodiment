@@ -19,6 +19,12 @@
     "type": "bool",
     "default": true
   },
+  "node_observability_detailed_logging": {
+    "description": "输出完整节点可观察性日志",
+    "hint": "默认关闭；关闭时仅记录简洁中文结果，开启时记录包含节点计数与区域聚合的完整 JSON。失败始终记录失败码与阶段。",
+    "type": "bool",
+    "default": false
+  },
   "proactive_enabled": {
     "description": "允许提出主动联系建议",
     "hint": "实际发送仍由 AstrBot 和用户控制；MVP 默认关闭。",

@@ -57,6 +57,7 @@ except ImportError:  # Static checks outside AstrBot.
 
 try:
     from .astr_embodiment import NativeBridge, NativeCoreUnavailable
+    from .astr_embodiment.bridge import validate_semantic_result
     from .astr_embodiment.contracts import (
         FrozenTurn,
         ScopeTokens,
@@ -83,6 +84,7 @@ try:
     )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment import NativeBridge, NativeCoreUnavailable
+    from astr_embodiment.bridge import validate_semantic_result
     from astr_embodiment.contracts import (
         FrozenTurn,
         ScopeTokens,
@@ -144,8 +146,8 @@ _SPC1_ESTIMATOR_SYSTEM_PROMPT = (
     f"estimator_confidence must be an integer in [1,{FXP6_SCALE}]. Zero means "
     "not evidenced and the maximum means strongly explicit. The template numbers "
     "are placeholders: replace them from the message evidence. The fifteen-value "
-    "vector must not be all-zero; for a non-empty message engagement must be at "
-    "least 1. Do not add or remove keys. Do not use floats, strings, null, Markdown "
+    "zero is an available neutral input, including an all-zero vector when the "
+    "message carries no evidence. Do not add or remove keys. Do not use floats, strings, null, Markdown "
     "code fences, explanations, tools, history, provider data, or control fields."
 )
 _SPC1_OUTCOME_CODES = {
@@ -171,6 +173,7 @@ _SPC1_OUTCOME_CODES = {
     "SEMANTIC_IDENTITY_CONFLICT",
     "SEMANTIC_REVISION_OVERFLOW",
     "SEMANTIC_STATE_UNCHANGED",
+    "SEMANTIC_VECTOR_UNAVAILABLE",
     "STALE_CAUSAL_BASE",
     "STALE_REVISION",
     "STORAGE",
@@ -178,6 +181,24 @@ _SPC1_OUTCOME_CODES = {
 }
 _SPC1_OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
 _SPC1_OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v2"
+_SPC1_OBSERVATORY_V3_SCHEMA = "astr-embodiment.observatory.semantic-injection.v3"
+_SPC1_SEMANTIC_VECTOR_FIELDS = frozenset(
+    {
+        "schema",
+        "formula",
+        "dimension_slot_count",
+        "evaluated_dimension_count",
+        "injected_dimension_count",
+        "nonzero_evidence_dimension_count",
+        "neutral_baseline_dimension_count",
+        "unavailable_dimension_count",
+        "state_changed",
+    }
+)
+_SPC1_V3_CALCULATION_STATES = frozenset({"SUCCEEDED", "FAILED", "NOT_EXECUTED"})
+_SPC1_NODE_STATES = frozenset(
+    {"CONFIRMED", "UNAVAILABLE", "REJECTED", "NOT_APPLICABLE"}
+)
 _EXPRESSION_PROJECTION_SCHEMA = "astr-embodiment.expression-projection.v1"
 _EXPRESSION_PROFILE_FIELD_ORDER = (
     "warmth",
@@ -682,6 +703,267 @@ class AstrEmbodimentPlugin(Star):
         value = self._config_values.get("observatory_enabled", True)
         return type(value) is bool and value
 
+    def _node_observability_detailed_logging_enabled(self) -> bool:
+        """Only a native Python bool enables the verbose node projection."""
+
+        return type(
+            self._config_values.get("node_observability_detailed_logging", False)
+        ) is bool and self._config_values.get("node_observability_detailed_logging", False)
+
+    @staticmethod
+    def _closed_observatory_dimensions(value: Any) -> dict[str, int] | None:
+        if type(value) is not dict or set(value) != set(DIMENSION_NAMES):
+            return None
+        dimensions: dict[str, int] = {}
+        for name in DIMENSION_NAMES:
+            item = value.get(name)
+            if type(item) is not int or not 0 <= item <= FXP6_SCALE:
+                return None
+            dimensions[name] = item
+        return dimensions
+
+    @staticmethod
+    def _closed_dimension_summary(value: Any) -> dict[str, int] | None:
+        fields = {
+            "evaluated_dimension_count",
+            "injected_dimension_count",
+            "nonzero_evidence_dimension_count",
+            "neutral_baseline_dimension_count",
+            "unavailable_dimension_count",
+        }
+        if type(value) is not dict or set(value) != fields:
+            return None
+        if any(type(value[name]) is not int for name in fields):
+            return None
+        evaluated = value["evaluated_dimension_count"]
+        injected = value["injected_dimension_count"]
+        nonzero = value["nonzero_evidence_dimension_count"]
+        neutral = value["neutral_baseline_dimension_count"]
+        unavailable = value["unavailable_dimension_count"]
+        if (
+            not 0 <= evaluated <= len(DIMENSION_NAMES)
+            or injected not in {0, len(DIMENSION_NAMES)}
+            or not 0 <= nonzero <= len(DIMENSION_NAMES)
+            or not 0 <= neutral <= len(DIMENSION_NAMES)
+            or not 0 <= unavailable <= len(DIMENSION_NAMES)
+            or evaluated + unavailable != len(DIMENSION_NAMES)
+            or nonzero + neutral != evaluated
+            or (injected and unavailable)
+        ):
+            return None
+        return {
+            "evaluated_dimension_count": evaluated,
+            "injected_dimension_count": injected,
+            "nonzero_evidence_dimension_count": nonzero,
+            "neutral_baseline_dimension_count": neutral,
+            "unavailable_dimension_count": unavailable,
+        }
+
+    @classmethod
+    def _v3_common_observatory_fields(
+        cls,
+        raw_outcome: Any,
+        closed_outcome: dict[str, str],
+    ) -> dict[str, Any]:
+        """Copy only closed outcome/diagnostic fields for the v3 log lane."""
+
+        closed = cls._closed_semantic_outcome(closed_outcome)
+        if closed != closed_outcome:
+            raise ValueError("closed outcome")
+        if raw_outcome is None:
+            if closed["status"] != "DEGRADED":
+                raise ValueError("missing success outcome")
+            return {
+                "status": "DEGRADED",
+                "code": closed["code"],
+                "stage": "INTERNAL",
+                "commit_state": "UNKNOWN",
+                "values_state": "UNAVAILABLE",
+                "dimensions_fxp6": None,
+                "estimator_confidence_fxp6": None,
+                "base_revision": None,
+                "revision": None,
+                "deduplicated": None,
+                "receipt_status": None,
+                "dimension_summary": {
+                    "evaluated_dimension_count": 0,
+                    "injected_dimension_count": 0,
+                    "nonzero_evidence_dimension_count": 0,
+                    "neutral_baseline_dimension_count": 0,
+                    "unavailable_dimension_count": len(DIMENSION_NAMES),
+                },
+            }
+        if type(raw_outcome) is not dict:
+            raise ValueError("raw outcome")
+        if raw_outcome.get("status") != closed["status"] or raw_outcome.get("code") != closed[
+            "code"
+        ]:
+            raise ValueError("outcome mismatch")
+        diagnostic = raw_outcome.get("diagnostic")
+        allowed_fields = _SPC1_DIAGNOSTIC_FIELDS | {"dimension_summary"}
+        if type(diagnostic) is not dict or (
+            set(diagnostic) != _SPC1_DIAGNOSTIC_FIELDS
+            and set(diagnostic) != allowed_fields
+        ):
+            raise ValueError("diagnostic")
+        stage = diagnostic.get("stage")
+        commit_state = diagnostic.get("commit_state")
+        values_state = diagnostic.get("values_state")
+        if (
+            type(stage) is not str
+            or stage not in _SPC1_STAGES
+            or type(commit_state) is not str
+            or commit_state not in _SPC1_COMMIT_STATES
+            or type(values_state) is not str
+            or values_state not in _SPC1_VALUES_STATES
+        ):
+            raise ValueError("diagnostic state")
+        dimensions = cls._closed_observatory_dimensions(
+            diagnostic.get("dimensions_fxp6")
+        )
+        if diagnostic.get("dimensions_fxp6") is not None and dimensions is None:
+            raise ValueError("dimensions")
+        confidence = diagnostic.get("estimator_confidence_fxp6")
+        if confidence is not None and (
+            type(confidence) is not int or not 1 <= confidence <= FXP6_SCALE
+        ):
+            raise ValueError("confidence")
+        if dimensions is not None and confidence is None:
+            raise ValueError("confidence")
+        for name in ("base_revision", "revision"):
+            item = diagnostic.get(name)
+            if item is not None and (type(item) is not int or item < 0):
+                raise ValueError("revision")
+        deduplicated = diagnostic.get("deduplicated")
+        if deduplicated is not None and type(deduplicated) is not bool:
+            raise ValueError("deduplicated")
+        receipt_status = diagnostic.get("receipt_status")
+        if receipt_status not in {None, "committed"}:
+            raise ValueError("receipt status")
+        summary = (
+            cls._closed_dimension_summary(diagnostic.get("dimension_summary"))
+            if "dimension_summary" in diagnostic
+            else None
+        )
+        if "dimension_summary" in diagnostic and summary is None:
+            raise ValueError("dimension summary")
+        return {
+            "status": closed["status"],
+            "code": closed["code"],
+            "stage": stage,
+            "commit_state": commit_state,
+            "values_state": values_state,
+            "dimensions_fxp6": dimensions,
+            "estimator_confidence_fxp6": confidence,
+            "base_revision": diagnostic.get("base_revision"),
+            "revision": diagnostic.get("revision"),
+            "deduplicated": deduplicated,
+            "receipt_status": receipt_status,
+            "dimension_summary": summary,
+        }
+
+    @staticmethod
+    def _closed_v3_semantic_vector(value: Any) -> dict[str, Any] | None:
+        if type(value) is not dict or set(value) != _SPC1_SEMANTIC_VECTOR_FIELDS:
+            return None
+        if (
+            value.get("schema") != "astr-embodiment.semantic-vector-receipt.v2"
+            or value.get("formula") != "full-vector-route-neutral-relaxation-v1"
+        ):
+            return None
+        count_names = (
+            "dimension_slot_count",
+            "evaluated_dimension_count",
+            "injected_dimension_count",
+            "nonzero_evidence_dimension_count",
+            "neutral_baseline_dimension_count",
+            "unavailable_dimension_count",
+        )
+        if any(type(value.get(name)) is not int for name in count_names):
+            return None
+        if (
+            value["dimension_slot_count"] != len(DIMENSION_NAMES)
+            or value["evaluated_dimension_count"] != len(DIMENSION_NAMES)
+            or value["injected_dimension_count"] != len(DIMENSION_NAMES)
+            or value["unavailable_dimension_count"] != 0
+            or value["nonzero_evidence_dimension_count"]
+            + value["neutral_baseline_dimension_count"]
+            != len(DIMENSION_NAMES)
+            or type(value.get("state_changed")) is not bool
+        ):
+            return None
+        return {
+            "formula": value["formula"],
+            "dimension_slot_count": len(DIMENSION_NAMES),
+            "evaluated_dimension_count": len(DIMENSION_NAMES),
+            "injected_dimension_count": len(DIMENSION_NAMES),
+            "nonzero_evidence_dimension_count": value[
+                "nonzero_evidence_dimension_count"
+            ],
+            "neutral_baseline_dimension_count": value[
+                "neutral_baseline_dimension_count"
+            ],
+            "unavailable_dimension_count": 0,
+            "state_changed": value["state_changed"],
+        }
+
+    @staticmethod
+    def _canonical_bridge_result_for_observatory(
+        value: Any, *, expected_base_revision: int | None
+    ) -> dict[str, Any]:
+        """Revalidate only the closed bridge surface, never a raw extension object."""
+
+        if type(value) is not dict:
+            raise ValueError("bridge result")
+        raw_fields = {
+            "schema",
+            "receipt",
+            "semantic_vector_receipt",
+            "node_observability",
+            "revision",
+            "deduplicated",
+            "expression_projection",
+        }
+        candidate = {name: value[name] for name in raw_fields if name in value}
+        return validate_semantic_result(
+            candidate, expected_base_revision=expected_base_revision
+        )
+
+    @classmethod
+    def _fallback_v3_semantic_observatory_record(
+        cls, *, code: str = "NATIVE_MALFORMED", stage: str = "INTERNAL"
+    ) -> dict[str, Any]:
+        return {
+            "schema": _SPC1_OBSERVATORY_V3_SCHEMA,
+            "status": "DEGRADED",
+            "code": code if code in _SPC1_OUTCOME_CODES else "NATIVE_MALFORMED",
+            "stage": stage if stage in _SPC1_STAGES else "INTERNAL",
+            "commit_state": "UNKNOWN",
+            "values_state": "UNAVAILABLE",
+            "fxp_scale": FXP6_SCALE,
+            "dimensions_fxp6": None,
+            "estimator_confidence_fxp6": None,
+            "base_revision": None,
+            "revision": None,
+            "deduplicated": None,
+            "receipt_status": None,
+            "dimension_summary": {
+                "evaluated_dimension_count": 0,
+                "injected_dimension_count": 0,
+                "nonzero_evidence_dimension_count": 0,
+                "neutral_baseline_dimension_count": 0,
+                "unavailable_dimension_count": len(DIMENSION_NAMES),
+            },
+            "calculation_state": "FAILED",
+            "full_vector_state": None,
+            "semantic_vector": None,
+            "native_calculation": None,
+            "node_observability_state": "NOT_APPLICABLE",
+            "node_observability": None,
+            "expression_state": "NOT_ATTEMPTED",
+            "expression_profile_fxp6": None,
+        }
+
     @staticmethod
     def _fallback_semantic_observatory_record() -> dict[str, Any]:
         return {
@@ -998,6 +1280,206 @@ class AstrEmbodimentPlugin(Star):
         except BaseException:
             return cls._fallback_semantic_observatory_record()
 
+    @classmethod
+    def _semantic_observatory_v3_record(
+        cls,
+        raw_outcome: Any,
+        closed_outcome: dict[str, str],
+        *,
+        expression_state: str = "NOT_ATTEMPTED",
+        expression_profile: Mapping[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Build the only detailed SPC1 record from closed coordinator data."""
+
+        try:
+            common = cls._v3_common_observatory_fields(raw_outcome, closed_outcome)
+            closed_expression_profile = cls._closed_expression_observatory_fields(
+                expression_state,
+                expression_profile,
+            )
+            status = common["status"]
+            if status == "SUCCESS":
+                if (
+                    common["stage"] != "RECEIPT"
+                    or common["values_state"] != "COMMITTED"
+                    or common["dimensions_fxp6"] is None
+                    or common["estimator_confidence_fxp6"] is None
+                    or common["base_revision"] is None
+                    or common["revision"] is None
+                    or common["receipt_status"] != "committed"
+                    or (
+                        common["commit_state"] == "CONFIRMED_NEW"
+                        and common["deduplicated"] is not False
+                    )
+                    or (
+                        common["commit_state"] == "CONFIRMED_EXISTING"
+                        and common["deduplicated"] is not True
+                    )
+                    or common["commit_state"]
+                    not in {"CONFIRMED_NEW", "CONFIRMED_EXISTING"}
+                    or type(raw_outcome) is not dict
+                ):
+                    raise ValueError("success outcome")
+                result = cls._canonical_bridge_result_for_observatory(
+                    raw_outcome.get("result"),
+                    expected_base_revision=common["base_revision"],
+                )
+                if (
+                    result["revision"] != common["revision"]
+                    or result["deduplicated"] is not common["deduplicated"]
+                    or result["receipt"]["status"] != common["receipt_status"]
+                ):
+                    raise ValueError("receipt correlation")
+                if result["full_vector_state"] == "FULL_VECTOR_CONFIRMED":
+                    semantic_vector = cls._closed_v3_semantic_vector(
+                        result["semantic_vector_receipt"]
+                    )
+                    if semantic_vector is None:
+                        raise ValueError("semantic vector")
+                    dimensions = common["dimensions_fxp6"]
+                    if (
+                        sum(value != 0 for value in dimensions.values())
+                        != semantic_vector["nonzero_evidence_dimension_count"]
+                        or sum(value == 0 for value in dimensions.values())
+                        != semantic_vector["neutral_baseline_dimension_count"]
+                    ):
+                        raise ValueError("dimension correlation")
+                    node_state = result["node_observability_state"]
+                    node_observability = result["node_observability"]
+                    if node_state == "CONFIRMED":
+                        if type(node_observability) is not dict:
+                            raise ValueError("node projection")
+                    elif node_state == "REJECTED":
+                        if node_observability is not None:
+                            raise ValueError("node projection")
+                    else:
+                        raise ValueError("node state")
+                    native_calculation = {
+                        "state_changed": semantic_vector["state_changed"],
+                        "receipt_active_nodes": result["receipt"]["active_nodes"],
+                        "active_edges": result["receipt"]["active_edges"],
+                    }
+                    calculation_state = "SUCCEEDED"
+                    full_vector_state: str | None = "FULL_VECTOR_CONFIRMED"
+                elif result["full_vector_state"] == "LEGACY_UNATTESTED":
+                    semantic_vector = None
+                    node_state = "UNAVAILABLE"
+                    node_observability = None
+                    native_calculation = None
+                    calculation_state = "FAILED"
+                    full_vector_state = "LEGACY_UNATTESTED"
+                else:
+                    raise ValueError("full vector state")
+            elif status == "NOOP":
+                if (
+                    common["code"] != "EMPTY_REQUEST"
+                    or common["stage"] != "INPUT"
+                    or common["commit_state"] != "NOT_ATTEMPTED"
+                    or common["dimensions_fxp6"] is not None
+                    or common["estimator_confidence_fxp6"] is not None
+                    or expression_state != "NOT_ATTEMPTED"
+                ):
+                    raise ValueError("noop outcome")
+                calculation_state = "NOT_EXECUTED"
+                full_vector_state = None
+                semantic_vector = None
+                native_calculation = None
+                node_state = "NOT_APPLICABLE"
+                node_observability = None
+            else:
+                if status != "DEGRADED" or expression_state != "NOT_ATTEMPTED":
+                    raise ValueError("failure outcome")
+                if common["code"] == "SEMANTIC_VECTOR_UNAVAILABLE":
+                    summary = common["dimension_summary"]
+                    if (
+                        common["stage"] != "ESTIMATOR"
+                        or common["commit_state"] != "NOT_ATTEMPTED"
+                        or common["dimensions_fxp6"] is not None
+                        or summary is None
+                        or summary["injected_dimension_count"] != 0
+                        or summary["unavailable_dimension_count"] == 0
+                    ):
+                        raise ValueError("unavailable vector")
+                calculation_state = (
+                    "NOT_EXECUTED"
+                    if common["stage"] in {"INPUT", "ESTIMATOR", "CURSOR", "PROPOSAL"}
+                    else "FAILED"
+                )
+                full_vector_state = None
+                semantic_vector = None
+                native_calculation = None
+                node_state = "NOT_APPLICABLE"
+                node_observability = None
+            return {
+                "schema": _SPC1_OBSERVATORY_V3_SCHEMA,
+                **common,
+                "fxp_scale": FXP6_SCALE,
+                "calculation_state": calculation_state,
+                "full_vector_state": full_vector_state,
+                "semantic_vector": semantic_vector,
+                "native_calculation": native_calculation,
+                "node_observability_state": node_state,
+                "node_observability": node_observability,
+                "expression_state": expression_state,
+                "expression_profile_fxp6": closed_expression_profile,
+            }
+        except BaseException:
+            code = (
+                closed_outcome.get("code")
+                if type(closed_outcome) is dict
+                and type(closed_outcome.get("code")) is str
+                else "NATIVE_MALFORMED"
+            )
+            return cls._fallback_v3_semantic_observatory_record(code=code)
+
+    @classmethod
+    def _compact_semantic_observatory_message(
+        cls,
+        raw_outcome: Any,
+        closed_outcome: dict[str, str],
+    ) -> tuple[str, bool]:
+        """Create the fixed compact line without serializing a node projection."""
+
+        try:
+            common = cls._v3_common_observatory_fields(raw_outcome, closed_outcome)
+            if common["status"] == "SUCCESS":
+                if (
+                    type(raw_outcome) is not dict
+                    or common["dimensions_fxp6"] is None
+                    or common["stage"] != "RECEIPT"
+                    or common["values_state"] != "COMMITTED"
+                    or common["revision"] is None
+                ):
+                    raise ValueError("success")
+                result = raw_outcome.get("result")
+                if type(result) is not dict or result.get("full_vector_state") != "FULL_VECTOR_CONFIRMED":
+                    raise ValueError("full vector")
+                semantic_vector = cls._closed_v3_semantic_vector(
+                    result.get("semantic_vector_receipt")
+                )
+                if semantic_vector is None:
+                    raise ValueError("semantic vector")
+                dimensions = common["dimensions_fxp6"]
+                if (
+                    sum(value != 0 for value in dimensions.values())
+                    != semantic_vector["nonzero_evidence_dimension_count"]
+                    or sum(value == 0 for value in dimensions.values())
+                    != semantic_vector["neutral_baseline_dimension_count"]
+                ):
+                    raise ValueError("dimension counts")
+                values = ",".join(
+                    f"{name}={dimensions[name]}" for name in DIMENSION_NAMES
+                )
+                return f"AstrEmbodiment：运算已完成｜十五维：{values}", False
+            if common["status"] == "NOOP" and common["code"] == "EMPTY_REQUEST":
+                return "AstrEmbodiment：未执行运算｜原因=EMPTY_REQUEST｜十五维：不可用", False
+            return (
+                f"AstrEmbodiment：运算失败｜失败码={common['code']}｜阶段={common['stage']}",
+                True,
+            )
+        except BaseException:
+            return "AstrEmbodiment：运算失败｜失败码=NATIVE_MALFORMED｜阶段=INTERNAL", True
+
     def _emit_semantic_observatory(
         self,
         raw_outcome: Any,
@@ -1007,27 +1489,39 @@ class AstrEmbodimentPlugin(Star):
         expression_profile: Mapping[str, int] | None = None,
     ) -> None:
         try:
-            if not self._observatory_enabled():
+            detailed = self._node_observability_detailed_logging_enabled()
+            if detailed:
+                record = self._semantic_observatory_v3_record(
+                    raw_outcome,
+                    closed_outcome,
+                    expression_state=expression_state,
+                    expression_profile=expression_profile,
+                )
+                encoded = json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                if (
+                    record["status"] == "DEGRADED"
+                    or record["node_observability_state"] != "CONFIRMED"
+                    and record["status"] == "SUCCESS"
+                    or record["expression_state"] in {"REJECTED", "INJECTION_FAILED"}
+                ):
+                    logger.warning("%s%s", _SPC1_OBSERVATORY_PREFIX, encoded)
+                else:
+                    logger.info("%s%s", _SPC1_OBSERVATORY_PREFIX, encoded)
                 return
-            record = self._semantic_observatory_record(
-                raw_outcome,
-                closed_outcome,
-                expression_state=expression_state,
-                expression_profile=expression_profile,
+            message, warning = self._compact_semantic_observatory_message(
+                raw_outcome, closed_outcome
             )
-            encoded = json.dumps(
-                record,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            if record["status"] == "DEGRADED" or record["expression_state"] in {
-                "REJECTED",
-                "INJECTION_FAILED",
-            }:
-                logger.warning("%s%s", _SPC1_OBSERVATORY_PREFIX, encoded)
+            if not warning and not self._observatory_enabled():
+                return
+            if warning:
+                logger.warning("%s", message)
             else:
-                logger.info("%s%s", _SPC1_OBSERVATORY_PREFIX, encoded)
+                logger.info("%s", message)
         except BaseException:
             return
 
