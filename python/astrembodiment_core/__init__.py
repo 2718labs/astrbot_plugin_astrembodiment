@@ -99,11 +99,13 @@ try:
     _native_module = _load_native()
 
     apply_event = _native_module.apply_event
+    apply_perception_proposal_v1 = _native_module.apply_perception_proposal_v1
     ensure_genesis = _native_module.ensure_genesis
     flush_and_close = _native_module.flush_and_close
     health = _native_module.health
     inspect = _native_module.inspect
     open = _native_module.open
+    semantic_revision_v1 = _native_module.semantic_revision_v1
     verify_replay = _native_module.verify_replay
     version = _native_module.version
 except (AttributeError, ImportError) as exc:  # pragma: no cover - install failure
@@ -122,11 +124,13 @@ except AttributeError:  # pragma: no cover - compatibility with older wheels
 __all__ = [
     "NativeCoreError",
     "apply_event",
+    "apply_perception_proposal_v1",
     "ensure_genesis",
     "flush_and_close",
     "health",
     "inspect",
     "open",
+    "semantic_revision_v1",
     "verify_replay",
     "version",
 ]

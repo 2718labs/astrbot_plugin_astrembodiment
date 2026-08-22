@@ -18,7 +18,7 @@
 - 现有 Genesis、SeedCode、Persona、`apply_event` 与响应钩子不能作为“Bot 已具备情绪反应”或生产可用的证据。
 - 本标签仅用于可恢复的源码基线；不得安装、上架、发布或替换现有 AstrBot 插件数据。
 
-## [1.0.0-rc1] - 2026-08-20
+## [1.0.0-rc1] - 2026-08-22
 
 ### 定版
 
@@ -26,6 +26,12 @@
 - README 改为中文优先并重排为“功能-模块-工作流”结构，补充无 WebUI 使用方式、配置文件路径、模块分层，以及与 `astrbot_plugin_sylanne` 的替代关系说明。
 - README 增加总工作流图、每个核心模块的独立工作流图，以及面向后续适配器的双向逻辑 API 头和闭合 JSON 契约说明。
 - `ae`、`ae_seed`、`on_llm_request`、`on_llm_response` 和 `after_message_sent` 的 AstrBot 展示描述改为中文。
+
+### 发布契约
+
+- 统一发布版本：AstrBot metadata 与 Rust workspace 使用 `1.0.0-rc1`，Python wheel 使用 PEP 440 的 `1.0.0rc1`。
+- 原生 loader 公开 `semantic_revision_v1` 与 `apply_perception_proposal_v1`；打包门禁拒绝缺少任一导出的旧 wheel。
+- 远端 GitHub Release 与 AstrBot Marketplace 上架仍由维护者单独执行，本地候选不自动发布。
 
 ### 修复
 

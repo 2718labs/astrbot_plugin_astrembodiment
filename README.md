@@ -1,14 +1,14 @@
 # AstrEmbodiment
 
-## ⚠️ Alpha 1 状态（请先读）
+## ⚠️ 1.0.0-rc1 发布候选状态（请先读）
 
-> 这是用于保全源码的公开开源 `v1.0.0-alpha.1` 快照，**不是可安装、可发布或可上架的功能版本**。
+> 这是 `1.0.0-rc1` 本地发布候选，**不是已上架的 AstrBot Marketplace 条目，也不是已创建的 GitHub Release**。
 >
-> 当前尚未实现完整的核心反应链：**用户话语 → 闭合语义证据 → 原生状态转移 → 受控回应策略/投影**。仓库中的 Genesis、SeedCode、Persona、工作流图、`apply_event` 与响应钩子不能单独证明该闭环已经可用；现有 G0 路径仍包含确定性占位/无状态推进。
+> 当前归档只在 fresh Windows x64 与 Linux x86_64 CPython 3.12+ 原生 wheel 已通过本版本验收时交付。完整核心反应链：**用户话语 → 闭合语义证据 → 原生状态转移 → 受控回应策略/投影** 仍不作为当前能力声明；现有 G0 路径包含确定性占位/无状态推进。
 >
-> 因此请不要把本标签用于 AstrBot Marketplace、GitHub Release、生产安装或“已具备情绪反应”的声明。它只用于保留当前源码和为后续 R7 缺陷补全提供可恢复基线。
+> 不要把 RC1 用作“已具备情绪反应”或人格漂移能力的声明。远端发布、上架和生产部署须由维护者在当前验收完成后单独决定。
 
-下文的架构、命令和发布描述保留为历史/目标说明；与本 Alpha 1 的实际能力冲突时，以上状态声明优先。
+下文的架构、命令和发布描述以当前已接线的 G0 边界为准；与以上状态声明冲突时，以上状态声明优先。
 
 <p align="center">
   <img src="logo.png" alt="AstrEmbodiment" width="260" />
@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/版本-1.0.0--alpha.1-0f766e?style=flat-square" alt="版本 1.0.0-alpha.1">
+  <img src="https://img.shields.io/badge/版本-1.0.0--rc1-0f766e?style=flat-square" alt="版本 1.0.0-rc1">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-f08c46?style=flat-square" alt="AstrBot >=4.16,<5">
   <img src="https://img.shields.io/badge/平台-Windows%20x64%20%7C%20Linux%20x86__64-475569?style=flat-square" alt="Windows x64 and Linux x86_64">
   <img src="https://img.shields.io/badge/许可证-AGPL--3.0--or--later-5b403a?style=flat-square" alt="AGPL-3.0-or-later">
@@ -56,19 +56,19 @@ AstrEmbodiment **没有** Sylanne 的长期记忆、关系状态、即时聊天�
 
 ## 当前版本
 
-当前保全标签：`v1.0.0-alpha.1`。
+当前发布候选：`1.0.0-rc1`。
 
-这是公开源码保全快照，不包含经过验收的发布包，也不构成 Windows、Linux、CPython 或 AstrBot 的运行兼容性承诺。
+本地候选归档在 fresh Windows x64 和 Linux x86_64 CPython 3.12+ wheel 的当前验收通过后提供；远端发布与 Marketplace 上架尚未执行。
 
 ## 安装与使用
 
-### Alpha 1 不提供发布包安装
+### RC1 发布包安装
 
-本 Alpha 1 不创建 GitHub Release、不提供二进制归档，也不提交 AstrBot Marketplace。后续“发布包安装”流程必须等核心反应链实现并经独立验收后才可启用；不要依据本快照安装、启用或替换现有插件数据。
+维护者使用 `scripts/package_plugin.py` 从当前验收的原生 wheel 生成归档。尚未获得该归档时，不要用旧 Alpha 快照替换现有插件数据；GitHub Release 和 AstrBot Marketplace 上架不由该脚本执行。
 
-### 目标使用方式（尚不可用）
+### 已接线的使用方式
 
-以下命令和配置说明仅保留为目标/历史文档，当前 Alpha 1 不应在 AstrBot 实例中启用：
+以下命令需要已验收的 RC1 归档和干净的 AstrBot 实例：
 
 ```text
 <命令前缀>ae

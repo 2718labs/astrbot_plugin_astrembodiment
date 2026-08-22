@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "astrembodiment-core"
-version = "1.0.0"
+version = "1.0.0rc1"
 description = "Rust-native ASTER-CCN runtime for AstrEmbodiment"
 requires-python = ">=3.12"
 license = { text = "AGPL-3.0-or-later" }

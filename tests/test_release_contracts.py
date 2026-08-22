@@ -5,8 +5,10 @@ import importlib
 import json
 import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -20,6 +22,10 @@ FRESH_LINUX_WHEEL = next(
     (FRESH_WHEELS_DIR / "rebuild-native-linux-current" / "dist").glob("*.whl"),
     None,
 )
+SEMANTIC_NATIVE_API = {
+    "semantic_revision_v1",
+    "apply_perception_proposal_v1",
+}
 NATIVE_API = {
     "version",
     "health",
@@ -30,15 +36,38 @@ NATIVE_API = {
     "verify_replay",
     "flush_and_close",
     "NativeCoreError",
-}
+} | SEMANTIC_NATIVE_API
 NATIVE_API_PAYLOAD = b" ".join(marker.encode() for marker in sorted(NATIVE_API))
 
 
-def test_release_metadata_and_required_files_are_present() -> None:
+def test_release_version_metadata_and_required_files_are_present() -> None:
     metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+
     assert 'version: "1.0.0-rc1"' in metadata
     assert 'astrbot_version: ">=4.16,<5"' in metadata
     assert "support_platforms:" in metadata
+    assert pyproject["project"]["version"] == "1.0.0rc1"
+    assert cargo["workspace"]["package"]["version"] == "1.0.0-rc1"
+    assert "## [1.0.0-rc1] - 2026-08-22" in changelog
+
+    workspace_packages = {
+        tomllib.loads((ROOT / member / "Cargo.toml").read_text(encoding="utf-8"))["package"][
+            "name"
+        ]
+        for member in cargo["workspace"]["members"]
+    }
+    locked_workspace_versions = {
+        package["name"]: package["version"]
+        for package in lock["package"]
+        if package["name"] in workspace_packages
+    }
+    assert locked_workspace_versions.keys() == workspace_packages
+    assert set(locked_workspace_versions.values()) == {"1.0.0-rc1"}
+
     for relative_path in ("LICENSE", "CHANGELOG.md", ".github/workflows/ci.yml"):
         assert (ROOT / relative_path).is_file()
 
@@ -67,6 +96,101 @@ def test_runtime_requirements_match_self_contained_archive() -> None:
     ]
     assert install_lines == []
     assert "Native Windows and Linux extensions are bundled" in requirements
+
+
+def test_native_loader_exports_semantic_native_api_as_callables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package_root = tmp_path / "astrembodiment_core"
+    package_root.mkdir()
+    wrapper_path = package_root / "__init__.py"
+    wrapper_path.write_bytes(
+        (ROOT / "python" / "astrembodiment_core" / "__init__.py").read_bytes()
+    )
+
+    native_payload = b"release-contract-native"
+    build_id = hashlib.sha256(native_payload).hexdigest()
+    bundled_root = package_root / "_bundled"
+    native_filename = "_native.pyd" if sys.platform == "win32" else "_native.abi3.so"
+    platform = "win32" if sys.platform == "win32" else "linux"
+    native_path = bundled_root / build_id / native_filename
+    native_path.parent.mkdir(parents=True)
+    native_path.write_bytes(native_payload)
+    (bundled_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "astrembodiment-native-bundle-v1",
+                "platforms": {
+                    platform: {"build_id": build_id, "filename": native_filename}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    functions = {
+        name: (lambda *args, _name=name, **kwargs: (_name, args, kwargs))
+        for name in NATIVE_API - {"NativeCoreError"}
+    }
+    native_error = type("NativeCoreError", (RuntimeError,), {})
+
+    class FakeNativeLoader:
+        def exec_module(self, module: ModuleType) -> None:
+            for name, function in functions.items():
+                setattr(module, name, function)
+            module.NativeCoreError = native_error
+
+    fake_spec = SimpleNamespace(loader=FakeNativeLoader())
+    monkeypatch.setattr(
+        importlib.util,
+        "spec_from_file_location",
+        lambda name, path: fake_spec,
+    )
+    monkeypatch.setattr(
+        importlib.util,
+        "module_from_spec",
+        lambda spec: ModuleType("release_contracts._native"),
+    )
+
+    module = ModuleType("release_contracts.loader")
+    module.__file__ = str(wrapper_path)
+    exec(compile(wrapper_path.read_bytes(), str(wrapper_path), "exec"), module.__dict__)
+
+    assert SEMANTIC_NATIVE_API <= set(module.__all__)
+    for name in SEMANTIC_NATIVE_API:
+        assert getattr(module, name) is functions[name]
+        assert callable(getattr(module, name))
+
+
+def test_release_archive_rejects_wheel_missing_semantic_api_markers(
+    tmp_path: Path,
+) -> None:
+    legacy_payload = b" ".join(
+        marker.encode() for marker in sorted(NATIVE_API - SEMANTIC_NATIVE_API)
+    )
+    wheel = tmp_path / "legacy-core-win.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("astrembodiment_core/__init__.py", "# legacy wheel\n")
+        archive.writestr("astrembodiment_core/_native.pyd", legacy_payload)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "package_plugin.py"),
+            "--output",
+            str(tmp_path / "archive.zip"),
+            "--native-wheel",
+            str(wheel),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    for marker in SEMANTIC_NATIVE_API:
+        assert marker in result.stderr
 
 
 def test_release_archive_uses_current_native_initializer_and_not_wheels(
