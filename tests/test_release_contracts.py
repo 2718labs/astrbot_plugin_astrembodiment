@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -13,23 +14,52 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-FRESH_WHEELS_DIR = ROOT.parents[1] / ".codex-task-temp"
 CURRENT_WHEEL_VERSION = tomllib.loads(
     (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 )["project"]["version"]
+FRESH_NATIVE_WHEEL_DIR_ENV = "AE_FRESH_NATIVE_WHEEL_DIR"
 
 
-def _fresh_native_wheel(platform: str) -> Path | None:
-    candidates = sorted(
-        (FRESH_WHEELS_DIR / f"rebuild-native-{platform}-current" / "dist").glob(
-            f"*{CURRENT_WHEEL_VERSION}*.whl"
+def _fresh_native_wheel() -> Path | None:
+    """Accept exactly the current job's native wheel, never a host scratch wheel."""
+    configured_directory = os.environ.get(FRESH_NATIVE_WHEEL_DIR_ENV)
+    if configured_directory is None:
+        return None
+
+    wheel_directory = Path(configured_directory)
+    if not wheel_directory.is_dir():
+        raise RuntimeError(
+            f"{FRESH_NATIVE_WHEEL_DIR_ENV} must name an existing wheel directory: "
+            f"{wheel_directory}"
         )
-    )
-    return candidates[-1] if candidates else None
+
+    version_marker = f"-{CURRENT_WHEEL_VERSION}-"
+    if sys.platform == "win32":
+        candidates = [
+            path
+            for path in sorted(wheel_directory.glob("*.whl"))
+            if version_marker in path.name and path.name.endswith("-win_amd64.whl")
+        ]
+    elif sys.platform.startswith("linux"):
+        candidates = [
+            path
+            for path in sorted(wheel_directory.glob("*.whl"))
+            if version_marker in path.name
+            and path.name.endswith("_x86_64.whl")
+            and ("manylinux" in path.name or "musllinux" in path.name)
+        ]
+    else:
+        raise RuntimeError(f"unsupported native wheel platform: {sys.platform}")
+
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"{FRESH_NATIVE_WHEEL_DIR_ENV} must contain exactly one current "
+            f"{sys.platform} {CURRENT_WHEEL_VERSION} native wheel; found: {candidates}"
+        )
+    return candidates[0]
 
 
-FRESH_WINDOWS_WHEEL = _fresh_native_wheel("win")
-FRESH_LINUX_WHEEL = _fresh_native_wheel("linux")
+FRESH_NATIVE_WHEEL = _fresh_native_wheel()
 SEMANTIC_NATIVE_API = {
     "semantic_revision_v1",
     "apply_perception_proposal_v1",
@@ -46,6 +76,43 @@ NATIVE_API = {
     "NativeCoreError",
 } | SEMANTIC_NATIVE_API
 NATIVE_API_PAYLOAD = b" ".join(marker.encode() for marker in sorted(NATIVE_API))
+
+
+def test_fresh_native_wheel_requires_one_explicit_current_platform_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(FRESH_NATIVE_WHEEL_DIR_ENV, raising=False)
+    assert _fresh_native_wheel() is None
+
+    monkeypatch.setenv(FRESH_NATIVE_WHEEL_DIR_ENV, str(tmp_path))
+    with pytest.raises(RuntimeError, match="exactly one current"):
+        _fresh_native_wheel()
+
+    if sys.platform == "win32":
+        filename = (
+            f"astrembodiment_core-{CURRENT_WHEEL_VERSION}-cp312-abi3-win_amd64.whl"
+        )
+        stale_filename = "astrembodiment_core-1.0.0rc1-cp312-abi3-win_amd64.whl"
+    elif sys.platform.startswith("linux"):
+        filename = (
+            f"astrembodiment_core-{CURRENT_WHEEL_VERSION}-cp312-abi3-"
+            "manylinux_2_34_x86_64.whl"
+        )
+        stale_filename = (
+            "astrembodiment_core-1.0.0rc1-cp312-abi3-manylinux_2_34_x86_64.whl"
+        )
+    else:
+        pytest.skip(f"unsupported native wheel platform: {sys.platform}")
+
+    wheel = tmp_path / filename
+    wheel.touch()
+    (tmp_path / stale_filename).touch()
+    assert _fresh_native_wheel() == wheel
+
+    duplicate = tmp_path / f"duplicate-{filename}"
+    duplicate.touch()
+    with pytest.raises(RuntimeError, match="exactly one current"):
+        _fresh_native_wheel()
 
 
 def test_release_version_metadata_and_required_files_are_present() -> None:
@@ -178,6 +245,79 @@ def test_release_automation_is_pinned_and_tag_gated() -> None:
     assert "gh release create" in release
     assert "package-ecosystem: github-actions" in dependabot
     assert "package-ecosystem: cargo" in dependabot
+    for workflow in (ci, release):
+        assert "- name: 保存原生 wheel" in workflow
+        assert "- name: 冒烟导入原生 wheel" in workflow
+        assert "- name: 冒烟导入完整插件 bundle" in workflow
+        assert (
+            workflow.index("- name: 保存原生 wheel")
+            < workflow.index("- name: 冒烟导入原生 wheel")
+            < workflow.index("- name: 冒烟导入完整插件 bundle")
+        )
+        assert "continue-on-error" not in workflow
+        assert FRESH_NATIVE_WHEEL_DIR_ENV in workflow
+
+
+def test_wheel_initializer_is_separate_from_plugin_bundle_loader() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    wheel_initializer = ROOT / "python-wheel" / "astrembodiment_core" / "__init__.py"
+    plugin_initializer = ROOT / "python" / "astrembodiment_core" / "__init__.py"
+    packager = (ROOT / "scripts" / "package_plugin.py").read_text(encoding="utf-8")
+
+    assert pyproject["tool"]["maturin"]["python-source"] == "python-wheel"
+    assert wheel_initializer.is_file()
+    wheel_source = wheel_initializer.read_text(encoding="utf-8")
+    plugin_source = plugin_initializer.read_text(encoding="utf-8")
+    assert "from ._native import" in wheel_source
+    assert "_bundled" not in wheel_source
+    assert "__all__" in wheel_source
+    for name in NATIVE_API:
+        assert f'"{name}"' in wheel_source
+    assert "_bundled" in plugin_source
+    assert "manifest.json" in plugin_source
+    assert wheel_source != plugin_source
+    assert 'NATIVE_SOURCE_INIT = ROOT / "python" / NATIVE_INIT' in packager
+    assert "python-wheel" not in packager
+
+
+def test_wheel_initializer_exports_current_native_public_api(tmp_path: Path) -> None:
+    wheel_initializer = ROOT / "python-wheel" / "astrembodiment_core" / "__init__.py"
+    assert wheel_initializer.is_file()
+
+    package_dir = tmp_path / "astrembodiment_core"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_bytes(wheel_initializer.read_bytes())
+    native_source = ["class NativeCoreError(RuntimeError):\n    pass\n"]
+    for name in sorted(NATIVE_API - {"NativeCoreError"}):
+        if name == "version":
+            native_source.append("def version():\n    return '1.0.0-rc2'\n")
+        else:
+            native_source.append(
+                f"def {name}(*_args, **_kwargs):\n    return '{name}'\n"
+            )
+    native_path = package_dir / "_native.py"
+    native_path.write_text("\n".join(native_source), encoding="utf-8")
+
+    module_name = "_astrembodiment_core_wheel_initializer"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        package_dir / "__init__.py",
+        submodule_search_locations=[str(package_dir)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        assert set(module.__all__) == NATIVE_API
+        assert module.version() == "1.0.0-rc2"
+        assert all(
+            callable(getattr(module, name)) for name in NATIVE_API - {"NativeCoreError"}
+        )
+        assert Path(sys.modules[f"{module_name}._native"].__file__) == native_path
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.modules.pop(f"{module_name}._native", None)
 
 
 def test_release_contract_checker_accepts_rc2_and_rejects_mismatched_tag() -> None:
@@ -371,12 +511,12 @@ def test_release_archive_uses_current_native_initializer_and_not_wheels(
 
 
 @pytest.mark.skipif(
-    FRESH_WINDOWS_WHEEL is None,
-    reason="requires a fresh current-version Windows native wheel",
+    FRESH_NATIVE_WHEEL is None,
+    reason="requires an explicit fresh current-platform native wheel",
 )
 def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-win_amd64.zip"
+    assert FRESH_NATIVE_WHEEL is not None
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-native.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -384,7 +524,7 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
             "--output",
             str(output),
             "--native-wheel",
-            str(FRESH_WINDOWS_WHEEL),
+            str(FRESH_NATIVE_WHEEL),
         ],
         cwd=ROOT,
         text=True,
@@ -397,7 +537,7 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
     assert "astrembodiment_core/__init__.py" in names
     assert "astrembodiment_core/_bundled/manifest.json" in names
     assert not any(name.startswith("astrembodiment_core/_native") for name in names)
-    assert FRESH_WINDOWS_WHEEL.name not in names
+    assert FRESH_NATIVE_WHEEL.name not in names
     assert "logo.png" in names
     assert "LICENSE" in names
     assert "CHANGELOG.md" in names
@@ -407,14 +547,13 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    FRESH_WINDOWS_WHEEL is None or FRESH_LINUX_WHEEL is None,
-    reason="requires fresh current-version Windows and Linux native wheels",
+    FRESH_NATIVE_WHEEL is None,
+    reason="requires an explicit fresh current-platform native wheel",
 )
-def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
+def test_fresh_wheel_member_is_copied_byte_for_byte_to_a_bundled_path(
     tmp_path: Path,
 ) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None
-    assert FRESH_LINUX_WHEEL is not None
+    assert FRESH_NATIVE_WHEEL is not None
     output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-native-refresh.zip"
     command = [
         sys.executable,
@@ -422,9 +561,7 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
         "--output",
         str(output),
         "--native-wheel",
-        str(FRESH_WINDOWS_WHEEL),
-        "--native-wheel",
-        str(FRESH_LINUX_WHEEL),
+        str(FRESH_NATIVE_WHEEL),
     ]
     result = subprocess.run(
         command,
@@ -443,42 +580,41 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
         manifest = json.loads(
             archive.read("astrembodiment_core/_bundled/manifest.json")
         )
-        for wheel_path in (FRESH_WINDOWS_WHEEL, FRESH_LINUX_WHEEL):
-            with zipfile.ZipFile(wheel_path) as wheel:
-                native_member = next(
-                    name
-                    for name in wheel.namelist()
-                    if name.startswith("astrembodiment_core/_native")
-                    and name.endswith((".pyd", ".so"))
-                )
-                wheel_bytes = wheel.read(native_member)
-            filename = Path(native_member).name
-            build_id = hashlib.sha256(wheel_bytes).hexdigest()
-            platform = "win32" if filename.endswith(".pyd") else "linux"
-            archive_member = f"astrembodiment_core/_bundled/{build_id}/{filename}"
-            assert all(symbol.encode("ascii") in wheel_bytes for symbol in NATIVE_API)
-            assert archive_member in names
-            archive_bytes = archive.read(archive_member)
-            assert archive_bytes == wheel_bytes
-            assert (
-                hashlib.sha256(archive_bytes).hexdigest()
-                == hashlib.sha256(wheel_bytes).hexdigest()
+        with zipfile.ZipFile(FRESH_NATIVE_WHEEL) as wheel:
+            native_member = next(
+                name
+                for name in wheel.namelist()
+                if name.startswith("astrembodiment_core/_native")
+                and name.endswith((".pyd", ".so"))
             )
-            assert all(symbol.encode("ascii") in archive_bytes for symbol in NATIVE_API)
-            assert manifest["platforms"][platform] == {
-                "build_id": build_id,
-                "filename": filename,
-            }
+            wheel_bytes = wheel.read(native_member)
+        filename = Path(native_member).name
+        build_id = hashlib.sha256(wheel_bytes).hexdigest()
+        platform = "win32" if filename.endswith(".pyd") else "linux"
+        archive_member = f"astrembodiment_core/_bundled/{build_id}/{filename}"
+        assert all(symbol.encode("ascii") in wheel_bytes for symbol in NATIVE_API)
+        assert archive_member in names
+        archive_bytes = archive.read(archive_member)
+        assert archive_bytes == wheel_bytes
+        assert (
+            hashlib.sha256(archive_bytes).hexdigest()
+            == hashlib.sha256(wheel_bytes).hexdigest()
+        )
+        assert all(symbol.encode("ascii") in archive_bytes for symbol in NATIVE_API)
+        assert manifest["platforms"][platform] == {
+            "build_id": build_id,
+            "filename": filename,
+        }
 
 
 @pytest.mark.skipif(
-    sys.platform != "win32" or FRESH_WINDOWS_WHEEL is None,
-    reason="requires a fresh current-version Windows native wheel",
+    FRESH_NATIVE_WHEEL is None,
+    reason="requires an explicit fresh current-platform native wheel",
 )
 def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
     tmp_path: Path,
 ) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None
+    assert FRESH_NATIVE_WHEEL is not None
     output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-native-smoke.zip"
     result = subprocess.run(
         [
@@ -487,7 +623,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
             "--output",
             str(output),
             "--native-wheel",
-            str(FRESH_WINDOWS_WHEEL),
+            str(FRESH_NATIVE_WHEEL),
         ],
         cwd=ROOT,
         text=True,
@@ -501,6 +637,10 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
     plugin_root.mkdir(parents=True)
     with zipfile.ZipFile(output) as archive:
         archive.extractall(plugin_root)
+    (plugin_root / "astrembodiment_core" / "_native.py").write_text(
+        "raise AssertionError('stale root native must never be imported')\n",
+        encoding="utf-8",
+    )
     for package_dir in (
         namespace_root / "data",
         namespace_root / "data" / "plugins",
@@ -526,11 +666,23 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
         )
         native = importlib.import_module(f"{module_prefix}.astrembodiment_core")
         assert NATIVE_API <= set(dir(native))
+        assert native.version() == "1.0.0-rc2"
         assert all(
             callable(getattr(native, symbol))
             for symbol in NATIVE_API - {"NativeCoreError"}
         )
         assert native.NativeCoreError.__name__ == "NativeCoreError"
+        native_module = sys.modules[f"{module_prefix}.astrembodiment_core._native"]
+        native_path = Path(native_module.__file__).resolve()
+        assert "_bundled" in native_path.parts
+        bundled_index = native_path.parts.index("_bundled")
+        assert len(native_path.parts) > bundled_index + 2
+        assert native_path.parent.parent.name == "_bundled"
+        assert native_path.name != "_native.py"
+        assert len(native_path.parent.name) == 64
+        assert all(
+            character in "0123456789abcdef" for character in native_path.parent.name
+        )
         runtime_dir = tmp_path / "runtime"
         runtime_dir.mkdir()
         health = bridge_module.NativeBridge().open(str(runtime_dir))

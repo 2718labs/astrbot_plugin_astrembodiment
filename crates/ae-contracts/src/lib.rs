@@ -46,7 +46,9 @@ pub mod hex {
             return Err(format!("expected 32 hex chars, got {}", trimmed.len()));
         }
         let mut out = [0u8; 16];
-        for (index, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
+        let (chunks, remainder) = trimmed.as_bytes().as_chunks::<2>();
+        debug_assert!(remainder.is_empty());
+        for (index, chunk) in chunks.iter().enumerate() {
             let high = (chunk[0] as char).to_digit(16).ok_or("invalid hex")?;
             let low = (chunk[1] as char).to_digit(16).ok_or("invalid hex")?;
             out[index] = ((high << 4) | low) as u8;
@@ -60,7 +62,9 @@ pub mod hex {
             return Err(format!("expected 64 hex chars, got {}", trimmed.len()));
         }
         let mut out = [0u8; 32];
-        for (index, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
+        let (chunks, remainder) = trimmed.as_bytes().as_chunks::<2>();
+        debug_assert!(remainder.is_empty());
+        for (index, chunk) in chunks.iter().enumerate() {
             let high = (chunk[0] as char).to_digit(16).ok_or("invalid hex")?;
             let low = (chunk[1] as char).to_digit(16).ok_or("invalid hex")?;
             out[index] = ((high << 4) | low) as u8;

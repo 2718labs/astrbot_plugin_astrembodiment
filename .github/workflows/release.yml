@@ -84,12 +84,9 @@ jobs:
       - name: 选择稳定版 Rust 工具链
         run: rustup default stable
       - name: 安装打包工具
-        run: python -m pip install --upgrade pip maturin==1.14.1
+        run: python -m pip install --upgrade pip maturin==1.14.1 "pytest>=8,<10"
       - name: 构建原生 wheel
         run: python -m maturin build --release --out dist
-      - name: 冒烟导入原生 wheel
-        run: >-
-          python -c "import pathlib, subprocess, sys; wheel=next(pathlib.Path('dist').glob('*.whl')); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', str(wheel)]); import astrembodiment_core as core; print(core.version())"
       - name: 保存原生 wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -97,6 +94,15 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 7
+      - name: 冒烟导入原生 wheel
+        run: >-
+          python -c "import pathlib, subprocess, sys; wheels=sorted(pathlib.Path('dist').glob('*.whl')); assert len(wheels) == 1, wheels; subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', str(wheels[0])]); import astrembodiment_core as core; assert core.version() == '1.0.0-rc2'; print(core.version())"
+      - name: 冒烟导入完整插件 bundle
+        env:
+          AE_FRESH_NATIVE_WHEEL_DIR: ${{ github.workspace }}/dist
+        run: >-
+          python -m pytest -q tests/test_release_contracts.py
+          -k "fresh_archive_imports_native_api_in_clean_astrbot_namespace"
 
   assemble-and-publish:
     name: 组装插件包并创建 GitHub Release

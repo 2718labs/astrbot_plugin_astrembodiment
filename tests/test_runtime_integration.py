@@ -7,7 +7,6 @@ import inspect
 import json
 import shutil
 import sys
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -970,38 +969,33 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
     assert issubclass(module.NativeCoreError, RuntimeError)
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="requires the Windows fresh wheel")
 def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The package must not let a stale root _native.py shadow the bundled wheel."""
-    wheel_path = next(
-        (
-            ROOT.parents[1] / ".codex-task-temp" / "rebuild-native-win-current" / "dist"
-        ).glob("*.whl"),
-        None,
-    )
-    assert wheel_path is not None
+    """The plugin loader selects its content-addressed native file, never root _native."""
     package_dir = tmp_path / "astrembodiment_core"
-    with zipfile.ZipFile(wheel_path) as wheel:
-        bundled_payload = wheel.read("astrembodiment_core/_native.pyd")
+    bundled_payload = b"current-content-addressed-native"
     build_id = hashlib.sha256(bundled_payload).hexdigest()
+    native_filename = "_native.pyd" if sys.platform == "win32" else "_native.abi3.so"
+    platform = "win32" if sys.platform == "win32" else "linux"
     bundled_dir = package_dir / "_bundled" / build_id
     bundled_dir.mkdir(parents=True)
-    (bundled_dir / "_native.pyd").write_bytes(bundled_payload)
+    bundled_native = bundled_dir / native_filename
+    bundled_native.write_bytes(bundled_payload)
     (package_dir / "_bundled" / "manifest.json").write_text(
         json.dumps(
             {
                 "schema": "astrembodiment-native-bundle-v1",
                 "platforms": {
-                    "win32": {"build_id": build_id, "filename": "_native.pyd"}
+                    platform: {"build_id": build_id, "filename": native_filename}
                 },
             }
         ),
         encoding="utf-8",
     )
-    (package_dir / "_native.py").write_text(
-        "version=lambda: 'stale-root'\nhealth=lambda: '{}'\n",
+    stale_root = package_dir / "_native.py"
+    stale_root.write_text(
+        "raise AssertionError('stale root native must never be imported')\n",
         encoding="utf-8",
     )
     (package_dir / "__init__.py").write_text(
@@ -1011,8 +1005,39 @@ def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
         encoding="utf-8",
     )
 
+    class FakeLoader:
+        def create_module(self, _spec):
+            return None
+
+        def exec_module(self, native):
+            native.apply_event = lambda *_args: "{}"
+            native.apply_perception_proposal_v1 = lambda *_args: "{}"
+            native.ensure_genesis = lambda *_args: "{}"
+            native.flush_and_close = lambda: None
+            native.health = lambda: "{}"
+            native.inspect = lambda *_args: "{}"
+            native.open = lambda *_args: None
+            native.semantic_revision_v1 = lambda *_args: "{}"
+            native.verify_replay = lambda *_args: "{}"
+            native.version = lambda: "bundled-current"
+            native.NativeCoreError = RuntimeError
+
+    observed_locations: list[Path] = []
+    original_spec_from_file_location = importlib.util.spec_from_file_location
+
+    def fake_spec_from_file_location(name, location, **kwargs):
+        if name.endswith("._native"):
+            observed_locations.append(Path(location))
+            return importlib.util.spec_from_loader(
+                name, FakeLoader(), origin=str(location)
+            )
+        return original_spec_from_file_location(name, location, **kwargs)
+
+    monkeypatch.setattr(
+        importlib.util, "spec_from_file_location", fake_spec_from_file_location
+    )
     module_name = "_astrembodiment_core_bundled_regression"
-    spec = importlib.util.spec_from_file_location(
+    spec = original_spec_from_file_location(
         module_name,
         package_dir / "__init__.py",
         submodule_search_locations=[str(package_dir)],
@@ -1022,15 +1047,12 @@ def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-        assert module.version() == "1.0.0-rc1"
+        assert module.version() == "bundled-current"
         assert callable(module.apply_event)
         assert callable(module.apply_perception_proposal_v1)
         assert callable(module.semantic_revision_v1)
-        assert Path(sys.modules[f"{module_name}._native"].__file__).parts[-3:] == (
-            "_bundled",
-            build_id,
-            "_native.pyd",
-        )
+        assert observed_locations == [bundled_native]
+        assert observed_locations[0] != stale_root
     finally:
         sys.modules.pop(module_name, None)
         sys.modules.pop(f"{module_name}._native", None)

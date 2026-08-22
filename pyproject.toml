@@ -16,7 +16,7 @@ classifiers = [
 
 [tool.maturin]
 manifest-path = "crates/ae-pyo3/Cargo.toml"
-python-source = "python"
+python-source = "python-wheel"
 module-name = "astrembodiment_core._native"
 bindings = "pyo3"
 strip = true

@@ -20,9 +20,10 @@ fn hex(bytes: &[u8]) -> String {
 
 fn unhex(value: &str) -> Vec<u8> {
     assert_eq!(value.len() % 2, 0);
-    value
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    pairs
+        .iter()
         .map(|pair| {
             let hi = (pair[0] as char).to_digit(16).unwrap();
             let lo = (pair[1] as char).to_digit(16).unwrap();

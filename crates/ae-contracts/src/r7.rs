@@ -1054,7 +1054,9 @@ fn sha256_digest(input: &[u8]) -> Digest {
     padded.extend_from_slice(&bit_length.to_be_bytes());
 
     let mut hash = INITIAL;
-    for chunk in padded.chunks_exact(64) {
+    let (chunks, remainder) = padded.as_chunks::<64>();
+    debug_assert!(remainder.is_empty());
+    for chunk in chunks {
         let mut words = [0_u32; 64];
         for (index, word) in words[..16].iter_mut().enumerate() {
             let offset = index * 4;
