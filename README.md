@@ -1,22 +1,18 @@
-# AstrEmbodiment
+# 让你的 Bot 不只记住经历，更能延续「Ta是谁」
 
-## ⚠️ 1.0.0-rc1 发布候选状态（请先读）
+**用户话语 → 15 维闭合语义证据 → native semantic commit**
 
-> 这是 `1.0.0-rc1` 本地发布候选，**不是已上架的 AstrBot Marketplace 条目，也不是已创建的 GitHub Release**。
->
-> 当前归档只在 fresh Windows x64 与 Linux x86_64 CPython 3.12+ 原生 wheel 已通过本版本验收时交付。完整核心反应链：**用户话语 → 闭合语义证据 → 原生状态转移 → 受控回应策略/投影** 仍不作为当前能力声明；现有 G0 路径包含确定性占位/无状态推进。
->
-> 不要把 RC1 用作“已具备情绪反应”或人格漂移能力的声明。远端发布、上架和生产部署须由维护者在当前验收完成后单独决定。
+AstrEmbodiment 是为 AstrBot 构建的 Rust 原生人格连续性运行时。它为人格建立可验证的 Genesis 起点和可持久的 SeedCode，并让每次进入状态的语义变化都能被验证、提交和追溯。
 
-下文的架构、命令和发布描述以当前已接线的 G0 边界为准；与以上状态声明冲突时，以上状态声明优先。
+它正在回答一个比“记住了什么”更难的问题：同一个 Bot，如何在一次次相处之后，仍然能够确认自己是谁、经历了什么，以及哪些变化真正属于自己。
 
 <p align="center">
   <img src="logo.png" alt="AstrEmbodiment" width="260" />
 </p>
 
 <p align="center">
-  <strong>Sylanne 方向的重制版人格连续性运行时</strong><br>
-  用 Rust 原生核心、Genesis 和 SeedCode，保留最初的“让 Bot 持续成为自己”这一件事。
+  <strong>Rust 原生人格连续性运行时</strong><br>
+  用 Genesis、SeedCode、闭合语义证据与原生提交，给“持续成为自己”一条可验证的路径。
 </p>
 
 <p align="center">
@@ -27,48 +23,50 @@
 </p>
 
 <p align="center">
-  <a href="#功能">功能</a> · <a href="#安装与使用">安装</a> · <a href="#模块分层">模块</a> ·
-  <a href="#一轮请求工作流">工作流</a> · <a href="#astrembodiment-与-sylanne-的关系">与 Sylanne 的关系</a> ·
+  <a href="#为什么是人格连续性">为什么</a> · <a href="#现在已经能做什么">能力</a> · <a href="#快速开始">快速开始</a> ·
+  <a href="#一次互动如何进入连续性">工作流</a> · <a href="#observatory看见每次提交了什么">Observatory</a> · <a href="#当前能力边界">边界</a> ·
+  <a href="#模块分层">技术细节</a> ·
   <a href="CHANGELOG.md">更新记录</a>
 </p>
 
-AstrEmbodiment 是 AstrBot 的 Rust 原生人格连续性插件。它把当前 AstrBot Persona 编译成一次 Genesis 创世清单，由 Rust 核心生成并持久化 SeedCode，然后在每轮 LLM 请求前注入有限的身份上下文。
+> **当前版本：1.0.0-rc1 本地候选。** Genesis、SeedCode、G0 continuity 与 SPC1 semantic commit 已接线并通过本地候选验收；受控回应策略和人格漂移仍是后续能力。尚未创建 GitHub Release，也未上架 AstrBot Marketplace。
 
-它刻意保持“小而纯粹”：只负责身份连续性、运行时状态和真实投递结算，不把记忆、主动聊天、QQ 空间、TTS 或 WebUI 控制台等额外产品能力塞进核心。
+## 为什么是人格连续性
 
-它不是聊天记录备份、API 密钥、独立对话模型，也不会替换 AstrBot 的主对话模型或平台适配器。
+记忆回答“发生过什么”；人格连续性还要回答：这些经历是否属于同一个持续存在的 Bot。Persona prompt 可以描述一个角色，却不能单独提供可修订、可持久、可验证的身份路径。
 
-## 功能
+AstrEmbodiment 把这条路径收拢为一个闭环：Genesis 定义起点，SeedCode 固定身份，闭合语义证据描述本轮输入的可提交部分，Rust 单写者负责原生状态与回执。它不替代 AstrBot 的主对话模型，而是让模型的上下文有一条可审计的连续性基础。
 
-| 能力 | 做什么 | 结果 |
-| --- | --- | --- |
-| Persona Genesis | 读取当前 Persona 的有限公开字段，并让辅助模型输出封闭的低维初始表型。 | 首次使用前建立一个可验证的身份起点。 |
-| Rust 原生连续体 | 在固定规模、稀疏连接的原生神经场中处理刺激、身体变量和行动候选。 | 每轮状态由原生单写者推进，而不是由 Python 逐节点修改。 |
-| SeedCode | 为同一 Persona/Scope 生成并持久化身份种子。 | 重载后仍能确认“是不是同一个运行身份”。 |
-| 因果 revision | 将请求、事件和投递绑定到单调 revision。 | 过期 turn、重复事件和 stale base 会被拒绝。 |
-| 行动契约 | 用封闭 JSON 描述本轮有限上下文与候选行动。 | 主模型只看到受控的运行时注入，不接管模型本身。 |
-| 真实投递结算 | 只在 AstrBot 确认消息真实发送后提交 `DeliveryOutcome`。 | 未发送的候选不会被伪装成历史事实。 |
-| 只读观测 | 提供版本、公式、节点数量和健康状态。 | 方便排查原生核心，不记录消息正文。 |
+## 现在已经能做什么
 
-### 明确不包含的功能
+| 当前能力 | 它为用户带来的结果 |
+| --- | --- |
+| Genesis + SeedCode | 为同一个 Persona/Scope 建立并保留可验证的运行身份；重载后仍可确认“是不是同一个自己”。 |
+| G0 continuity | 为 revision、replay、生命周期与真实投递事实建立受控边界，拒绝过期或重复提交。 |
+| SPC1 语义证据 | 将当前用户话语估计为 15 维已验证的闭合语义证据；原生状态不保留原始文本。 |
+| native semantic commit + Observatory | 由 Rust 权威提交语义提案，并用不含消息内容的本地结构化日志展示结果。 |
 
-AstrEmbodiment **没有** Sylanne 的长期记忆、关系状态、即时聊天、主动消息、生活模拟、QQ 空间、Embedding 召回、TTS 编排或独立 WebUI。这不是功能缺失的临时占位，而是本版本的边界：先把“人格连续性”这一条核心链路做正确。
+## 一次互动如何进入连续性
 
-## 当前版本
+当前已接线的路径是：
 
-当前发布候选：`1.0.0-rc1`。
+```text
+current user text
+  -> closed 15-dimensional semantic evidence
+  -> Python validation and frozen turn binding
+  -> Rust native semantic commit
+  -> revisioned receipt and local observatory record
+```
 
-本地候选归档在 fresh Windows x64 和 Linux x86_64 CPython 3.12+ wheel 的当前验收通过后提供；远端发布与 Marketplace 上架尚未执行。
+这条路径已经能把本轮语义以受控、可验证的方式带入连续性状态。它与未来的受控回应策略、外显人格漂移是两层能力：前者已经可以提交，后者还不能据此宣称会改变 Bot 的对外人格。
 
-## 安装与使用
+## 快速开始
 
-### RC1 发布包安装
+### 安装本地 RC1 发布包
 
-维护者使用 `scripts/package_plugin.py` 从当前验收的原生 wheel 生成归档。尚未获得该归档时，不要用旧 Alpha 快照替换现有插件数据；GitHub Release 和 AstrBot Marketplace 上架不由该脚本执行。
+使用已完成本地验收的 `astrbot_plugin_astrembodiment-1.0.0-rc1-win_linux_x86_64.zip`，解压到 AstrBot 的插件目录，然后重载插件。该归档尚未作为 GitHub Release 发布，也未上架 AstrBot Marketplace。
 
-### 已接线的使用方式
-
-以下命令需要已验收的 RC1 归档和干净的 AstrBot 实例：
+首次载入后，可使用：
 
 ```text
 <命令前缀>ae
@@ -76,47 +74,31 @@ AstrEmbodiment **没有** Sylanne 的长期记忆、关系状态、即时聊天�
 ```
 
 - `ae`：显示原生核心版本、公式、节点数量和运行状态。
-- `ae_seed`：如果已经有 SeedCode，就直接回显；如果没有，就执行 Genesis、生成 SeedCode、保存后回显。
+- `ae_seed`：已有 SeedCode 时回显；没有时执行 Genesis、生成并保存新的身份种子。
 
-SeedCode 由 AstrBot 的插件配置保存接口持久化，不依赖用户点击 WebUI。默认配置文件由 AstrBot 管理，通常位于：
-
-```text
-AstrBot/data/config/astrbot_plugin_astrembodiment_config.json
-```
-
-具体路径以服务器的 AstrBot 数据根目录为准。不要改发布包内的插件安装目录；没有 WebUI 时，先备份配置文件，再编辑该配置文件中的 JSON。只修改配置字段，不要删除 `seed_code` 或把它改成随意文本。
-
-如果服务器配置保存接口不可用，`ae_seed` 会返回明确的生成失败消息，插件不会假装已经持久化。若配置文件或数据卷被清理，旧 SeedCode 无法恢复，只能重新执行 `ae_seed` 生成新的身份。
-
-## 配置
-
-配置由 AstrBot 读取 `_conf_schema.json` 自动合并默认值。没有 WebUI 时，在 AstrBot 配置文件中使用下面的字段：
+### 关键配置
 
 | 字段 | 默认值 | 作用 |
 | --- | --- | --- |
-| `runtime_envelope` | `auto` | 选择资源包络：`auto`、`reference-2c2g-v1`、`compat-1c1g-v1`。不改变人格公式。 |
-| `native_data_dir` | `""` | 原生 SQLite 数据目录。留空时使用 AstrBot 分配的插件数据目录。 |
-| `observatory_enabled` | `true` | 开启不含消息正文的只读诊断。 |
-| `proactive_enabled` | `false` | 是否允许提出主动联系建议；实际发送仍受 AstrBot 权限和用户控制。 |
-| `model_settings.assistant_provider_id` | `""` | Genesis 辅助模型 Provider ID。非空时固定使用它；留空时自动使用当前会话的主对话模型。 |
-| `seed_code` | `""` | 系统生成的 SeedCode。不要手工伪造；生成后由插件保存。 |
+| `native_data_dir` | `""` | 原生 SQLite 数据目录；留空时使用 AstrBot 分配的插件数据目录。 |
+| `model_settings.assistant_provider_id` | `""` | Genesis 辅助模型 Provider ID；留空时使用当前会话的主对话模型。 |
+| `observatory_enabled` | `true` | 开启不含消息正文的 SPC1 结构化诊断日志。 |
 
-配置示例：
+配置由 AstrBot 根据 `_conf_schema.json` 管理。没有 WebUI 时，请在 AstrBot 的插件配置文件中修改这些字段，而不要修改发布包内的插件目录。
 
-```json
-{
-  "runtime_envelope": "auto",
-  "native_data_dir": "",
-  "observatory_enabled": true,
-  "proactive_enabled": false,
-  "model_settings": {
-    "assistant_provider_id": ""
-  },
-  "seed_code": ""
-}
-```
+## Observatory：看见每次提交了什么
 
-辅助 Provider 的规则只有一条：填了有效 ID 就使用该 Provider；留空才使用当前会话模型。非空但不存在的 ID 会直接报错，不会悄悄回退。
+SPC1 的本地观测记录会在普通日志级别给出完整结果：SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录。只要估计有效，记录会包含全部 15 个 fxp6 语义证据值和置信度，并清楚区分已提交、已估计但未提交、已估计但未确认，以及不可用。
+
+当前 RC1 的原生 load 直接使用 `positive`、`harm`、`boundary` 和 `epistemic_conflict` 四个维度；其余维度仍作为同一份闭合证据被验证、记录和随回执追溯。这里的 15 个值是语义证据，不是可由外部直接编辑的“神经节点”。
+
+Observatory 不记录用户消息、Provider 输出、token、nonce、SeedCode 或状态摘要；它只帮助你判断本轮是否得到了有效证据、是否抵达原生提交，以及为什么没有抵达。
+
+## 当前能力边界
+
+AstrEmbodiment 今天可以将闭合语义证据提交到原生状态，但不把这等同于完整的情绪反应产品。受控回应策略和外显人格漂移仍是后续能力；当前版本不会据此承诺改变 Bot 的对外语言、关系策略或长期行为。
+
+Sylanne 的长期记忆、关系状态、主动聊天、TTS 与 dashboard 等产品能力没有捆绑进 AstrEmbodiment。两者都可能接管同一轮对话的生命周期，因此同一个 AstrBot 会话只应启用一个人格运行时。
 
 ## 模块分层
 
@@ -190,19 +172,19 @@ flowchart LR
 
 通过的事件也只是候选，最终仍要经过 Rust 唯一提交写者。任何 stale turn 或 stale base 都不能借用最新 revision 强行提交；失败时返回 `STALE_CAUSAL_BASE`、`STALE_REVISION`、`DUPLICATE_EVENT` 或 `CLOSED_SCHEMA`，并保留旧状态。
 
-### 4. Micro-Attention 与 Neurocontinuum：从证据到固定神经场试算
+### 4. Micro-Attention 与 Neurocontinuum：从证据到原生语义提交
 
-当前 G0 输入是 `UserStimulus` 的封闭 evidence 向量（默认零置信度占位，不含原始文本），以及 Genesis 建立的 16,384 槽位初始场；输出是固定维度的稀疏荷载和确定性的 no-op 状态投影。`ae-attention` 只有证据装配权限，`ae-neurofield` 负责建立、校验和摘要初始场，二者没有权威状态写权限；schema、维度、容量或神经状态校验失败时拒绝事件并保留 committed state。语义估计、Allostasis/Glia、局部传播和 `NeuralTrial` 属于后续 G1 目标路径，当前 `apply_event` 不改变 field，`state_before` 与 `state_after` 保持一致。
+SPC1 当前输入是本轮用户话语生成的封闭 15 维语义证据和置信度；原始文本不会进入 native state。Python 先验证 schema、fxp6 维度与冻结 turn，再由 Rust 执行 semantic proposal commit。`ae-attention` 只有证据装配权限，`ae-neurofield` 负责建立、校验和摘要初始场，二者没有权威状态写权限；schema、维度、容量或神经状态校验失败时拒绝事件并保留 committed state。当前 RC1 的 native load 直接使用 `positive`、`harm`、`boundary` 与 `epistemic_conflict`；更深的场传播、Allostasis/Glia 与 `NeuralTrial` 仍属于后续 G1 路径。
 
 ```mermaid
 flowchart TD
-    A[UserStimulus] --> B[去除原文 / 固定维度]
-    B --> C[G0: 全零 evidence + confidence=0]
-    C --> D[Micro-Attention 稀疏荷载]
+    A[当前用户话语] --> B[SPC1: 去除原文 / 闭合 15 维 evidence]
+    B --> C[Python validation + frozen turn]
+    C --> D[Rust native semantic commit]
     E[Genesis initial field] --> F[16,384 槽位 + sparse graph]
-    D --> G[G0 deterministic no-op]
+    D --> G[revisioned semantic receipt]
     F --> G
-    G --> H[state_before = state_after]
+    G --> H[Observatory record]
     H --> I[ActionContract + receipt]
     B -.非法 schema.-> J[拒绝本轮]
     K[G1 field propagation / NeuralTrial] -.目标路径.-> G
@@ -360,8 +342,8 @@ flowchart TB
     E --> F[Rust 校验 Manifest 并生成 SeedCode]
     D -- 是 --> G[inspect 恢复 revision]
     F --> G
-    G --> H[apply_event UserStimulus]
-    H --> I[ActionContract + 有限 Runtime Context]
+    G --> H[SPC1: 15 维闭合语义证据]
+    H --> I[Rust native semantic commit + 有限 Runtime Context]
     I --> J[注入本轮 ProviderRequest]
     J --> K[AstrBot 主模型生成回复]
     K --> L[on_llm_response 当前 G0 no-op]
@@ -377,8 +359,9 @@ flowchart TB
   -> 解析当前会话有效 Persona
   -> Genesis（若该 scope 尚未绑定）
   -> Rust inspect 持久化 revision
-  -> apply_event(UserStimulus)
-  -> 返回 ActionContract 与 SeedCode
+  -> SPC1 生成并验证 15 维闭合语义证据
+  -> Rust native semantic commit
+  -> 返回 ActionContract、回执与 SeedCode
   -> 注入本轮有限 Runtime Context
   -> AstrBot 主模型正常生成回复
   -> on_llm_response（当前 G0 no-op）

@@ -72,6 +72,43 @@ def test_release_version_metadata_and_required_files_are_present() -> None:
         assert (ROOT / relative_path).is_file()
 
 
+def test_product_readme_and_metadata_match_rc1_contract() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+
+    assert "# 让你的 Bot 不只记住经历，更能延续「Ta是谁」" in readme
+    assert "**用户话语 → 15 维闭合语义证据 → native semantic commit**" in readme
+    assert "当前版本：1.0.0-rc1 本地候选" in readme
+    assert "尚未创建 GitHub Release，也未上架 AstrBot Marketplace" in readme
+    assert "## 为什么是人格连续性" in readme
+    assert "## 现在已经能做什么" in readme
+    assert "## 一次互动如何进入连续性" in readme
+    assert "## Observatory：看见每次提交了什么" in readme
+    assert "SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录" in readme
+    assert "positive`、`harm`、`boundary` 和 `epistemic_conflict`" in readme
+    assert "受控回应策略和外显人格漂移仍是后续能力" in readme
+    assert "不记录用户消息、Provider 输出、token、nonce、SeedCode 或状态摘要" in readme
+
+    assert (
+        "desc: 让你的 Bot 不只记住经历，更能延续“Ta是谁”。AstrEmbodiment 以 Rust 原生运行时承载人格连续性，将用户话语转化为 15 维闭合语义证据并提交原生状态，为受控回应与人格演化提供试验性基础。"
+        in metadata
+    )
+    assert (
+        "short_desc: Rust 原生人格连续性运行时：让用户话语成为可验证、可提交的连续语义证据。"
+        in metadata
+    )
+    for unchanged_field in (
+        "name: astrbot_plugin_astrembodiment",
+        "display_name: AstrEmbodiment",
+        'version: "1.0.0-rc1"',
+        "repo: https://github.com/2718labs/astrbot_plugin_astrembodiment",
+        'astrbot_version: ">=4.16,<5"',
+        "support_platforms:",
+        "tags:",
+    ):
+        assert unchanged_field in metadata
+
+
 def test_plugin_entrypoint_uses_astrbot_auto_discovery() -> None:
     entrypoint = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "from astrbot.api.star import Context, Star, register" not in entrypoint

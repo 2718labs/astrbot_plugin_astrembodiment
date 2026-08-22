@@ -1,7 +1,7 @@
 name: astrbot_plugin_astrembodiment
 display_name: AstrEmbodiment
-desc: Rust-native AstrEmbodiment runtime release candidate for AstrBot. It exposes the verified G0 continuity boundary; semantic reaction and personality drift are not claimed.
-short_desc: Rust-native G0 continuity runtime for AstrBot (1.0.0-rc1 release candidate).
+desc: 让你的 Bot 不只记住经历，更能延续“Ta是谁”。AstrEmbodiment 以 Rust 原生运行时承载人格连续性，将用户话语转化为 15 维闭合语义证据并提交原生状态，为受控回应与人格演化提供试验性基础。
+short_desc: Rust 原生人格连续性运行时：让用户话语成为可验证、可提交的连续语义证据。
 version: "1.0.0-rc1"
 author: 2718labs
 repo: https://github.com/2718labs/astrbot_plugin_astrembodiment
