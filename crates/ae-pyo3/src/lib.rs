@@ -697,7 +697,12 @@ mod native_private_projection_absence_tests {
             payload["node_observability"]["schema"],
             ae_runtime::NODE_OBSERVABILITY_SCHEMA_V1
         );
-        assert_eq!(payload["node_observability"]["regions"].as_array().map(Vec::len), Some(9));
+        assert_eq!(
+            payload["node_observability"]["regions"]
+                .as_array()
+                .map(Vec::len),
+            Some(9)
+        );
         assert_eq!(
             payload["node_observability"]["residuals"],
             serde_json::json!({"state": "NOT_COMPUTED", "formula": null, "values_fxp6": null})
