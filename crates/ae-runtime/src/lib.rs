@@ -21,8 +21,8 @@ use ae_authority::authority_projection_digest;
 use ae_continuum::{CommitEnvelope, ReplayReport};
 use ae_contracts::r7::{PerceptionProposalErrorV1, PerceptionProposalV1};
 use ae_contracts::{
-    wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisReceipt, GenesisStatus,
-    Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
+    wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisManifest, GenesisReceipt,
+    GenesisStatus, Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
@@ -448,6 +448,68 @@ fn decode_hot_state_v1(
         return Err(RuntimeError::InvalidNeuralState);
     }
     Ok((field, graph))
+}
+
+fn encode_legacy_g0_state_1_0_4(field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for values in [
+        &field.potential,
+        &field.excitation,
+        &field.inhibition,
+        &field.adaptation,
+        &field.precision,
+        &field.prediction_error,
+        &field.eligibility,
+        &field.metabolic_reserve,
+    ] {
+        bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
+        for value in values {
+            bytes.extend_from_slice(&value.encode());
+        }
+    }
+    bytes.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
+    for offset in &graph.row_offsets {
+        bytes.extend_from_slice(&offset.to_le_bytes());
+    }
+    bytes.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
+    bytes
+}
+
+fn decode_root_g0_snapshot_v1(
+    bytes: &[u8],
+    formula_digest: &Digest,
+    expected_state_digest: &Digest,
+    expected_graph_digest: &Digest,
+    genesis_manifest: &GenesisManifest,
+    development_seed_digest: &Digest,
+) -> Result<(NeuralField, SparseGraph), RuntimeError> {
+    match decode_hot_state_v1(
+        bytes,
+        formula_digest,
+        expected_state_digest,
+        expected_graph_digest,
+    ) {
+        Ok(state) => Ok(state),
+        Err(RuntimeError::InvalidNeuralState)
+            if !bytes.starts_with(&CANONICAL_HOT_STATE_MAGIC_V1) =>
+        {
+            let (field, graph) = initial_state_from_manifest(
+                genesis_manifest,
+                formula_digest,
+                development_seed_digest,
+            );
+            if !field.validate()
+                || !graph.validate()
+                || state_digest(&field, formula_digest) != *expected_state_digest
+                || graph_digest(&graph) != *expected_graph_digest
+                || bytes != encode_legacy_g0_state_1_0_4(&field, &graph)
+            {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+            Ok((field, graph))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -948,7 +1010,7 @@ impl AstrRuntime {
             .lookup_bound_genesis(&bot_token, &persona_token)?
             .ok_or(RuntimeError::PersonaGenesisRequired)?;
         let identity = ae_genesis::GenesisIdentity {
-            manifest: committed.manifest,
+            manifest: committed.manifest.clone(),
             manifest_digest: committed.receipt.manifest_digest,
             seed_code_digest: committed.receipt.seed_code_digest,
             incarnation_id: committed.receipt.incarnation_id,
@@ -1032,12 +1094,23 @@ impl AstrRuntime {
                 &receipt.graph_after,
             )?;
         }
-        let (field, graph) = decode_hot_state_v1(
-            &snapshot.state_bytes,
-            &committed.receipt.formula_digest,
-            &expected_state_digest,
-            &expected_graph_digest,
-        )?;
+        let (field, graph) = if semantic_revision == 0 {
+            decode_root_g0_snapshot_v1(
+                &snapshot.state_bytes,
+                &committed.receipt.formula_digest,
+                &expected_state_digest,
+                &expected_graph_digest,
+                &committed.manifest,
+                &committed.receipt.development_seed_digest,
+            )?
+        } else {
+            decode_hot_state_v1(
+                &snapshot.state_bytes,
+                &committed.receipt.formula_digest,
+                &expected_state_digest,
+                &expected_graph_digest,
+            )?
+        };
         self.hot = Some(HotBrain {
             bot_token,
             persona_token,
@@ -1071,6 +1144,8 @@ impl AstrRuntime {
                 formula_digest,
                 field,
                 graph,
+                genesis_manifest,
+                development_seed_digest,
             ) = {
                 let hot = self
                     .hot
@@ -1084,6 +1159,8 @@ impl AstrRuntime {
                     hot.formula_digest,
                     hot.field.clone(),
                     hot.graph.clone(),
+                    hot.identity.manifest.clone(),
+                    hot.identity.development_seed_digest,
                 )
             };
             let store_legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
@@ -1101,12 +1178,23 @@ impl AstrRuntime {
                     Some(snapshot) => {
                         snapshot.revision != store_semantic_revision
                             || snapshot.state_digest != state_digest(&field, &formula_digest)
-                            || decode_hot_state_v1(
-                                &snapshot.state_bytes,
-                                &formula_digest,
-                                &snapshot.state_digest,
-                                &graph_digest(&graph),
-                            )
+                            || (if store_semantic_revision == 0 {
+                                decode_root_g0_snapshot_v1(
+                                    &snapshot.state_bytes,
+                                    &formula_digest,
+                                    &snapshot.state_digest,
+                                    &graph_digest(&graph),
+                                    &genesis_manifest,
+                                    &development_seed_digest,
+                                )
+                            } else {
+                                decode_hot_state_v1(
+                                    &snapshot.state_bytes,
+                                    &formula_digest,
+                                    &snapshot.state_digest,
+                                    &graph_digest(&graph),
+                                )
+                            })
                             .is_err()
                     }
                     None => true,
@@ -1125,10 +1213,8 @@ impl AstrRuntime {
         &self,
         legacy_scope: &Digest,
         legacy_revision: u64,
-        formula_digest: &Digest,
-        manifest_digest: &Digest,
-        initial_snapshot_digest: &Digest,
-        genesis_graph_digest: &Digest,
+        genesis_manifest: &GenesisManifest,
+        genesis_receipt: &GenesisReceipt,
     ) -> Result<(Digest, Digest, u32, u32), RuntimeError> {
         // The G0 append path must audit the complete legacy journal before it
         // asks Store for the current chain tip.  Store's CAS guard verifies
@@ -1144,7 +1230,7 @@ impl AstrRuntime {
         if row_count != current_revision {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let report = ae_continuum::verify_replay(*initial_snapshot_digest, &rows);
+        let report = ae_continuum::verify_replay(genesis_receipt.initial_snapshot_digest, &rows);
         let last_chain_digest = self.store.last_chain_digest(legacy_scope)?;
         if !report.ok
             || report.checked != rows.len()
@@ -1164,8 +1250,8 @@ impl AstrRuntime {
         }
 
         let mut expected_revision = 0_u64;
-        let mut expected_state = *initial_snapshot_digest;
-        let mut expected_graph = *genesis_graph_digest;
+        let mut expected_state = genesis_receipt.initial_snapshot_digest;
+        let mut expected_graph = genesis_receipt.graph_digest;
         for row in &rows {
             let next_revision = expected_revision
                 .checked_add(1)
@@ -1200,7 +1286,8 @@ impl AstrRuntime {
                 CanonicalEvent::TimeAdvance(value) => value.event_id,
                 _ => unreachable!(),
             };
-            let expected_contract = noop_action_contract(manifest_digest, &event_digest, turn_id);
+            let expected_contract =
+                noop_action_contract(&genesis_receipt.manifest_digest, &event_digest, turn_id);
             if row.revision != next_revision
                 || row.event_kind != event_kind
                 || receipt.next_revision != row.revision
@@ -1214,7 +1301,7 @@ impl AstrRuntime {
                 || event_scope_digest != *legacy_scope
                 || event_digest != row.event_digest
                 || receipt.event_digest != row.event_digest
-                || receipt.formula_digest != *formula_digest
+                || receipt.formula_digest != genesis_receipt.formula_digest
                 || receipt.state_before != expected_state
                 || receipt.state_after != expected_state
                 || receipt.graph_after != expected_graph
@@ -1237,11 +1324,13 @@ impl AstrRuntime {
         // G0 snapshots are rooted at Genesis.  The audited no-op rows must
         // preserve the Genesis graph, so decode against the recomputed graph
         // digest rather than any semantic hot state.
-        let (field, graph) = decode_hot_state_v1(
+        let (field, graph) = decode_root_g0_snapshot_v1(
             &snapshot.state_bytes,
-            formula_digest,
+            &genesis_receipt.formula_digest,
             &snapshot.state_digest,
             &expected_graph,
+            genesis_manifest,
+            &genesis_receipt.development_seed_digest,
         )?;
         let decoded_graph_digest = graph_digest(&graph);
         if decoded_graph_digest != expected_graph {
@@ -1329,10 +1418,8 @@ impl AstrRuntime {
         let (state_before, graph_after, active_nodes, active_edges) = self.durable_g0_metadata_v1(
             &legacy_persona_scope,
             legacy_revision,
-            &formula_digest,
-            &manifest_digest,
-            &initial_snapshot_digest,
-            &committed.receipt.graph_digest,
+            &committed.manifest,
+            &committed.receipt,
         )?;
         let event_scope = match event {
             CanonicalEvent::UserStimulus(e) => &e.scope,
@@ -1992,6 +2079,123 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ae-runtime-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn legacy_g0_snapshot_bytes(field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
+        // 1.0.4 persisted only the eight fixed field vectors, CSR offsets, and
+        // edge count. It had no codec header, formula digest, or edge bodies.
+        let mut bytes = Vec::new();
+        for values in [
+            &field.potential,
+            &field.excitation,
+            &field.inhibition,
+            &field.adaptation,
+            &field.precision,
+            &field.prediction_error,
+            &field.eligibility,
+            &field.metabolic_reserve,
+        ] {
+            bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                bytes.extend_from_slice(&value.encode());
+            }
+        }
+        bytes.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
+        for offset in &graph.row_offsets {
+            bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        bytes.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn legacy_g0_revision_zero_snapshot_reopens_and_continues() {
+        let dir = temp_dir("legacy-g0-r0");
+        let path = dir.join("store.db");
+        let request = request(41);
+        let scope = request.source.scope_persona_scope();
+        let legacy_scope = wire::persona_scope_digest(
+            &request.source.scope.bot_token,
+            &request.source.scope.persona_token,
+            None,
+        );
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        let genesis = runtime.ensure_genesis(&request).expect("genesis");
+        let legacy_bytes = {
+            let hot = runtime.hot.as_ref().expect("hot after genesis");
+            legacy_g0_snapshot_bytes(&hot.field, &hot.graph)
+        };
+        runtime
+            .flush_and_close()
+            .expect("close runtime before upgrade");
+        drop(runtime);
+
+        let mut store = Store::open(&path).expect("open legacy store");
+        store
+            .write_snapshot(
+                &legacy_scope,
+                0,
+                &genesis.initial_snapshot_digest,
+                &legacy_bytes,
+            )
+            .expect("install 1.0.4 revision-zero snapshot");
+        drop(store);
+
+        let mut reopened = AstrRuntime::open(&path).expect("reopen upgraded runtime");
+        reopened
+            .ensure_genesis(&request)
+            .expect("rejoin genesis from a 1.0.4 revision-zero snapshot");
+        let next = reopened
+            .apply_event(&scope, &stimulus(41, 0, 1))
+            .expect("apply after legacy revision-zero upgrade");
+        assert_eq!(next.revision, 1);
+        reopened.flush_and_close().expect("close upgraded runtime");
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_g0_revision_one_snapshot_reopens_and_continues() {
+        let dir = temp_dir("legacy-g0-r1");
+        let path = dir.join("store.db");
+        let request = request(42);
+        let scope = request.source.scope_persona_scope();
+        let legacy_scope = wire::persona_scope_digest(
+            &request.source.scope.bot_token,
+            &request.source.scope.persona_token,
+            None,
+        );
+        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
+        runtime.ensure_genesis(&request).expect("genesis");
+        let first = runtime
+            .apply_event(&scope, &stimulus(42, 0, 1))
+            .expect("first G0 event");
+        let legacy_bytes = {
+            let hot = runtime.hot.as_ref().expect("hot after first G0 event");
+            legacy_g0_snapshot_bytes(&hot.field, &hot.graph)
+        };
+        runtime
+            .flush_and_close()
+            .expect("close runtime before upgrade");
+        drop(runtime);
+
+        let mut store = Store::open(&path).expect("open legacy store");
+        store
+            .write_snapshot(&legacy_scope, 1, &first.receipt.state_after, &legacy_bytes)
+            .expect("install 1.0.4 revision-one snapshot");
+        drop(store);
+
+        let mut reopened = AstrRuntime::open(&path).expect("reopen upgraded runtime");
+        reopened
+            .ensure_genesis(&request)
+            .expect("rejoin genesis from a 1.0.4 revision-one snapshot");
+        let next = reopened
+            .apply_event(&scope, &stimulus(42, 1, 2))
+            .expect("apply after legacy revision-one upgrade");
+        assert_eq!(next.revision, 2);
+        reopened.flush_and_close().expect("close upgraded runtime");
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
