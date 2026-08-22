@@ -28,6 +28,7 @@ version = "1.0.0-rc1"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
+ "ae-neurofield",
  "serde",
 ]
 
