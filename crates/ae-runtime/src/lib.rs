@@ -1021,9 +1021,8 @@ impl AstrRuntime {
         let legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
         let semantic_revision = self.store.current_revision(&persona_scope)?;
         self.verify_durable_history_v1(
-            committed.receipt.formula_digest,
-            committed.receipt.initial_snapshot_digest,
-            committed.receipt.graph_digest,
+            &committed.manifest,
+            &committed.receipt,
             persona_scope,
             true,
         )?;
@@ -1579,27 +1578,26 @@ impl AstrRuntime {
 
     fn verify_durable_history_v1(
         &self,
-        formula_digest: Digest,
-        initial_snapshot_digest: Digest,
-        initial_graph_digest: Digest,
+        genesis_manifest: &GenesisManifest,
+        genesis_receipt: &GenesisReceipt,
         persona_scope: Digest,
         requires_semantic_snapshots: bool,
     ) -> Result<ReplayReport, RuntimeError> {
         let rows = self.store.read_journal(&persona_scope)?;
         let current_revision = self.store.current_revision(&persona_scope)?;
-        let report = ae_continuum::verify_replay(initial_snapshot_digest, &rows);
+        let report = ae_continuum::verify_replay(genesis_receipt.initial_snapshot_digest, &rows);
         if !report.ok || report.final_revision != current_revision {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let mut expected_state_digest = initial_snapshot_digest;
-        let mut expected_graph_digest = initial_graph_digest;
+        let mut expected_state_digest = genesis_receipt.initial_snapshot_digest;
+        let mut expected_graph_digest = genesis_receipt.graph_digest;
         for row in &rows {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
             if row.revision != receipt.next_revision
                 || row.base_revision != receipt.base_revision
-                || receipt.formula_digest != formula_digest
+                || receipt.formula_digest != genesis_receipt.formula_digest
                 || receipt.scope_digest != persona_scope
                 || receipt.state_before != expected_state_digest
             {
@@ -1615,7 +1613,7 @@ impl AstrRuntime {
                 }
                 let _ = decode_hot_state_v1(
                     &snapshot.state_bytes,
-                    &formula_digest,
+                    &genesis_receipt.formula_digest,
                     &receipt.state_after,
                     &receipt.graph_after,
                 )?;
@@ -1623,11 +1621,13 @@ impl AstrRuntime {
                 if snapshot.state_digest != receipt.state_after {
                     return Err(RuntimeError::InvalidNeuralState);
                 }
-                let _ = decode_hot_state_v1(
+                let _ = decode_root_g0_snapshot_v1(
                     &snapshot.state_bytes,
-                    &formula_digest,
+                    &genesis_receipt.formula_digest,
                     &receipt.state_after,
                     &receipt.graph_after,
+                    genesis_manifest,
+                    &genesis_receipt.development_seed_digest,
                 )?;
             }
         }
@@ -1635,18 +1635,29 @@ impl AstrRuntime {
             let latest_snapshot = self
                 .store
                 .read_latest_snapshot(&persona_scope, current_revision)?;
-            if let Some(snapshot) = latest_snapshot {
+            if requires_semantic_snapshots {
+                let snapshot = latest_snapshot.ok_or(RuntimeError::InvalidNeuralState)?;
                 if snapshot.state_digest != expected_state_digest {
                     return Err(RuntimeError::InvalidNeuralState);
                 }
                 let _ = decode_hot_state_v1(
                     &snapshot.state_bytes,
-                    &formula_digest,
+                    &genesis_receipt.formula_digest,
                     &expected_state_digest,
                     &expected_graph_digest,
                 )?;
-            } else if requires_semantic_snapshots {
-                return Err(RuntimeError::InvalidNeuralState);
+            } else if let Some(snapshot) = latest_snapshot {
+                if snapshot.state_digest != expected_state_digest {
+                    return Err(RuntimeError::InvalidNeuralState);
+                }
+                let _ = decode_root_g0_snapshot_v1(
+                    &snapshot.state_bytes,
+                    &genesis_receipt.formula_digest,
+                    &expected_state_digest,
+                    &expected_graph_digest,
+                    genesis_manifest,
+                    &genesis_receipt.development_seed_digest,
+                )?;
             }
         }
         Ok(report)
@@ -1664,9 +1675,8 @@ impl AstrRuntime {
             .ok_or(RuntimeError::PersonaGenesisRequired)?;
         let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
         self.verify_durable_history_v1(
-            committed.receipt.formula_digest,
-            committed.receipt.initial_snapshot_digest,
-            committed.receipt.graph_digest,
+            &committed.manifest,
+            &committed.receipt,
             legacy_persona_scope,
             false,
         )
@@ -1688,9 +1698,8 @@ impl AstrRuntime {
         let semantic_persona_scope = r7_semantic_persona_scope(bot_token, persona_token);
         for persona_scope in [legacy_persona_scope, semantic_persona_scope] {
             self.verify_durable_history_v1(
-                committed.receipt.formula_digest,
-                committed.receipt.initial_snapshot_digest,
-                committed.receipt.graph_digest,
+                &committed.manifest,
+                &committed.receipt,
                 persona_scope,
                 persona_scope == semantic_persona_scope,
             )?;
@@ -2149,6 +2158,19 @@ mod tests {
             .apply_event(&scope, &stimulus(41, 0, 1))
             .expect("apply after legacy revision-zero upgrade");
         assert_eq!(next.revision, 1);
+        let replay = reopened
+            .verify_replay(
+                &request.source.scope.bot_token,
+                &request.source.scope.persona_token,
+            )
+            .expect("replay a 1.0.4 revision-zero snapshot after append");
+        assert!(replay.ok, "{:?}", replay.first_error);
+        reopened
+            .audit_durable_histories_v1(
+                &request.source.scope.bot_token,
+                &request.source.scope.persona_token,
+            )
+            .expect("audit both histories after a 1.0.4 revision-zero upgrade");
         reopened.flush_and_close().expect("close upgraded runtime");
         drop(reopened);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2189,6 +2211,19 @@ mod tests {
         reopened
             .ensure_genesis(&request)
             .expect("rejoin genesis from a 1.0.4 revision-one snapshot");
+        let replay = reopened
+            .verify_replay(
+                &request.source.scope.bot_token,
+                &request.source.scope.persona_token,
+            )
+            .expect("replay a 1.0.4 revision-one snapshot");
+        assert!(replay.ok, "{:?}", replay.first_error);
+        reopened
+            .audit_durable_histories_v1(
+                &request.source.scope.bot_token,
+                &request.source.scope.persona_token,
+            )
+            .expect("audit both histories after a 1.0.4 revision-one upgrade");
         let next = reopened
             .apply_event(&scope, &stimulus(42, 1, 2))
             .expect("apply after legacy revision-one upgrade");
