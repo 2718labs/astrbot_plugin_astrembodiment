@@ -58,6 +58,13 @@ SEMANTIC_DEGRADED = "DEGRADED"
 
 _RETRY_WAIT_ATTEMPTS = 40
 _RETRY_WAIT_DELAY_S = 0.05
+_CALCULATION_RESIDUAL_NAMES = (
+    "authority",
+    "continuity",
+    "energy",
+    "renormalization",
+    "capacity",
+)
 
 
 class GenesisCoordinator:
@@ -272,6 +279,49 @@ class GenesisCoordinator:
             return None, None
         return dimensions, confidence
 
+    @staticmethod
+    def _preflight_calculation(receipt: Any) -> dict[str, Any] | None:
+        """Project a validated native receipt into content-free result values."""
+
+        if type(receipt) is not dict:
+            return None
+        try:
+            state_before = receipt["state_before"]
+            state_after = receipt["state_after"]
+            if type(state_before) is not str or type(state_after) is not str:
+                raise ValueError("state digest")
+            if len(state_before) != 64 or len(state_after) != 64:
+                raise ValueError("state digest")
+            bytes.fromhex(state_before)
+            bytes.fromhex(state_after)
+            if state_before == state_after:
+                raise ValueError("unchanged state")
+            active_nodes = receipt["active_nodes"]
+            active_edges = receipt["active_edges"]
+            if type(active_nodes) is not int or active_nodes < 0:
+                raise ValueError("active nodes")
+            if type(active_edges) is not int or active_edges < 0:
+                raise ValueError("active edges")
+            residuals = receipt["residuals"]
+            if type(residuals) is not dict or set(residuals) != set(
+                _CALCULATION_RESIDUAL_NAMES
+            ):
+                raise ValueError("residuals")
+            closed_residuals: dict[str, int] = {}
+            for name in _CALCULATION_RESIDUAL_NAMES:
+                value = residuals[name]
+                if type(value) is not int or not -(1 << 63) <= value <= (1 << 63) - 1:
+                    raise ValueError("residual")
+                closed_residuals[name] = value
+        except BaseException:
+            return None
+        return {
+            "state_changed": True,
+            "active_nodes": active_nodes,
+            "active_edges": active_edges,
+            "residuals_fxp6": closed_residuals,
+        }
+
     @classmethod
     def _preflight_diagnostic(
         cls,
@@ -284,10 +334,18 @@ class GenesisCoordinator:
         revision: int | None = None,
         deduplicated: bool | None = None,
         receipt_status: str | None = None,
+        receipt: Any = None,
     ) -> dict[str, Any]:
         dimensions, confidence = cls._preflight_estimate_values(estimate)
         if dimensions is None:
             values_state = "UNAVAILABLE"
+        native_calculation = cls._preflight_calculation(receipt)
+        if native_calculation is not None:
+            calculation_state = "CONFIRMED"
+        elif commit_state in {"UNKNOWN", "CONFIRMED_NEW", "CONFIRMED_EXISTING"}:
+            calculation_state = "UNCONFIRMED"
+        else:
+            calculation_state = "NOT_ATTEMPTED"
         return {
             "stage": stage,
             "commit_state": commit_state,
@@ -298,6 +356,8 @@ class GenesisCoordinator:
             "revision": revision,
             "deduplicated": deduplicated,
             "receipt_status": receipt_status,
+            "calculation_state": calculation_state,
+            "native_calculation": native_calculation,
         }
 
     @classmethod
@@ -727,6 +787,7 @@ class GenesisCoordinator:
                 revision=native_result["revision"],
                 deduplicated=native_result["deduplicated"],
                 receipt_status=native_result["receipt"]["status"],
+                receipt=native_result["receipt"],
             ),
         }
 

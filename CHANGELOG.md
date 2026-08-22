@@ -37,6 +37,7 @@
 
 - `observatory_enabled=true` 时，成功的语义注入以 INFO 记录完整 15 维 fxp6 证据、confidence、revision 与去重结果；`ZERO_LOAD` 明确标记为未提交。
 - NOOP 以 INFO、DEGRADED 以 WARNING 记录，并区分 `stage`、`code` 与 `commit_state`；观测日志不包含用户正文、Provider 输出、token、nonce 或 digest。
+- 成功回执额外回显 native 的 `state_changed`、活跃节点/边数和五类 fxp6 残差；失败固定标明计算是未尝试还是未确认。
 
 ### 修复
 

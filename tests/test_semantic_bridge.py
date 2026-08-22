@@ -40,6 +40,26 @@ def _estimate() -> dict:
     return {"dimensions": dimensions, "estimator_confidence": 800_000}
 
 
+def _calculation(
+    *,
+    active_nodes: int = 0,
+    active_edges: int = 0,
+    state_changed: bool = True,
+) -> dict:
+    return {
+        "state_changed": state_changed,
+        "active_nodes": active_nodes,
+        "active_edges": active_edges,
+        "residuals_fxp6": {
+            "authority": 0,
+            "continuity": 0,
+            "energy": 0,
+            "renormalization": 0,
+            "capacity": 0,
+        },
+    }
+
+
 def _diagnostic(
     *,
     stage: str,
@@ -51,7 +71,17 @@ def _diagnostic(
     revision: int | None = None,
     deduplicated: bool | None = None,
     receipt_status: str | None = None,
+    calculation_state: str | None = None,
+    native_calculation: dict | None = None,
 ) -> dict:
+    if calculation_state is None:
+        calculation_state = (
+            "CONFIRMED"
+            if commit_state in {"CONFIRMED_NEW", "CONFIRMED_EXISTING"}
+            else "UNCONFIRMED" if commit_state == "UNKNOWN" else "NOT_ATTEMPTED"
+        )
+    if native_calculation is None and calculation_state == "CONFIRMED":
+        native_calculation = _calculation()
     return {
         "stage": stage,
         "commit_state": commit_state,
@@ -62,6 +92,8 @@ def _diagnostic(
         "revision": revision,
         "deduplicated": deduplicated,
         "receipt_status": receipt_status,
+        "calculation_state": calculation_state,
+        "native_calculation": native_calculation,
     }
 
 

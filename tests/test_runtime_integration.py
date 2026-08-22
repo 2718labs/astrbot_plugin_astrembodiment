@@ -1244,6 +1244,21 @@ def _spc1_zero_load_dimensions() -> dict[str, int]:
     return dimensions
 
 
+def _spc1_calculation() -> dict:
+    return {
+        "state_changed": True,
+        "active_nodes": 17,
+        "active_edges": 23,
+        "residuals_fxp6": {
+            "authority": 0,
+            "continuity": 0,
+            "energy": 0,
+            "renormalization": 0,
+            "capacity": 0,
+        },
+    }
+
+
 def _spc1_diagnostic(
     *,
     stage: str,
@@ -1255,7 +1270,17 @@ def _spc1_diagnostic(
     revision: int | None = None,
     deduplicated: bool | None = None,
     receipt_status: str | None = None,
+    calculation_state: str | None = None,
+    native_calculation: dict | None = None,
 ) -> dict:
+    if calculation_state is None:
+        calculation_state = (
+            "CONFIRMED"
+            if commit_state in {"CONFIRMED_NEW", "CONFIRMED_EXISTING"}
+            else "UNCONFIRMED" if commit_state == "UNKNOWN" else "NOT_ATTEMPTED"
+        )
+    if native_calculation is None and calculation_state == "CONFIRMED":
+        native_calculation = _spc1_calculation()
     return {
         "stage": stage,
         "commit_state": commit_state,
@@ -1266,6 +1291,8 @@ def _spc1_diagnostic(
         "revision": revision,
         "deduplicated": deduplicated,
         "receipt_status": receipt_status,
+        "calculation_state": calculation_state,
+        "native_calculation": native_calculation,
     }
 
 
@@ -1316,6 +1343,8 @@ def test_spc1_observatory_success_emits_all_dimensions_at_info(
     assert len(record["dimensions_fxp6"]) == 15
     assert record["estimator_confidence_fxp6"] == 900_000
     assert record["revision"] == 8
+    assert record["calculation_state"] == "CONFIRMED"
+    assert record["native_calculation"] == _spc1_calculation()
 
 
 def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
@@ -1337,6 +1366,8 @@ def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
             "revision": None,
             "deduplicated": None,
             "receipt_status": None,
+            "calculation_state": "UNCONFIRMED",
+            "native_calculation": None,
         },
         "request": "USER_RAW_SENTINEL",
         "exception": "EXCEPTION_RAW_SENTINEL",
@@ -1358,6 +1389,8 @@ def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
     assert record["stage"] == "NATIVE_APPLY"
     assert record["commit_state"] == "UNKNOWN"
     assert record["dimensions_fxp6"] == _spc1_dimensions()
+    assert record["calculation_state"] == "UNCONFIRMED"
+    assert record["native_calculation"] is None
 
 
 @pytest.mark.parametrize(
@@ -1807,6 +1840,8 @@ def test_spc1_observatory_invalid_outcome_semantics_use_fixed_fallback(
         "revision": None,
         "deduplicated": None,
         "receipt_status": None,
+        "calculation_state": "UNCONFIRMED",
+        "native_calculation": None,
     }
 
 
@@ -1838,6 +1873,8 @@ def test_spc1_observatory_local_degraded_preserves_closed_code(
         "revision": None,
         "deduplicated": None,
         "receipt_status": None,
+        "calculation_state": "UNCONFIRMED",
+        "native_calculation": None,
     }
 
 
@@ -1907,6 +1944,8 @@ def test_spc1_observatory_malformed_diagnostic_falls_back_without_raw_fields(
         "revision": None,
         "deduplicated": None,
         "receipt_status": None,
+        "calculation_state": "UNCONFIRMED",
+        "native_calculation": None,
     }
 
 

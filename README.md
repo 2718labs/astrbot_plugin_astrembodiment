@@ -88,11 +88,11 @@ current user text
 
 ## Observatory：看见每次提交了什么
 
-SPC1 的本地观测记录会在普通日志级别给出完整结果：SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录。只要估计有效，记录会包含全部 15 个 fxp6 语义证据值和置信度，并清楚区分已提交、已估计但未提交、已估计但未确认，以及不可用。
+SPC1 的本地观测记录会在普通日志级别给出完整结果：SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录。只要估计有效，记录会包含全部 15 个 fxp6 语义证据值和置信度，并清楚区分已提交、已估计但未提交、已估计但未确认，以及不可用。原生回执可信时，`calculation_state=CONFIRMED`，`native_calculation` 会继续给出 `state_changed`、`active_nodes`、`active_edges` 和五类 `residuals_fxp6`；未进入原生计算时为 `NOT_ATTEMPTED`，进入后未取得可信回执时为 `UNCONFIRMED`。
 
 当前 RC1 的原生 load 直接使用 `positive`、`harm`、`boundary` 和 `epistemic_conflict` 四个维度；其余维度仍作为同一份闭合证据被验证、记录和随回执追溯。这里的 15 个值是语义证据，不是可由外部直接编辑的“神经节点”。
 
-Observatory 不记录用户消息、Provider 输出、token、nonce、SeedCode 或状态摘要；它只帮助你判断本轮是否得到了有效证据、是否抵达原生提交，以及为什么没有抵达。
+Observatory 不记录用户消息、Provider 输出、token、nonce、SeedCode、状态 digest 或原始神经节点；它只回显闭合的估计输入、原生计算摘要和提交结论，帮助你判断本轮算了什么、是否提交，以及为什么没有抵达。
 
 ## 当前能力边界
 

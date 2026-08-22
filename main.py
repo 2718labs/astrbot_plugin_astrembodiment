@@ -190,6 +190,8 @@ _SPC1_DIAGNOSTIC_FIELDS = {
     "revision",
     "deduplicated",
     "receipt_status",
+    "calculation_state",
+    "native_calculation",
 }
 _SPC1_STAGES = {
     "INPUT",
@@ -212,6 +214,20 @@ _SPC1_VALUES_STATES = {
     "ESTIMATED_NOT_CONFIRMED",
     "COMMITTED",
 }
+_SPC1_CALCULATION_STATES = {"NOT_ATTEMPTED", "UNCONFIRMED", "CONFIRMED"}
+_SPC1_CALCULATION_FIELDS = {
+    "state_changed",
+    "active_nodes",
+    "active_edges",
+    "residuals_fxp6",
+}
+_SPC1_RESIDUAL_NAMES = (
+    "authority",
+    "continuity",
+    "energy",
+    "renormalization",
+    "capacity",
+)
 
 
 class AstrEmbodimentPlugin(Star):
@@ -553,6 +569,8 @@ class AstrEmbodimentPlugin(Star):
             "revision": None,
             "deduplicated": None,
             "receipt_status": None,
+            "calculation_state": "UNCONFIRMED",
+            "native_calculation": None,
         }
 
     @staticmethod
@@ -569,6 +587,8 @@ class AstrEmbodimentPlugin(Star):
         revision: int | None,
         deduplicated: bool | None,
         receipt_status: str | None,
+        calculation_state: str,
+        native_calculation: dict[str, Any] | None,
     ) -> bool:
         if status == "SUCCESS":
             return (
@@ -580,6 +600,9 @@ class AstrEmbodimentPlugin(Star):
                 and base_revision is not None
                 and revision is not None
                 and receipt_status == "committed"
+                and calculation_state == "CONFIRMED"
+                and native_calculation is not None
+                and native_calculation["state_changed"] is True
                 and (
                     (commit_state == "CONFIRMED_NEW" and deduplicated is False)
                     or (
@@ -602,6 +625,8 @@ class AstrEmbodimentPlugin(Star):
                     and confidence is None
                     and base_revision is None
                     and native_result_is_absent
+                    and calculation_state == "NOT_ATTEMPTED"
+                    and native_calculation is None
                 )
             if code == "ZERO_LOAD":
                 return (
@@ -613,6 +638,8 @@ class AstrEmbodimentPlugin(Star):
                     and all(dimensions[name] == 0 for name in LOAD_DIMENSIONS)
                     and base_revision is None
                     and native_result_is_absent
+                    and calculation_state == "NOT_ATTEMPTED"
+                    and native_calculation is None
                 )
             return False
 
@@ -647,6 +674,9 @@ class AstrEmbodimentPlugin(Star):
             and values_are_valid
             and base_is_valid
             and native_result_is_absent
+            and native_calculation is None
+            and calculation_state
+            == ("UNCONFIRMED" if commit_state == "UNKNOWN" else "NOT_ATTEMPTED")
         )
 
     @classmethod
@@ -717,6 +747,51 @@ class AstrEmbodimentPlugin(Star):
             if receipt_status not in {None, "committed"}:
                 raise ValueError
 
+            calculation_state = diagnostic.get("calculation_state")
+            native_calculation = diagnostic.get("native_calculation")
+            if (
+                type(calculation_state) is not str
+                or calculation_state not in _SPC1_CALCULATION_STATES
+            ):
+                raise ValueError
+            if calculation_state == "CONFIRMED":
+                if (
+                    type(native_calculation) is not dict
+                    or set(native_calculation) != _SPC1_CALCULATION_FIELDS
+                    or native_calculation.get("state_changed") is not True
+                ):
+                    raise ValueError
+                active_nodes = native_calculation.get("active_nodes")
+                active_edges = native_calculation.get("active_edges")
+                if type(active_nodes) is not int or active_nodes < 0:
+                    raise ValueError
+                if type(active_edges) is not int or active_edges < 0:
+                    raise ValueError
+                residuals = native_calculation.get("residuals_fxp6")
+                if type(residuals) is not dict or set(residuals) != set(
+                    _SPC1_RESIDUAL_NAMES
+                ):
+                    raise ValueError
+                closed_residuals: dict[str, int] = {}
+                for name in _SPC1_RESIDUAL_NAMES:
+                    value = residuals.get(name)
+                    if (
+                        type(value) is not int
+                        or not -(1 << 63) <= value <= (1 << 63) - 1
+                    ):
+                        raise ValueError
+                    closed_residuals[name] = value
+                closed_calculation = {
+                    "state_changed": True,
+                    "active_nodes": active_nodes,
+                    "active_edges": active_edges,
+                    "residuals_fxp6": closed_residuals,
+                }
+            else:
+                if native_calculation is not None:
+                    raise ValueError
+                closed_calculation = None
+
             status = closed_outcome.get("status")
             code = closed_outcome.get("code")
             if type(status) is not str or type(code) is not str:
@@ -737,6 +812,8 @@ class AstrEmbodimentPlugin(Star):
                 revision=revision,
                 deduplicated=deduplicated,
                 receipt_status=receipt_status,
+                calculation_state=calculation_state,
+                native_calculation=closed_calculation,
             ):
                 raise ValueError
             return {
@@ -753,6 +830,8 @@ class AstrEmbodimentPlugin(Star):
                 "revision": revision,
                 "deduplicated": deduplicated,
                 "receipt_status": receipt_status,
+                "calculation_state": calculation_state,
+                "native_calculation": closed_calculation,
             }
         except BaseException:
             return cls._fallback_semantic_observatory_record()
