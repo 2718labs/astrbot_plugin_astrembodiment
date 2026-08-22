@@ -192,7 +192,7 @@ pub struct ExpressionProjectionV1 {
 
 将其加入 PerceptionProposalDecisionV1。新提交路径从 prepared.next_field 和 next_revision 生成它；重复路径先 bind_hot，再从 hot.field 和 row.revision 生成它。任何 store 错误在档案生成前返回，任何无效 field 返回现有 InvalidNeuralState。
 
-同时把 native_formula_digest 的 attention 输入说明从四维改为 all-15 regional routing，使规则变更能改变公式身份。
+保持 `native_formula_digest` 不变：它是 RC1 已持久化快照和 Genesis 绑定的身份键。RC2 的路由扩展在同一 v1 状态协议内进行；不要因这次升级创建新 incarnation、重置 field 或引入 BindingConflict。为此加入一个 RC1 持久化状态重新打开后继续提交的回归测试，断言 binding 与 revision 连续。
 
 - [ ] **步骤 5：运行 runtime 测试并确认 GREEN**
 

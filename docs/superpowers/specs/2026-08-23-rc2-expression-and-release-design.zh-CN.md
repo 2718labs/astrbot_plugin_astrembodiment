@@ -80,6 +80,8 @@ excitation = saturating_add(excitation, regional_signal)
 
 场是持久化的饱和累加器。RC2 不加按时间衰减或自主动力学：互动会产生可重放的漂移，但不会假装在做生物模拟。以后若要加有限恢复机制，必须单独设计状态转移和迁移路径。
 
+RC2 保持现有 `native_formula_digest` 不变。它已是 RC1 持久化快照、Genesis 绑定和人格作用域的身份键；直接改动会把已有 Bot 拒于新绑定之外，破坏已经累积的漂移。RC2 在同一 v1 状态协议中扩展确定性路由，升级后必须从 RC1 场连续恢复、继续递增 revision，而不是重生、清空或替换旧人格状态。将来若需要改变这把身份键，必须先提供显式、可验证的回放/迁移设计。
+
 原生层仍是唯一写入者：
 
 1. 校验 scope、闭合 proposal、confidence、15 维、因果基线和场/图形状。
@@ -266,6 +268,7 @@ CI artifact 只短期保留；CI 不创建 tag、GitHub Release、Marketplace �
 4. 不同的已提交互动序列产生不同持久化档案；close/reopen 后从恢复场继续推导。
 5. 重复事件返回同一 revision 和档案，不产生二次状态修改。
 6. 无效 scope、proposal、field、store 或 receipt 不返回档案，持久化状态不变。
+7. 以 RC1 公式身份提交的既有场在 RC2 打开后保持同一绑定和 revision 连续性；不得因为路由升级重生或报绑定冲突。
 
 Python RED/GREEN：
 

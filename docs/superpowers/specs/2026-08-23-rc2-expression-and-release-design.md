@@ -115,6 +115,14 @@ interaction-dependent, replayable form of drift without pretending that the
 runtime is performing biological simulation. A later release can add bounded
 recovery only with a separate state-transition design and migration plan.
 
+RC2 keeps the existing `native_formula_digest` unchanged. It is already the
+identity key for RC1 snapshots, Genesis bindings, and persona scope; changing
+it would reject existing Bot state at the active binding and destroy accumulated
+drift. The deterministic routing expansion therefore remains within the v1
+state protocol: an RC1 field must reopen and continue its revision rather than
+be reborn, cleared, or replaced. A future identity change requires an explicit,
+verified replay or migration design.
+
 ### 4.3 Atomicity and deduplication
 
 The native transition remains the sole writer:
