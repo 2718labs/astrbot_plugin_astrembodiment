@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ae-action-contract"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "serde",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "ae-agent"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "ae-attention"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "ae-authority"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "ae-cognitive-envelope"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-action-contract",
  "ae-contracts",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "ae-continuum"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "blake3",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "ae-contracts"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-fixed",
  "blake3",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "ae-efference-copy"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-action-contract",
  "ae-contracts",
@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "ae-epistemic-state"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
@@ -101,14 +101,14 @@ dependencies = [
 
 [[package]]
 name = "ae-fixed"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ae-genesis"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "ae-mechanics"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-authority",
  "ae-contracts",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "ae-morph"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "thiserror",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "ae-neurofield"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "ae-fixed",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "ae-organism-runtime"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-action-contract",
  "ae-cognitive-envelope",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "ae-renorm"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-fixed",
  "serde",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "ae-runtime"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-action-contract",
  "ae-agent",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "ae-soma"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "ae-subjective-present",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "ae-store"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-continuum",
  "ae-contracts",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "ae-subjective-present"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-contracts",
  "serde",
@@ -257,7 +257,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "astrembodiment-core"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 dependencies = [
  "ae-action-contract",
  "ae-cognitive-envelope",

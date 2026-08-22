@@ -1,0 +1,153 @@
+name: 发布
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的 Git 标签，例如 v1.0.0-rc2
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 验证标签与版本契约
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.release_tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - id: release_tag
+        name: 验证目标标签存在且格式正确
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}" >/dev/null
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          main_commit="$(git rev-parse "refs/remotes/origin/main")"
+          if [[ "$tag_commit" != "$main_commit" ]]; then
+            echo "release tag must point to current origin/main" >&2
+            exit 1
+          fi
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: 验证标签与源码版本一致
+        env:
+          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: python scripts/verify_release_contract.py --tag "$RELEASE_TAG"
+
+  build-native:
+    name: 构建原生 wheel (${{ matrix.name }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            artifact: native-wheel-windows
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            artifact: native-wheel-linux
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装稳定版 Rust 工具链
+        run: rustup toolchain install stable --profile minimal
+      - name: 选择稳定版 Rust 工具链
+        run: rustup default stable
+      - name: 安装打包工具
+        run: python -m pip install --upgrade pip maturin==1.14.1
+      - name: 构建原生 wheel
+        run: python -m maturin build --release --out dist
+      - name: 冒烟导入原生 wheel
+        run: >-
+          python -c "import pathlib, subprocess, sys; wheel=next(pathlib.Path('dist').glob('*.whl')); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', str(wheel)]); import astrembodiment_core as core; print(core.version())"
+      - name: 保存原生 wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-and-publish:
+    name: 组装插件包并创建 GitHub Release
+    needs:
+      - validate
+      - build-native
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: 下载 Windows 与 Linux 原生 wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: native-wheel-*
+          path: wheels
+          merge-multiple: false
+      - name: 组装 AstrBot 插件包
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          python scripts/package_plugin.py \
+            --output "dist/astrbot_plugin_astrembodiment-$RELEASE_TAG-win_linux_x86_64.zip" \
+            --native-wheel wheels/native-wheel-windows/*.whl \
+            --native-wheel wheels/native-wheel-linux/*.whl
+          test -s "dist/astrbot_plugin_astrembodiment-$RELEASE_TAG-win_linux_x86_64.zip"
+      - name: 发布或更新 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+          prerelease=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_TAG" \
+            --generate-notes \
+            "${prerelease[@]}" \
+            dist/*.zip

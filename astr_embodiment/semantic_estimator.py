@@ -100,9 +100,7 @@ class SemanticEstimate:
 
     def as_json(self) -> dict[str, Any]:
         return {
-            "dimensions": {
-                name: self.dimensions[name] for name in DIMENSION_NAMES
-            },
+            "dimensions": {name: self.dimensions[name] for name in DIMENSION_NAMES},
             "estimator_confidence": self.estimator_confidence,
         }
 
@@ -375,7 +373,9 @@ def make_request_nonce_digest(
     if digest == "00" * 32:
         # Cryptographically unreachable for SHA-256, but preserve the
         # nonzero contract even if a test replaces the hash implementation.
-        digest = hashlib.sha256(_NONCE_DOMAIN + b"\x01" + _canonical_json(binding)).hexdigest()
+        digest = hashlib.sha256(
+            _NONCE_DOMAIN + b"\x01" + _canonical_json(binding)
+        ).hexdigest()
     return digest
 
 

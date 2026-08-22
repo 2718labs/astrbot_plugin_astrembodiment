@@ -8,21 +8,99 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  static-release-checks:
-    runs-on: windows-latest
+  python-quality:
+    name: Python 格式、静态检查与回归
+    runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
-      - name: Validate configuration schema
+          cache: pip
+      - name: 安装开发依赖
+        run: python -m pip install --upgrade pip -r requirements-dev.txt
+      - name: 检查 Python 格式
+        run: python -m ruff format --check main.py astr_embodiment tests scripts
+      - name: 检查 Python 错误
         run: >-
-           python -c "import json; from pathlib import Path; schema=json.loads(Path('_conf_schema.json').read_text(encoding='utf-8')); expected={'runtime_envelope','native_data_dir','observatory_enabled','proactive_enabled','model_settings','seed_code'}; missing=expected-schema.keys(); assert not missing, f'missing schema keys: {sorted(missing)}'"
-      - name: Validate marketplace metadata fields
+          python -m ruff check --select E,F --ignore E501
+          main.py astr_embodiment tests scripts
+      - name: 运行 Python 回归
+        run: python -m pytest -q --ignore=tests/test_release_contracts.py
+      - name: 运行可复现的发布契约测试
         run: >-
-           python -c "from pathlib import Path; text=Path('metadata.yaml').read_text(encoding='utf-8'); q=chr(34); required=('name: astrbot_plugin_astrembodiment', f'version: {q}1.0.0-rc1{q}', f'astrbot_version: {q}>=4.16,<5{q}', 'support_platforms:', '  - aiocqhttp'); missing=[item for item in required if item not in text]; assert not missing, f'missing metadata fields: {missing}'"
-      - name: Compile Python sources
-        run: python -m py_compile main.py astr_embodiment/__init__.py astr_embodiment/bridge.py
+          python -m pytest -q tests/test_release_contracts.py
+          -k "not fresh and not release_archive_bundles_only_runtime_files"
+
+  rust-quality:
+    name: Rust 格式、Clippy 与回归
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: 安装稳定版 Rust 工具链
+        run: >-
+          rustup toolchain install stable --profile minimal
+          --component rustfmt --component clippy
+      - name: 选择稳定版 Rust 工具链
+        run: rustup default stable
+      - name: 检查 Rust 格式
+        run: cargo fmt --all -- --check
+      - name: 检查 Rust lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: 运行 Rust 回归
+        env:
+          AE_RC1_TASK_TEMP: ${{ runner.temp }}
+        run: cargo test --workspace --locked
+
+  release-contract:
+    name: 发布版本契约
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: 验证版本和锁文件
+        run: python scripts/verify_release_contract.py
+
+  native-wheel:
+    name: 原生 wheel (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            runner: windows-2022
+          - name: linux
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装稳定版 Rust 工具链
+        run: rustup toolchain install stable --profile minimal
+      - name: 选择稳定版 Rust 工具链
+        run: rustup default stable
+      - name: 安装打包工具
+        run: python -m pip install --upgrade pip maturin==1.14.1
+      - name: 构建原生 wheel
+        run: python -m maturin build --release --out dist
+      - name: 冒烟导入原生 wheel
+        run: >-
+          python -c "import pathlib, subprocess, sys; wheel=next(pathlib.Path('dist').glob('*.whl')); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', str(wheel)]); import astrembodiment_core as core; print(core.version())"

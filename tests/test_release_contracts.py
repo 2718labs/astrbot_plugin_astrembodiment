@@ -14,14 +14,22 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FRESH_WHEELS_DIR = ROOT.parents[1] / ".codex-task-temp"
-FRESH_WINDOWS_WHEEL = next(
-    (FRESH_WHEELS_DIR / "rebuild-native-win-current" / "dist").glob("*.whl"),
-    None,
-)
-FRESH_LINUX_WHEEL = next(
-    (FRESH_WHEELS_DIR / "rebuild-native-linux-current" / "dist").glob("*.whl"),
-    None,
-)
+CURRENT_WHEEL_VERSION = tomllib.loads(
+    (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+)["project"]["version"]
+
+
+def _fresh_native_wheel(platform: str) -> Path | None:
+    candidates = sorted(
+        (FRESH_WHEELS_DIR / f"rebuild-native-{platform}-current" / "dist").glob(
+            f"*{CURRENT_WHEEL_VERSION}*.whl"
+        )
+    )
+    return candidates[-1] if candidates else None
+
+
+FRESH_WINDOWS_WHEEL = _fresh_native_wheel("win")
+FRESH_LINUX_WHEEL = _fresh_native_wheel("linux")
 SEMANTIC_NATIVE_API = {
     "semantic_revision_v1",
     "apply_perception_proposal_v1",
@@ -47,17 +55,17 @@ def test_release_version_metadata_and_required_files_are_present() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
 
-    assert 'version: "1.0.0-rc1"' in metadata
+    assert 'version: "1.0.0-rc2"' in metadata
     assert 'astrbot_version: ">=4.16,<5"' in metadata
     assert "support_platforms:" in metadata
-    assert pyproject["project"]["version"] == "1.0.0rc1"
-    assert cargo["workspace"]["package"]["version"] == "1.0.0-rc1"
-    assert "## [1.0.0-rc1] - 2026-08-22" in changelog
+    assert pyproject["project"]["version"] == "1.0.0rc2"
+    assert cargo["workspace"]["package"]["version"] == "1.0.0-rc2"
+    assert "## [1.0.0-rc2] - 2026-08-23" in changelog
 
     workspace_packages = {
-        tomllib.loads((ROOT / member / "Cargo.toml").read_text(encoding="utf-8"))["package"][
-            "name"
-        ]
+        tomllib.loads((ROOT / member / "Cargo.toml").read_text(encoding="utf-8"))[
+            "package"
+        ]["name"]
         for member in cargo["workspace"]["members"]
     }
     locked_workspace_versions = {
@@ -66,49 +74,124 @@ def test_release_version_metadata_and_required_files_are_present() -> None:
         if package["name"] in workspace_packages
     }
     assert locked_workspace_versions.keys() == workspace_packages
-    assert set(locked_workspace_versions.values()) == {"1.0.0-rc1"}
+    assert set(locked_workspace_versions.values()) == {"1.0.0-rc2"}
 
-    for relative_path in ("LICENSE", "CHANGELOG.md", ".github/workflows/ci.yml"):
+    for relative_path in (
+        "LICENSE",
+        "CHANGELOG.md",
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml",
+        ".github/dependabot.yml",
+        "scripts/verify_release_contract.py",
+    ):
         assert (ROOT / relative_path).is_file()
 
 
-def test_product_readme_and_metadata_match_rc1_contract() -> None:
+def test_product_readme_and_metadata_match_rc2_contract() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
 
     assert "# 让你的 Bot 不只记住经历，更能延续「Ta是谁」" in readme
-    assert "**用户话语 → 15 维闭合语义证据 → native semantic commit**" in readme
-    assert "当前版本：1.0.0-rc1 本地候选" in readme
+    assert "**用户话语 → 15 维闭合语义证据 → 原生语义提交 → 同轮表达倾向**" in readme
+    assert "当前版本：1.0.0-rc2 本地候选" in readme
     assert "尚未创建 GitHub Release，也未上架 AstrBot Marketplace" in readme
+    assert "标签发布工作流完成后" in readme
+    assert "native semantic commit" not in readme
     assert "## 为什么是人格连续性" in readme
     assert "## 现在已经能做什么" in readme
     assert "## 一次互动如何进入连续性" in readme
     assert "## Observatory：看见每次提交了什么" in readme
-    assert "SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录" in readme
-    assert "positive`、`harm`、`boundary` 和 `epistemic_conflict`" in readme
-    assert "受控回应策略和外显人格漂移仍是后续能力" in readme
+    assert (
+        "SUCCESS 和 NOOP 以 INFO 记录；DEGRADED、REJECTED 与 INJECTION_FAILED "
+        "以 WARNING 记录" in readme
+    )
+    assert "15 个维度都会进入原生注意力负载" in readme
+    assert "同轮表达上下文" in readme
+    assert "不等同于意识、主观感受或真实关系" in readme
     assert "calculation_state=CONFIRMED" in readme
     assert "state_changed`、`active_nodes`、`active_edges`" in readme
-    assert "不记录用户消息、Provider 输出、token、nonce、SeedCode、状态 digest 或原始神经节点" in readme
+    assert "expression_state" in readme
+    assert "expression_profile_fxp6" in readme
+    assert (
+        "不记录用户消息、Provider 输出、token、nonce、SeedCode、状态 digest 或原始神经节点"
+        in readme
+    )
 
     assert (
-        "desc: 让你的 Bot 不只记住经历，更能延续“Ta是谁”。AstrEmbodiment 以 Rust 原生运行时承载人格连续性，将用户话语转化为 15 维闭合语义证据并提交原生状态，为受控回应与人格演化提供试验性基础。"
+        "desc: 让你的 Bot 不只记住经历，更能延续“Ta是谁”。AstrEmbodiment 以 Rust 原生运行时承载人格连续性，将用户话语转化为 15 维闭合语义证据，提交为可追溯的原生状态，并在同一回合提供受限表达倾向。"
         in metadata
     )
     assert (
-        "short_desc: Rust 原生人格连续性运行时：让用户话语成为可验证、可提交的连续语义证据。"
+        "short_desc: Rust 原生人格连续性运行时：15 维语义证据、持久原生提交与受限同轮表达。"
         in metadata
     )
     for unchanged_field in (
         "name: astrbot_plugin_astrembodiment",
         "display_name: AstrEmbodiment",
-        'version: "1.0.0-rc1"',
+        'version: "1.0.0-rc2"',
         "repo: https://github.com/2718labs/astrbot_plugin_astrembodiment",
         'astrbot_version: ">=4.16,<5"',
         "support_platforms:",
         "tags:",
     ):
         assert unchanged_field in metadata
+
+
+def test_release_automation_is_pinned_and_tag_gated() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+
+    for workflow in (ci, release):
+        assert "permissions:" in workflow
+        assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in workflow
+        assert (
+            "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065" in workflow
+        )
+    assert "ruff format --check" in ci
+    assert "ruff check --select E,F" in ci
+    assert "cargo fmt --all -- --check" in ci
+    assert "cargo clippy --workspace --all-targets --locked -- -D warnings" in ci
+    assert "AE_RC1_TASK_TEMP: ${{ runner.temp }}" in ci
+    assert "native-wheel-windows" in release
+    assert "native-wheel-linux" in release
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in release
+    assert (
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release
+    )
+    assert "tags:" in release
+    assert '- "v*"' in release
+    assert "refs/remotes/origin/main" in release
+    assert "release tag must point to current origin/main" in release
+    assert "contents: write" in release
+    assert "verify_release_contract.py --tag" in release
+    assert "gh release create" in release
+    assert "package-ecosystem: github-actions" in dependabot
+    assert "package-ecosystem: cargo" in dependabot
+
+
+def test_release_contract_checker_accepts_rc2_and_rejects_mismatched_tag() -> None:
+    command = [sys.executable, str(ROOT / "scripts" / "verify_release_contract.py")]
+    accepted = subprocess.run(
+        [*command, "--tag", "v1.0.0-rc2"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    rejected = subprocess.run(
+        [*command, "--tag", "v1.0.1-rc2"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode != 0
+    assert "version mismatch" in rejected.stderr
 
 
 def test_plugin_entrypoint_uses_astrbot_auto_discovery() -> None:
@@ -279,11 +362,13 @@ def test_release_archive_uses_current_native_initializer_and_not_wheels(
         assert not any(name.endswith(".whl") for name in archive.namelist())
 
 
+@pytest.mark.skipif(
+    FRESH_WINDOWS_WHEEL is None,
+    reason="requires a fresh current-version Windows native wheel",
+)
 def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None, (
-        "build the native wheel before package verification"
-    )
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-win_amd64.zip"
+    assert FRESH_WINDOWS_WHEEL is not None
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-win_amd64.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -313,12 +398,16 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
     assert output.stat().st_size <= 16 * 1024 * 1024
 
 
+@pytest.mark.skipif(
+    FRESH_WINDOWS_WHEEL is None or FRESH_LINUX_WHEEL is None,
+    reason="requires fresh current-version Windows and Linux native wheels",
+)
 def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
     tmp_path: Path,
 ) -> None:
     assert FRESH_WINDOWS_WHEEL is not None
     assert FRESH_LINUX_WHEEL is not None
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-native-refresh.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-native-refresh.zip"
     command = [
         sys.executable,
         str(ROOT / "scripts" / "package_plugin.py"),
@@ -374,12 +463,15 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
             }
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="requires the Windows fresh wheel")
+@pytest.mark.skipif(
+    sys.platform != "win32" or FRESH_WINDOWS_WHEEL is None,
+    reason="requires a fresh current-version Windows native wheel",
+)
 def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
     tmp_path: Path,
 ) -> None:
     assert FRESH_WINDOWS_WHEEL is not None
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-native-smoke.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-native-smoke.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -434,7 +526,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
         runtime_dir = tmp_path / "runtime"
         runtime_dir.mkdir()
         health = bridge_module.NativeBridge().open(str(runtime_dir))
-        assert health.version == "1.0.0-rc1"
+        assert health.version == "1.0.0-rc2"
         assert (runtime_dir / "astrembodiment.sqlite3").is_file()
         assert main_module.AstrEmbodimentPlugin is not None
     finally:
@@ -447,7 +539,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
 
 def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
     linux_wheel = (
-        tmp_path / "astrembodiment_core-1.0.0-rc1-cp312-abi3-manylinux_2_17_x86_64.whl"
+        tmp_path / "astrembodiment_core-1.0.0-rc2-cp312-abi3-manylinux_2_17_x86_64.whl"
     )
     with zipfile.ZipFile(linux_wheel, "w") as wheel:
         wheel.writestr(
@@ -458,7 +550,7 @@ def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
             b"linux-native-placeholder " + NATIVE_API_PAYLOAD,
         )
 
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-linux_x86_64.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-linux_x86_64.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -503,7 +595,7 @@ def test_release_archive_can_bundle_windows_and_linux_extensions(
             b"linux-native-placeholder " + NATIVE_API_PAYLOAD,
         )
 
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-universal.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc2-universal.zip"
     result = subprocess.run(
         [
             sys.executable,

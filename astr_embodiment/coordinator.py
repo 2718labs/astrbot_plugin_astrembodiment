@@ -261,9 +261,7 @@ class GenesisCoordinator:
         if type(estimate) is not SemanticEstimate:
             return None, None
         try:
-            dimensions = {
-                name: estimate.dimensions[name] for name in DIMENSION_NAMES
-            }
+            dimensions = {name: estimate.dimensions[name] for name in DIMENSION_NAMES}
             confidence = estimate.estimator_confidence
             if (
                 set(estimate.dimensions) != set(DIMENSION_NAMES)
@@ -513,9 +511,7 @@ class GenesisCoordinator:
                 # estimator raised CancelledError); expose the same fixed
                 # outcome that the done callback will cache.  A cancellation
                 # of this caller alone leaves the owner task untouched.
-                return copy.deepcopy(
-                    self._preflight_failure("ESTIMATOR_UNAVAILABLE")
-                )
+                return copy.deepcopy(self._preflight_failure("ESTIMATOR_UNAVAILABLE"))
             raise
         except BaseException:
             # The done callback consumes the task exception and stores a fixed
@@ -615,7 +611,9 @@ class GenesisCoordinator:
         if not request_text.strip():
             return self._preflight_noop("EMPTY_REQUEST", stage="INPUT")
         try:
-            raw_estimate = await self._invoke_preflight_estimator(estimator, request_text)
+            raw_estimate = await self._invoke_preflight_estimator(
+                estimator, request_text
+            )
         except asyncio.CancelledError:
             return self._preflight_failure(
                 "ESTIMATOR_UNAVAILABLE",
@@ -691,7 +689,10 @@ class GenesisCoordinator:
                 commit_state="NOT_ATTEMPTED",
                 estimate=estimate,
             )
-        if set(cursor) != {"schema", "revision"} or cursor.get("schema") != "astrembodiment.semantic-revision.v1":
+        if (
+            set(cursor) != {"schema", "revision"}
+            or cursor.get("schema") != "astrembodiment.semantic-revision.v1"
+        ):
             return self._preflight_failure(
                 "NATIVE_MALFORMED",
                 stage="CURSOR",

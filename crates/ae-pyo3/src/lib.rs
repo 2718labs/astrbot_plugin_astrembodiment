@@ -597,6 +597,7 @@ mod native_private_projection_absence_tests {
 
     #[test]
     fn python_error_boundary_is_fixed_and_encoding_is_fallible() {
+        Python::initialize();
         let cases = [
             (
                 ae_runtime::RuntimeError::Store(StoreError::Sqlite(

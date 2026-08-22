@@ -1,8 +1,8 @@
 # 让你的 Bot 不只记住经历，更能延续「Ta是谁」
 
-**用户话语 → 15 维闭合语义证据 → native semantic commit**
+**用户话语 → 15 维闭合语义证据 → 原生语义提交 → 同轮表达倾向**
 
-AstrEmbodiment 是为 AstrBot 构建的 Rust 原生人格连续性运行时。它为人格建立可验证的 Genesis 起点和可持久的 SeedCode，并让每次进入状态的语义变化都能被验证、提交和追溯。
+AstrEmbodiment 是为 AstrBot 构建的 Rust 原生人格连续性运行时。它为人格建立可验证的 Genesis 起点和可持久的 SeedCode，把每轮用户话语收拢为 15 维闭合证据，并在原生提交确认后将六个定点表达值附加到同一轮回复上下文。
 
 它正在回答一个比“记住了什么”更难的问题：同一个 Bot，如何在一次次相处之后，仍然能够确认自己是谁、经历了什么，以及哪些变化真正属于自己。
 
@@ -12,11 +12,11 @@ AstrEmbodiment 是为 AstrBot 构建的 Rust 原生人格连续性运行时。�
 
 <p align="center">
   <strong>Rust 原生人格连续性运行时</strong><br>
-  用 Genesis、SeedCode、闭合语义证据与原生提交，给“持续成为自己”一条可验证的路径。
+  用 Genesis、SeedCode、闭合语义证据、原生提交与同轮表达投影，给“持续成为自己”一条可验证的路径。
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/版本-1.0.0--rc1-0f766e?style=flat-square" alt="版本 1.0.0-rc1">
+  <img src="https://img.shields.io/badge/版本-1.0.0--rc2-0f766e?style=flat-square" alt="版本 1.0.0-rc2">
   <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-f08c46?style=flat-square" alt="AstrBot >=4.16,<5">
   <img src="https://img.shields.io/badge/平台-Windows%20x64%20%7C%20Linux%20x86__64-475569?style=flat-square" alt="Windows x64 and Linux x86_64">
   <img src="https://img.shields.io/badge/许可证-AGPL--3.0--or--later-5b403a?style=flat-square" alt="AGPL-3.0-or-later">
@@ -29,7 +29,7 @@ AstrEmbodiment 是为 AstrBot 构建的 Rust 原生人格连续性运行时。�
   <a href="CHANGELOG.md">更新记录</a>
 </p>
 
-> **当前版本：1.0.0-rc1 本地候选。** Genesis、SeedCode、G0 continuity 与 SPC1 semantic commit 已接线并通过本地候选验收；受控回应策略和人格漂移仍是后续能力。尚未创建 GitHub Release，也未上架 AstrBot Marketplace。
+> **当前版本：1.0.0-rc2 本地候选。** Genesis、SeedCode、G0 continuity、15 维原生语义提交与同轮表达投影均已接线并完成本地候选验收。尚未创建 GitHub Release，也未上架 AstrBot Marketplace。
 
 ## 为什么是人格连续性
 
@@ -44,27 +44,30 @@ AstrEmbodiment 把这条路径收拢为一个闭环：Genesis 定义起点，See
 | Genesis + SeedCode | 为同一个 Persona/Scope 建立并保留可验证的运行身份；重载后仍可确认“是不是同一个自己”。 |
 | G0 continuity | 为 revision、replay、生命周期与真实投递事实建立受控边界，拒绝过期或重复提交。 |
 | SPC1 语义证据 | 将当前用户话语估计为 15 维已验证的闭合语义证据；原生状态不保留原始文本。 |
-| native semantic commit + Observatory | 由 Rust 权威提交语义提案，并用不含消息内容的本地结构化日志展示结果。 |
+| 原生语义提交 + Observatory | 由 Rust 权威提交 15 维语义提案，并用不含消息内容的本地结构化日志展示提交、计算与表达结果。 |
+| 同轮表达倾向 | 仅在原生提交确认后，把 warmth、sensitivity、guardedness、repair_orientation、engagement、epistemic_caution 六个 fxp6 值作为受限风格倾向提供给本轮主模型。 |
 
 ## 一次互动如何进入连续性
 
 当前已接线的路径是：
 
 ```text
-current user text
-  -> closed 15-dimensional semantic evidence
-  -> Python validation and frozen turn binding
-  -> Rust native semantic commit
-  -> revisioned receipt and local observatory record
+当前用户话语
+  -> 闭合 15 维语义证据
+  -> Python 校验与冻结 turn 绑定
+  -> Rust 原生语义提交
+  -> 持久表达投影
+  -> 同一 ProviderRequest 的受限表达上下文
+  -> revisioned receipt 与本地 observatory record
 ```
 
-这条路径已经能把本轮语义以受控、可验证的方式带入连续性状态。它与未来的受控回应策略、外显人格漂移是两层能力：前者已经可以提交，后者还不能据此宣称会改变 Bot 的对外人格。
+这条路径已经能把本轮语义以受控、可验证的方式带入连续性状态，并在同一轮对回复的表达倾向产生有限影响。它不替代 AstrBot 主模型，也不会绕过事实、工具、安全、同意或平台策略。
 
 ## 快速开始
 
-### 安装本地 RC1 发布包
+### 安装 RC2 发布包
 
-使用已完成本地验收的 `astrbot_plugin_astrembodiment-1.0.0-rc1-win_linux_x86_64.zip`，解压到 AstrBot 的插件目录，然后重载插件。该归档尚未作为 GitHub Release 发布，也未上架 AstrBot Marketplace。
+RC2 当前是待发布候选。标签发布工作流完成后，会生成 `astrbot_plugin_astrembodiment-v1.0.0-rc2-win_linux_x86_64.zip`；下载后解压到 AstrBot 的插件目录，再重载插件。当前尚未创建 GitHub Release，也未上架 AstrBot Marketplace，因此不要假定该跨平台归档已经存在。
 
 首次载入后，可使用：
 
@@ -88,15 +91,15 @@ current user text
 
 ## Observatory：看见每次提交了什么
 
-SPC1 的本地观测记录会在普通日志级别给出完整结果：SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录。只要估计有效，记录会包含全部 15 个 fxp6 语义证据值和置信度，并清楚区分已提交、已估计但未提交、已估计但未确认，以及不可用。原生回执可信时，`calculation_state=CONFIRMED`，`native_calculation` 会继续给出 `state_changed`、`active_nodes`、`active_edges` 和五类 `residuals_fxp6`；未进入原生计算时为 `NOT_ATTEMPTED`，进入后未取得可信回执时为 `UNCONFIRMED`。
+SPC1 的本地观测记录会在普通日志级别给出完整结果：SUCCESS 和 NOOP 以 INFO 记录；DEGRADED、REJECTED 与 INJECTION_FAILED 以 WARNING 记录。只要估计有效，记录会包含全部 15 个 fxp6 语义证据值和置信度，并清楚区分已提交、已估计但未提交、已估计但未确认，以及不可用。原生回执可信时，`calculation_state=CONFIRMED`，`native_calculation` 会继续给出 `state_changed`、`active_nodes`、`active_edges` 和五类 `residuals_fxp6`；未进入原生计算时为 `NOT_ATTEMPTED`，进入后未取得可信回执时为 `UNCONFIRMED`。同一条记录还会给出 `expression_state` 与 `expression_profile_fxp6`：只有已确认、闭合的六项表达值才会写入后者。
 
-当前 RC1 的原生 load 直接使用 `positive`、`harm`、`boundary` 和 `epistemic_conflict` 四个维度；其余维度仍作为同一份闭合证据被验证、记录和随回执追溯。这里的 15 个值是语义证据，不是可由外部直接编辑的“神经节点”。
+15 个维度都会进入原生注意力负载，并映射到固定的神经场区域组合；没有任何维度只停留在日志里。提交后的场状态会导出六项受限表达值，但这里的 15 个值和六项表达值都不是可由外部直接编辑的“神经节点”。
 
 Observatory 不记录用户消息、Provider 输出、token、nonce、SeedCode、状态 digest 或原始神经节点；它只回显闭合的估计输入、原生计算摘要和提交结论，帮助你判断本轮算了什么、是否提交，以及为什么没有抵达。
 
 ## 当前能力边界
 
-AstrEmbodiment 今天可以将闭合语义证据提交到原生状态，但不把这等同于完整的情绪反应产品。受控回应策略和外显人格漂移仍是后续能力；当前版本不会据此承诺改变 Bot 的对外语言、关系策略或长期行为。
+AstrEmbodiment 会在确认提交后把受限表达倾向写入本轮回复上下文，但这不等同于意识、主观感受或真实关系。它不声称 Bot 有需要、记忆、情绪体验或独立意图；主模型仍然独立决定事实陈述、工具调用、安全判断、同意与关系边界。长期关系模型、主动聊天、TTS、dashboard 与可解释的长期人格演化不在本次 RC2 承诺内。
 
 Sylanne 的长期记忆、关系状态、主动聊天、TTS 与 dashboard 等产品能力没有捆绑进 AstrEmbodiment。两者都可能接管同一轮对话的生命周期，因此同一个 AstrBot 会话只应启用一个人格运行时。
 
@@ -110,14 +113,14 @@ Sylanne 的长期记忆、关系状态、主动聊天、TTS 与 dashboard 等产
 
 **Rust 原生 crate**：`ae-pyo3` 暴露 Python 边界；`ae-runtime` 是唯一提交写者；`ae-store` 保存 SQLite Journal 和 Snapshot；`ae-authority` 处理权限与因果；`ae-attention`、`ae-neurofield`、`ae-mechanics`、`ae-renorm` 和 `ae-agent` 依次处理荷载、神经场、候选响应、尺度投影和行动契约；`ae-continuum` 负责 Delta 与 replay。
 
-**验证与打包**：`tests/` 覆盖运行时、静态契约和归档检查；`scripts/package_plugin.py` 用 fresh 原生构建组装跨平台发布包；`.github/workflows/ci.yml` 执行 schema、metadata、Python 编译和发布门禁；`docs/` 与 `adr/` 保存架构决策、数据契约和产品边界。
+**验证与打包**：`tests/` 覆盖运行时、静态契约和归档检查；`scripts/package_plugin.py` 用 fresh 原生构建组装跨平台发布包；`scripts/verify_release_contract.py` 固定校验 metadata、Python、Rust 与 lockfile 的版本一致性；`.github/workflows/ci.yml` 执行格式、静态、Python、Rust 与 wheel 门禁，`.github/workflows/release.yml` 仅在已验证标签上组装并发布；`docs/` 与 `adr/` 保存架构决策、数据契约和产品边界。
 ### 模块之间的边界
 
 Python 只负责 AstrBot 生命周期、Persona 快照、模型调用和消息投递。神经状态、残差、SeedCode 的权威生成和 SQLite 提交都由 Rust 单写者负责；Python 不能逐节点读写生产状态。
 
 ## 模块工作流
 
-下面每个模块都是一个独立小节：先说明职责和输入输出，再给出自己的 Mermaid 工作流图。图中标注“G0 占位”或“目标路径”的地方，是为了区分当前 `1.0.0-rc1` 已接线行为和后续架构，不把设计稿误写成已完成能力。它们不代表插件额外开启了 HTTP 服务；当前插件仍由 AstrBot 生命周期驱动。
+下面每个模块都是一个独立小节：先说明职责和输入输出，再给出自己的 Mermaid 工作流图。图中标注“G0 占位”或“目标路径”的地方，是为了区分当前 `1.0.0-rc2` 已接线行为和后续架构，不把设计稿误写成已完成能力。它们不代表插件额外开启了 HTTP 服务；当前插件仍由 AstrBot 生命周期驱动。
 
 ### 1. Host 与 FFI：把 AstrBot 事件变成封闭调用
 
@@ -174,18 +177,19 @@ flowchart LR
 
 ### 4. Micro-Attention 与 Neurocontinuum：从证据到原生语义提交
 
-SPC1 当前输入是本轮用户话语生成的封闭 15 维语义证据和置信度；原始文本不会进入 native state。Python 先验证 schema、fxp6 维度与冻结 turn，再由 Rust 执行 semantic proposal commit。`ae-attention` 只有证据装配权限，`ae-neurofield` 负责建立、校验和摘要初始场，二者没有权威状态写权限；schema、维度、容量或神经状态校验失败时拒绝事件并保留 committed state。当前 RC1 的 native load 直接使用 `positive`、`harm`、`boundary` 与 `epistemic_conflict`；更深的场传播、Allostasis/Glia 与 `NeuralTrial` 仍属于后续 G1 路径。
+SPC1 当前输入是本轮用户话语生成的封闭 15 维语义证据和置信度；原始文本不会进入原生状态。Python 先验证模式、fxp6 维度与冻结回合，再由 Rust 执行语义提案提交。`ae-attention` 将全部 15 维映射为固定的区域负载，`ae-neurofield` 负责建立、校验和摘要场，`ae-runtime` 在确认提交后的同一修订号导出六项表达投影。任何模式、维度、容量或神经状态校验失败都会拒绝事件并保留已提交状态；表达投影缺失、畸形或宿主注入失败只降级表达层，不旁路或回滚已确认的语义提交。
 
 ```mermaid
 flowchart TD
-    A[当前用户话语] --> B[SPC1: 去除原文 / 闭合 15 维 evidence]
-    B --> C[Python validation + frozen turn]
-    C --> D[Rust native semantic commit]
-    E[Genesis initial field] --> F[16,384 槽位 + sparse graph]
-    D --> G[revisioned semantic receipt]
+    A[当前用户话语] --> B[SPC1: 去除原文 / 闭合 15 维证据]
+    B --> C[Python 校验 + 冻结回合]
+    C --> D[Rust 原生语义提交]
+    E[Genesis 初始场] --> F[16,384 槽位 + 稀疏图]
+    D --> G[带修订号的语义回执]
     F --> G
-    G --> H[Observatory record]
-    H --> I[ActionContract + receipt]
+    G --> H[六项表达投影]
+    H --> I[同轮受限表达上下文]
+    I --> M[Observatory record]
     B -.非法 schema.-> J[拒绝本轮]
     K[G1 field propagation / NeuralTrial] -.目标路径.-> G
     F -.校验失败.-> L[INVALID_NEURAL_STATE]
@@ -317,7 +321,7 @@ flowchart LR
 
 ### Rust -> Python：响应载荷
 
-响应必须保留原生方法的 `schema` 和操作专用字段。`apply_event` 当前返回 `contract`、`receipt`、`revision`、`deduplicated`；`ensure_genesis` 当前返回 `lease_status`、`receipt`、`manifest`、`seed_code`、`seed_code_short`、`incarnation_id`；`inspect` 和 `verify_replay` 返回各自的只读投影。适配器可以在外层增加 `status` 和 `error`，但不能删除这些原生字段。
+响应必须保留原生方法的 `schema` 和操作专用字段。`apply_perception_proposal_v1` 的确认结果返回 `receipt`、`revision`、`deduplicated` 与闭合的 `expression_projection`；`apply_event` 当前返回 `contract`、`receipt`、`revision`、`deduplicated`；`ensure_genesis` 当前返回 `lease_status`、`receipt`、`manifest`、`seed_code`、`seed_code_short`、`incarnation_id`；`inspect` 和 `verify_replay` 返回各自的只读投影。适配器可以在外层增加 `status` 和 `error`，但不能删除这些原生字段。
 
 ```json
 {
@@ -343,8 +347,8 @@ flowchart TB
     D -- 是 --> G[inspect 恢复 revision]
     F --> G
     G --> H[SPC1: 15 维闭合语义证据]
-    H --> I[Rust native semantic commit + 有限 Runtime Context]
-    I --> J[注入本轮 ProviderRequest]
+    H --> I[Rust 原生语义提交 + 表达投影]
+    I --> J[注入本轮运行与表达上下文]
     J --> K[AstrBot 主模型生成回复]
     K --> L[on_llm_response 当前 G0 no-op]
     L --> M[AstrBot 平台真实投递]
@@ -360,9 +364,9 @@ flowchart TB
   -> Genesis（若该 scope 尚未绑定）
   -> Rust inspect 持久化 revision
   -> SPC1 生成并验证 15 维闭合语义证据
-  -> Rust native semantic commit
-  -> 返回 ActionContract、回执与 SeedCode
-  -> 注入本轮有限 Runtime Context
+  -> Rust 原生语义提交
+  -> 返回回执、持久表达投影与 SeedCode
+  -> 注入本轮有限运行上下文与同轮表达上下文
   -> AstrBot 主模型正常生成回复
   -> on_llm_response（当前 G0 no-op）
   -> after_message_sent 确认真实投递
@@ -404,13 +408,13 @@ Sylanne 拥有更多面向产品体验的功能，例如长期记忆、关系状
 - 当前验证适配器：`aiocqhttp`
 - 不承诺 macOS、ARM、musl-only Linux、Python 3.11 及以下或其他未列出的适配器。
 
-发布包由 `scripts/package_plugin.py` 从 fresh Windows/Linux wheel 组装，归档内不包含 wheel、测试、Rust crate 或缓存目录。完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+发布包由 `scripts/package_plugin.py` 从 fresh Windows/Linux wheel 组装，归档内不包含 wheel、测试、Rust crate 或缓存目录。`scripts/verify_release_contract.py` 会先确认 metadata、Python wheel、Rust workspace 与 Cargo.lock 的版本一致，再允许标签对应的发布任务继续。完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 仓库与自动化
 
 仓库采用 2718lab GitHub Repository Template 的治理约定：中文文档优先、Issue/PR 模板、CODEOWNERS、Dependabot 安全更新、路径标签和发布检查。模板仓库只提供可审计的配置和权限声明；Dosu、DCO、All Contributors 等外部机器人必须由仓库管理员单独安装，未安装时由维护者手工处理，不会由插件自动安装或取得合并权限。
 
-AstrEmbodiment 的本地 CI 负责 schema、metadata、Python 编译、测试和发布契约；任何自动生成的 Pull Request 都必须经过人工审查和合并。
+`.github/workflows/ci.yml` 会执行 Python 格式检查、错误检查、回归、Rust 格式、Clippy、Rust 回归、版本契约及 Windows/Linux wheel 冒烟；`.github/workflows/release.yml` 只会在推送 `v*` 标签（或手动指定一个已存在标签）后执行。它会重新构建两端原生 wheel、组装插件包，并用 GitHub 的临时令牌创建或更新同名 GitHub Release；含短横线的标签会标记为 prerelease。该自动化不会上架 AstrBot Marketplace，任何自动生成的 Pull Request 仍须人工审查和合并。
 
 ## 许可证
 

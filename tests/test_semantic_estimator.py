@@ -67,10 +67,15 @@ def test_all_fifteen_raw_fxp6_dimensions_round_trip_as_ints() -> None:
         {**_nested_estimate(), "xml": "<RAW_SENTINEL/>"},
         {**_nested_estimate(), "tool": {"name": "RAW_SENTINEL"}},
         {**_nested_estimate(), "action": {"kind": "RAW_SENTINEL"}},
-        {"dimensions": {**_nested_estimate()["dimensions"], "unknown": 1}, "estimator_confidence": 1},
+        {
+            "dimensions": {**_nested_estimate()["dimensions"], "unknown": 1},
+            "estimator_confidence": 1,
+        },
     ],
 )
-def test_closed_estimate_rejects_control_fields_without_echoing_input(bad: dict) -> None:
+def test_closed_estimate_rejects_control_fields_without_echoing_input(
+    bad: dict,
+) -> None:
     with pytest.raises(SemanticEstimateError) as error:
         parse_estimator_output(bad)
 
@@ -92,7 +97,9 @@ def test_closed_estimate_rejects_control_fields_without_echoing_input(bad: dict)
         ("estimator_confidence", 1.5),
     ],
 )
-def test_numeric_boundary_is_integer_only_and_fail_closed(field: str, value: object) -> None:
+def test_numeric_boundary_is_integer_only_and_fail_closed(
+    field: str, value: object
+) -> None:
     bad = _nested_estimate()
     if field == "estimator_confidence":
         bad[field] = value
@@ -104,11 +111,17 @@ def test_numeric_boundary_is_integer_only_and_fail_closed(field: str, value: obj
 
 
 def test_zero_vector_is_invalid_but_zero_four_load_is_a_valid_noop_candidate() -> None:
-    zero = {"dimensions": {name: 0 for name in DIMENSION_NAMES}, "estimator_confidence": 1}
+    zero = {
+        "dimensions": {name: 0 for name in DIMENSION_NAMES},
+        "estimator_confidence": 1,
+    }
     with pytest.raises(SemanticEstimateError):
         parse_estimator_output(zero)
 
-    other_only = {"dimensions": {name: 0 for name in DIMENSION_NAMES}, "estimator_confidence": 1}
+    other_only = {
+        "dimensions": {name: 0 for name in DIMENSION_NAMES},
+        "estimator_confidence": 1,
+    }
     other_only["dimensions"]["affiliation"] = 1
     estimate = parse_estimator_output(other_only)
     assert all(estimate.dimensions[name] == 0 for name in LOAD_DIMENSIONS)

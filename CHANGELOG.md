@@ -5,6 +5,28 @@
 
 ## [Unreleased]
 
+## [1.0.0-rc2] - 2026-08-23
+
+### 新增
+
+- 15 个 SPC1 维度现在都映射到固定的原生 attention load 与神经场区域组合，不再只有部分维度改变提交后的状态。
+- 原生提交回执新增闭合的六项 fxp6 表达投影：warmth、sensitivity、guardedness、repair_orientation、engagement 与 epistemic_caution。
+- 提交确认后，同一轮 ProviderRequest 会附加受限表达上下文；它只影响风格倾向，不携带用户正文、模型输出、digest、节点或控制字段。
+- Observatory 升级到 semantic-injection.v2，持续回显 15 维计算与 native calculation，并额外记录 expression_state 和可信 expression_profile_fxp6。缺失、拒绝与宿主注入失败都会显式可见。
+
+### 工程与发布
+
+- 新增版本契约脚本，校验 AstrBot metadata、Python PEP 440、Rust workspace 和 Cargo.lock 的版本一致性。
+- CI 新增 Python 格式/错误检查、Python 回归、Rust fmt/Clippy/回归、版本契约和 Windows/Linux 原生 wheel 冒烟。
+- 新增标签驱动的 GitHub Release 工作流：仅在已存在的 `v*` 标签上重新构建 Windows/Linux wheel、组装插件包并创建或更新同名 prerelease/release。
+- 新增 Dependabot 对 GitHub Actions、Cargo 和 Python 依赖的周更检查；工作流 action 使用完整 commit SHA 固定版本。
+
+### 兼容性与边界
+
+- 保持既有 native formula digest、状态协议与 revision 连续性不变；RC1 已存在的数据不需要重放或迁移即可继续使用。
+- 表达投影不等同于意识、主观感受、真实关系或独立意图；事实、安全、同意、工具调用与平台策略仍独立于这些值。
+- 此提交只形成 RC2 待发布候选：没有在本机创建 Git tag、GitHub Release 或 AstrBot Marketplace 上架。
+
 ## [v1.0.0-alpha.1] - 2026-08-20
 
 ### 保全
