@@ -1232,22 +1232,58 @@ def _spc1_dimensions() -> dict[str, int]:
     return {name: index * 10_000 for index, name in enumerate(names, start=1)}
 
 
-def _spc1_success_outcome() -> dict:
+def _spc1_zero_load_dimensions() -> dict[str, int]:
+    dimensions = _spc1_dimensions()
+    for name in ("positive", "harm", "boundary", "epistemic_conflict"):
+        dimensions[name] = 0
+    return dimensions
+
+
+def _spc1_diagnostic(
+    *,
+    stage: str,
+    commit_state: str,
+    values_state: str,
+    dimensions_fxp6: dict[str, int] | None = None,
+    estimator_confidence_fxp6: int | None = None,
+    base_revision: int | None = None,
+    revision: int | None = None,
+    deduplicated: bool | None = None,
+    receipt_status: str | None = None,
+) -> dict:
     return {
-        "status": "SUCCESS",
-        "code": "SEMANTIC_COMMITTED",
-        "diagnostic": {
-            "stage": "RECEIPT",
-            "commit_state": "CONFIRMED_NEW",
-            "values_state": "COMMITTED",
-            "dimensions_fxp6": _spc1_dimensions(),
-            "estimator_confidence_fxp6": 900_000,
-            "base_revision": 7,
-            "revision": 8,
-            "deduplicated": False,
-            "receipt_status": "committed",
-        },
+        "stage": stage,
+        "commit_state": commit_state,
+        "values_state": values_state,
+        "dimensions_fxp6": dimensions_fxp6,
+        "estimator_confidence_fxp6": estimator_confidence_fxp6,
+        "base_revision": base_revision,
+        "revision": revision,
+        "deduplicated": deduplicated,
+        "receipt_status": receipt_status,
     }
+
+
+def _spc1_outcome(status: str, code: str, diagnostic: dict) -> dict:
+    return {"status": status, "code": code, "diagnostic": diagnostic}
+
+
+def _spc1_success_outcome() -> dict:
+    return _spc1_outcome(
+        "SUCCESS",
+        "SEMANTIC_COMMITTED",
+        _spc1_diagnostic(
+            stage="RECEIPT",
+            commit_state="CONFIRMED_NEW",
+            values_state="COMMITTED",
+            dimensions_fxp6=_spc1_dimensions(),
+            estimator_confidence_fxp6=900_000,
+            base_revision=7,
+            revision=8,
+            deduplicated=False,
+            receipt_status="committed",
+        ),
+    )
 
 
 def test_spc1_observatory_success_emits_all_dimensions_at_info(
@@ -1317,6 +1353,456 @@ def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
     assert record["stage"] == "NATIVE_APPLY"
     assert record["commit_state"] == "UNKNOWN"
     assert record["dimensions_fxp6"] == _spc1_dimensions()
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "diagnostic"),
+    [
+        pytest.param(
+            "SUCCESS",
+            "SEMANTIC_COMMITTED",
+            _spc1_diagnostic(
+                stage="RECEIPT",
+                commit_state="CONFIRMED_EXISTING",
+                values_state="COMMITTED",
+                dimensions_fxp6=_spc1_dimensions(),
+                estimator_confidence_fxp6=900_000,
+                base_revision=7,
+                revision=8,
+                deduplicated=True,
+                receipt_status="committed",
+            ),
+            id="deduplicated-success",
+        ),
+        pytest.param(
+            "NOOP",
+            "EMPTY_REQUEST",
+            _spc1_diagnostic(
+                stage="INPUT",
+                commit_state="NOT_ATTEMPTED",
+                values_state="UNAVAILABLE",
+            ),
+            id="empty-request",
+        ),
+        pytest.param(
+            "NOOP",
+            "ZERO_LOAD",
+            _spc1_diagnostic(
+                stage="ESTIMATOR",
+                commit_state="NOT_ATTEMPTED",
+                values_state="ESTIMATED_NOT_COMMITTED",
+                dimensions_fxp6=_spc1_zero_load_dimensions(),
+                estimator_confidence_fxp6=900_000,
+            ),
+            id="zero-load",
+        ),
+        pytest.param(
+            "DEGRADED",
+            "INVALID_TURN",
+            _spc1_diagnostic(
+                stage="INPUT",
+                commit_state="NOT_ATTEMPTED",
+                values_state="UNAVAILABLE",
+            ),
+            id="degraded-input",
+        ),
+        pytest.param(
+            "DEGRADED",
+            "ESTIMATOR_MALFORMED",
+            _spc1_diagnostic(
+                stage="ESTIMATOR",
+                commit_state="NOT_ATTEMPTED",
+                values_state="UNAVAILABLE",
+            ),
+            id="degraded-estimator",
+        ),
+        pytest.param(
+            "DEGRADED",
+            "NATIVE_ERROR",
+            _spc1_diagnostic(
+                stage="CURSOR",
+                commit_state="NOT_ATTEMPTED",
+                values_state="ESTIMATED_NOT_CONFIRMED",
+                dimensions_fxp6=_spc1_dimensions(),
+                estimator_confidence_fxp6=900_000,
+            ),
+            id="degraded-cursor",
+        ),
+        pytest.param(
+            "DEGRADED",
+            "INVALID_PROPOSAL",
+            _spc1_diagnostic(
+                stage="PROPOSAL",
+                commit_state="NOT_ATTEMPTED",
+                values_state="ESTIMATED_NOT_CONFIRMED",
+                dimensions_fxp6=_spc1_dimensions(),
+                estimator_confidence_fxp6=900_000,
+            ),
+            id="degraded-proposal",
+        ),
+        pytest.param(
+            "DEGRADED",
+            "NATIVE_ERROR",
+            _spc1_diagnostic(
+                stage="NATIVE_APPLY",
+                commit_state="UNKNOWN",
+                values_state="ESTIMATED_NOT_CONFIRMED",
+                dimensions_fxp6=_spc1_dimensions(),
+                estimator_confidence_fxp6=900_000,
+                base_revision=7,
+            ),
+            id="degraded-native-apply",
+        ),
+        pytest.param(
+            "DEGRADED",
+            "NATIVE_MALFORMED",
+            _spc1_diagnostic(
+                stage="RECEIPT",
+                commit_state="UNKNOWN",
+                values_state="ESTIMATED_NOT_CONFIRMED",
+                dimensions_fxp6=_spc1_dimensions(),
+                estimator_confidence_fxp6=900_000,
+                base_revision=7,
+            ),
+            id="degraded-receipt",
+        ),
+        pytest.param(
+            "DEGRADED",
+            "NATIVE_ERROR",
+            _spc1_diagnostic(
+                stage="INTERNAL",
+                commit_state="UNKNOWN",
+                values_state="UNAVAILABLE",
+            ),
+            id="degraded-internal",
+        ),
+    ],
+)
+def test_spc1_observatory_accepts_only_valid_outcome_semantics(
+    status: str, code: str, diagnostic: dict
+) -> None:
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+    raw = _spc1_outcome(status, code, diagnostic)
+
+    record = instance._semantic_observatory_record(
+        raw, {"status": status, "code": code}
+    )
+
+    assert record["status"] == status
+    assert record["code"] == code
+    assert record["stage"] == diagnostic["stage"]
+    assert record["commit_state"] == diagnostic["commit_state"]
+    assert record["values_state"] == diagnostic["values_state"]
+    assert record["dimensions_fxp6"] == diagnostic["dimensions_fxp6"]
+    assert record["base_revision"] == diagnostic["base_revision"]
+    assert record["revision"] == diagnostic["revision"]
+    assert record["deduplicated"] == diagnostic["deduplicated"]
+    assert record["receipt_status"] == diagnostic["receipt_status"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "closed"),
+    [
+        pytest.param(
+            _spc1_outcome(
+                "SUCCESS",
+                "SEMANTIC_COMMITTED",
+                _spc1_diagnostic(
+                    stage="INPUT",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="UNAVAILABLE",
+                ),
+            ),
+            {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+            id="success-before-commit",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "SUCCESS",
+                "SEMANTIC_COMMITTED",
+                _spc1_diagnostic(
+                    stage="RECEIPT",
+                    commit_state="CONFIRMED_NEW",
+                    values_state="COMMITTED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    base_revision=7,
+                    revision=8,
+                    deduplicated=True,
+                    receipt_status="committed",
+                ),
+            ),
+            {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+            id="confirmed-new-deduplicated",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "SUCCESS",
+                "SEMANTIC_COMMITTED",
+                _spc1_diagnostic(
+                    stage="RECEIPT",
+                    commit_state="CONFIRMED_EXISTING",
+                    values_state="COMMITTED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    base_revision=7,
+                    revision=8,
+                    deduplicated=False,
+                    receipt_status="committed",
+                ),
+            ),
+            {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+            id="confirmed-existing-new",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "SUCCESS",
+                "SEMANTIC_COMMITTED",
+                _spc1_diagnostic(
+                    stage="RECEIPT",
+                    commit_state="CONFIRMED_NEW",
+                    values_state="COMMITTED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    revision=8,
+                    deduplicated=False,
+                    receipt_status="committed",
+                ),
+            ),
+            {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+            id="success-missing-base-revision",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "SUCCESS",
+                "SEMANTIC_COMMITTED",
+                _spc1_diagnostic(
+                    stage="RECEIPT",
+                    commit_state="CONFIRMED_NEW",
+                    values_state="COMMITTED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    base_revision=7,
+                    deduplicated=False,
+                    receipt_status="committed",
+                ),
+            ),
+            {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+            id="success-missing-result-revision",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "SUCCESS",
+                "SEMANTIC_COMMITTED",
+                _spc1_diagnostic(
+                    stage="RECEIPT",
+                    commit_state="CONFIRMED_NEW",
+                    values_state="COMMITTED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    base_revision=7,
+                    revision=8,
+                    deduplicated=False,
+                ),
+            ),
+            {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
+            id="success-missing-receipt-status",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "NOOP",
+                "EMPTY_REQUEST",
+                _spc1_diagnostic(
+                    stage="INPUT",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="ESTIMATED_NOT_COMMITTED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                ),
+            ),
+            {"status": "NOOP", "code": "EMPTY_REQUEST"},
+            id="empty-request-with-estimate",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "NOOP",
+                "ZERO_LOAD",
+                _spc1_diagnostic(
+                    stage="ESTIMATOR",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="ESTIMATED_NOT_COMMITTED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                ),
+            ),
+            {"status": "NOOP", "code": "ZERO_LOAD"},
+            id="zero-load-with-positive-load",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "NOOP",
+                "ZERO_LOAD",
+                _spc1_diagnostic(
+                    stage="ESTIMATOR",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="ESTIMATED_NOT_COMMITTED",
+                    dimensions_fxp6=_spc1_zero_load_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    base_revision=7,
+                ),
+            ),
+            {"status": "NOOP", "code": "ZERO_LOAD"},
+            id="zero-load-with-native-base",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "INVALID_TURN",
+                _spc1_diagnostic(
+                    stage="INPUT",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="ESTIMATED_NOT_CONFIRMED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                ),
+            ),
+            {"status": "DEGRADED", "code": "INVALID_TURN"},
+            id="degraded-input-with-estimate",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "NATIVE_ERROR",
+                _spc1_diagnostic(
+                    stage="CURSOR",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="UNAVAILABLE",
+                ),
+            ),
+            {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+            id="degraded-cursor-without-estimate",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "NATIVE_ERROR",
+                _spc1_diagnostic(
+                    stage="CURSOR",
+                    commit_state="UNKNOWN",
+                    values_state="ESTIMATED_NOT_CONFIRMED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                ),
+            ),
+            {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+            id="degraded-cursor-unknown-commit",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "NATIVE_ERROR",
+                _spc1_diagnostic(
+                    stage="NATIVE_APPLY",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="ESTIMATED_NOT_CONFIRMED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    base_revision=7,
+                ),
+            ),
+            {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+            id="degraded-native-not-attempted",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "NATIVE_MALFORMED",
+                _spc1_diagnostic(
+                    stage="RECEIPT",
+                    commit_state="UNKNOWN",
+                    values_state="ESTIMATED_NOT_CONFIRMED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                ),
+            ),
+            {"status": "DEGRADED", "code": "NATIVE_MALFORMED"},
+            id="degraded-receipt-missing-base",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "ESTIMATOR_MALFORMED",
+                _spc1_diagnostic(
+                    stage="ESTIMATOR",
+                    commit_state="NOT_ATTEMPTED",
+                    values_state="UNAVAILABLE",
+                    base_revision=7,
+                ),
+            ),
+            {"status": "DEGRADED", "code": "ESTIMATOR_MALFORMED"},
+            id="degraded-estimator-with-base",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "NATIVE_ERROR",
+                _spc1_diagnostic(
+                    stage="INTERNAL",
+                    commit_state="UNKNOWN",
+                    values_state="ESTIMATED_NOT_CONFIRMED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                ),
+            ),
+            {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+            id="degraded-internal-with-estimate",
+        ),
+        pytest.param(
+            _spc1_outcome(
+                "DEGRADED",
+                "NATIVE_ERROR",
+                _spc1_diagnostic(
+                    stage="NATIVE_APPLY",
+                    commit_state="UNKNOWN",
+                    values_state="ESTIMATED_NOT_CONFIRMED",
+                    dimensions_fxp6=_spc1_dimensions(),
+                    estimator_confidence_fxp6=900_000,
+                    base_revision=7,
+                    revision=8,
+                ),
+            ),
+            {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+            id="degraded-with-native-result",
+        ),
+        pytest.param(
+            _spc1_success_outcome(),
+            {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+            id="raw-and-closed-mismatch",
+        ),
+    ],
+)
+def test_spc1_observatory_invalid_outcome_semantics_use_fixed_fallback(
+    raw: dict, closed: dict[str, str]
+) -> None:
+    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+
+    record = instance._semantic_observatory_record(raw, closed)
+
+    assert record == {
+        "schema": "astr-embodiment.observatory.semantic-injection.v1",
+        "status": "DEGRADED",
+        "code": "NATIVE_MALFORMED",
+        "stage": "INTERNAL",
+        "commit_state": "UNKNOWN",
+        "values_state": "UNAVAILABLE",
+        "fxp_scale": 1_000_000,
+        "dimensions_fxp6": None,
+        "estimator_confidence_fxp6": None,
+        "base_revision": None,
+        "revision": None,
+        "deduplicated": None,
+        "receipt_status": None,
+    }
 
 
 @pytest.mark.parametrize("configured", [False, "true", 1, None])

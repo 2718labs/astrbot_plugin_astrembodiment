@@ -69,7 +69,11 @@ try:
         PersonaSourceSnapshot,
         compile_with_provider,
     )
-    from .astr_embodiment.semantic_estimator import DIMENSION_NAMES, FXP6_SCALE
+    from .astr_embodiment.semantic_estimator import (
+        DIMENSION_NAMES,
+        FXP6_SCALE,
+        LOAD_DIMENSIONS,
+    )
     from .astr_embodiment.tokens import (
         bot_token,
         event_id,
@@ -91,7 +95,11 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
         PersonaSourceSnapshot,
         compile_with_provider,
     )
-    from astr_embodiment.semantic_estimator import DIMENSION_NAMES, FXP6_SCALE
+    from astr_embodiment.semantic_estimator import (
+        DIMENSION_NAMES,
+        FXP6_SCALE,
+        LOAD_DIMENSIONS,
+    )
     from astr_embodiment.tokens import (
         bot_token,
         event_id,
@@ -512,6 +520,100 @@ class AstrEmbodimentPlugin(Star):
             "receipt_status": None,
         }
 
+    @staticmethod
+    def _valid_semantic_observatory_semantics(
+        *,
+        status: str,
+        code: str,
+        stage: str,
+        commit_state: str,
+        values_state: str,
+        dimensions: dict[str, int] | None,
+        confidence: int | None,
+        base_revision: int | None,
+        revision: int | None,
+        deduplicated: bool | None,
+        receipt_status: str | None,
+    ) -> bool:
+        if status == "SUCCESS":
+            return (
+                code == "SEMANTIC_COMMITTED"
+                and stage == "RECEIPT"
+                and values_state == "COMMITTED"
+                and dimensions is not None
+                and confidence is not None
+                and base_revision is not None
+                and revision is not None
+                and receipt_status == "committed"
+                and (
+                    (commit_state == "CONFIRMED_NEW" and deduplicated is False)
+                    or (
+                        commit_state == "CONFIRMED_EXISTING"
+                        and deduplicated is True
+                    )
+                )
+            )
+
+        native_result_is_absent = (
+            revision is None and deduplicated is None and receipt_status is None
+        )
+        if status == "NOOP":
+            if code == "EMPTY_REQUEST":
+                return (
+                    stage == "INPUT"
+                    and commit_state == "NOT_ATTEMPTED"
+                    and values_state == "UNAVAILABLE"
+                    and dimensions is None
+                    and confidence is None
+                    and base_revision is None
+                    and native_result_is_absent
+                )
+            if code == "ZERO_LOAD":
+                return (
+                    stage == "ESTIMATOR"
+                    and commit_state == "NOT_ATTEMPTED"
+                    and values_state == "ESTIMATED_NOT_COMMITTED"
+                    and dimensions is not None
+                    and confidence is not None
+                    and all(dimensions[name] == 0 for name in LOAD_DIMENSIONS)
+                    and base_revision is None
+                    and native_result_is_absent
+                )
+            return False
+
+        if status != "DEGRADED" or code in {
+            "SEMANTIC_COMMITTED",
+            "EMPTY_REQUEST",
+            "ZERO_LOAD",
+        }:
+            return False
+        early_stages = {"INPUT", "ESTIMATOR", "CURSOR", "PROPOSAL"}
+        native_stages = {"NATIVE_APPLY", "RECEIPT"}
+        commit_is_valid = (
+            stage in early_stages and commit_state == "NOT_ATTEMPTED"
+        ) or (stage in native_stages | {"INTERNAL"} and commit_state == "UNKNOWN")
+        unavailable_stages = {"INPUT", "ESTIMATOR", "INTERNAL"}
+        values_are_valid = (
+            stage in unavailable_stages
+            and values_state == "UNAVAILABLE"
+            and dimensions is None
+            and confidence is None
+        ) or (
+            stage in {"CURSOR", "PROPOSAL", "NATIVE_APPLY", "RECEIPT"}
+            and values_state == "ESTIMATED_NOT_CONFIRMED"
+            and dimensions is not None
+            and confidence is not None
+        )
+        base_is_valid = (stage in native_stages and base_revision is not None) or (
+            stage not in native_stages and base_revision is None
+        )
+        return (
+            commit_is_valid
+            and values_are_valid
+            and base_is_valid
+            and native_result_is_absent
+        )
+
     @classmethod
     def _semantic_observatory_record(
         cls, raw_outcome: Any, closed_outcome: dict[str, str]
@@ -573,6 +675,24 @@ class AstrEmbodimentPlugin(Star):
             status = closed_outcome.get("status")
             code = closed_outcome.get("code")
             if type(status) is not str or type(code) is not str:
+                raise ValueError
+            if cls._closed_semantic_outcome(closed_outcome) != closed_outcome:
+                raise ValueError
+            if raw_outcome.get("status") != status or raw_outcome.get("code") != code:
+                raise ValueError
+            if not cls._valid_semantic_observatory_semantics(
+                status=status,
+                code=code,
+                stage=stage,
+                commit_state=commit_state,
+                values_state=values_state,
+                dimensions=closed_dimensions,
+                confidence=confidence,
+                base_revision=base_revision,
+                revision=revision,
+                deduplicated=deduplicated,
+                receipt_status=receipt_status,
+            ):
                 raise ValueError
             return {
                 "schema": _SPC1_OBSERVATORY_SCHEMA,
