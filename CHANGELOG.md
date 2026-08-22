@@ -33,6 +33,11 @@
 - 原生 loader 公开 `semantic_revision_v1` 与 `apply_perception_proposal_v1`；打包门禁拒绝缺少任一导出的旧 wheel。
 - 远端 GitHub Release 与 AstrBot Marketplace 上架仍由维护者单独执行，本地候选不自动发布。
 
+### 可观测性
+
+- `observatory_enabled=true` 时，成功的语义注入以 INFO 记录完整 15 维 fxp6 证据、confidence、revision 与去重结果；`ZERO_LOAD` 明确标记为未提交。
+- NOOP 以 INFO、DEGRADED 以 WARNING 记录，并区分 `stage`、`code` 与 `commit_state`；观测日志不包含用户正文、Provider 输出、token、nonce 或 digest。
+
 ### 修复
 
 - `ae_seed` 现在明确支持无 WebUI 直接生成 SeedCode，并通过 AstrBot 配置保存接口持久化；插件重载后可再次用命令查看。
