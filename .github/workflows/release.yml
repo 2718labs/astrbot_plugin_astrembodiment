@@ -45,9 +45,9 @@ jobs:
           fi
           git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}" >/dev/null
           tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
-          main_commit="$(git rev-parse "refs/remotes/origin/main")"
+          main_commit="$(git rev-parse "refs/remotes/origin/master")"
           if [[ "$tag_commit" != "$main_commit" ]]; then
-            echo "release tag must point to current origin/main" >&2
+            echo "release tag must point to current origin/master" >&2
             exit 1
           fi
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"

@@ -157,6 +157,12 @@ def test_release_automation_is_pinned_and_tag_gated() -> None:
     assert "cargo fmt --all -- --check" in ci
     assert "cargo clippy --workspace --all-targets --locked -- -D warnings" in ci
     assert "AE_RC1_TASK_TEMP: ${{ runner.temp }}" in ci
+    assert "artifact: native-wheel-windows" in ci
+    assert "artifact: native-wheel-linux" in ci
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in ci
+    assert "name: ${{ matrix.artifact }}" in ci
+    assert "path: dist/*.whl" in ci
+    assert "if-no-files-found: error" in ci
     assert "native-wheel-windows" in release
     assert "native-wheel-linux" in release
     assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in release
@@ -165,8 +171,8 @@ def test_release_automation_is_pinned_and_tag_gated() -> None:
     )
     assert "tags:" in release
     assert '- "v*"' in release
-    assert "refs/remotes/origin/main" in release
-    assert "release tag must point to current origin/main" in release
+    assert "refs/remotes/origin/master" in release
+    assert "release tag must point to current origin/master" in release
     assert "contents: write" in release
     assert "verify_release_contract.py --tag" in release
     assert "gh release create" in release

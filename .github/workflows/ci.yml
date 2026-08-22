@@ -82,8 +82,10 @@ jobs:
         include:
           - name: windows
             runner: windows-2022
+            artifact: native-wheel-windows
           - name: linux
             runner: ubuntu-22.04
+            artifact: native-wheel-linux
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -104,3 +106,10 @@ jobs:
       - name: 冒烟导入原生 wheel
         run: >-
           python -c "import pathlib, subprocess, sys; wheel=next(pathlib.Path('dist').glob('*.whl')); subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--force-reinstall', str(wheel)]); import astrembodiment_core as core; print(core.version())"
+      - name: 保存原生 wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
