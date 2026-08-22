@@ -27,7 +27,7 @@ use ae_contracts::{
 use ae_fixed::Fixed;
 use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph, Synapse,
-    EDGE_CAPACITY, NEURON_SLOTS,
+    EDGE_CAPACITY, NEURON_SLOTS, REGION_LAYOUT,
 };
 use ae_store::{
     ClaimOutcome, GenesisCommit, R7PolicyBindingKeyV1, R7PolicyCommitOutcomeV1,
@@ -106,6 +106,38 @@ pub struct PerceptionProposalDecisionV1 {
     pub receipt: TransitionReceipt,
     pub revision: u64,
     pub deduplicated: bool,
+    pub expression_projection: ExpressionProjectionV1,
+}
+
+pub const EXPRESSION_PROJECTION_SCHEMA_V1: &str = "astr-embodiment.expression-projection.v1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpressionProfileFxP6 {
+    pub warmth: u32,
+    pub sensitivity: u32,
+    pub guardedness: u32,
+    pub repair_orientation: u32,
+    pub engagement: u32,
+    pub epistemic_caution: u32,
+}
+
+impl ExpressionProfileFxP6 {
+    pub fn values(&self) -> [u32; 6] {
+        [
+            self.warmth,
+            self.sensitivity,
+            self.guardedness,
+            self.repair_orientation,
+            self.engagement,
+            self.epistemic_caution,
+        ]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpressionProjectionV1 {
+    pub revision: u64,
+    pub profile_fxp6: ExpressionProfileFxP6,
 }
 
 /// Result of the one supported production R7 semantic transition. Its receipt
@@ -183,6 +215,62 @@ pub struct AstrRuntime {
 
 fn fixed_zero_vector() -> InvariantResiduals {
     InvariantResiduals::default()
+}
+
+const EXPRESSION_FXP6_MAX: u32 = 1_000_000;
+
+fn region_expression_signal_fxp6(field: &NeuralField, region: usize) -> Result<u32, RuntimeError> {
+    if !field.validate() {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let (start, count) = REGION_LAYOUT
+        .get(region)
+        .copied()
+        .ok_or(RuntimeError::InvalidNeuralState)?;
+    let end = start
+        .checked_add(count)
+        .filter(|end| *end <= NEURON_SLOTS)
+        .ok_or(RuntimeError::InvalidNeuralState)?;
+    let denominator = i128::try_from(count)
+        .ok()
+        .and_then(|count| count.checked_mul(2))
+        .filter(|count| *count > 0)
+        .ok_or(RuntimeError::InvalidNeuralState)?;
+    let sum = (start..end).fold(0_i128, |total, node| {
+        total + i128::from(field.potential[node].raw()) + i128::from(field.excitation[node].raw())
+    });
+    let average = (sum / denominator).clamp(0, i128::from(EXPRESSION_FXP6_MAX));
+    u32::try_from(average).map_err(|_| RuntimeError::InvalidNeuralState)
+}
+
+fn expression_mean_fxp6(field: &NeuralField, regions: &[usize]) -> Result<u32, RuntimeError> {
+    let count = u64::try_from(regions.len())
+        .ok()
+        .filter(|count| *count > 0)
+        .ok_or(RuntimeError::InvalidNeuralState)?;
+    let sum = regions.iter().try_fold(0_u64, |total, region| {
+        total
+            .checked_add(u64::from(region_expression_signal_fxp6(field, *region)?))
+            .ok_or(RuntimeError::InvalidNeuralState)
+    })?;
+    u32::try_from(sum / count).map_err(|_| RuntimeError::InvalidNeuralState)
+}
+
+fn expression_projection_from_field_v1(
+    field: &NeuralField,
+    revision: u64,
+) -> Result<ExpressionProjectionV1, RuntimeError> {
+    Ok(ExpressionProjectionV1 {
+        revision,
+        profile_fxp6: ExpressionProfileFxP6 {
+            warmth: expression_mean_fxp6(field, &[1, 8])?,
+            sensitivity: expression_mean_fxp6(field, &[0, 1, 2])?,
+            guardedness: expression_mean_fxp6(field, &[4, 5])?,
+            repair_orientation: expression_mean_fxp6(field, &[3, 6, 7])?,
+            engagement: expression_mean_fxp6(field, &[7, 8])?,
+            epistemic_caution: expression_mean_fxp6(field, &[3, 2])?,
+        },
+    })
 }
 
 fn r7_semantic_persona_scope(bot_token: &Id128, persona_token: &Id128) -> Digest {
@@ -1754,6 +1842,40 @@ impl AstrRuntime {
         Ok(false)
     }
 
+    fn expression_projection_for_semantic_snapshot(
+        &self,
+        semantic_scope: &Digest,
+        formula_digest: &Digest,
+        receipt: &TransitionReceipt,
+        revision: u64,
+    ) -> Result<ExpressionProjectionV1, RuntimeError> {
+        if receipt.action_contract.is_some()
+            || receipt.schema_version != 1
+            || receipt.status != CommitStatus::Committed
+            || receipt.scope_digest != *semantic_scope
+            || receipt.formula_digest != *formula_digest
+            || receipt.next_revision != revision
+            || receipt.base_revision >= receipt.next_revision
+            || receipt.base_revision.checked_add(1) != Some(receipt.next_revision)
+        {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let snapshot = self
+            .store
+            .read_snapshot(semantic_scope, revision)?
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        if snapshot.revision != revision || snapshot.state_digest != receipt.state_after {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let (field, _) = decode_hot_state_v1(
+            &snapshot.state_bytes,
+            formula_digest,
+            &receipt.state_after,
+            &receipt.graph_after,
+        )?;
+        expression_projection_from_field_v1(&field, revision)
+    }
+
     /// Validate and durably apply one closed SPC1 proposal.  The method owns
     /// the estimator commitment, reuses the existing semantic field
     /// preparation seam, and commits only the semantic journal/snapshot.  No
@@ -1829,14 +1951,21 @@ impl AstrRuntime {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.action_contract.is_some() {
+            if receipt.action_contract.is_some() || receipt.event_digest != event_digest {
                 return Err(RuntimeError::SemanticIdentityConflict);
             }
+            let expression_projection = self.expression_projection_for_semantic_snapshot(
+                &semantic_persona_scope,
+                &formula_digest,
+                &receipt,
+                row.revision,
+            )?;
             self.bind_hot(scope.bot_token, scope.persona_token)?;
             return Ok(PerceptionProposalDecisionV1 {
                 receipt,
                 revision: row.revision,
                 deduplicated: true,
+                expression_projection,
             });
         }
         if self.semantic_event_identity_conflict(
@@ -1907,6 +2036,8 @@ impl AstrRuntime {
         before_commit();
         match self.store.commit_stateful_journal(&commit) {
             Ok((revision, _row)) => {
+                let expression_projection =
+                    expression_projection_from_field_v1(&prepared.next_field, revision)?;
                 if let Some(hot) = self.hot.as_mut() {
                     hot.field = prepared.next_field;
                     hot.graph = graph;
@@ -1916,6 +2047,7 @@ impl AstrRuntime {
                     receipt,
                     revision,
                     deduplicated: false,
+                    expression_projection,
                 })
             }
             Err(StoreError::DuplicateEvent(revision)) => {
@@ -1932,11 +2064,18 @@ impl AstrRuntime {
                 if receipt.action_contract.is_some() {
                     return Err(RuntimeError::SemanticIdentityConflict);
                 }
+                let expression_projection = self.expression_projection_for_semantic_snapshot(
+                    &semantic_persona_scope,
+                    &formula_digest,
+                    &receipt,
+                    revision,
+                )?;
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
                     revision,
                     deduplicated: true,
+                    expression_projection,
                 })
             }
             Err(stale @ StoreError::StaleRevision { .. }) => {
@@ -1967,11 +2106,18 @@ impl AstrRuntime {
                 {
                     return Err(RuntimeError::InvalidNeuralState);
                 }
+                let expression_projection = self.expression_projection_for_semantic_snapshot(
+                    &semantic_persona_scope,
+                    &formula_digest,
+                    &receipt,
+                    revision,
+                )?;
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
                     revision,
                     deduplicated: true,
+                    expression_projection,
                 })
             }
             Err(other) => Err(RuntimeError::Store(other)),
@@ -3634,12 +3780,6 @@ finally:
         let mut zero_vector = base.clone();
         zero_vector.dimensions = EvidenceVector::default();
         invalid.push(zero_vector);
-        let mut four_load_noop = base.clone();
-        four_load_noop.dimensions = EvidenceVector {
-            affiliation: Fixed::ONE,
-            ..EvidenceVector::default()
-        };
-        invalid.push(four_load_noop);
         let mut negative = base.clone();
         negative.dimensions.positive = Fixed::from_raw(-1);
         invalid.push(negative);

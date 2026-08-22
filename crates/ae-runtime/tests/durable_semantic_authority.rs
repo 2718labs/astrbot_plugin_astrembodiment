@@ -550,11 +550,12 @@ macro_rules! durable_semantic_authority_test_contents {
                 panic!("fixture must contain a user stimulus");
             };
             let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
-            for (position, node) in load.active_nodes.iter().enumerate() {
-                let regional_load = load.regional_loads[position % load.regional_loads.len()]
+            assert_eq!(load.active_nodes.len(), load.node_loads.len());
+            for (&node, &node_load) in load.active_nodes.iter().zip(&load.node_loads) {
+                let regional_load = node_load
                     .checked_mul(stimulus.evidence.estimator_confidence)
                     .expect("bounded fixture estimate");
-                let index = *node as usize;
+                let index = node as usize;
                 field.potential[index] = field.potential[index].saturating_add(regional_load);
                 field.excitation[index] = field.excitation[index].saturating_add(regional_load);
             }
@@ -1206,6 +1207,74 @@ macro_rules! durable_semantic_authority_test_contents {
                     .state_digest,
                 state_after
             );
+        }
+
+        #[test]
+        fn semantic_expression_is_committed_deduplicated_and_restored() {
+            let request = request(101);
+            let mut scope = scope_for(&request);
+            scope.session_token = [108; 16];
+            let database = unique_database("semantic-expression");
+            let mut runtime = AstrRuntime::open(&database).expect("open runtime");
+            runtime.ensure_genesis(&request).expect("commit genesis");
+
+            let proposal = r7_contracts::PerceptionProposalV1 {
+                schema_version: r7_contracts::PerceptionProposalV1::SCHEMA_VERSION,
+                event_id: [102; 16],
+                turn_id: [103; 16],
+                observed_at_ms: request.observed_at_ms,
+                base_revision: 0,
+                dimensions: r7_contracts::EvidenceVector {
+                    positive: Fixed::from_raw(600_000),
+                    affiliation: Fixed::from_raw(400_000),
+                    engagement: Fixed::from_raw(500_000),
+                    ..r7_contracts::EvidenceVector::default()
+                },
+                estimator_confidence: Fixed::from_raw(900_000),
+                protocol_version: r7_contracts::PerceptionProposalV1::PROTOCOL_VERSION,
+                request_nonce_digest: [104; 32],
+            };
+            let first = runtime
+                .apply_perception_proposal_v1(&scope, &proposal)
+                .expect("commit first semantic proposal");
+            assert!(!first.deduplicated);
+            assert_eq!(first.expression_projection.revision, first.revision);
+            assert!(first
+                .expression_projection
+                .profile_fxp6
+                .values()
+                .into_iter()
+                .all(|value| value <= 1_000_000));
+
+            let duplicate = runtime
+                .apply_perception_proposal_v1(&scope, &proposal)
+                .expect("deduplicate the exact semantic proposal");
+            assert!(duplicate.deduplicated);
+            assert_eq!(duplicate.revision, first.revision);
+            assert_eq!(duplicate.expression_projection, first.expression_projection);
+
+            runtime.flush_and_close().expect("close committed field");
+            drop(runtime);
+
+            let mut reopened = AstrRuntime::open(&database).expect("reopen runtime");
+            let mut second_proposal = proposal.clone();
+            second_proposal.event_id = [105; 16];
+            second_proposal.turn_id = [106; 16];
+            second_proposal.base_revision = first.revision;
+            second_proposal.request_nonce_digest = [107; 32];
+            second_proposal.dimensions = r7_contracts::EvidenceVector {
+                harm: Fixed::from_raw(700_000),
+                boundary: Fixed::from_raw(500_000),
+                hostility: Fixed::from_raw(400_000),
+                rejection: Fixed::from_raw(300_000),
+                ..r7_contracts::EvidenceVector::default()
+            };
+            let second = reopened
+                .apply_perception_proposal_v1(&scope, &second_proposal)
+                .expect("continue from the restored semantic field");
+            assert_eq!(second.revision, first.revision + 1);
+            assert_ne!(second.expression_projection, first.expression_projection);
+            reopened.flush_and_close().expect("close restored field");
         }
 
         #[test]

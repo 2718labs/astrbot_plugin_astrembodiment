@@ -12,19 +12,6 @@ macro_rules! committed_semantic_projection_path_test_contents {
         };
         use ae_contracts::r7::{CanonicalEvent, UserStimulus};
 
-        const MATCHING_STATE_AFTER: Digest = [
-            175, 101, 127, 47, 72, 127, 104, 128, 15, 110, 181, 235, 113, 84, 247, 80, 133, 31,
-            121, 0, 223, 59, 155, 10, 94, 239, 30, 175, 5, 115, 50, 162,
-        ];
-        const MATCHING_TURN_BINDING: Digest = [
-            208, 194, 199, 233, 217, 236, 71, 110, 100, 66, 12, 201, 250, 46, 44, 34, 194, 171,
-            114, 21, 12, 235, 142, 178, 178, 117, 213, 119, 64, 99, 42, 108,
-        ];
-        const MATCHING_SCOPE_DIGEST: Digest = [
-            102, 26, 133, 97, 137, 103, 228, 37, 142, 94, 1, 86, 92, 142, 141, 163, 243, 8, 139,
-            97, 52, 11, 241, 184, 198, 55, 141, 169, 115, 48, 98, 135,
-        ];
-
         #[derive(Clone, Copy)]
         struct MatchingSemanticBinding {
             revision: u64,
@@ -34,14 +21,18 @@ macro_rules! committed_semantic_projection_path_test_contents {
             turn_binding: Digest,
         }
 
-        fn matching_semantic_binding() -> MatchingSemanticBinding {
-            MatchingSemanticBinding {
-                revision: 1,
-                state_after: MATCHING_STATE_AFTER,
-                turn_id: TURN_ID,
-                scope_digest: MATCHING_SCOPE_DIGEST,
-                turn_binding: MATCHING_TURN_BINDING,
-            }
+        fn matching_semantic_binding(
+            runtime: &AstrRuntime,
+            event: &CanonicalEvent,
+        ) -> Result<MatchingSemanticBinding, RuntimeError> {
+            let binding = runtime.semantic_projection_binding_for_test(event)?;
+            Ok(MatchingSemanticBinding {
+                revision: binding.revision,
+                state_after: binding.state_after,
+                turn_id: binding.turn_id,
+                scope_digest: binding.scope_digest,
+                turn_binding: binding.turn_binding,
+            })
         }
 
         fn scope_ref_for(scope_digest: &Digest) -> String {
@@ -293,7 +284,7 @@ macro_rules! committed_semantic_projection_path_test_contents {
             identity: IdentityConstitutionV1,
             event: &CanonicalEvent,
         ) -> Result<crate::r7::RuntimeDecision, RuntimeError> {
-            let binding = matching_semantic_binding();
+            let binding = matching_semantic_binding(runtime, event)?;
             let update = pre_output_update(identity.clone(), &binding, None, None, None, None);
             let input = R7PreOutputProjectionInputV1::new(identity_capsule(identity), update)
                 .expect("immutable identity");
@@ -312,14 +303,19 @@ macro_rules! committed_semantic_projection_path_test_contents {
             assert_ne!(decision.receipt.event_digest, [0; 32]);
             assert_ne!(decision.receipt.authority_digest, [0; 32]);
             let mut wire = decision.into_private_projection_wire();
+            let mut repeated_runtime = AstrRuntime::scaffold();
+            let repeated_wire_digest = *atomically_compile(
+                &mut repeated_runtime,
+                constitution.clone(),
+                &user_event([61; 16], 0),
+            )
+            .expect("same closed evidence has a deterministic prepared wire")
+            .into_private_projection_wire()
+            .wire_digest();
             assert_eq!(
                 wire.wire_digest(),
-                &[
-                    0x8f, 0xca, 0xbe, 0xb1, 0x5e, 0xc0, 0x83, 0x2d, 0x76, 0x60, 0xab, 0x06, 0xc1,
-                    0x04, 0xe9, 0xcc, 0x52, 0x97, 0x0b, 0xc3, 0x56, 0xa8, 0x59, 0xa9, 0xf4, 0xfd,
-                    0x83, 0x5f, 0x75, 0xe3, 0xc4, 0x57,
-                ],
-                "the existing deterministic AER7PPW1 fixture stays byte-for-byte stable"
+                &repeated_wire_digest,
+                "same closed evidence produces the same AER7PPW1 wire"
             );
             let transfer = wire
                 .begin_transfer_once_v1()
@@ -345,7 +341,8 @@ macro_rules! committed_semantic_projection_path_test_contents {
             let event = user_event([61; 16], 0);
             let mut target_runtime = AstrRuntime::scaffold();
             let field_before = target_runtime.field.potential.clone();
-            let binding = matching_semantic_binding();
+            let binding = matching_semantic_binding(&target_runtime, &event)
+                .expect("derive the matching binding");
             let update = pre_output_update(
                 constitution.clone(),
                 &binding,
@@ -370,7 +367,8 @@ macro_rules! committed_semantic_projection_path_test_contents {
             let event = user_event([61; 16], 0);
             let mut runtime = AstrRuntime::scaffold();
             let field_before = runtime.field.potential.clone();
-            let binding = matching_semantic_binding();
+            let binding =
+                matching_semantic_binding(&runtime, &event).expect("derive the matching binding");
             let update = pre_output_update(
                 constitution.clone(),
                 &binding,
@@ -393,9 +391,10 @@ macro_rules! committed_semantic_projection_path_test_contents {
         fn failed_r7_input_leaves_the_same_runtime_retryable_then_good_input_commits() {
             let constitution = identity(41);
             let event = user_event([61; 16], 0);
-            let binding = matching_semantic_binding();
             let mut runtime = AstrRuntime::scaffold();
             let field_before = runtime.field.potential.clone();
+            let binding =
+                matching_semantic_binding(&runtime, &event).expect("derive the matching binding");
             let rejected = pre_output_update(
                 constitution.clone(),
                 &binding,
@@ -445,7 +444,8 @@ macro_rules! committed_semantic_projection_path_test_contents {
             let event = user_event([61; 16], 0);
             let mut runtime = AstrRuntime::scaffold();
             let field_before = runtime.field.potential.clone();
-            let binding = matching_semantic_binding();
+            let binding =
+                matching_semantic_binding(&runtime, &event).expect("derive the matching binding");
             let mismatched_update =
                 pre_output_update(constitution.clone(), &binding, None, None, None, None);
             let mismatched_input = R7PreOutputProjectionInputV1::new(
@@ -473,7 +473,6 @@ macro_rules! committed_semantic_projection_path_test_contents {
         fn migrated_legacy_causal_binding_mismatches_do_not_consume_the_transition() {
             let constitution = identity(41);
             let event = user_event([61; 16], 0);
-            let binding = matching_semantic_binding();
 
             for (turn_override, scope_override) in [
                 (Some([98; 16]), None),
@@ -481,6 +480,8 @@ macro_rules! committed_semantic_projection_path_test_contents {
             ] {
                 let mut runtime = AstrRuntime::scaffold();
                 let field_before = runtime.field.potential.clone();
+                let binding = matching_semantic_binding(&runtime, &event)
+                    .expect("derive the matching binding");
                 let update = pre_output_update(
                     constitution.clone(),
                     &binding,

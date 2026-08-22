@@ -13,7 +13,7 @@ use ae_contracts::r7::{
     ScopeRef, SourceAuthority, TransitionReceipt, UserStimulus,
 };
 use ae_fixed::Fixed;
-use ae_neurofield::{NeuralField, SparseGraph, NEURON_SLOTS};
+use ae_neurofield::{NeuralField, SparseGraph, NEURON_SLOTS, REGION_LAYOUT};
 use ae_renorm::empty_workspace;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -338,6 +338,16 @@ struct PreparedSemanticTransitionV1 {
     projection_binding: R7SemanticProjectionBindingV1,
     contract: ActionContract,
     receipt: TransitionReceipt,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct SemanticProjectionBindingForTestV1 {
+    pub(crate) revision: u64,
+    pub(crate) state_after: [u8; 32],
+    pub(crate) turn_id: [u8; 16],
+    pub(crate) scope_digest: [u8; 32],
+    pub(crate) turn_binding: [u8; 32],
 }
 
 fn committed_semantic_projection_turn_binding(
@@ -951,19 +961,30 @@ impl AstrRuntime {
         );
         let state_before = neural_field_digest(&self.field);
         let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
-        if load.active_nodes.is_empty() {
+        if load.active_nodes.is_empty()
+            || load.regional_loads.is_empty()
+            || load.active_nodes.len() != load.node_loads.len()
+        {
             return Err(RuntimeError::InvalidSemanticEstimate);
         }
 
         let confidence = stimulus.evidence.estimator_confidence;
-        if load.regional_loads.is_empty() {
-            return Err(RuntimeError::InvalidSemanticEstimate);
-        }
-
         let mut next_field = self.field.clone();
-        for (position, node) in load.active_nodes.iter().enumerate() {
-            let index = *node as usize;
-            let regional_load = load.regional_loads[position % load.regional_loads.len()]
+        let mut seen_nodes = vec![false; NEURON_SLOTS];
+        for (&node, &node_load) in load.active_nodes.iter().zip(&load.node_loads) {
+            let index = usize::try_from(node).map_err(|_| RuntimeError::InvalidNeuralField)?;
+            if index >= NEURON_SLOTS || seen_nodes[index] || node_load < Fixed::ZERO {
+                return Err(RuntimeError::InvalidSemanticEstimate);
+            }
+            let region = REGION_LAYOUT
+                .iter()
+                .position(|(start, count)| (*start..*start + *count).contains(&index))
+                .ok_or(RuntimeError::InvalidNeuralField)?;
+            if load.regional_loads.get(region) != Some(&node_load) {
+                return Err(RuntimeError::InvalidSemanticEstimate);
+            }
+            seen_nodes[index] = true;
+            let regional_load = node_load
                 .checked_mul(confidence)
                 .ok_or(RuntimeError::InvalidSemanticEstimate)?;
             next_field.potential[index] = next_field.potential[index].saturating_add(regional_load);
@@ -1037,6 +1058,21 @@ impl AstrRuntime {
             projection_binding,
             contract,
             receipt,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semantic_projection_binding_for_test(
+        &self,
+        event: &CanonicalEvent,
+    ) -> Result<SemanticProjectionBindingForTestV1, RuntimeError> {
+        let candidate = self.prepare_user_stimulus_transition_v1(event)?;
+        Ok(SemanticProjectionBindingForTestV1 {
+            revision: candidate.next_revision,
+            state_after: candidate.state_after,
+            turn_id: candidate.turn_id,
+            scope_digest: candidate.scope_digest,
+            turn_binding: candidate.projection_turn_binding,
         })
     }
 
@@ -1115,16 +1151,31 @@ pub(crate) fn prepare_production_user_stimulus_transition_v1(
     };
     validate_user_stimulus(stimulus, revision)?;
     let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
-    if load.active_nodes.is_empty() || load.regional_loads.is_empty() {
+    if load.active_nodes.is_empty()
+        || load.regional_loads.is_empty()
+        || load.active_nodes.len() != load.node_loads.len()
+    {
         return Err(RuntimeError::InvalidSemanticEstimate);
     }
 
     let mut next_field = field.clone();
-    for (position, node) in load.active_nodes.iter().enumerate() {
-        let regional_load = load.regional_loads[position % load.regional_loads.len()]
+    let mut seen_nodes = vec![false; NEURON_SLOTS];
+    for (&node, &node_load) in load.active_nodes.iter().zip(&load.node_loads) {
+        let index = usize::try_from(node).map_err(|_| RuntimeError::InvalidNeuralField)?;
+        if index >= NEURON_SLOTS || seen_nodes[index] || node_load < Fixed::ZERO {
+            return Err(RuntimeError::InvalidSemanticEstimate);
+        }
+        let region = REGION_LAYOUT
+            .iter()
+            .position(|(start, count)| (*start..*start + *count).contains(&index))
+            .ok_or(RuntimeError::InvalidNeuralField)?;
+        if load.regional_loads.get(region) != Some(&node_load) {
+            return Err(RuntimeError::InvalidSemanticEstimate);
+        }
+        seen_nodes[index] = true;
+        let regional_load = node_load
             .checked_mul(stimulus.evidence.estimator_confidence)
             .ok_or(RuntimeError::InvalidSemanticEstimate)?;
-        let index = *node as usize;
         next_field.potential[index] = next_field.potential[index].saturating_add(regional_load);
         next_field.excitation[index] = next_field.excitation[index].saturating_add(regional_load);
     }
@@ -1882,7 +1933,10 @@ mod user_stimulus_state_transition_semantic_regressions {
             first_decision.receipt.action_contract,
             repeated_decision.receipt.action_contract
         );
-        assert_ne!(first.field.potential[0], contrasting.field.potential[0]);
+        assert_ne!(
+            first.field.potential[2_048],
+            contrasting.field.potential[2_048]
+        );
         assert_ne!(
             first_decision.receipt.state_after,
             contrasting_decision.receipt.state_after
@@ -1955,7 +2009,7 @@ mod user_stimulus_state_transition_semantic_regressions {
     }
 
     #[test]
-    fn slice_a_aggregate_attention_collides_for_equal_sum_different_composition() {
+    fn regional_attention_distinguishes_equal_sum_different_composition() {
         let mut first_event = closed_stimulus(0);
         let CanonicalEvent::UserStimulus(first_stimulus) = &mut first_event else {
             unreachable!("fixture is a user stimulus");
@@ -1984,8 +2038,8 @@ mod user_stimulus_state_transition_semantic_regressions {
             .expect("second sparse aggregate activation");
 
         assert_ne!(first.receipt.event_digest, second.receipt.event_digest);
-        assert_eq!(first.receipt.state_after, second.receipt.state_after);
-        assert_eq!(
+        assert_ne!(first.receipt.state_after, second.receipt.state_after);
+        assert_ne!(
             first_runtime.field.potential,
             second_runtime.field.potential
         );
