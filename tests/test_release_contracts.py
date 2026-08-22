@@ -224,6 +224,7 @@ def test_release_automation_is_pinned_and_tag_gated() -> None:
     assert "cargo fmt --all -- --check" in ci
     assert "cargo clippy --workspace --all-targets --locked -- -D warnings" in ci
     assert "AE_RC1_TASK_TEMP: ${{ runner.temp }}" in ci
+    assert "CODEX_TASK_TEMP: ${{ runner.temp }}" in ci
     assert "artifact: native-wheel-windows" in ci
     assert "artifact: native-wheel-linux" in ci
     assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in ci

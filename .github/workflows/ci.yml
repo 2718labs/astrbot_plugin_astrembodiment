@@ -59,6 +59,7 @@ jobs:
       - name: 运行 Rust 回归
         env:
           AE_RC1_TASK_TEMP: ${{ runner.temp }}
+          CODEX_TASK_TEMP: ${{ runner.temp }}
         run: cargo test --workspace --locked
 
   release-contract:
