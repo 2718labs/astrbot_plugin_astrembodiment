@@ -1383,9 +1383,8 @@ def _spc1_expression_projection(
 
 
 def _spc1_success_outcome_with_expression(projection: object) -> dict:
-    outcome = _spc1_success_outcome()
-    outcome["result"] = {
-        "revision": 8,
+    outcome = _spc1_full_vector_success_outcome()
+    outcome["result"] = dict(outcome["result"]) | {
         "expression_projection": projection,
     }
     return outcome
@@ -1543,8 +1542,15 @@ async def _run_spc1_request_with_outcome(
     outcome: object,
     *,
     request: FakeRequest | None = None,
+    detailed_logging: bool = False,
 ) -> tuple[AstrEmbodimentPlugin, FakeEvent, FakeRequest]:
-    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+    instance = plugin(
+        FakeConfig(
+            observatory_enabled=True,
+            node_observability_detailed_logging=detailed_logging,
+        ),
+        FakeContext(),
+    )
     scope = _spc1_scope()
 
     async def run_genesis(*_args, **_kwargs):
@@ -1709,7 +1715,7 @@ def test_failure_is_logged_with_code_and_stage_in_both_modes(
         ]
 
 
-def test_spc1_observatory_success_emits_all_dimensions_at_info(
+def test_spc1_observatory_default_success_emits_compact_full_vector_dimensions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorder = RecordingLogger()
@@ -1717,27 +1723,18 @@ def test_spc1_observatory_success_emits_all_dimensions_at_info(
     instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
 
     instance._emit_semantic_observatory(
-        _spc1_success_outcome(),
+        _spc1_full_vector_success_outcome(),
         {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
     )
 
     assert recorder.warning_messages == []
-    assert len(recorder.info_messages) == 1
-    prefix = "AstrEmbodiment SPC1 observatory: "
-    assert recorder.info_messages[0].startswith(prefix)
-    record = json.loads(recorder.info_messages[0][len(prefix) :])
-    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v2"
-    assert record["status"] == "SUCCESS"
-    assert record["code"] == "SEMANTIC_COMMITTED"
-    assert record["fxp_scale"] == 1_000_000
-    assert record["dimensions_fxp6"] == _spc1_dimensions()
-    assert len(record["dimensions_fxp6"]) == 15
-    assert record["estimator_confidence_fxp6"] == 900_000
-    assert record["revision"] == 8
-    assert record["calculation_state"] == "CONFIRMED"
-    assert record["native_calculation"] == _spc1_calculation()
-    assert record["expression_state"] == "NOT_ATTEMPTED"
-    assert record["expression_profile_fxp6"] is None
+    assert recorder.info_messages == [
+        "AstrEmbodiment：运算已完成｜十五维："
+        + ",".join(
+            f"{name}={_spc1_full_vector_dimensions()[name]}"
+            for name in DIMENSION_NAMES
+        )
+    ]
 
 
 def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
@@ -1745,7 +1742,13 @@ def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
 ) -> None:
     recorder = RecordingLogger()
     monkeypatch.setattr(main_module, "logger", recorder)
-    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+    instance = plugin(
+        FakeConfig(
+            observatory_enabled=True,
+            node_observability_detailed_logging=True,
+        ),
+        FakeContext(),
+    )
     raw = {
         "status": "DEGRADED",
         "code": "NATIVE_ERROR",
@@ -1777,13 +1780,19 @@ def test_spc1_observatory_degraded_warns_without_echoing_raw_fields(
     assert "USER_RAW_SENTINEL" not in encoded
     assert "EXCEPTION_RAW_SENTINEL" not in encoded
     assert "DIGEST_RAW_SENTINEL" not in encoded
-    record = json.loads(encoded.split(": ", 1)[1])
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert encoded.startswith(prefix)
+    record = json.loads(encoded[len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
     assert record["status"] == "DEGRADED"
+    assert record["code"] == "NATIVE_ERROR"
     assert record["stage"] == "NATIVE_APPLY"
     assert record["commit_state"] == "UNKNOWN"
     assert record["dimensions_fxp6"] == _spc1_dimensions()
-    assert record["calculation_state"] == "UNCONFIRMED"
+    assert record["calculation_state"] == "FAILED"
     assert record["native_calculation"] is None
+    assert record["full_vector_state"] is None
+    assert record["node_observability_state"] == "NOT_APPLICABLE"
     assert record["expression_state"] == "NOT_ATTEMPTED"
     assert record["expression_profile_fxp6"] is None
 
@@ -2253,26 +2262,9 @@ def test_spc1_observatory_local_degraded_preserves_closed_code(
     instance._emit_semantic_observatory(None, {"status": "DEGRADED", "code": code})
 
     assert recorder.info_messages == []
-    assert len(recorder.warning_messages) == 1
-    assert json.loads(recorder.warning_messages[0].split(": ", 1)[1]) == {
-        "schema": "astr-embodiment.observatory.semantic-injection.v2",
-        "status": "DEGRADED",
-        "code": code,
-        "stage": "INTERNAL",
-        "commit_state": "UNKNOWN",
-        "values_state": "UNAVAILABLE",
-        "fxp_scale": 1_000_000,
-        "dimensions_fxp6": None,
-        "estimator_confidence_fxp6": None,
-        "base_revision": None,
-        "revision": None,
-        "deduplicated": None,
-        "receipt_status": None,
-        "calculation_state": "UNCONFIRMED",
-        "native_calculation": None,
-        "expression_state": "NOT_ATTEMPTED",
-        "expression_profile_fxp6": None,
-    }
+    assert recorder.warning_messages == [
+        f"AstrEmbodiment：运算失败｜失败码={code}｜阶段=INTERNAL"
+    ]
 
 
 def test_spc1_observatory_empty_raw_mapping_still_uses_fixed_fallback() -> None:
@@ -2297,7 +2289,7 @@ def test_spc1_observatory_disabled_or_malformed_config_emits_nothing(
     instance = plugin(FakeConfig(observatory_enabled=configured), FakeContext())
 
     instance._emit_semantic_observatory(
-        _spc1_success_outcome(),
+        _spc1_full_vector_success_outcome(),
         {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"},
     )
 
@@ -2310,7 +2302,13 @@ def test_spc1_observatory_malformed_diagnostic_falls_back_without_raw_fields(
 ) -> None:
     recorder = RecordingLogger()
     monkeypatch.setattr(main_module, "logger", recorder)
-    instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+    instance = plugin(
+        FakeConfig(
+            observatory_enabled=True,
+            node_observability_detailed_logging=True,
+        ),
+        FakeContext(),
+    )
 
     instance._emit_semantic_observatory(
         {
@@ -2327,10 +2325,12 @@ def test_spc1_observatory_malformed_diagnostic_falls_back_without_raw_fields(
     encoded = recorder.warning_messages[0]
     assert "INTERNAL_RAW_SENTINEL" not in encoded
     assert "DIMENSION_RAW_SENTINEL" not in encoded
-    assert json.loads(encoded.split(": ", 1)[1]) == {
-        "schema": "astr-embodiment.observatory.semantic-injection.v2",
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert encoded.startswith(prefix)
+    assert json.loads(encoded[len(prefix) :]) == {
+        "schema": "astr-embodiment.observatory.semantic-injection.v3",
         "status": "DEGRADED",
-        "code": "NATIVE_MALFORMED",
+        "code": "NATIVE_ERROR",
         "stage": "INTERNAL",
         "commit_state": "UNKNOWN",
         "values_state": "UNAVAILABLE",
@@ -2341,8 +2341,19 @@ def test_spc1_observatory_malformed_diagnostic_falls_back_without_raw_fields(
         "revision": None,
         "deduplicated": None,
         "receipt_status": None,
-        "calculation_state": "UNCONFIRMED",
+        "dimension_summary": {
+            "evaluated_dimension_count": 0,
+            "injected_dimension_count": 0,
+            "nonzero_evidence_dimension_count": 0,
+            "neutral_baseline_dimension_count": 0,
+            "unavailable_dimension_count": 15,
+        },
+        "calculation_state": "FAILED",
+        "full_vector_state": None,
+        "semantic_vector": None,
         "native_calculation": None,
+        "node_observability_state": "NOT_APPLICABLE",
+        "node_observability": None,
         "expression_state": "NOT_ATTEMPTED",
         "expression_profile_fxp6": None,
     }
@@ -2476,7 +2487,13 @@ def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker(
     monkeypatch.setattr(main_module, "logger", recorder)
 
     async def run():
-        instance = plugin(FakeConfig(observatory_enabled=True), FakeContext())
+        instance = plugin(
+            FakeConfig(
+                observatory_enabled=True,
+                node_observability_detailed_logging=True,
+            ),
+            FakeContext(),
+        )
         scope = _spc1_scope()
 
         async def run_genesis(*_args, **_kwargs):
@@ -2513,6 +2530,11 @@ def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker(
     assert getattr(request, "_astrembodiment_affect_expression_injected_v1") is True
     assert len(recorder.info_messages) == 1
     assert recorder.warning_messages == []
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert recorder.info_messages[0].startswith(prefix)
+    record = json.loads(recorder.info_messages[0][len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
+    assert record["expression_state"] == "APPLIED"
 
 
 def test_confirmed_expression_projection_is_injected_once_into_the_same_request(
@@ -2523,7 +2545,9 @@ def test_confirmed_expression_projection_is_injected_once_into_the_same_request(
     projection = _spc1_expression_projection()
     outcome = _spc1_success_outcome_with_expression(projection)
 
-    instance, event, request = asyncio.run(_run_spc1_request_with_outcome(outcome))
+    instance, event, request = asyncio.run(
+        _run_spc1_request_with_outcome(outcome, detailed_logging=True)
+    )
 
     expected_context = (
         "\n\n[AE Affect Expression Context / v1]\n"
@@ -2552,11 +2576,17 @@ def test_confirmed_expression_projection_is_injected_once_into_the_same_request(
     assert getattr(request, "_astrembodiment_affect_expression_injected_v1") is True
     assert len(recorder.info_messages) == 1
     assert recorder.warning_messages == []
-    record = json.loads(recorder.info_messages[0].split(": ", 1)[1])
-    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v2"
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert recorder.info_messages[0].startswith(prefix)
+    record = json.loads(recorder.info_messages[0][len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
     assert record["expression_state"] == "APPLIED"
     assert record["expression_profile_fxp6"] == projection["profile_fxp6"]
-    assert record["native_calculation"] == _spc1_calculation()
+    assert record["native_calculation"] == {
+        "state_changed": True,
+        "receipt_active_nodes": 17,
+        "active_edges": 23,
+    }
 
     instance._inject_expression_projection(request, projection["profile_fxp6"])
 
@@ -2570,7 +2600,9 @@ def test_missing_expression_projection_keeps_g0_and_reports_unavailable(
     monkeypatch.setattr(main_module, "logger", recorder)
 
     _instance, event, request = asyncio.run(
-        _run_spc1_request_with_outcome(_spc1_success_outcome())
+        _run_spc1_request_with_outcome(
+            _spc1_full_vector_success_outcome(), detailed_logging=True
+        )
     )
 
     assert event.stopped is False
@@ -2578,7 +2610,10 @@ def test_missing_expression_projection_keeps_g0_and_reports_unavailable(
     assert "AE Affect Expression Context" not in request.system_prompt
     assert len(recorder.info_messages) == 1
     assert recorder.warning_messages == []
-    record = json.loads(recorder.info_messages[0].split(": ", 1)[1])
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert recorder.info_messages[0].startswith(prefix)
+    record = json.loads(recorder.info_messages[0][len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
     assert record["expression_state"] == "UNAVAILABLE"
     assert record["expression_profile_fxp6"] is None
 
@@ -2594,7 +2629,9 @@ def test_malformed_expression_projection_is_rejected_without_echoing_raw_values(
         _spc1_expression_projection(profile_fxp6=malformed_profile)
     )
 
-    _instance, event, request = asyncio.run(_run_spc1_request_with_outcome(outcome))
+    _instance, event, request = asyncio.run(
+        _run_spc1_request_with_outcome(outcome, detailed_logging=True)
+    )
 
     assert event.stopped is False
     assert "AE Affect Expression Context" not in request.system_prompt
@@ -2603,7 +2640,10 @@ def test_malformed_expression_projection_is_rejected_without_echoing_raw_values(
     assert len(recorder.warning_messages) == 1
     encoded = recorder.warning_messages[0]
     assert "EXPRESSION_RAW_SENTINEL" not in encoded
-    record = json.loads(encoded.split(": ", 1)[1])
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert encoded.startswith(prefix)
+    record = json.loads(encoded[len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
     assert record["expression_state"] == "REJECTED"
     assert record["expression_profile_fxp6"] is None
 
@@ -2619,6 +2659,7 @@ def test_expression_injection_failure_rolls_back_to_g0_and_is_observable(
         _run_spc1_request_with_outcome(
             _spc1_success_outcome_with_expression(projection),
             request=ExpressionInjectionFailingRequest(),
+            detailed_logging=True,
         )
     )
 
@@ -2627,6 +2668,9 @@ def test_expression_injection_failure_rolls_back_to_g0_and_is_observable(
     assert "AE Affect Expression Context" not in request.system_prompt
     assert recorder.info_messages == []
     assert len(recorder.warning_messages) == 1
-    record = json.loads(recorder.warning_messages[0].split(": ", 1)[1])
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert recorder.warning_messages[0].startswith(prefix)
+    record = json.loads(recorder.warning_messages[0][len(prefix) :])
+    assert record["schema"] == "astr-embodiment.observatory.semantic-injection.v3"
     assert record["expression_state"] == "INJECTION_FAILED"
     assert record["expression_profile_fxp6"] == projection["profile_fxp6"]

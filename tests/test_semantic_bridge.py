@@ -145,6 +145,21 @@ def _valid_result(*, deduplicated: bool = False, **receipt_overrides: object) ->
     }
 
 
+def _legacy_unattested_result(
+    *, deduplicated: bool = False, **receipt_overrides: object
+) -> dict:
+    """The v1 receipt stays byte-shape compatible but cannot attest v2 facts."""
+
+    return _valid_result(
+        deduplicated=deduplicated, **receipt_overrides
+    ) | {
+        "semantic_vector_receipt": None,
+        "node_observability": None,
+        "full_vector_state": "LEGACY_UNATTESTED",
+        "node_observability_state": "UNAVAILABLE",
+    }
+
+
 _NODE_REGION_LAYOUT = (
     ("interoception_allostasis", 2_048),
     ("affective_valuation", 2_048),
@@ -205,7 +220,10 @@ def _valid_node_observability(*, revision: int = 1, state_changed: bool = True) 
 
 
 def _valid_full_vector_result(
-    *, deduplicated: bool = False, state_changed: bool = True
+    *,
+    deduplicated: bool = False,
+    state_changed: bool = True,
+    nonzero_evidence_dimension_count: int = 2,
 ) -> dict:
     receipt = _valid_receipt(
         state_after=("02" * 32 if state_changed else "01" * 32)
@@ -219,8 +237,9 @@ def _valid_full_vector_result(
             "dimension_slot_count": 15,
             "evaluated_dimension_count": 15,
             "injected_dimension_count": 15,
-            "nonzero_evidence_dimension_count": 2,
-            "neutral_baseline_dimension_count": 13,
+            "nonzero_evidence_dimension_count": nonzero_evidence_dimension_count,
+            "neutral_baseline_dimension_count": 15
+            - nonzero_evidence_dimension_count,
             "unavailable_dimension_count": 0,
             "state_changed": state_changed,
         },
@@ -307,7 +326,13 @@ def test_bridge_serializes_closed_scope_and_proposal_and_exposes_allowlist() -> 
     )
 
     assert cursor == {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
-    assert set(result) == {"schema", "receipt", "revision", "deduplicated"}
+    assert result == _legacy_unattested_result()
+    assert set(result["receipt"]) == set(_valid_receipt())
+    assert result["receipt"] == _valid_receipt()
+    assert result["semantic_vector_receipt"] is None
+    assert result["node_observability"] is None
+    assert result["full_vector_state"] == "LEGACY_UNATTESTED"
+    assert result["node_observability_state"] == "UNAVAILABLE"
     assert json.loads(native.revision_calls[0]) == _scope().scope_json()
     sent_scope, sent_proposal = native.apply_calls[0]
     assert json.loads(sent_scope) == _scope().scope_json()
@@ -330,7 +355,7 @@ def test_bridge_rebuilds_a_confirmed_closed_expression_projection() -> None:
         _scope().scope_json(), json.dumps(_proposal())
     )
 
-    assert result == _valid_result() | {
+    assert result == _legacy_unattested_result() | {
         "expression_projection": _valid_expression_projection(),
     }
     assert list(result["expression_projection"]["profile_fxp6"]) == [
@@ -368,7 +393,7 @@ def test_bridge_marks_malformed_expression_as_rejected(projection: dict) -> None
         _scope().scope_json(), json.dumps(_proposal())
     )
 
-    assert result == _valid_result() | {
+    assert result == _legacy_unattested_result() | {
         "expression_projection": None,
     }
     assert "RAW_SENTINEL" not in json.dumps(result)
@@ -386,7 +411,7 @@ def test_bridge_marks_missing_expression_as_unavailable() -> None:
         _scope().scope_json(), json.dumps(_proposal())
     )
 
-    assert result == _valid_result()
+    assert result == _legacy_unattested_result()
 
 
 def test_bridge_rebuilds_full_vector_receipt_and_node_observability() -> None:
@@ -620,45 +645,81 @@ def test_coordinator_preflight_calls_estimator_once_and_keeps_native_order() -> 
     assert "DIFFERENT_RAW_SENTINEL" not in json.dumps(first)
 
 
-def test_zero_load_is_fixed_noop_and_never_calls_native_or_provider() -> None:
-    class TrapBridge:
-        def semantic_revision_v1(self, _scope: dict) -> dict:
-            raise AssertionError("zero-load must not read semantic cursor")
+def test_all_zero_available_vector_commits_through_native() -> None:
+    class Native:
+        def __init__(self) -> None:
+            self.apply_calls: list[dict] = []
 
-        def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
-            raise AssertionError("zero-load must not commit")
+        def semantic_revision_v1(self, _scope: str) -> str:
+            return json.dumps(
+                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+            )
 
-    async def run() -> tuple[dict, list[str]]:
-        bridge = TrapBridge()
-        coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
+        def apply_perception_proposal_v1(self, _scope: str, proposal: str) -> str:
+            self.apply_calls.append(json.loads(proposal))
+            return json.dumps(
+                _valid_full_vector_result(
+                    state_changed=False,
+                    nonzero_evidence_dimension_count=0,
+                )
+            )
+
+    async def run() -> tuple[dict, Native, list[str]]:
+        native = Native()
+        bridge = NativeBridge()
+        bridge._native = native
+        coordinator = GenesisCoordinator(bridge)
         calls: list[str] = []
 
         async def estimator(request_text: str) -> dict:
             calls.append(request_text)
-            dimensions = {name: 0 for name in DIMENSION_NAMES}
-            dimensions["affiliation"] = 1
-            return {"dimensions": dimensions, "estimator_confidence": 1}
+            return {
+                "dimensions": {name: 0 for name in DIMENSION_NAMES},
+                "estimator_confidence": 1,
+            }
 
         result = await coordinator.preflight_stimulus(
             _scope(), _turn(), "request", estimator
         )
-        return result, calls
+        return result, native, calls
 
-    result, calls = asyncio.run(run())
-    expected_dimensions = {name: 0 for name in DIMENSION_NAMES}
-    expected_dimensions["affiliation"] = 1
-    assert result == _outcome(
-        "NOOP",
-        "ZERO_LOAD",
-        _diagnostic(
-            stage="ESTIMATOR",
-            commit_state="NOT_ATTEMPTED",
-            values_state="ESTIMATED_NOT_COMMITTED",
-            dimensions=expected_dimensions,
-            estimator_confidence=1,
-        ),
-    )
+    result, native, calls = asyncio.run(run())
+
     assert calls == ["request"]
+    assert len(native.apply_calls) == 1
+    assert native.apply_calls[0]["dimensions"] == {
+        name: 0 for name in DIMENSION_NAMES
+    }
+    assert result["status"] == "SUCCESS"
+    assert result["code"] == "SEMANTIC_COMMITTED"
+    assert result["result"]["semantic_vector_receipt"] == {
+        "schema": "astr-embodiment.semantic-vector-receipt.v2",
+        "formula": "full-vector-route-neutral-relaxation-v1",
+        "dimension_slot_count": 15,
+        "evaluated_dimension_count": 15,
+        "injected_dimension_count": 15,
+        "nonzero_evidence_dimension_count": 0,
+        "neutral_baseline_dimension_count": 15,
+        "unavailable_dimension_count": 0,
+        "state_changed": False,
+    }
+    assert result["result"]["receipt"]["next_revision"] == 1
+    assert result["result"]["receipt"]["state_before"] == result["result"]["receipt"][
+        "state_after"
+    ]
+    assert result["diagnostic"]["calculation_state"] == "CONFIRMED"
+    assert result["diagnostic"]["native_calculation"] == {
+        "state_changed": False,
+        "active_nodes": 0,
+        "active_edges": 0,
+        "residuals_fxp6": {
+            "authority": 0,
+            "continuity": 0,
+            "energy": 0,
+            "renormalization": 0,
+            "capacity": 0,
+        },
+    }
 
 
 def test_preflight_fails_closed_when_any_dimension_is_unavailable() -> None:
@@ -865,7 +926,12 @@ def test_bridge_forwards_all_zero_vector_to_native() -> None:
 
         def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
             self.calls += 1
-            return json.dumps(_valid_result())
+            return json.dumps(
+                _valid_full_vector_result(
+                    state_changed=False,
+                    nonzero_evidence_dimension_count=0,
+                )
+            )
 
     bridge = NativeBridge()
     native = Native()
@@ -876,8 +942,30 @@ def test_bridge_forwards_all_zero_vector_to_native() -> None:
         _scope().scope_json(), json.dumps(proposal)
     )
 
-    assert result == _valid_result()
     assert native.calls == 1
+    assert result["full_vector_state"] == "FULL_VECTOR_CONFIRMED"
+    assert result["semantic_vector_receipt"] == {
+        "schema": "astr-embodiment.semantic-vector-receipt.v2",
+        "formula": "full-vector-route-neutral-relaxation-v1",
+        "dimension_slot_count": 15,
+        "evaluated_dimension_count": 15,
+        "injected_dimension_count": 15,
+        "nonzero_evidence_dimension_count": 0,
+        "neutral_baseline_dimension_count": 15,
+        "unavailable_dimension_count": 0,
+        "state_changed": False,
+    }
+    assert result["receipt"]["next_revision"] == 1
+    assert result["receipt"]["state_before"] == result["receipt"]["state_after"]
+    assert result["node_observability_state"] == "CONFIRMED"
+    assert result["node_observability"]["counts"] == {
+        "selected_node_count": 0,
+        "activated_node_count": 0,
+        "changed_node_count": 0,
+        "potential_nonzero_after_count": 0,
+        "excitation_nonzero_after_count": 0,
+        "signal_nonzero_after_count": 0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -993,35 +1081,43 @@ def test_coordinator_never_promotes_a_weak_receipt_to_success(
     )
 
 
-def test_coordinator_accepts_a_direct_bridge_zero_load_noop() -> None:
+def test_coordinator_rejects_a_legacy_zero_load_noop_response() -> None:
     class Bridge:
+        def __init__(self) -> None:
+            self.apply_calls = 0
+
         def semantic_revision_v1(self, _scope: dict) -> dict:
             return {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
 
         def apply_perception_proposal_v1(self, _scope: dict, _proposal: str) -> dict:
+            self.apply_calls += 1
             return {"status": "NOOP", "code": "ZERO_LOAD"}
 
-    async def run() -> dict:
-        coordinator = GenesisCoordinator(Bridge())  # type: ignore[arg-type]
+    async def run() -> tuple[dict, Bridge]:
+        bridge = Bridge()
+        coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
 
         async def estimator(_request_text: str) -> dict:
             return _estimate()
 
-        return await coordinator.preflight_stimulus(
-            _scope(), _turn(), "request", estimator
+        return (
+            await coordinator.preflight_stimulus(
+                _scope(), _turn(), "request", estimator
+            ),
+            bridge,
         )
 
-    assert asyncio.run(run()) == _outcome(
-        "NOOP",
-        "ZERO_LOAD",
-        _diagnostic(
-            stage="ESTIMATOR",
-            commit_state="NOT_ATTEMPTED",
-            values_state="ESTIMATED_NOT_COMMITTED",
-            dimensions=_estimate()["dimensions"],
-            estimator_confidence=800_000,
-        ),
-    )
+    result, bridge = asyncio.run(run())
+
+    assert bridge.apply_calls == 1
+    assert result["status"] == "DEGRADED"
+    assert result["code"] == "NATIVE_MALFORMED"
+    assert result["diagnostic"]["stage"] == "RECEIPT"
+    assert result["diagnostic"]["commit_state"] == "UNKNOWN"
+    assert result["diagnostic"]["values_state"] == "ESTIMATED_NOT_CONFIRMED"
+    assert result["diagnostic"]["dimensions_fxp6"] == _estimate()["dimensions"]
+    assert result["diagnostic"]["estimator_confidence_fxp6"] == 800_000
+    assert result["diagnostic"]["base_revision"] == 0
 
 
 def test_coordinator_cancellation_keeps_one_shared_attempt_for_later_retry() -> None:

@@ -326,7 +326,11 @@ class GenesisCoordinator:
         }
 
     @staticmethod
-    def _preflight_calculation(receipt: Any) -> dict[str, Any] | None:
+    def _preflight_calculation(
+        receipt: Any,
+        *,
+        expected_state_changed: bool | None = None,
+    ) -> dict[str, Any] | None:
         """Project a validated native receipt into content-free result values."""
 
         if type(receipt) is not dict:
@@ -340,7 +344,13 @@ class GenesisCoordinator:
                 raise ValueError("state digest")
             bytes.fromhex(state_before)
             bytes.fromhex(state_after)
-            if state_before == state_after:
+            state_changed = state_before != state_after
+            if expected_state_changed is not None and (
+                type(expected_state_changed) is not bool
+                or state_changed is not expected_state_changed
+            ):
+                raise ValueError("state changed")
+            if state_before == state_after and expected_state_changed is not False:
                 raise ValueError("unchanged state")
             active_nodes = receipt["active_nodes"]
             active_edges = receipt["active_edges"]
@@ -362,7 +372,7 @@ class GenesisCoordinator:
         except BaseException:
             return None
         return {
-            "state_changed": True,
+            "state_changed": state_changed,
             "active_nodes": active_nodes,
             "active_edges": active_edges,
             "residuals_fxp6": closed_residuals,
@@ -381,11 +391,15 @@ class GenesisCoordinator:
         deduplicated: bool | None = None,
         receipt_status: str | None = None,
         receipt: Any = None,
+        semantic_vector_state_changed: bool | None = None,
     ) -> dict[str, Any]:
         dimensions, confidence = cls._preflight_estimate_values(estimate)
         if dimensions is None:
             values_state = "UNAVAILABLE"
-        native_calculation = cls._preflight_calculation(receipt)
+        native_calculation = cls._preflight_calculation(
+            receipt,
+            expected_state_changed=semantic_vector_state_changed,
+        )
         if native_calculation is not None:
             calculation_state = "CONFIRMED"
         elif commit_state in {"UNKNOWN", "CONFIRMED_NEW", "CONFIRMED_EXISTING"}:
@@ -841,6 +855,11 @@ class GenesisCoordinator:
                 deduplicated=native_result["deduplicated"],
                 receipt_status=native_result["receipt"]["status"],
                 receipt=native_result["receipt"],
+                semantic_vector_state_changed=(
+                    native_result["semantic_vector_receipt"]["state_changed"]
+                    if native_result["full_vector_state"] == "FULL_VECTOR_CONFIRMED"
+                    else None
+                ),
             ),
         }
 

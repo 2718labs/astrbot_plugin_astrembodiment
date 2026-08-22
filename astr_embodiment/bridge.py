@@ -139,6 +139,29 @@ _SEMANTIC_RESULT_FULL_VECTOR_FIELDS = frozenset(
 _SEMANTIC_RESULT_FULL_VECTOR_WITH_EXPRESSION_FIELDS = frozenset(
     {*_SEMANTIC_RESULT_FULL_VECTOR_FIELDS, "expression_projection"}
 )
+_SEMANTIC_RESULT_CANONICAL_STATE_FIELDS = frozenset(
+    {"full_vector_state", "node_observability_state"}
+)
+_SEMANTIC_RESULT_LEGACY_CANONICAL_FIELDS = frozenset(
+    {
+        *_SEMANTIC_RESULT_FIELDS,
+        "semantic_vector_receipt",
+        "node_observability",
+        *_SEMANTIC_RESULT_CANONICAL_STATE_FIELDS,
+    }
+)
+_SEMANTIC_RESULT_LEGACY_CANONICAL_WITH_EXPRESSION_FIELDS = frozenset(
+    {*_SEMANTIC_RESULT_LEGACY_CANONICAL_FIELDS, "expression_projection"}
+)
+_SEMANTIC_RESULT_FULL_VECTOR_CANONICAL_FIELDS = frozenset(
+    {
+        *_SEMANTIC_RESULT_FULL_VECTOR_FIELDS,
+        *_SEMANTIC_RESULT_CANONICAL_STATE_FIELDS,
+    }
+)
+_SEMANTIC_RESULT_FULL_VECTOR_CANONICAL_WITH_EXPRESSION_FIELDS = frozenset(
+    {*_SEMANTIC_RESULT_FULL_VECTOR_CANONICAL_FIELDS, "expression_projection"}
+)
 _EXPRESSION_PROJECTION_SCHEMA = "astr-embodiment.expression-projection.v1"
 _EXPRESSION_PROJECTION_FIELDS = frozenset({"schema", "revision", "profile_fxp6"})
 _EXPRESSION_PROFILE_FIELD_ORDER = (
@@ -782,6 +805,7 @@ def _validate_semantic_result(
 ) -> dict[str, Any]:
     payload = _native_json(value)
     payload_fields = set(payload)
+    canonicalized = False
     if payload_fields in {
         _SEMANTIC_RESULT_FIELDS,
         _SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS,
@@ -792,6 +816,20 @@ def _validate_semantic_result(
         _SEMANTIC_RESULT_FULL_VECTOR_WITH_EXPRESSION_FIELDS,
     }:
         full_vector = True
+    elif payload_fields in {
+        _SEMANTIC_RESULT_LEGACY_CANONICAL_FIELDS,
+        _SEMANTIC_RESULT_LEGACY_CANONICAL_WITH_EXPRESSION_FIELDS,
+        _SEMANTIC_RESULT_FULL_VECTOR_CANONICAL_FIELDS,
+        _SEMANTIC_RESULT_FULL_VECTOR_CANONICAL_WITH_EXPRESSION_FIELDS,
+    }:
+        canonicalized = True
+        # The canonical legacy and v2 result shapes intentionally have the
+        # same top-level keys.  Their closed projection values, not a lax
+        # field subset, determine which strict validator applies.
+        full_vector = (
+            payload.get("semantic_vector_receipt") is not None
+            or payload.get("node_observability") is not None
+        )
     else:
         raise ValueError("semantic payload")
     if payload.get("schema") != _SEMANTIC_RESULT_SCHEMA:
@@ -851,6 +889,12 @@ def _validate_semantic_result(
             )
         except (TypeError, ValueError):
             canonical_result["expression_projection"] = None
+    if canonicalized and (
+        payload.get("full_vector_state") != canonical_result["full_vector_state"]
+        or payload.get("node_observability_state")
+        != canonical_result["node_observability_state"]
+    ):
+        raise ValueError("canonical semantic result state")
     return canonical_result
 
 
@@ -859,7 +903,7 @@ def validate_semantic_result(
     *,
     expected_base_revision: int | None = None,
 ) -> dict[str, Any]:
-    """Validate the exact closed result emitted by the PyO3 SPC1 surface."""
+    """Validate a raw PyO3 result or its exact closed canonical projection."""
 
     return _validate_semantic_result(
         value,
