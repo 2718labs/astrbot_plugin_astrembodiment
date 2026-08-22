@@ -7,7 +7,7 @@ use self::r7_atomic_projection::{
     compile_atomic_pre_output_wire_v1, R7SemanticProjectionBindingV1,
 };
 use ae_agent::r7::scaffold_contract;
-use ae_attention::r7::assemble_load;
+use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
 use ae_contracts::r7::{
     wire, ActionContract, CanonicalEvent, CommitStatus, EvidenceVector, InvariantResiduals,
     ScopeRef, SourceAuthority, TransitionReceipt, UserStimulus,
@@ -136,6 +136,7 @@ const NATIVE_SEMANTIC_ACTION_DOMAIN_V1: &[u8] = b"astr-embodiment/native-semanti
 const NATIVE_SEMANTIC_CONTRACT_DOMAIN_V1: &[u8] =
     b"astr-embodiment/native-semantic-action-contract-v1";
 const NATIVE_SEMANTIC_ACTION_TTL_MS: u64 = 30_000;
+pub(crate) const NEUTRAL_RELAXATION_MAX_RATE: Fixed = Fixed::from_raw(125_000);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IssuedHostEffectV1 {
@@ -271,6 +272,7 @@ impl AstrBotToolRegistryRecordV1 {
 
 pub(crate) struct AstrRuntime {
     pub(crate) field: NeuralField,
+    baseline_field: NeuralField,
     pub(crate) graph: SparseGraph,
     pub(crate) revision: u64,
     pub(crate) formula_digest: [u8; 32],
@@ -324,6 +326,7 @@ impl RuntimeDecision {
 pub(crate) struct PreparedProductionUserStimulusTransitionV1 {
     pub(crate) next_field: NeuralField,
     pub(crate) active_nodes: u32,
+    pub(crate) full_vector_load: FullVectorLoad,
 }
 
 struct PreparedSemanticTransitionV1 {
@@ -386,8 +389,9 @@ fn native_formula_digest() -> [u8; 32] {
         &[
             b"input:canonical-user-stimulus-v1",
             b"validation:closed-typed-estimate-v1",
-            b"attention:positive-harm-epistemic-conflict-boundary-v1",
-            b"state:potential-and-excitation-regional-load-times-confidence-v1",
+            b"attention:full-vector-route-neutral-relaxation-v1",
+            b"state:potential-and-excitation-evidence-drive-neutral-recovery-v1",
+            b"neutral:max-rate-fxp6-125000",
             b"contract:scaffold-identity-bound-to-transition-v1",
             b"receipt:canonical-domain-hashes-v1",
         ],
@@ -637,11 +641,96 @@ fn validate_user_stimulus(stimulus: &UserStimulus, revision: u64) -> Result<(), 
         || dimensions
             .into_iter()
             .any(|value| value < Fixed::ZERO || value > Fixed::ONE)
-        || dimensions.into_iter().all(|value| value == Fixed::ZERO)
     {
         return Err(RuntimeError::InvalidSemanticEstimate);
     }
     Ok(())
+}
+
+struct FullVectorDynamics {
+    next_field: NeuralField,
+    selected_nodes: u32,
+    load: FullVectorLoad,
+}
+
+pub(crate) fn full_vector_component_update(
+    current: Fixed,
+    baseline: Fixed,
+    drive: Fixed,
+    neutral_rate: Fixed,
+) -> Result<(Fixed, Fixed), RuntimeError> {
+    let displacement = current.saturating_sub(baseline);
+    let recovery = displacement
+        .checked_mul(neutral_rate)
+        .ok_or(RuntimeError::InvalidNeuralField)?;
+    Ok((
+        current.saturating_add(drive).saturating_sub(recovery),
+        recovery,
+    ))
+}
+
+fn apply_full_vector_dynamics(
+    field: &NeuralField,
+    baseline: &NeuralField,
+    evidence: &EvidenceVector,
+    confidence: Fixed,
+) -> Result<FullVectorDynamics, RuntimeError> {
+    if !field.validate() || !baseline.validate() {
+        return Err(RuntimeError::InvalidNeuralField);
+    }
+    let load =
+        assemble_full_vector_load(evidence).map_err(|_| RuntimeError::InvalidSemanticEstimate)?;
+    if load.evaluated_dimension_count != 15 || load.injected_dimension_count != 15 {
+        return Err(RuntimeError::InvalidSemanticEstimate);
+    }
+
+    let mut next_field = field.clone();
+    let mut selected_nodes = 0_u32;
+    for (region, &(start, count)) in REGION_LAYOUT.iter().enumerate() {
+        let drive = load.evidence_means[region]
+            .checked_mul(confidence)
+            .ok_or(RuntimeError::InvalidSemanticEstimate)?;
+        let neutral_rate = load.neutral_means[region]
+            .checked_mul(NEUTRAL_RELAXATION_MAX_RATE)
+            .ok_or(RuntimeError::InvalidSemanticEstimate)?;
+        let end = start
+            .checked_add(count)
+            .filter(|end| *end <= NEURON_SLOTS)
+            .ok_or(RuntimeError::InvalidNeuralField)?;
+        for node in start..end {
+            let (next_potential, potential_recovery) = full_vector_component_update(
+                field.potential[node],
+                baseline.potential[node],
+                drive,
+                neutral_rate,
+            )?;
+            let (next_excitation, excitation_recovery) = full_vector_component_update(
+                field.excitation[node],
+                baseline.excitation[node],
+                drive,
+                neutral_rate,
+            )?;
+            if drive == Fixed::ZERO
+                && potential_recovery == Fixed::ZERO
+                && excitation_recovery == Fixed::ZERO
+            {
+                continue;
+            }
+            selected_nodes = selected_nodes
+                .checked_add(1)
+                .ok_or(RuntimeError::InvalidNeuralField)?;
+            next_field.potential[node] = next_potential;
+            next_field.excitation[node] = next_excitation;
+        }
+    }
+    if !next_field.validate() {
+        return Err(RuntimeError::InvalidNeuralField);
+    }
+    Ok(FullVectorDynamics {
+        next_field,
+        selected_nodes,
+        load,
+    })
 }
 
 fn native_action_contract(
@@ -672,8 +761,10 @@ impl AstrRuntime {
     /// Host/projection tests. Production `ae_runtime::AstrRuntime` never owns
     /// or delegates semantic state to this scaffold.
     pub(crate) fn scaffold() -> Self {
+        let baseline_field = NeuralField::zeroed();
         Self {
-            field: NeuralField::zeroed(),
+            field: baseline_field.clone(),
+            baseline_field,
             graph: SparseGraph {
                 row_offsets: vec![0; NEURON_SLOTS + 1],
                 edges: Vec::new(),
@@ -960,40 +1051,13 @@ impl AstrRuntime {
             ],
         );
         let state_before = neural_field_digest(&self.field);
-        let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
-        if load.active_nodes.is_empty()
-            || load.regional_loads.is_empty()
-            || load.active_nodes.len() != load.node_loads.len()
-        {
-            return Err(RuntimeError::InvalidSemanticEstimate);
-        }
-
-        let confidence = stimulus.evidence.estimator_confidence;
-        let mut next_field = self.field.clone();
-        let mut seen_nodes = vec![false; NEURON_SLOTS];
-        for (&node, &node_load) in load.active_nodes.iter().zip(&load.node_loads) {
-            let index = usize::try_from(node).map_err(|_| RuntimeError::InvalidNeuralField)?;
-            if index >= NEURON_SLOTS || seen_nodes[index] || node_load < Fixed::ZERO {
-                return Err(RuntimeError::InvalidSemanticEstimate);
-            }
-            let region = REGION_LAYOUT
-                .iter()
-                .position(|(start, count)| (*start..*start + *count).contains(&index))
-                .ok_or(RuntimeError::InvalidNeuralField)?;
-            if load.regional_loads.get(region) != Some(&node_load) {
-                return Err(RuntimeError::InvalidSemanticEstimate);
-            }
-            seen_nodes[index] = true;
-            let regional_load = node_load
-                .checked_mul(confidence)
-                .ok_or(RuntimeError::InvalidSemanticEstimate)?;
-            next_field.potential[index] = next_field.potential[index].saturating_add(regional_load);
-            next_field.excitation[index] =
-                next_field.excitation[index].saturating_add(regional_load);
-        }
-        if !next_field.validate() {
-            return Err(RuntimeError::InvalidNeuralField);
-        }
+        let dynamics = apply_full_vector_dynamics(
+            &self.field,
+            &self.baseline_field,
+            &stimulus.evidence.dimensions,
+            stimulus.evidence.estimator_confidence,
+        )?;
+        let next_field = dynamics.next_field;
         let state_after = neural_field_digest(&next_field);
         if state_before == state_after {
             return Err(RuntimeError::NativeStateUnchanged);
@@ -1040,8 +1104,7 @@ impl AstrRuntime {
             state_after,
             graph_after,
             action_contract: Some(action_contract),
-            active_nodes: u32::try_from(load.active_nodes.len())
-                .map_err(|_| RuntimeError::InvalidNeuralField)?,
+            active_nodes: dynamics.selected_nodes,
             active_edges: self.graph.edges.len() as u32,
             residuals: InvariantResiduals::default(),
             status: CommitStatus::Committed,
@@ -1136,6 +1199,7 @@ impl AstrRuntime {
 pub(crate) fn prepare_production_user_stimulus_transition_v1(
     event: &CanonicalEvent,
     field: &NeuralField,
+    baseline: &NeuralField,
     graph: &SparseGraph,
     revision: u64,
 ) -> Result<PreparedProductionUserStimulusTransitionV1, RuntimeError> {
@@ -1150,42 +1214,16 @@ pub(crate) fn prepare_production_user_stimulus_transition_v1(
         _ => return Err(RuntimeError::UnsupportedEvent),
     };
     validate_user_stimulus(stimulus, revision)?;
-    let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
-    if load.active_nodes.is_empty()
-        || load.regional_loads.is_empty()
-        || load.active_nodes.len() != load.node_loads.len()
-    {
-        return Err(RuntimeError::InvalidSemanticEstimate);
-    }
-
-    let mut next_field = field.clone();
-    let mut seen_nodes = vec![false; NEURON_SLOTS];
-    for (&node, &node_load) in load.active_nodes.iter().zip(&load.node_loads) {
-        let index = usize::try_from(node).map_err(|_| RuntimeError::InvalidNeuralField)?;
-        if index >= NEURON_SLOTS || seen_nodes[index] || node_load < Fixed::ZERO {
-            return Err(RuntimeError::InvalidSemanticEstimate);
-        }
-        let region = REGION_LAYOUT
-            .iter()
-            .position(|(start, count)| (*start..*start + *count).contains(&index))
-            .ok_or(RuntimeError::InvalidNeuralField)?;
-        if load.regional_loads.get(region) != Some(&node_load) {
-            return Err(RuntimeError::InvalidSemanticEstimate);
-        }
-        seen_nodes[index] = true;
-        let regional_load = node_load
-            .checked_mul(stimulus.evidence.estimator_confidence)
-            .ok_or(RuntimeError::InvalidSemanticEstimate)?;
-        next_field.potential[index] = next_field.potential[index].saturating_add(regional_load);
-        next_field.excitation[index] = next_field.excitation[index].saturating_add(regional_load);
-    }
-    if !next_field.validate() {
-        return Err(RuntimeError::InvalidNeuralField);
-    }
+    let dynamics = apply_full_vector_dynamics(
+        field,
+        baseline,
+        &stimulus.evidence.dimensions,
+        stimulus.evidence.estimator_confidence,
+    )?;
     Ok(PreparedProductionUserStimulusTransitionV1 {
-        next_field,
-        active_nodes: u32::try_from(load.active_nodes.len())
-            .map_err(|_| RuntimeError::InvalidNeuralField)?,
+        next_field: dynamics.next_field,
+        active_nodes: dynamics.selected_nodes,
+        full_vector_load: dynamics.load,
     })
 }
 
@@ -1574,7 +1612,7 @@ mod user_stimulus_state_transition_semantic_regressions {
         runtime.commit_prepared_projection_wire_v1(candidate, wire)
     }
 
-    const NATIVE_FORMULA_DIGEST_HEX_V1: &str =
+    const LEGACY_NATIVE_FORMULA_DIGEST_HEX_V1: &str =
         "632bfe32268a280aa56189d5a198550502707d79069c9f2fa76f74aa977f957d";
 
     fn closed_stimulus(positive_delta: i64) -> CanonicalEvent {
@@ -1995,7 +2033,7 @@ mod user_stimulus_state_transition_semantic_regressions {
     }
 
     #[test]
-    fn fully_zero_evidence_fails_closed_without_mutating_runtime_state() {
+    fn fully_zero_evidence_reaches_native_neutral_calculation_before_v1_rejects_unchanged_state() {
         let mut event = closed_stimulus(0);
         let CanonicalEvent::UserStimulus(stimulus) = &mut event else {
             unreachable!("fixture is a user stimulus");
@@ -2004,7 +2042,10 @@ mod user_stimulus_state_transition_semantic_regressions {
 
         let mut runtime = AstrRuntime::scaffold();
         let before = snapshot(&runtime);
-        assert!(commit_semantic_transition_for_test(&mut runtime, &event).is_err());
+        assert!(matches!(
+            commit_semantic_transition_for_test(&mut runtime, &event),
+            Err(RuntimeError::NativeStateUnchanged)
+        ));
         assert_unchanged(&runtime, &before);
     }
 
@@ -2066,9 +2107,9 @@ mod user_stimulus_state_transition_semantic_regressions {
             ],
         );
 
-        assert_eq!(
+        assert_ne!(
             digest_hex(runtime.formula_digest),
-            NATIVE_FORMULA_DIGEST_HEX_V1
+            LEGACY_NATIVE_FORMULA_DIGEST_HEX_V1
         );
         assert_eq!(decision.receipt.scope_digest, expected_scope);
         assert_eq!(decision.receipt.event_digest, expected_event);

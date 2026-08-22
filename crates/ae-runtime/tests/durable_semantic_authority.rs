@@ -3,7 +3,6 @@ macro_rules! durable_semantic_authority_test_contents {
     () => {
         use crate::r7::PrivateProjectionTransferReceiptV1;
         use crate::AstrRuntime;
-        use ae_attention::r7::assemble_load;
         use ae_authority::authority_projection_digest;
         use ae_continuum::CommitEnvelope;
         use ae_contracts::r7 as r7_contracts;
@@ -542,38 +541,36 @@ macro_rules! durable_semantic_authority_test_contents {
             )
         }
 
+        fn production_genesis_field(request: &PersonaGenesisRequest) -> (NeuralField, SparseGraph) {
+            let identity =
+                derive_identity(request, &GenesisPrior::default()).expect("derive genesis");
+            initial_state_from_manifest(
+                &identity.manifest,
+                &request.formula_digest,
+                &identity.development_seed_digest,
+            )
+        }
+
         fn apply_stimulus_to_field(
-            mut field: NeuralField,
+            baseline: &NeuralField,
+            field: &NeuralField,
+            graph: &SparseGraph,
+            revision: u64,
             event: &r7_contracts::CanonicalEvent,
         ) -> NeuralField {
-            let r7_contracts::CanonicalEvent::UserStimulus(stimulus) = event else {
-                panic!("fixture must contain a user stimulus");
-            };
-            let load = assemble_load(&stimulus.evidence.dimensions, NEURON_SLOTS as u32);
-            assert_eq!(load.active_nodes.len(), load.node_loads.len());
-            for (&node, &node_load) in load.active_nodes.iter().zip(&load.node_loads) {
-                let regional_load = node_load
-                    .checked_mul(stimulus.evidence.estimator_confidence)
-                    .expect("bounded fixture estimate");
-                let index = node as usize;
-                field.potential[index] = field.potential[index].saturating_add(regional_load);
-                field.excitation[index] = field.excitation[index].saturating_add(regional_load);
-            }
-            field
+            crate::r7::prepare_production_user_stimulus_transition_v1(
+                event, field, baseline, graph, revision,
+            )
+            .expect("fixture must use the production full-vector transition")
+            .next_field
         }
 
         fn expected_production_next_field(
             request: &PersonaGenesisRequest,
             event: &r7_contracts::CanonicalEvent,
         ) -> NeuralField {
-            let identity =
-                derive_identity(request, &GenesisPrior::default()).expect("derive genesis");
-            let (field, _) = initial_state_from_manifest(
-                &identity.manifest,
-                &request.formula_digest,
-                &identity.development_seed_digest,
-            );
-            apply_stimulus_to_field(field, event)
+            let (baseline, graph) = production_genesis_field(request);
+            apply_stimulus_to_field(&baseline, &baseline, &graph, 0, event)
         }
 
         #[test]
@@ -800,7 +797,9 @@ macro_rules! durable_semantic_authority_test_contents {
                 },
             });
             let root_event = root_event_from_r7(&event);
-            let next_field = expected_production_next_field(&request, &event);
+            let (baseline_field, graph) = production_genesis_field(&request);
+            let next_field =
+                apply_stimulus_to_field(&baseline_field, &baseline_field, &graph, 0, &event);
             let state_after = state_digest(&next_field, &request.formula_digest);
             let legacy_persona_scope =
                 wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
@@ -881,7 +880,8 @@ macro_rules! durable_semantic_authority_test_contents {
             second_stimulus.causal.turn_id = [80; 16];
             second_stimulus.causal.base_revision = 1;
             let second_root_event = root_event_from_r7(&second_event);
-            let second_field = apply_stimulus_to_field(next_field, &second_event);
+            let second_field =
+                apply_stimulus_to_field(&baseline_field, &next_field, &graph, 1, &second_event);
             let second_state_after = state_digest(&second_field, &request.formula_digest);
             let second_event_digest = wire::event_digest(&second_root_event);
             let second_authority_digest = authority_projection_digest(&second_root_event);
@@ -924,7 +924,8 @@ macro_rules! durable_semantic_authority_test_contents {
                 Some(PrivateProjectionTransferReceiptV1::Discarded)
             );
             let third_root_event = root_event_from_r7(&third_event);
-            let third_field = apply_stimulus_to_field(second_field, &third_event);
+            let third_field =
+                apply_stimulus_to_field(&baseline_field, &second_field, &graph, 2, &third_event);
             let third_state_after = state_digest(&third_field, &request.formula_digest);
             let third_event_digest = wire::event_digest(&third_root_event);
             let third_authority_digest = authority_projection_digest(&third_root_event);

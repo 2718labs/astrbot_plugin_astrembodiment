@@ -17,12 +17,14 @@
 //! ```
 
 use ae_agent::noop_action_contract;
+use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
 use ae_authority::authority_projection_digest;
 use ae_continuum::{CommitEnvelope, ReplayReport};
-use ae_contracts::r7::{PerceptionProposalErrorV1, PerceptionProposalV1};
+use ae_contracts::r7::PerceptionProposalV1;
 use ae_contracts::{
     wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisManifest, GenesisReceipt,
-    GenesisStatus, Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
+    GenesisStatus, Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef,
+    SemanticVectorFormulaV2, SemanticVectorReceiptV2, TransitionReceipt, TransitionReceiptV2,
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
@@ -33,6 +35,7 @@ use ae_store::{
     ClaimOutcome, GenesisCommit, R7PolicyBindingKeyV1, R7PolicyCommitOutcomeV1,
     R7PolicyValidationContextV1, R7PublicPolicyBundleV1, StatefulCommit, Store, StoreError,
 };
+use serde::Serialize;
 use std::path::Path;
 use thiserror::Error;
 
@@ -104,6 +107,10 @@ pub struct ApplyDecision {
 #[derive(Clone, Debug)]
 pub struct PerceptionProposalDecisionV1 {
     pub receipt: TransitionReceipt,
+    /// Independent, non-persisted proof of this full-vector semantic turn.
+    /// The legacy receipt above retains its exact v1 codec and journal shape.
+    pub semantic_vector_receipt: TransitionReceiptV2,
+    pub node_observability: NodeObservabilityProjectionV1,
     pub revision: u64,
     pub deduplicated: bool,
     pub expression_projection: ExpressionProjectionV1,
@@ -138,6 +145,81 @@ impl ExpressionProfileFxP6 {
 pub struct ExpressionProjectionV1 {
     pub revision: u64,
     pub profile_fxp6: ExpressionProfileFxP6,
+}
+
+pub const NODE_OBSERVABILITY_SCHEMA_V1: &str = "astr-embodiment.node-observability.v1";
+pub const NODE_OBSERVABILITY_FORMULA_V1: &str = "spc1-node-observability-v1";
+const NODE_OBSERVABILITY_REGION_LAYOUT_V1: &str = "regions-v1";
+const NODE_OBSERVABILITY_JSON_MAX_BYTES: usize = 16_384;
+const NODE_REGION_NAMES: [&str; REGION_LAYOUT.len()] = [
+    "interoception_allostasis",
+    "affective_valuation",
+    "salience",
+    "epistemic_fallibility",
+    "social_boundary",
+    "temper_inhibitory",
+    "world_model_imagination",
+    "global_workspace",
+    "action_expression",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NodeObservabilityResidualStateV1 {
+    NotComputed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NodeObservabilityResidualsV1 {
+    pub state: NodeObservabilityResidualStateV1,
+    pub formula: Option<&'static str>,
+    pub values_fxp6: Option<[i64; 5]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NodeObservabilityCountsV1 {
+    pub selected_node_count: u32,
+    pub activated_node_count: u32,
+    pub changed_node_count: u32,
+    pub potential_nonzero_after_count: u32,
+    pub excitation_nonzero_after_count: u32,
+    pub signal_nonzero_after_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NodeObservabilityComponentV1 {
+    pub before_mean_fxp6: i64,
+    pub after_mean_fxp6: i64,
+    pub delta_mean_fxp6: i64,
+    pub changed_node_count: u32,
+    pub nonzero_after_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NodeObservabilityRegionV1 {
+    pub region_id: u8,
+    pub region_name: &'static str,
+    pub node_capacity: u32,
+    pub selected_node_count: u32,
+    pub activated_node_count: u32,
+    pub changed_node_count: u32,
+    pub potential: NodeObservabilityComponentV1,
+    pub excitation: NodeObservabilityComponentV1,
+}
+
+/// Bounded aggregate only: it contains no node identifier, raw node value, or
+/// user/estimator text.  It is intentionally separate from `TransitionReceipt`
+/// so the historical v1 receipt codec remains byte-for-byte stable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NodeObservabilityProjectionV1 {
+    pub schema: &'static str,
+    pub formula: &'static str,
+    pub revision: u64,
+    pub field_node_capacity: u32,
+    pub region_layout: &'static str,
+    pub counts: NodeObservabilityCountsV1,
+    pub residuals: NodeObservabilityResidualsV1,
+    pub regions: Vec<NodeObservabilityRegionV1>,
 }
 
 /// Result of the one supported production R7 semantic transition. Its receipt
@@ -713,8 +795,334 @@ fn validate_perception_scope(scope: &ScopeRef) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn map_perception_proposal_error(_error: PerceptionProposalErrorV1) -> RuntimeError {
-    RuntimeError::InvalidPerceptionProposal
+fn validate_full_vector_perception_proposal(
+    proposal: &PerceptionProposalV1,
+) -> Result<(), RuntimeError> {
+    if proposal.schema_version != PerceptionProposalV1::SCHEMA_VERSION
+        || proposal.protocol_version != PerceptionProposalV1::PROTOCOL_VERSION
+        || proposal.event_id.iter().all(|byte| *byte == 0)
+        || proposal.turn_id.iter().all(|byte| *byte == 0)
+        || proposal.observed_at_ms == 0
+        || proposal.request_nonce_digest.iter().all(|byte| *byte == 0)
+        || proposal.estimator_confidence <= Fixed::ZERO
+        || proposal.estimator_confidence > Fixed::ONE
+    {
+        return Err(RuntimeError::InvalidPerceptionProposal);
+    }
+    let dimensions = [
+        proposal.dimensions.positive,
+        proposal.dimensions.affiliation,
+        proposal.dimensions.harm,
+        proposal.dimensions.boundary,
+        proposal.dimensions.repair,
+        proposal.dimensions.repetition,
+        proposal.dimensions.new_information,
+        proposal.dimensions.constraint_instability,
+        proposal.dimensions.epistemic_conflict,
+        proposal.dimensions.self_responsibility,
+        proposal.dimensions.other_responsibility,
+        proposal.dimensions.hostility,
+        proposal.dimensions.publicness,
+        proposal.dimensions.engagement,
+        proposal.dimensions.rejection,
+    ];
+    if dimensions
+        .into_iter()
+        .any(|value| value < Fixed::ZERO || value > Fixed::ONE)
+    {
+        return Err(RuntimeError::InvalidPerceptionProposal);
+    }
+    Ok(())
+}
+
+fn proposal_nonzero_evidence_dimension_count(proposal: &PerceptionProposalV1) -> u8 {
+    [
+        proposal.dimensions.positive,
+        proposal.dimensions.affiliation,
+        proposal.dimensions.harm,
+        proposal.dimensions.boundary,
+        proposal.dimensions.repair,
+        proposal.dimensions.repetition,
+        proposal.dimensions.new_information,
+        proposal.dimensions.constraint_instability,
+        proposal.dimensions.epistemic_conflict,
+        proposal.dimensions.self_responsibility,
+        proposal.dimensions.other_responsibility,
+        proposal.dimensions.hostility,
+        proposal.dimensions.publicness,
+        proposal.dimensions.engagement,
+        proposal.dimensions.rejection,
+    ]
+    .into_iter()
+    .filter(|value| *value != Fixed::ZERO)
+    .count() as u8
+}
+
+fn semantic_vector_receipt_v2(
+    legacy: &TransitionReceipt,
+    evaluated_dimension_count: u8,
+    injected_dimension_count: u8,
+    nonzero_evidence_dimension_count: u8,
+) -> Result<TransitionReceiptV2, RuntimeError> {
+    let neutral_baseline_dimension_count = evaluated_dimension_count
+        .checked_sub(nonzero_evidence_dimension_count)
+        .ok_or(RuntimeError::InvalidNeuralState)?;
+    TransitionReceiptV2::from_legacy(
+        legacy,
+        SemanticVectorReceiptV2 {
+            schema_version: SemanticVectorReceiptV2::SCHEMA_VERSION,
+            formula: SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1,
+            dimension_slot_count: 15,
+            evaluated_dimension_count,
+            injected_dimension_count,
+            nonzero_evidence_dimension_count,
+            neutral_baseline_dimension_count,
+            unavailable_dimension_count: 0,
+            state_changed: legacy.state_before != legacy.state_after,
+        },
+    )
+    .ok_or(RuntimeError::InvalidNeuralState)
+}
+
+fn mean_fxp6(sum: i128, count: usize) -> Result<i64, RuntimeError> {
+    let count = i128::try_from(count)
+        .ok()
+        .filter(|count| *count > 0)
+        .ok_or(RuntimeError::InvalidNeuralState)?;
+    i64::try_from(sum / count).map_err(|_| RuntimeError::InvalidNeuralState)
+}
+
+fn node_observability_projection_v1(
+    before: &NeuralField,
+    after: &NeuralField,
+    baseline: &NeuralField,
+    full_vector_load: &FullVectorLoad,
+    estimator_confidence: Fixed,
+    revision: u64,
+    expected_selected_node_count: u32,
+) -> Result<NodeObservabilityProjectionV1, RuntimeError> {
+    if !before.validate()
+        || !after.validate()
+        || !baseline.validate()
+        || full_vector_load.evaluated_dimension_count != 15
+        || full_vector_load.injected_dimension_count != 15
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+
+    let mut regions = Vec::with_capacity(REGION_LAYOUT.len());
+    let mut selected_total = 0_u32;
+    let mut activated_total = 0_u32;
+    let mut changed_total = 0_u32;
+    let mut potential_nonzero_after_total = 0_u32;
+    let mut excitation_nonzero_after_total = 0_u32;
+    let mut signal_nonzero_after_total = 0_u32;
+    let mut expected_start = 0_usize;
+
+    for (region, &(start, count)) in REGION_LAYOUT.iter().enumerate() {
+        if start != expected_start {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let end = start
+            .checked_add(count)
+            .filter(|end| *end <= NEURON_SLOTS)
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        expected_start = end;
+        let drive = full_vector_load.evidence_means[region]
+            .checked_mul(estimator_confidence)
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        let neutral_rate = full_vector_load.neutral_means[region]
+            .checked_mul(r7::NEUTRAL_RELAXATION_MAX_RATE)
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        let mut region_selected = 0_u32;
+        let mut region_activated = 0_u32;
+        let mut region_changed = 0_u32;
+        let mut potential_before_sum = 0_i128;
+        let mut potential_after_sum = 0_i128;
+        let mut potential_delta_sum = 0_i128;
+        let mut potential_changed = 0_u32;
+        let mut potential_nonzero_after = 0_u32;
+        let mut excitation_before_sum = 0_i128;
+        let mut excitation_after_sum = 0_i128;
+        let mut excitation_delta_sum = 0_i128;
+        let mut excitation_changed = 0_u32;
+        let mut excitation_nonzero_after = 0_u32;
+
+        for node in start..end {
+            if before.inhibition[node] != after.inhibition[node]
+                || before.adaptation[node] != after.adaptation[node]
+                || before.precision[node] != after.precision[node]
+                || before.prediction_error[node] != after.prediction_error[node]
+                || before.eligibility[node] != after.eligibility[node]
+                || before.metabolic_reserve[node] != after.metabolic_reserve[node]
+            {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+
+            let (expected_potential, potential_recovery) = r7::full_vector_component_update(
+                before.potential[node],
+                baseline.potential[node],
+                drive,
+                neutral_rate,
+            )
+            .map_err(map_semantic_prepare_error)?;
+            let (expected_excitation, excitation_recovery) = r7::full_vector_component_update(
+                before.excitation[node],
+                baseline.excitation[node],
+                drive,
+                neutral_rate,
+            )
+            .map_err(map_semantic_prepare_error)?;
+            let selected = drive != Fixed::ZERO
+                || potential_recovery != Fixed::ZERO
+                || excitation_recovery != Fixed::ZERO;
+            if selected {
+                if after.potential[node] != expected_potential
+                    || after.excitation[node] != expected_excitation
+                {
+                    return Err(RuntimeError::InvalidNeuralState);
+                }
+                region_selected = region_selected
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                selected_total = selected_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            } else if after.potential[node] != before.potential[node]
+                || after.excitation[node] != before.excitation[node]
+            {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+
+            let potential_effective_delta = drive.saturating_sub(potential_recovery);
+            let excitation_effective_delta = drive.saturating_sub(excitation_recovery);
+            let activated = selected
+                && (potential_effective_delta != Fixed::ZERO
+                    || excitation_effective_delta != Fixed::ZERO);
+            if activated {
+                region_activated = region_activated
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                activated_total = activated_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+
+            let potential_changed_here = before.potential[node] != after.potential[node];
+            let excitation_changed_here = before.excitation[node] != after.excitation[node];
+            if potential_changed_here {
+                potential_changed = potential_changed
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if excitation_changed_here {
+                excitation_changed = excitation_changed
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if potential_changed_here || excitation_changed_here {
+                region_changed = region_changed
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                changed_total = changed_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if after.potential[node] != Fixed::ZERO {
+                potential_nonzero_after = potential_nonzero_after
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                potential_nonzero_after_total = potential_nonzero_after_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if after.excitation[node] != Fixed::ZERO {
+                excitation_nonzero_after = excitation_nonzero_after
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                excitation_nonzero_after_total = excitation_nonzero_after_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if after.potential[node] != Fixed::ZERO || after.excitation[node] != Fixed::ZERO {
+                signal_nonzero_after_total = signal_nonzero_after_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+
+            potential_before_sum += i128::from(before.potential[node].raw());
+            potential_after_sum += i128::from(after.potential[node].raw());
+            potential_delta_sum +=
+                i128::from(after.potential[node].raw()) - i128::from(before.potential[node].raw());
+            excitation_before_sum += i128::from(before.excitation[node].raw());
+            excitation_after_sum += i128::from(after.excitation[node].raw());
+            excitation_delta_sum += i128::from(after.excitation[node].raw())
+                - i128::from(before.excitation[node].raw());
+        }
+
+        if region_changed > region_activated || region_activated > region_selected {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        regions.push(NodeObservabilityRegionV1 {
+            region_id: u8::try_from(region).map_err(|_| RuntimeError::InvalidNeuralState)?,
+            region_name: NODE_REGION_NAMES[region],
+            node_capacity: u32::try_from(count).map_err(|_| RuntimeError::InvalidNeuralState)?,
+            selected_node_count: region_selected,
+            activated_node_count: region_activated,
+            changed_node_count: region_changed,
+            potential: NodeObservabilityComponentV1 {
+                before_mean_fxp6: mean_fxp6(potential_before_sum, count)?,
+                after_mean_fxp6: mean_fxp6(potential_after_sum, count)?,
+                delta_mean_fxp6: mean_fxp6(potential_delta_sum, count)?,
+                changed_node_count: potential_changed,
+                nonzero_after_count: potential_nonzero_after,
+            },
+            excitation: NodeObservabilityComponentV1 {
+                before_mean_fxp6: mean_fxp6(excitation_before_sum, count)?,
+                after_mean_fxp6: mean_fxp6(excitation_after_sum, count)?,
+                delta_mean_fxp6: mean_fxp6(excitation_delta_sum, count)?,
+                changed_node_count: excitation_changed,
+                nonzero_after_count: excitation_nonzero_after,
+            },
+        });
+    }
+
+    if expected_start != NEURON_SLOTS
+        || selected_total != expected_selected_node_count
+        || changed_total > activated_total
+        || activated_total > selected_total
+        || regions.len() != REGION_LAYOUT.len()
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+
+    let projection = NodeObservabilityProjectionV1 {
+        schema: NODE_OBSERVABILITY_SCHEMA_V1,
+        formula: NODE_OBSERVABILITY_FORMULA_V1,
+        revision,
+        field_node_capacity: u32::try_from(NEURON_SLOTS)
+            .map_err(|_| RuntimeError::InvalidNeuralState)?,
+        region_layout: NODE_OBSERVABILITY_REGION_LAYOUT_V1,
+        counts: NodeObservabilityCountsV1 {
+            selected_node_count: selected_total,
+            activated_node_count: activated_total,
+            changed_node_count: changed_total,
+            potential_nonzero_after_count: potential_nonzero_after_total,
+            excitation_nonzero_after_count: excitation_nonzero_after_total,
+            signal_nonzero_after_count: signal_nonzero_after_total,
+        },
+        residuals: NodeObservabilityResidualsV1 {
+            state: NodeObservabilityResidualStateV1::NotComputed,
+            formula: None,
+            values_fxp6: None,
+        },
+        regions,
+    };
+    let compact = serde_json::to_vec(&projection).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    if compact.len() > NODE_OBSERVABILITY_JSON_MAX_BYTES {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    Ok(projection)
 }
 
 fn map_semantic_prepare_error(error: r7::RuntimeError) -> RuntimeError {
@@ -822,6 +1230,8 @@ impl AstrRuntime {
             formula_digest,
             manifest_digest,
             initial_snapshot_digest,
+            genesis_manifest,
+            development_seed_digest,
             field,
             graph,
         ) = {
@@ -834,12 +1244,22 @@ impl AstrRuntime {
                 hot.formula_digest,
                 hot.identity.manifest_digest,
                 hot.initial_snapshot_digest,
+                hot.identity.manifest.clone(),
+                hot.identity.development_seed_digest,
                 hot.field.clone(),
                 hot.graph.clone(),
             )
         };
         if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
             return Err(RuntimeError::GenesisManifestMismatch);
+        }
+        let (baseline_field, baseline_graph) = initial_state_from_manifest(
+            &genesis_manifest,
+            &formula_digest,
+            &development_seed_digest,
+        );
+        if !baseline_field.validate() || !baseline_graph.validate() {
+            return Err(RuntimeError::InvalidNeuralState);
         }
 
         let event_bytes = wire::encode_event(&root_event);
@@ -870,6 +1290,7 @@ impl AstrRuntime {
         let prepared = r7::prepare_production_user_stimulus_transition_v1(
             event,
             &field,
+            &baseline_field,
             &graph,
             semantic_revision,
         )?;
@@ -1842,6 +2263,115 @@ impl AstrRuntime {
         Ok(false)
     }
 
+    fn semantic_field_from_snapshot_v1(
+        &self,
+        semantic_scope: &Digest,
+        formula_digest: &Digest,
+        baseline_field: &NeuralField,
+        revision: u64,
+        expected_state_digest: &Digest,
+        expected_graph_digest: &Digest,
+    ) -> Result<NeuralField, RuntimeError> {
+        if revision == 0 {
+            if state_digest(baseline_field, formula_digest) != *expected_state_digest {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+            return Ok(baseline_field.clone());
+        }
+        let snapshot = self
+            .store
+            .read_snapshot(semantic_scope, revision)?
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        if snapshot.revision != revision || snapshot.state_digest != *expected_state_digest {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let (field, _) = decode_hot_state_v1(
+            &snapshot.state_bytes,
+            formula_digest,
+            expected_state_digest,
+            expected_graph_digest,
+        )?;
+        Ok(field)
+    }
+
+    fn node_observability_for_semantic_receipt_v1(
+        &self,
+        semantic_scope: &Digest,
+        formula_digest: &Digest,
+        baseline_field: &NeuralField,
+        receipt: &TransitionReceipt,
+        proposal: &PerceptionProposalV1,
+        revision: u64,
+    ) -> Result<NodeObservabilityProjectionV1, RuntimeError> {
+        if receipt.schema_version != 1
+            || receipt.status != CommitStatus::Committed
+            || receipt.action_contract.is_some()
+            || receipt.scope_digest != *semantic_scope
+            || receipt.formula_digest != *formula_digest
+            || receipt.next_revision != revision
+            || receipt.base_revision.checked_add(1) != Some(revision)
+        {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let before = if receipt.base_revision == 0 {
+            self.semantic_field_from_snapshot_v1(
+                semantic_scope,
+                formula_digest,
+                baseline_field,
+                0,
+                &receipt.state_before,
+                &receipt.graph_after,
+            )?
+        } else {
+            let base_row = self
+                .store
+                .read_journal(semantic_scope)?
+                .into_iter()
+                .find(|row| row.revision == receipt.base_revision)
+                .ok_or(RuntimeError::InvalidNeuralState)?;
+            let base_receipt = base_row
+                .decode_receipt()
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if base_receipt.next_revision != receipt.base_revision
+                || base_receipt.state_after != receipt.state_before
+                || base_receipt.formula_digest != *formula_digest
+                || base_receipt.scope_digest != *semantic_scope
+            {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+            self.semantic_field_from_snapshot_v1(
+                semantic_scope,
+                formula_digest,
+                baseline_field,
+                receipt.base_revision,
+                &base_receipt.state_after,
+                &base_receipt.graph_after,
+            )?
+        };
+        let after = self.semantic_field_from_snapshot_v1(
+            semantic_scope,
+            formula_digest,
+            baseline_field,
+            revision,
+            &receipt.state_after,
+            &receipt.graph_after,
+        )?;
+        if state_digest(&before, formula_digest) != receipt.state_before {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let full_vector_load = assemble_full_vector_load(&proposal.dimensions)
+            .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
+        node_observability_projection_v1(
+            &before,
+            &after,
+            baseline_field,
+            &full_vector_load,
+            proposal.estimator_confidence,
+            revision,
+            receipt.active_nodes,
+        )
+    }
+
     fn expression_projection_for_semantic_snapshot(
         &self,
         semantic_scope: &Digest,
@@ -1908,9 +2438,8 @@ impl AstrRuntime {
         F: FnMut(),
     {
         validate_perception_scope(scope)?;
-        proposal
-            .validate_v1()
-            .map_err(map_perception_proposal_error)?;
+        validate_full_vector_perception_proposal(proposal)?;
+        let nonzero_evidence_dimension_count = proposal_nonzero_evidence_dimension_count(proposal);
 
         let r7_scope = r7_scope_from_root(scope);
         let estimator_digest = proposal.estimator_digest_v1(&r7_scope);
@@ -1924,6 +2453,8 @@ impl AstrRuntime {
             semantic_revision,
             formula_digest,
             initial_snapshot_digest,
+            genesis_manifest,
+            development_seed_digest,
             field,
             graph,
         ) = {
@@ -1935,12 +2466,22 @@ impl AstrRuntime {
                 hot.semantic_revision,
                 hot.formula_digest,
                 hot.initial_snapshot_digest,
+                hot.identity.manifest.clone(),
+                hot.identity.development_seed_digest,
                 hot.field.clone(),
                 hot.graph.clone(),
             )
         };
         if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
             return Err(RuntimeError::GenesisManifestMismatch);
+        }
+        let (baseline_field, baseline_graph) = initial_state_from_manifest(
+            &genesis_manifest,
+            &formula_digest,
+            &development_seed_digest,
+        );
+        if !baseline_field.validate() || !baseline_graph.validate() {
+            return Err(RuntimeError::InvalidNeuralState);
         }
 
         let event_digest = wire::event_digest(&root_event);
@@ -1954,6 +2495,16 @@ impl AstrRuntime {
             if receipt.action_contract.is_some() || receipt.event_digest != event_digest {
                 return Err(RuntimeError::SemanticIdentityConflict);
             }
+            let semantic_vector_receipt =
+                semantic_vector_receipt_v2(&receipt, 15, 15, nonzero_evidence_dimension_count)?;
+            let node_observability = self.node_observability_for_semantic_receipt_v1(
+                &semantic_persona_scope,
+                &formula_digest,
+                &baseline_field,
+                &receipt,
+                proposal,
+                row.revision,
+            )?;
             let expression_projection = self.expression_projection_for_semantic_snapshot(
                 &semantic_persona_scope,
                 &formula_digest,
@@ -1963,6 +2514,8 @@ impl AstrRuntime {
             self.bind_hot(scope.bot_token, scope.persona_token)?;
             return Ok(PerceptionProposalDecisionV1 {
                 receipt,
+                semantic_vector_receipt,
+                node_observability,
                 revision: row.revision,
                 deduplicated: true,
                 expression_projection,
@@ -1985,6 +2538,7 @@ impl AstrRuntime {
         let prepared = r7::prepare_production_user_stimulus_transition_v1(
             &r7_event,
             &field,
+            &baseline_field,
             &graph,
             semantic_revision,
         )
@@ -1994,9 +2548,6 @@ impl AstrRuntime {
             .ok_or(RuntimeError::SemanticRevisionOverflow)?;
         let state_before = state_digest(&field, &formula_digest);
         let state_after = state_digest(&prepared.next_field, &formula_digest);
-        if state_before == state_after {
-            return Err(RuntimeError::SemanticStateUnchanged);
-        }
         let graph_after = graph_digest(&graph);
         let authority_digest = authority_projection_digest(&root_event);
         let receipt = TransitionReceipt {
@@ -2016,6 +2567,21 @@ impl AstrRuntime {
             residuals: fixed_zero_vector(),
             status: CommitStatus::Committed,
         };
+        let semantic_vector_receipt = semantic_vector_receipt_v2(
+            &receipt,
+            prepared.full_vector_load.evaluated_dimension_count,
+            prepared.full_vector_load.injected_dimension_count,
+            nonzero_evidence_dimension_count,
+        )?;
+        let node_observability = node_observability_projection_v1(
+            &field,
+            &prepared.next_field,
+            &baseline_field,
+            &prepared.full_vector_load,
+            proposal.estimator_confidence,
+            next_revision,
+            prepared.active_nodes,
+        )?;
         let state_bytes = encode_hot_state_v1(&formula_digest, &prepared.next_field, &graph);
         let _ = decode_hot_state_v1(&state_bytes, &formula_digest, &state_after, &graph_after)?;
         let chain_seed = self
@@ -2045,6 +2611,8 @@ impl AstrRuntime {
                 }
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
+                    semantic_vector_receipt,
+                    node_observability,
                     revision,
                     deduplicated: false,
                     expression_projection,
@@ -2064,6 +2632,16 @@ impl AstrRuntime {
                 if receipt.action_contract.is_some() {
                     return Err(RuntimeError::SemanticIdentityConflict);
                 }
+                let semantic_vector_receipt =
+                    semantic_vector_receipt_v2(&receipt, 15, 15, nonzero_evidence_dimension_count)?;
+                let node_observability = self.node_observability_for_semantic_receipt_v1(
+                    &semantic_persona_scope,
+                    &formula_digest,
+                    &baseline_field,
+                    &receipt,
+                    proposal,
+                    revision,
+                )?;
                 let expression_projection = self.expression_projection_for_semantic_snapshot(
                     &semantic_persona_scope,
                     &formula_digest,
@@ -2073,6 +2651,8 @@ impl AstrRuntime {
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
+                    semantic_vector_receipt,
+                    node_observability,
                     revision,
                     deduplicated: true,
                     expression_projection,
@@ -2112,9 +2692,21 @@ impl AstrRuntime {
                     &receipt,
                     revision,
                 )?;
+                let semantic_vector_receipt =
+                    semantic_vector_receipt_v2(&receipt, 15, 15, nonzero_evidence_dimension_count)?;
+                let node_observability = self.node_observability_for_semantic_receipt_v1(
+                    &semantic_persona_scope,
+                    &formula_digest,
+                    &baseline_field,
+                    &receipt,
+                    proposal,
+                    revision,
+                )?;
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
+                    semantic_vector_receipt,
+                    node_observability,
                     revision,
                     deduplicated: true,
                     expression_projection,
@@ -3806,9 +4398,6 @@ finally:
         let mut protocol = base.clone();
         protocol.protocol_version = 2;
         invalid.push(protocol);
-        let mut zero_vector = base.clone();
-        zero_vector.dimensions = EvidenceVector::default();
-        invalid.push(zero_vector);
         let mut negative = base.clone();
         negative.dimensions.positive = Fixed::from_raw(-1);
         invalid.push(negative);
@@ -3870,6 +4459,189 @@ finally:
         runtime.flush_and_close().expect("close");
         drop(runtime);
         let _ = std::fs::remove_file(database("invalid"));
+    }
+
+    #[test]
+    fn all_zero_neutral_vector_commits_even_when_state_is_unchanged() {
+        let (mut runtime, request_scope) = runtime_for(73, "all-zero-neutral");
+        let mut neutral = proposal(83, 0);
+        neutral.dimensions = EvidenceVector::default();
+
+        let decision = runtime
+            .apply_perception_proposal_v1(&request_scope, &neutral)
+            .expect("all-zero neutral vector must commit");
+
+        assert_eq!(decision.revision, 1);
+        assert_eq!(decision.receipt.base_revision, 0);
+        assert_eq!(decision.receipt.next_revision, 1);
+        assert_eq!(decision.receipt.state_before, decision.receipt.state_after);
+        assert_eq!(decision.receipt.active_nodes, 0);
+        let semantic_vector = &decision.semantic_vector_receipt.semantic_vector;
+        assert_eq!(semantic_vector.dimension_slot_count, 15);
+        assert_eq!(semantic_vector.evaluated_dimension_count, 15);
+        assert_eq!(semantic_vector.injected_dimension_count, 15);
+        assert_eq!(semantic_vector.nonzero_evidence_dimension_count, 0);
+        assert_eq!(semantic_vector.neutral_baseline_dimension_count, 15);
+        assert_eq!(semantic_vector.unavailable_dimension_count, 0);
+        assert!(!semantic_vector.state_changed);
+        assert_eq!(decision.semantic_vector_receipt.active_nodes, 0);
+        assert_eq!(decision.node_observability.counts.selected_node_count, 0);
+        assert_eq!(decision.node_observability.counts.activated_node_count, 0);
+        assert_eq!(decision.node_observability.counts.changed_node_count, 0);
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
+
+        runtime.flush_and_close().expect("close");
+        drop(runtime);
+        let _ = std::fs::remove_file(database("all-zero-neutral"));
+    }
+
+    #[test]
+    fn full_vector_commit_injects_three_evidence_and_twelve_neutral_slots() {
+        let (mut runtime, request_scope) = runtime_for(75, "three-evidence-twelve-neutral");
+        let mut full_vector = proposal(87, 0);
+        full_vector.dimensions = EvidenceVector {
+            positive: Fixed::from_raw(350_000),
+            affiliation: Fixed::from_raw(250_000),
+            engagement: Fixed::from_raw(600_000),
+            ..EvidenceVector::default()
+        };
+
+        let decision = runtime
+            .apply_perception_proposal_v1(&request_scope, &full_vector)
+            .expect("full vector evidence and neutral slots must commit");
+        let semantic_vector = &decision.semantic_vector_receipt.semantic_vector;
+        assert_eq!(semantic_vector.dimension_slot_count, 15);
+        assert_eq!(semantic_vector.evaluated_dimension_count, 15);
+        assert_eq!(semantic_vector.injected_dimension_count, 15);
+        assert_eq!(semantic_vector.nonzero_evidence_dimension_count, 3);
+        assert_eq!(semantic_vector.neutral_baseline_dimension_count, 12);
+        assert_eq!(semantic_vector.unavailable_dimension_count, 0);
+        assert!(semantic_vector.state_changed);
+        assert_eq!(
+            decision.semantic_vector_receipt.active_nodes,
+            decision.receipt.active_nodes
+        );
+        let projection = &decision.node_observability;
+        assert_eq!(projection.schema, NODE_OBSERVABILITY_SCHEMA_V1);
+        assert_eq!(projection.revision, decision.revision);
+        assert_eq!(projection.field_node_capacity, NEURON_SLOTS as u32);
+        assert_eq!(projection.regions.len(), REGION_LAYOUT.len());
+        assert_eq!(
+            projection.counts.selected_node_count,
+            decision.receipt.active_nodes
+        );
+        assert!(
+            projection.counts.changed_node_count <= projection.counts.activated_node_count
+                && projection.counts.activated_node_count <= projection.counts.selected_node_count
+        );
+        assert_eq!(
+            projection
+                .regions
+                .iter()
+                .map(|region| region.selected_node_count)
+                .sum::<u32>(),
+            projection.counts.selected_node_count
+        );
+        assert_eq!(
+            projection
+                .regions
+                .iter()
+                .map(|region| region.changed_node_count)
+                .sum::<u32>(),
+            projection.counts.changed_node_count
+        );
+        assert_eq!(
+            projection.residuals.state,
+            NodeObservabilityResidualStateV1::NotComputed
+        );
+        assert_eq!(projection.residuals.formula, None);
+        assert_eq!(projection.residuals.values_fxp6, None);
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
+
+        runtime.flush_and_close().expect("close");
+        drop(runtime);
+        let _ = std::fs::remove_file(database("three-evidence-twelve-neutral"));
+    }
+
+    #[test]
+    fn repeated_neutral_turns_monotonically_return_toward_genesis_baseline() {
+        let (mut runtime, request_scope) = runtime_for(74, "neutral-relaxation");
+        let baseline = runtime.hot.as_ref().expect("bound genesis").field.clone();
+
+        runtime
+            .apply_perception_proposal_v1(&request_scope, &proposal(84, 0))
+            .expect("evidence turn");
+        let driven = runtime
+            .hot
+            .as_ref()
+            .expect("driven hot field")
+            .field
+            .clone();
+
+        let mut first_neutral = proposal(85, 1);
+        first_neutral.dimensions = EvidenceVector::default();
+        runtime
+            .apply_perception_proposal_v1(&request_scope, &first_neutral)
+            .expect("first neutral turn");
+        let relaxed_once = runtime
+            .hot
+            .as_ref()
+            .expect("relaxed hot field")
+            .field
+            .clone();
+
+        let mut second_neutral = proposal(86, 2);
+        second_neutral.dimensions = EvidenceVector::default();
+        runtime
+            .apply_perception_proposal_v1(&request_scope, &second_neutral)
+            .expect("second neutral turn");
+        let relaxed_twice = runtime
+            .hot
+            .as_ref()
+            .expect("twice relaxed hot field")
+            .field
+            .clone();
+
+        let deltas = [
+            (
+                &baseline.potential,
+                &driven.potential,
+                &relaxed_once.potential,
+                &relaxed_twice.potential,
+            ),
+            (
+                &baseline.excitation,
+                &driven.excitation,
+                &relaxed_once.excitation,
+                &relaxed_twice.excitation,
+            ),
+        ];
+        let mut observed_recovery = false;
+        for (baseline, driven, once, twice) in deltas {
+            for ((base, after_drive), (after_once, after_twice)) in
+                baseline.iter().zip(driven).zip(once.iter().zip(twice))
+            {
+                let driven_delta = after_drive.raw() - base.raw();
+                let once_delta = after_once.raw() - base.raw();
+                let twice_delta = after_twice.raw() - base.raw();
+                if driven_delta == 0 {
+                    assert_eq!(once_delta, 0);
+                    assert_eq!(twice_delta, 0);
+                    continue;
+                }
+                observed_recovery = true;
+                assert_eq!(driven_delta.signum(), once_delta.signum());
+                assert_eq!(once_delta.signum(), twice_delta.signum());
+                assert!(once_delta.unsigned_abs() <= driven_delta.unsigned_abs());
+                assert!(twice_delta.unsigned_abs() <= once_delta.unsigned_abs());
+            }
+        }
+        assert!(observed_recovery);
+        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 3);
+
+        runtime.flush_and_close().expect("close");
+        drop(runtime);
+        let _ = std::fs::remove_file(database("neutral-relaxation"));
     }
 }
 
