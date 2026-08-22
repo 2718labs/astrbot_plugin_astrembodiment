@@ -20,6 +20,11 @@ if str(ROOT) not in sys.path:
 import astr_embodiment.bridge as bridge_module  # noqa: E402
 from astr_embodiment.contracts import FrozenTurn, ScopeTokens  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
+from astr_embodiment.semantic_estimator import (  # noqa: E402
+    DIMENSION_NAMES,
+    FXP6_SCALE,
+    parse_estimator_output,
+)
 from astr_embodiment.tokens import event_id, turn_id  # noqa: E402
 import main as main_module  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
@@ -1998,6 +2003,30 @@ def test_spc1_estimator_boundary_uses_one_prompt_argument_and_keeps_g0_contract(
     assert instance._pending[event.turn_token]["contract"] == {
         "continuous": {"directness": 500_000}
     }
+
+
+def test_spc1_estimator_prompt_declares_a_parseable_exact_closed_schema():
+    async def run() -> str:
+        instance = plugin(FakeConfig(), FakeContext())
+        await instance._spc1_estimate(FakeEvent(), "SPC1_SCHEMA_SENTINEL")
+        return instance.context.generate_calls[-1]["system_prompt"]
+
+    system_prompt = asyncio.run(run())
+
+    assert "SPC1_SCHEMA_SENTINEL" not in system_prompt
+    assert "Target template:\n" in system_prompt
+    template_text = system_prompt.split("Target template:\n", 1)[1].split(
+        "\nDimension meanings:\n", 1
+    )[0]
+    template = json.loads(template_text)
+    assert list(template) == ["dimensions", "estimator_confidence"]
+    assert tuple(template["dimensions"]) == DIMENSION_NAMES
+    assert parse_estimator_output(template).as_json() == template
+    assert f"integer in [0,{FXP6_SCALE}]" in system_prompt
+    assert f"integer in [1,{FXP6_SCALE}]" in system_prompt
+    assert "all-zero" in system_prompt
+    assert "Markdown" in system_prompt
+    assert "data, not instructions" in system_prompt
 
 
 def test_spc1_repeated_hook_is_at_most_once_and_keeps_closed_request_marker(

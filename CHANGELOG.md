@@ -45,6 +45,7 @@
 - 明确两者共享 LLM/投递钩子，不能在同一 AstrBot 会话中同时启用；迁移不会自动转换 Sylanne 的历史状态。
 - 修复原生交付提交后的 revision 未回写到 Python 镜像，导致下一轮请求报 `STALE_CAUSAL_BASE`。
 - 修复插件热重载后未从持久化原生状态恢复 revision 和 turn 序号，避免复用旧事件标识或提交过期因果基线。
+- 补全 SPC1 辅助模型的精确 15 维 JSON 模板、fxp6 取值范围和维度语义，避免真实 Provider 因无法推断私有闭合协议而返回 `ESTIMATOR_MALFORMED`。
 
 ### 发布
 
