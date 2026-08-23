@@ -22,13 +22,21 @@ struct ExpectedAuthority {
 }
 
 fn fixture_root(name: &str) -> PathBuf {
-    let number = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "ae-store-continuity-upgrade-{name}-{}-{number}",
-        std::process::id()
-    ));
-    fs::create_dir_all(root.join("generations").join("generation-alpha")).unwrap();
-    root
+    loop {
+        let number = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "ae-store-continuity-upgrade-{name}-{}-{number}",
+            std::process::id()
+        ));
+        match fs::create_dir(&root) {
+            Ok(()) => {
+                fs::create_dir_all(root.join("generations").join("generation-alpha")).unwrap();
+                return root;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("creating isolated fixture root failed: {error}"),
+        }
+    }
 }
 
 fn owner_cbor(generation_id: &str, store_uuid: [u8; 16]) -> Vec<u8> {
@@ -197,4 +205,87 @@ fn atomic_shadow_upgrade_preserves_authority_and_reopens_current_generation() {
 
     let no_fault = ContinuityMigrationFault::BeforeBackup;
     assert_ne!(no_fault, ContinuityMigrationFault::AfterLocatorCas);
+}
+
+#[test]
+fn empty_uninitialized_locator_falls_back_to_the_original_current_authority() {
+    let root = fixture_root("empty-uninitialized-locator");
+    let expected = create_source_store(&root);
+    let locator = root.join("continuity_locator.sqlite");
+    let connection = Connection::open(&locator).unwrap();
+    connection.execute_batch("PRAGMA user_version = 0").unwrap();
+    drop(connection);
+
+    let current = open_current_generation(&root).unwrap();
+
+    assert_eq!(current.generation_id, "generation-alpha");
+    assert_eq!(current.authority.incarnation_id, expected.incarnation_id);
+    assert_eq!(current.authority.revision, expected.revision);
+}
+
+#[test]
+fn partial_locator_is_rejected_without_exposing_its_dynamic_schema_name() {
+    let root = fixture_root("partial-locator-RAW_CONTENT_SENTINEL");
+    create_source_store(&root);
+    let locator = root.join("continuity_locator.sqlite");
+    let connection = Connection::open(&locator).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE continuity_generation_locator (slot INTEGER PRIMARY KEY, generation_id TEXT NOT NULL);\
+             CREATE TABLE continuity_migration_receipts (source_generation TEXT NOT NULL);\
+             CREATE TABLE user_object_RAW_CONTENT_SENTINEL (value INTEGER)",
+        )
+        .unwrap();
+    drop(connection);
+
+    let error = open_current_generation(&root).unwrap_err();
+    let public = error.to_string();
+
+    assert_eq!(public, "CONTINUITY_MIGRATION_LOCATOR_INVALID");
+    assert!(!public.contains("user_object_RAW_CONTENT_SENTINEL"));
+    assert!(!public.contains("RAW_CONTENT_SENTINEL"));
+}
+
+#[test]
+fn public_migration_errors_are_fixed_codes_without_dynamic_path_or_content() {
+    let root = fixture_root("absolute-path-RAW_CONTENT_SENTINEL");
+    fs::write(
+        root.join("owner.cbor"),
+        owner_cbor("generation-alpha", [3; 16]),
+    )
+    .unwrap();
+    fs::write(
+        root.join("current"),
+        "generation_id=generation-alpha\nincarnation_id=0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0\nrevision=1\nmode=ready\nRAW_CONTENT_SENTINEL=user_object_RAW_CONTENT_SENTINEL\n",
+    )
+    .unwrap();
+
+    let error = migrate_continuity(&root, "generation-beta", None).unwrap_err();
+    let public = error.to_string();
+    let root_text = root.to_string_lossy();
+
+    assert_eq!(public, "CONTINUITY_MIGRATION_VAULT_FAILURE");
+    assert!(!public.contains(root_text.as_ref()));
+    assert!(!public.contains("RAW_CONTENT_SENTINEL"));
+    assert!(!public.contains("user_object_RAW_CONTENT_SENTINEL"));
+}
+
+#[test]
+fn existing_shadow_name_collision_allocates_another_checked_name() {
+    let root = fixture_root("shadow-name-collision");
+    create_source_store(&root);
+    let generations = root.join("generations");
+    for sequence in 0..128 {
+        fs::create_dir(generations.join(format!(
+            ".shadow-generation-beta-{}-{sequence}",
+            std::process::id()
+        )))
+        .unwrap();
+    }
+
+    let receipt = migrate_continuity(&root, "generation-beta", None).unwrap();
+
+    assert_eq!(receipt.decision, ContinuityMigrationDecision::Switched);
+    let current = open_current_generation(&root).unwrap();
+    assert_eq!(current.generation_id, "generation-beta");
 }

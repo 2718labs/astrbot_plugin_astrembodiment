@@ -23,13 +23,21 @@ struct ExpectedAuthority {
 }
 
 fn fixture_root(name: &str) -> PathBuf {
-    let number = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "ae-store-continuity-fault-{name}-{}-{number}",
-        std::process::id()
-    ));
-    fs::create_dir_all(root.join("generations").join("generation-alpha")).unwrap();
-    root
+    loop {
+        let number = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "ae-store-continuity-fault-{name}-{}-{number}",
+            std::process::id()
+        ));
+        match fs::create_dir(&root) {
+            Ok(()) => {
+                fs::create_dir_all(root.join("generations").join("generation-alpha")).unwrap();
+                return root;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("creating isolated fixture root failed: {error}"),
+        }
+    }
 }
 
 fn owner_cbor(generation_id: &str, store_uuid: [u8; 16]) -> Vec<u8> {
@@ -124,7 +132,6 @@ fn injected_failures_never_publish_partial_target_or_fallback_to_genesis() {
     for point in [
         ContinuityMigrationFault::BeforeBackup,
         ContinuityMigrationFault::AfterBackup,
-        ContinuityMigrationFault::BeforeLocatorCas,
     ] {
         let root = fixture_root("before-cas");
         let expected = create_source_store(&root);
@@ -147,6 +154,108 @@ fn injected_failures_never_publish_partial_target_or_fallback_to_genesis() {
         assert_eq!(current.authority.history_digest, expected.history_digest);
         assert!(!root.join("generations").join("generation-beta").exists());
     }
+}
+
+#[test]
+fn publication_fault_after_rename_keeps_old_locator_and_only_a_complete_target() {
+    let root = fixture_root("publication-fault-after-rename");
+    let expected = create_source_store(&root);
+
+    let error = migrate_continuity(
+        &root,
+        "generation-beta",
+        Some(ContinuityMigrationFault::BeforeLocatorCas),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ContinuityMigrationError::InjectedFault(ContinuityMigrationFault::BeforeLocatorCas)
+    ));
+    let old = open_current_generation(&root).unwrap();
+    assert_eq!(old.generation_id, "generation-alpha");
+    assert_eq!(old.authority.incarnation_id, expected.incarnation_id);
+    assert_eq!(old.authority.revision, expected.revision);
+
+    let target = root
+        .join("generations")
+        .join("generation-beta")
+        .join("authority.sqlite");
+    assert!(
+        target.is_file(),
+        "post-publication fault must retain the target"
+    );
+    let target_connection = Connection::open(&target).unwrap();
+    let active_bindings: i64 = target_connection
+        .query_row("SELECT COUNT(*) FROM active_bindings", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(active_bindings, 1);
+    drop(target_connection);
+    assert!(root
+        .join("generations")
+        .join("generation-beta")
+        .join("migration.intent")
+        .is_file());
+
+    let retry = migrate_continuity(&root, "generation-beta", None).unwrap();
+    assert_eq!(retry.decision, ContinuityMigrationDecision::Switched);
+    let reopened = open_current_generation(&root).unwrap();
+    assert_eq!(reopened.generation_id, "generation-beta");
+    assert_eq!(reopened.authority, retry.after);
+}
+
+#[test]
+fn replay_receipt_waits_for_the_source_writer_and_records_fenced_authority() {
+    let root = fixture_root("replay-source-writer-race");
+    create_source_store(&root);
+    migrate_continuity(&root, "generation-beta", None).unwrap();
+
+    let source = root
+        .join("generations")
+        .join("generation-beta")
+        .join("authority.sqlite");
+    let updated_state_digest = [99; 32];
+    let writer = Connection::open(&source).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writer
+        .execute(
+            "UPDATE snapshots SET state_digest = ?1",
+            params![updated_state_digest.to_vec()],
+        )
+        .unwrap();
+
+    let (result_sender, result_receiver) = mpsc::channel();
+    let worker_root = root.clone();
+    let worker = thread::spawn(move || {
+        result_sender
+            .send(migrate_continuity(&worker_root, "generation-beta", None))
+            .unwrap();
+    });
+
+    assert!(matches!(
+        result_receiver.recv_timeout(Duration::from_millis(250)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    writer.execute_batch("COMMIT").unwrap();
+
+    let receipt = result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    assert!(receipt.replay);
+    assert_eq!(receipt.before.state_digest, updated_state_digest);
+    assert_eq!(receipt.after, receipt.before);
+
+    let audit = Connection::open(root.join("continuity_locator.sqlite")).unwrap();
+    let persisted_state_digest: Vec<u8> = audit
+        .query_row(
+            "SELECT before_state_digest FROM continuity_migration_receipts WHERE source_generation = ?1 AND target_generation = ?2",
+            params!["generation-beta", "generation-beta"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted_state_digest, updated_state_digest.to_vec());
 }
 
 #[test]
@@ -183,6 +292,67 @@ fn fault_after_locator_cas_leaves_new_current_authoritative_and_retry_is_replay(
     assert!(replay.replay);
     assert_eq!(replay.decision, ContinuityMigrationDecision::Replayed);
     assert_eq!(replay.before, replay.after);
+}
+
+#[test]
+fn first_locator_initialization_faults_reopen_the_old_authority_without_genesis() {
+    for point in [
+        ContinuityMigrationFault::AfterLocatorFileCreate,
+        ContinuityMigrationFault::AfterFirstLocatorSchemaDdl,
+        ContinuityMigrationFault::AfterSecondLocatorSchemaDdl,
+    ] {
+        let root = fixture_root("first-locator-initialization-fault");
+        let expected = create_source_store(&root);
+
+        let error = migrate_continuity(&root, "generation-beta", Some(point)).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ContinuityMigrationError::InjectedFault(found) if found == point
+        ));
+        let current = open_current_generation(&root).unwrap();
+        assert_eq!(current.generation_id, "generation-alpha");
+        assert_eq!(current.authority.incarnation_id, expected.incarnation_id);
+        assert_eq!(current.authority.revision, expected.revision);
+        assert!(root
+            .join("generations")
+            .join("generation-beta")
+            .join("authority.sqlite")
+            .is_file());
+
+        let retry = migrate_continuity(&root, "generation-beta", None).unwrap();
+        assert_eq!(retry.decision, ContinuityMigrationDecision::Switched);
+        let reopened = open_current_generation(&root).unwrap();
+        assert_eq!(reopened.generation_id, "generation-beta");
+        assert_eq!(reopened.authority, retry.after);
+    }
+}
+
+#[test]
+fn locator_commit_fault_reopens_only_the_complete_new_authority() {
+    let root = fixture_root("first-locator-commit-fault");
+    let expected = create_source_store(&root);
+
+    let error = migrate_continuity(
+        &root,
+        "generation-beta",
+        Some(ContinuityMigrationFault::AfterLocatorCommit),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ContinuityMigrationError::InjectedFault(ContinuityMigrationFault::AfterLocatorCommit)
+    ));
+    let current = open_current_generation(&root).unwrap();
+    assert_eq!(current.generation_id, "generation-beta");
+    assert_eq!(current.authority.incarnation_id, expected.incarnation_id);
+    assert_eq!(current.authority.revision, expected.revision);
+    assert!(root
+        .join("generations")
+        .join("generation-beta")
+        .join("authority.sqlite")
+        .is_file());
 }
 
 #[test]
