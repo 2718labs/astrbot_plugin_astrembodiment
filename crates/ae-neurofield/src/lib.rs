@@ -17,7 +17,11 @@ mod graph_replay;
 mod structural_delta;
 
 pub use graph_development::{develop_graph, GraphDevelopmentError, GraphFormula};
-pub use graph_replay::{GraphReplayError, GraphReplayV1, GraphSnapshotV1, GRAPH_REPLAY_FORMULA_V1};
+pub use graph_replay::{
+    bind_delta_to_graph_replay_rule, graph_replay_rule_descriptor, graph_replay_rule_digest,
+    graph_replay_rule_digest_for_descriptor, GraphReplayError, GraphReplayV1, GraphSnapshotV1,
+    GRAPH_REPLAY_FORMULA_V1,
+};
 pub use structural_delta::{apply_delta, DeltaError, EdgeOperationV1, StructuralDeltaV1};
 
 pub const NEURON_SLOTS: usize = 16_384;

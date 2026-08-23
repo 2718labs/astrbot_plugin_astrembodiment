@@ -1,6 +1,8 @@
 use ae_neurofield::{
-    graph_digest, EdgeOperationV1, GraphReplayError, GraphReplayV1, GraphSnapshotV1, SparseGraph,
-    StructuralDeltaV1, Synapse, GRAPH_REPLAY_FORMULA_V1, NEURON_SLOTS,
+    bind_delta_to_graph_replay_rule, graph_digest, graph_replay_rule_descriptor,
+    graph_replay_rule_digest, graph_replay_rule_digest_for_descriptor, EdgeOperationV1,
+    GraphReplayError, GraphReplayV1, GraphSnapshotV1, SparseGraph, StructuralDeltaV1, Synapse,
+    GRAPH_REPLAY_FORMULA_V1, NEURON_SLOTS,
 };
 
 fn edge(target: u32, weight: i16) -> Synapse {
@@ -43,14 +45,16 @@ fn delta(
     operations: Vec<EdgeOperationV1>,
     after_graph: &SparseGraph,
 ) -> StructuralDeltaV1 {
-    StructuralDeltaV1 {
+    let mut delta = StructuralDeltaV1 {
         base_revision,
         base_graph_digest: graph_digest(base_graph),
         delta_sequence,
-        rule_digest: [7; 32],
+        rule_digest: Default::default(),
         operations,
         after_graph_digest: graph_digest(after_graph),
-    }
+    };
+    bind_delta_to_graph_replay_rule(GRAPH_REPLAY_FORMULA_V1, &mut delta).unwrap();
+    delta
 }
 
 fn sealed_history() -> (GraphReplayV1, SparseGraph, SparseGraph) {
@@ -80,6 +84,64 @@ fn sealed_history() -> (GraphReplayV1, SparseGraph, SparseGraph) {
     let anchor = GraphSnapshotV1::from_graph(GRAPH_REPLAY_FORMULA_V1, 10, &genesis).unwrap();
     let history = GraphReplayV1::seal(anchor, vec![first, second]).unwrap();
     (history, genesis, final_graph)
+}
+
+#[test]
+fn production_rule_digest_is_derived_from_the_canonical_formula_descriptor() {
+    let (history, _, _) = sealed_history();
+    let descriptor = graph_replay_rule_descriptor(GRAPH_REPLAY_FORMULA_V1).unwrap();
+    let rule_digest = graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1).unwrap();
+
+    assert!(descriptor.contains(&format!("formula_version={GRAPH_REPLAY_FORMULA_V1}")));
+    assert!(descriptor.contains("delta_schema=StructuralDeltaV1"));
+    assert!(descriptor.contains("apply_delta=v1-cas-canonical-operations"));
+    assert_eq!(
+        rule_digest,
+        graph_replay_rule_digest_for_descriptor(GRAPH_REPLAY_FORMULA_V1, &descriptor).unwrap()
+    );
+    assert_ne!(
+        rule_digest, [rule_digest[0]; 32],
+        "a valid graph replay rule digest must derive from its rule contract"
+    );
+    assert_ne!(rule_digest, [0_u8; 32]);
+    assert_ne!(rule_digest, [u8::MAX; 32]);
+    assert!(history
+        .deltas
+        .iter()
+        .all(|delta| delta.rule_digest == rule_digest));
+}
+
+#[test]
+fn rule_contract_rejects_formula_or_descriptor_mismatch() {
+    let descriptor = graph_replay_rule_descriptor(GRAPH_REPLAY_FORMULA_V1).unwrap();
+
+    assert_eq!(
+        graph_replay_rule_descriptor(GRAPH_REPLAY_FORMULA_V1 + 1).unwrap_err(),
+        GraphReplayError::UnsupportedFormulaVersion
+    );
+
+    let mut tampered_descriptor = descriptor;
+    tampered_descriptor.push('!');
+    assert_eq!(
+        graph_replay_rule_digest_for_descriptor(GRAPH_REPLAY_FORMULA_V1, &tampered_descriptor,)
+            .unwrap_err(),
+        GraphReplayError::RuleDescriptorMismatch
+    );
+}
+
+#[test]
+fn production_bound_deltas_replay_under_the_same_rule_contract() {
+    let (history, _, expected) = sealed_history();
+    let production_digest = graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1).unwrap();
+
+    assert!(history
+        .deltas
+        .iter()
+        .all(|delta| delta.rule_digest == production_digest));
+    assert_eq!(
+        history.reopen().unwrap().1.canonical_bytes(),
+        expected.canonical_bytes()
+    );
 }
 
 #[test]
