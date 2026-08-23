@@ -10,6 +10,11 @@
 
 pub mod continuity_vault;
 pub use continuity_vault::{locate_vault, VaultLocateError, VaultLocation, VaultMode};
+pub mod legacy_discovery;
+pub use legacy_discovery::{
+    discover_legacy, validate_legacy_candidate, verify_candidate, CandidateFences, Discovery,
+    DiscoveryRejectCode, DiscoverySources, LegacyCandidate,
+};
 
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
