@@ -124,6 +124,46 @@ fn corrupt_owner_is_not_normalized_to_unborn() {
 }
 
 #[test]
+fn oversized_owner_is_rejected_without_unborn_fallback() {
+    let root = fixture_root("oversized-owner");
+    fs::write(root.join("owner.cbor"), vec![0; 4097]).unwrap();
+
+    let error = locate_vault(&root).unwrap_err();
+
+    assert_eq!(
+        error,
+        VaultLocateError::InvalidOwner("owner.cbor exceeds 4096 bytes".into())
+    );
+}
+
+#[test]
+fn oversized_current_is_rejected_without_unborn_fallback() {
+    let root = fixture_root("oversized-current");
+    write_owner(&root, "generation-alpha", [4; 16]);
+    fs::write(root.join("current"), vec![b'x'; 4097]).unwrap();
+
+    let error = locate_vault(&root).unwrap_err();
+
+    assert_eq!(
+        error,
+        VaultLocateError::InvalidCurrent("current exceeds 4096 bytes".into())
+    );
+}
+
+#[test]
+fn zero_store_uuid_is_rejected_without_unborn_fallback() {
+    let root = fixture_root("zero-store-uuid");
+    write_owner(&root, "generation-alpha", [0; 16]);
+
+    let error = locate_vault(&root).unwrap_err();
+
+    assert_eq!(
+        error,
+        VaultLocateError::InvalidOwner("store_uuid must not be all zero".into())
+    );
+}
+
+#[test]
 fn missing_root_is_unborn_but_never_authorizes_genesis() {
     let root = fixture_path("missing-root");
     assert!(!root.exists());

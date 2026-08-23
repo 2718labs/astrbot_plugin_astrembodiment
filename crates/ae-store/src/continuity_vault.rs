@@ -1,7 +1,11 @@
 use ae_contracts::Digest;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+const OWNER_METADATA_MAX_BYTES: u64 = 4096;
+const CURRENT_METADATA_MAX_BYTES: u64 = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VaultMode {
@@ -58,6 +62,32 @@ struct CurrentMetadata {
     mode: VaultMode,
 }
 
+#[derive(Clone, Copy)]
+enum ControlMetadataKind {
+    Owner,
+    Current,
+}
+
+impl ControlMetadataKind {
+    fn max_bytes(self) -> u64 {
+        match self {
+            ControlMetadataKind::Owner => OWNER_METADATA_MAX_BYTES,
+            ControlMetadataKind::Current => CURRENT_METADATA_MAX_BYTES,
+        }
+    }
+
+    fn too_large_error(self) -> VaultLocateError {
+        match self {
+            ControlMetadataKind::Owner => {
+                VaultLocateError::InvalidOwner("owner.cbor exceeds 4096 bytes".into())
+            }
+            ControlMetadataKind::Current => {
+                VaultLocateError::InvalidCurrent("current exceeds 4096 bytes".into())
+            }
+        }
+    }
+}
+
 /// Locate only the durable, package-external continuity vault.  This routine
 /// neither creates nor migrates anything: incomplete or invalid continuity
 /// metadata is reported as recovery/error state and never authorizes Genesis.
@@ -75,9 +105,9 @@ pub fn locate_vault(path: impl AsRef<Path>) -> Result<VaultLocation, VaultLocate
     }
 
     let owner_path = root.join("owner.cbor");
-    let owner_bytes = match fs::read(&owner_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let owner_bytes = match read_control_metadata(&owner_path, ControlMetadataKind::Owner)? {
+        Some(bytes) => bytes,
+        None => {
             match fs::metadata(root.join("current")) {
                 Ok(_) => return Err(VaultLocateError::CurrentWithoutOwner),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -88,14 +118,13 @@ pub fn locate_vault(path: impl AsRef<Path>) -> Result<VaultLocation, VaultLocate
             }
             return Ok(unborn(root));
         }
-        Err(error) => return Err(VaultLocateError::Inspection(error.to_string())),
     };
     let owner = parse_owner(&owner_bytes)?;
 
     let current_path = root.join("current");
-    let current_bytes = match fs::read(&current_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let current_bytes = match read_control_metadata(&current_path, ControlMetadataKind::Current)? {
+        Some(bytes) => bytes,
+        None => {
             return Ok(VaultLocation {
                 root,
                 generation_id: owner.generation_id,
@@ -106,7 +135,6 @@ pub fn locate_vault(path: impl AsRef<Path>) -> Result<VaultLocation, VaultLocate
                 genesis_authorized: false,
             });
         }
-        Err(error) => return Err(VaultLocateError::Inspection(error.to_string())),
     };
     let current = parse_current(&current_bytes)?;
     if current.generation_id != owner.generation_id {
@@ -205,6 +233,31 @@ fn directory_has_entries(path: &Path) -> Result<bool, VaultLocateError> {
     }
 }
 
+fn read_control_metadata(
+    path: &Path,
+    kind: ControlMetadataKind,
+) -> Result<Option<Vec<u8>>, VaultLocateError> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(VaultLocateError::Inspection(error.to_string())),
+    };
+    if metadata.len() > kind.max_bytes() {
+        return Err(kind.too_large_error());
+    }
+
+    let file =
+        fs::File::open(path).map_err(|error| VaultLocateError::Inspection(error.to_string()))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(kind.max_bytes() + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| VaultLocateError::Inspection(error.to_string()))?;
+    if bytes.len() > kind.max_bytes() as usize {
+        return Err(kind.too_large_error());
+    }
+    Ok(Some(bytes))
+}
+
 fn parse_owner(bytes: &[u8]) -> Result<OwnerMetadata, VaultLocateError> {
     let mut reader = CborReader::new(bytes);
     if reader.map_len()? != 2 {
@@ -225,6 +278,11 @@ fn parse_owner(bytes: &[u8]) -> Result<OwnerMetadata, VaultLocateError> {
                 let uuid: [u8; 16] = bytes.try_into().map_err(|_| {
                     VaultLocateError::InvalidOwner("store_uuid must contain 16 bytes".into())
                 })?;
+                if uuid.iter().all(|byte| *byte == 0) {
+                    return Err(VaultLocateError::InvalidOwner(
+                        "store_uuid must not be all zero".into(),
+                    ));
+                }
                 store_uuid = Some(uuid);
             }
             key => {
