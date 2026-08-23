@@ -6,12 +6,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
-fn fixture_root(name: &str) -> PathBuf {
+fn fixture_path(name: &str) -> PathBuf {
     let number = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
+    std::env::temp_dir().join(format!(
         "ae-store-continuity-vault-{name}-{}-{number}",
         std::process::id()
-    ));
+    ))
+}
+
+fn fixture_root(name: &str) -> PathBuf {
+    let root = fixture_path(name);
     fs::create_dir_all(&root).unwrap();
     root
 }
@@ -81,18 +85,32 @@ fn compatible_current_is_ready_and_preserves_identity() {
 
 #[test]
 fn plugin_package_path_is_rejected() {
-    let package_root = fixture_root("plugin-package");
+    let legacy_package_root = fixture_root("legacy-plugin-package");
     fs::write(
-        package_root.join("plugin.toml"),
+        legacy_package_root.join("plugin.toml"),
         "[plugin]\nname = 'fixture'\n",
     )
     .unwrap();
-    let vault_root = package_root.join("continuity-vault");
-    fs::create_dir_all(&vault_root).unwrap();
+    let legacy_vault_root = legacy_package_root.join("continuity-vault");
+    fs::create_dir_all(&legacy_vault_root).unwrap();
 
-    let error = locate_vault(&vault_root).unwrap_err();
+    let legacy_error = locate_vault(&legacy_vault_root).unwrap_err();
 
-    assert_eq!(error, VaultLocateError::PluginPackagePath);
+    assert_eq!(legacy_error, VaultLocateError::PluginPackagePath);
+
+    let astrbot_package_root = fixture_root("astrbot-plugin-package");
+    fs::write(
+        astrbot_package_root.join("metadata.yaml"),
+        "name: fixture\n",
+    )
+    .unwrap();
+    fs::write(astrbot_package_root.join("main.py"), "# fixture\n").unwrap();
+    let astrbot_vault_root = astrbot_package_root.join("continuity-vault");
+    fs::create_dir_all(&astrbot_vault_root).unwrap();
+
+    let astrbot_error = locate_vault(&astrbot_vault_root).unwrap_err();
+
+    assert_eq!(astrbot_error, VaultLocateError::PluginPackagePath);
 }
 
 #[test]
@@ -103,4 +121,25 @@ fn corrupt_owner_is_not_normalized_to_unborn() {
     let error = locate_vault(&root).unwrap_err();
 
     assert!(matches!(error, VaultLocateError::InvalidOwner(_)));
+}
+
+#[test]
+fn missing_root_is_unborn_but_never_authorizes_genesis() {
+    let root = fixture_path("missing-root");
+    assert!(!root.exists());
+
+    let result = locate_vault(&root).unwrap();
+
+    assert_eq!(result.mode, VaultMode::Unborn);
+    assert!(!result.genesis_authorized);
+}
+
+#[test]
+fn empty_root_is_unborn_but_never_authorizes_genesis() {
+    let root = fixture_root("empty-root");
+
+    let result = locate_vault(&root).unwrap();
+
+    assert_eq!(result.mode, VaultMode::Unborn);
+    assert!(!result.genesis_authorized);
 }

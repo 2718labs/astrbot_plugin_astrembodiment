@@ -139,7 +139,7 @@ fn unborn(root: PathBuf) -> VaultLocation {
         mode: VaultMode::Unborn,
         incarnation_id: [0; 32],
         revision: 0,
-        genesis_authorized: true,
+        genesis_authorized: false,
     }
 }
 
@@ -186,7 +186,8 @@ fn reject_plugin_package_path(root: &Path) -> Result<(), VaultLocateError> {
         if metadata.is_dir()
             && (ancestor.join("plugin.toml").is_file()
                 || ancestor.join("plugin.json").is_file()
-                || ancestor.join(".codex-plugin").join("plugin.json").is_file())
+                || ancestor.join(".codex-plugin").join("plugin.json").is_file()
+                || (ancestor.join("metadata.yaml").is_file() && ancestor.join("main.py").is_file()))
         {
             return Err(VaultLocateError::PluginPackagePath);
         }
