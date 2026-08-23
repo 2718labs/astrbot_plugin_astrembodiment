@@ -1721,6 +1721,37 @@ def test_detailed_log_warns_for_unattested_legacy_v1_exact_retry(
     assert record["calculation_state"] == "FAILED"
 
 
+def test_compact_log_warns_for_unattested_legacy_v1_exact_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(FakeConfig(), FakeContext())
+    outcome = _spc1_full_vector_success_outcome()
+    outcome["diagnostic"] = dict(outcome["diagnostic"]) | {
+        "commit_state": "CONFIRMED_EXISTING",
+        "deduplicated": True,
+    }
+    outcome["result"] = dict(outcome["result"]) | {
+        "semantic_vector_receipt": None,
+        "node_observability": None,
+        "full_vector_state": "LEGACY_UNATTESTED",
+        "node_observability_state": "UNAVAILABLE",
+        "deduplicated": True,
+    }
+
+    instance._emit_semantic_observatory(
+        outcome, {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"}
+    )
+
+    assert recorder.info_messages == []
+    assert recorder.warning_messages == [
+        "AstrEmbodiment：运算已提交｜状态=LEGACY_UNATTESTED｜阶段=RECEIPT"
+    ]
+    assert "十五维" not in recorder.warning_messages[0]
+    assert "节点" not in recorder.warning_messages[0]
+
+
 @pytest.mark.parametrize("detailed", [False, True])
 def test_failure_is_logged_with_code_and_stage_in_both_modes(
     monkeypatch: pytest.MonkeyPatch, detailed: bool

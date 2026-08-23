@@ -1452,7 +1452,34 @@ class AstrEmbodimentPlugin(Star):
                 ):
                     raise ValueError("success")
                 result = raw_outcome.get("result")
-                if type(result) is not dict or result.get("full_vector_state") != "FULL_VECTOR_CONFIRMED":
+                if type(result) is not dict:
+                    raise ValueError("full vector")
+                if result.get("full_vector_state") == "LEGACY_UNATTESTED":
+                    if result.get("node_observability_state") != "UNAVAILABLE":
+                        raise ValueError("legacy node observability")
+                    canonical_result = cls._canonical_bridge_result_for_observatory(
+                        result,
+                        expected_base_revision=common["base_revision"],
+                    )
+                    if (
+                        canonical_result["full_vector_state"]
+                        != "LEGACY_UNATTESTED"
+                        or canonical_result["node_observability_state"] != "UNAVAILABLE"
+                        or canonical_result["semantic_vector_receipt"] is not None
+                        or canonical_result["node_observability"] is not None
+                        or canonical_result["deduplicated"] is not True
+                        or canonical_result["revision"] != common["revision"]
+                        or canonical_result["receipt"]["status"]
+                        != common["receipt_status"]
+                        or common["commit_state"] != "CONFIRMED_EXISTING"
+                        or common["deduplicated"] is not True
+                    ):
+                        raise ValueError("legacy semantic retry")
+                    return (
+                        "AstrEmbodiment：运算已提交｜状态=LEGACY_UNATTESTED｜阶段=RECEIPT",
+                        True,
+                    )
+                if result.get("full_vector_state") != "FULL_VECTOR_CONFIRMED":
                     raise ValueError("full vector")
                 semantic_vector = cls._closed_v3_semantic_vector(
                     result.get("semantic_vector_receipt")
