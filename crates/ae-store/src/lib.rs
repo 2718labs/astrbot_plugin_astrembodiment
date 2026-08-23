@@ -10,6 +10,12 @@
 
 pub mod continuity_vault;
 pub use continuity_vault::{locate_vault, VaultLocateError, VaultLocation, VaultMode};
+pub mod continuity_migration;
+pub use continuity_migration::{
+    migrate_continuity, open_current_generation, ContinuityAuthority, ContinuityMigrationDecision,
+    ContinuityMigrationError, ContinuityMigrationFault, ContinuityMigrationReceipt,
+    CurrentContinuityGeneration,
+};
 pub mod legacy_discovery;
 pub use legacy_discovery::{
     discover_legacy, validate_legacy_candidate, verify_candidate, CandidateFences, Discovery,
