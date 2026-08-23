@@ -1,9 +1,10 @@
 use ae_contracts::{wire, Digest};
 use ae_store::{
     migrate_continuity, open_current_generation, ContinuityMigrationDecision,
-    ContinuityMigrationFault,
+    ContinuityMigrationError, ContinuityMigrationFault,
 };
 use rusqlite::{params, Connection};
+use std::error::Error as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,13 +262,158 @@ fn public_migration_errors_are_fixed_codes_without_dynamic_path_or_content() {
     .unwrap();
 
     let error = migrate_continuity(&root, "generation-beta", None).unwrap_err();
-    let public = error.to_string();
     let root_text = root.to_string_lossy();
+    assert_public_error_surface_is_non_echoing(&error, root_text.as_ref());
+}
 
-    assert_eq!(public, "CONTINUITY_MIGRATION_VAULT_FAILURE");
-    assert!(!public.contains(root_text.as_ref()));
-    assert!(!public.contains("RAW_CONTENT_SENTINEL"));
-    assert!(!public.contains("user_object_RAW_CONTENT_SENTINEL"));
+fn assert_public_error_surface_is_non_echoing(
+    error: &ContinuityMigrationError,
+    absolute_path: &str,
+) {
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+    for surface in [&display, &debug] {
+        assert!(
+            !surface.contains(absolute_path),
+            "public surface leaked path: {surface}"
+        );
+        assert!(
+            !surface.contains("RAW_CONTENT_SENTINEL"),
+            "public surface leaked raw content: {surface}"
+        );
+        assert!(
+            !surface.contains("user_object_RAW_CONTENT_SENTINEL"),
+            "public surface leaked schema content: {surface}"
+        );
+    }
+
+    let mut source = error.source();
+    while let Some(current) = source {
+        let rendered = current.to_string();
+        let debug = format!("{current:?}");
+        for surface in [&rendered, &debug] {
+            assert!(!surface.contains(absolute_path));
+            assert!(!surface.contains("RAW_CONTENT_SENTINEL"));
+            assert!(!surface.contains("user_object_RAW_CONTENT_SENTINEL"));
+        }
+        source = current.source();
+    }
+    assert!(
+        error.source().is_none(),
+        "public migration errors must not expose dynamic sources"
+    );
+}
+
+#[test]
+fn strict_locator_schema_rejects_wrong_ddl_invalid_slot_check_and_partial_receipts() {
+    for (name, ddl) in [
+        (
+            "wrong-ddl",
+            r#"
+                CREATE TABLE continuity_generation_locator (
+                    slot INTEGER PRIMARY KEY,
+                    generation_id TEXT NOT NULL
+                );
+                CREATE TABLE continuity_migration_receipts (
+                    source_generation TEXT NOT NULL,
+                    target_generation TEXT NOT NULL,
+                    before_incarnation_id BLOB NOT NULL,
+                    before_revision INTEGER NOT NULL,
+                    before_state_digest BLOB NOT NULL,
+                    before_graph_digest BLOB NOT NULL,
+                    before_history_digest BLOB NOT NULL,
+                    after_incarnation_id BLOB NOT NULL,
+                    after_revision INTEGER NOT NULL,
+                    after_state_digest BLOB NOT NULL,
+                    after_graph_digest BLOB NOT NULL,
+                    after_history_digest BLOB NOT NULL,
+                    replay INTEGER NOT NULL,
+                    decision TEXT NOT NULL,
+                    PRIMARY KEY (source_generation, target_generation)
+                );
+                INSERT INTO continuity_generation_locator (slot, generation_id) VALUES (1, 'generation-alpha');
+            "#,
+        ),
+        (
+            "invalid-slot-check",
+            r#"
+                CREATE TABLE continuity_generation_locator (
+                    slot INTEGER PRIMARY KEY CHECK (slot IN (1, 2)),
+                    generation_id TEXT NOT NULL
+                );
+                CREATE TABLE continuity_migration_receipts (
+                    source_generation TEXT NOT NULL,
+                    target_generation TEXT NOT NULL,
+                    before_incarnation_id BLOB NOT NULL,
+                    before_revision INTEGER NOT NULL,
+                    before_state_digest BLOB NOT NULL,
+                    before_graph_digest BLOB NOT NULL,
+                    before_history_digest BLOB NOT NULL,
+                    after_incarnation_id BLOB NOT NULL,
+                    after_revision INTEGER NOT NULL,
+                    after_state_digest BLOB NOT NULL,
+                    after_graph_digest BLOB NOT NULL,
+                    after_history_digest BLOB NOT NULL,
+                    replay INTEGER NOT NULL,
+                    decision TEXT NOT NULL,
+                    PRIMARY KEY (source_generation, target_generation)
+                );
+                INSERT INTO continuity_generation_locator (slot, generation_id) VALUES (1, 'generation-alpha');
+            "#,
+        ),
+        (
+            "partial-receipts",
+            r#"
+                CREATE TABLE continuity_generation_locator (
+                    slot INTEGER PRIMARY KEY CHECK (slot = 1),
+                    generation_id TEXT NOT NULL
+                );
+                CREATE TABLE continuity_migration_receipts (source_generation TEXT NOT NULL);
+                INSERT INTO continuity_generation_locator (slot, generation_id) VALUES (1, 'generation-alpha');
+            "#,
+        ),
+    ] {
+        let root = fixture_root(name);
+        create_source_store(&root);
+        let locator = Connection::open(root.join("continuity_locator.sqlite")).unwrap();
+        locator.execute_batch(ddl).unwrap();
+        drop(locator);
+
+        let error = open_current_generation(&root).unwrap_err();
+
+        assert!(matches!(error, ContinuityMigrationError::LocatorInvalid));
+        assert_public_error_surface_is_non_echoing(&error, root.to_string_lossy().as_ref());
+    }
+}
+
+#[test]
+fn strict_locator_schema_rejects_extra_view_trigger_and_manual_index() {
+    for (name, extra_object) in [
+        (
+            "extra-view",
+            "CREATE VIEW user_view_RAW_CONTENT_SENTINEL AS SELECT slot FROM continuity_generation_locator;",
+        ),
+        (
+            "extra-trigger",
+            "CREATE TRIGGER user_trigger_RAW_CONTENT_SENTINEL AFTER UPDATE ON continuity_generation_locator BEGIN SELECT 1; END;",
+        ),
+        (
+            "extra-index",
+            "CREATE INDEX user_index_RAW_CONTENT_SENTINEL ON continuity_generation_locator (generation_id);",
+        ),
+    ] {
+        let root = fixture_root(name);
+        create_source_store(&root);
+        migrate_continuity(&root, "generation-beta", None).unwrap();
+        let locator = Connection::open(root.join("continuity_locator.sqlite")).unwrap();
+        locator.execute_batch(extra_object).unwrap();
+        drop(locator);
+
+        let error = open_current_generation(&root).unwrap_err();
+
+        assert!(matches!(error, ContinuityMigrationError::LocatorInvalid));
+        assert_public_error_surface_is_non_echoing(&error, root.to_string_lossy().as_ref());
+    }
 }
 
 #[test]

@@ -64,12 +64,29 @@ pub enum ContinuityMigrationFault {
     AfterLocatorCommit,
 }
 
+/// A fixed stage code for a failed durability operation.  These remain public
+/// so supervisors can distinguish the failed fence without receiving an OS
+/// error, path, or other runtime payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum ContinuityMigrationStage {
+    #[error("CONTINUITY_MIGRATION_DURABILITY_ROOT_CREATE_FAILED")]
+    EnsureGenerationsRoot,
+    #[error("CONTINUITY_MIGRATION_DURABILITY_FILE_OPEN_FAILED")]
+    OpenFile,
+    #[error("CONTINUITY_MIGRATION_DURABILITY_FILE_FLUSH_FAILED")]
+    FlushFile,
+    #[error("CONTINUITY_MIGRATION_DURABILITY_DIRECTORY_OPEN_FAILED")]
+    OpenDirectory,
+    #[error("CONTINUITY_MIGRATION_DURABILITY_DIRECTORY_FLUSH_FAILED")]
+    FlushDirectory,
+}
+
 #[derive(Debug, Error)]
 pub enum ContinuityMigrationError {
     #[error("CONTINUITY_MIGRATION_SOURCE_NOT_READY")]
-    SourceNotReady(VaultMode),
+    SourceNotReady,
     #[error("CONTINUITY_MIGRATION_VAULT_FAILURE")]
-    Vault(#[from] VaultLocateError),
+    Vault,
     #[error("CONTINUITY_MIGRATION_INVALID_GENERATION")]
     InvalidGeneration,
     #[error("CONTINUITY_MIGRATION_SOURCE_MISSING")]
@@ -79,21 +96,17 @@ pub enum ContinuityMigrationError {
     #[error("CONTINUITY_MIGRATION_AUTHORITY_INVALID")]
     AuthorityMissingOrAmbiguous,
     #[error("CONTINUITY_MIGRATION_AUTHORITY_BYTES_INVALID")]
-    InvalidAuthorityBytes(&'static str),
+    InvalidAuthorityBytes,
     #[error("CONTINUITY_MIGRATION_AUTHORITY_LOCATOR_MISMATCH")]
     AuthorityLocatorMismatch,
     #[error("CONTINUITY_MIGRATION_REVISION_OUT_OF_RANGE")]
     RevisionOutOfRange,
     #[error("CONTINUITY_MIGRATION_DATABASE_FAILURE")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite,
     #[error("CONTINUITY_MIGRATION_FILESYSTEM_FAILURE")]
-    Io(#[from] std::io::Error),
-    #[error("CONTINUITY_MIGRATION_FILESYSTEM_FAILURE")]
-    StageIo {
-        stage: &'static str,
-        #[source]
-        source: std::io::Error,
-    },
+    Io,
+    #[error("{0}")]
+    StageIo(ContinuityMigrationStage),
     #[error("CONTINUITY_MIGRATION_SHADOW_INTEGRITY_FAILURE")]
     ShadowIntegrity,
     #[error("CONTINUITY_MIGRATION_CONCURRENT_LOCATOR_CHANGE")]
@@ -104,10 +117,26 @@ pub enum ContinuityMigrationError {
     InjectedFault(ContinuityMigrationFault),
     #[error("CONTINUITY_MIGRATION_LOCATOR_INVALID")]
     LocatorInvalid,
-    #[error("CONTINUITY_MIGRATION_LOCATOR_INVALID")]
-    LocatorDatabase(#[source] rusqlite::Error),
     #[error("CONTINUITY_MIGRATION_SHADOW_SEQUENCE_EXHAUSTED")]
     ShadowSequenceExhausted,
+}
+
+impl From<VaultLocateError> for ContinuityMigrationError {
+    fn from(_: VaultLocateError) -> Self {
+        Self::Vault
+    }
+}
+
+impl From<rusqlite::Error> for ContinuityMigrationError {
+    fn from(_: rusqlite::Error) -> Self {
+        Self::Sqlite
+    }
+}
+
+impl From<std::io::Error> for ContinuityMigrationError {
+    fn from(_: std::io::Error) -> Self {
+        Self::Io
+    }
 }
 
 /// Resolve the current authoritative generation.  The SQLite locator is
@@ -118,7 +147,7 @@ pub fn open_current_generation(
 ) -> Result<CurrentContinuityGeneration, ContinuityMigrationError> {
     let location = locate_vault(vault_root)?;
     if location.mode != VaultMode::Ready {
-        return Err(ContinuityMigrationError::SourceNotReady(location.mode));
+        return Err(ContinuityMigrationError::SourceNotReady);
     }
     let generation_id =
         read_locator_generation(&location.root)?.unwrap_or_else(|| location.generation_id.clone());
@@ -146,7 +175,7 @@ pub fn migrate_continuity(
     validate_generation_id(target_generation)?;
     let location = locate_vault(vault_root)?;
     if location.mode != VaultMode::Ready {
-        return Err(ContinuityMigrationError::SourceNotReady(location.mode));
+        return Err(ContinuityMigrationError::SourceNotReady);
     }
     let root = location.root;
     let source_generation =
@@ -206,9 +235,8 @@ pub fn migrate_continuity(
     )?;
 
     let generations_root = root.join(GENERATIONS_DIRECTORY);
-    fs::create_dir_all(&generations_root).map_err(|source| ContinuityMigrationError::StageIo {
-        stage: "ensuring the generations root",
-        source,
+    fs::create_dir_all(&generations_root).map_err(|_| {
+        ContinuityMigrationError::StageIo(ContinuityMigrationStage::EnsureGenerationsRoot)
     })?;
     let target_directory = generations_root.join(target_generation);
     if target_directory.exists() {
@@ -222,6 +250,7 @@ pub fn migrate_continuity(
         if target_authority != before {
             return Err(ContinuityMigrationError::TargetGenerationExists);
         }
+        durably_publish_target(&target_directory, &generations_root)?;
         if fault == Some(ContinuityMigrationFault::BeforeLocatorCas) {
             return Err(ContinuityMigrationError::InjectedFault(
                 ContinuityMigrationFault::BeforeLocatorCas,
@@ -278,8 +307,7 @@ pub fn migrate_continuity(
             ));
         }
         fs::rename(&shadow_directory, &target_directory)?;
-        sync_directory(&target_directory)?;
-        sync_directory(&generations_root)?;
+        durably_publish_target(&target_directory, &generations_root)?;
         if fault == Some(ContinuityMigrationFault::BeforeLocatorCas) {
             return Err(ContinuityMigrationError::InjectedFault(
                 ContinuityMigrationFault::BeforeLocatorCas,
@@ -347,6 +375,18 @@ fn write_migration_intent(
         migration_intent(source_generation, target_generation, authority),
     )?;
     sync_file(&path)
+}
+
+/// Ensure every file accepted as the target authority and both directory
+/// entries are durable before the locator can make that target authoritative.
+fn durably_publish_target(
+    target_directory: &Path,
+    generations_root: &Path,
+) -> Result<(), ContinuityMigrationError> {
+    sync_file(&target_directory.join(AUTHORITY_DATABASE))?;
+    sync_file(&target_directory.join(MIGRATION_INTENT_FILE))?;
+    sync_directory(target_directory)?;
+    sync_directory(generations_root)
 }
 
 fn verify_migration_intent(
@@ -430,7 +470,7 @@ fn create_shadow_directory(
                 return Ok(directory);
             }
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(source) => return Err(ContinuityMigrationError::Io(source)),
+            Err(_) => return Err(ContinuityMigrationError::Io),
         }
     }
 }
@@ -443,37 +483,37 @@ fn next_shadow_sequence(counter: &AtomicU64) -> Result<u64, ContinuityMigrationE
         .map_err(|_| ContinuityMigrationError::ShadowSequenceExhausted)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocatorSchemaState {
+    Empty,
+    Valid,
+}
+
+struct LocatorSchemaObject {
+    kind: String,
+    name: String,
+    table: String,
+    sql: Option<String>,
+}
+
+type LocatorColumnSpec = (
+    i64,
+    &'static str,
+    &'static str,
+    i64,
+    Option<&'static str>,
+    i64,
+);
+
 fn read_locator_generation(root: &Path) -> Result<Option<String>, ContinuityMigrationError> {
     let path = root.join(LOCATOR_DATABASE);
     if !path.exists() {
         return Ok(None);
     }
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(ContinuityMigrationError::LocatorDatabase)?;
-    let mut statement = connection
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .map_err(ContinuityMigrationError::LocatorDatabase)?;
-    let names = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(ContinuityMigrationError::LocatorDatabase)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ContinuityMigrationError::LocatorDatabase)?;
-    if names.is_empty() {
-        let schema_version: i64 = connection
-            .pragma_query_value(None, "schema_version", |row| row.get(0))
-            .map_err(ContinuityMigrationError::LocatorDatabase)?;
-        if schema_version == 0 {
-            return Ok(None);
-        }
-    }
-    let has_generation_locator = names
-        .iter()
-        .any(|name| name == "continuity_generation_locator");
-    let has_receipts = names
-        .iter()
-        .any(|name| name == "continuity_migration_receipts");
-    if names.len() != 2 || !has_generation_locator || !has_receipts {
-        return Err(ContinuityMigrationError::LocatorInvalid);
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    if classify_locator_schema(&connection)? == LocatorSchemaState::Empty {
+        return Ok(None);
     }
     let generation: Option<String> = connection
         .query_row(
@@ -482,10 +522,251 @@ fn read_locator_generation(root: &Path) -> Result<Option<String>, ContinuityMigr
             |row| row.get(0),
         )
         .optional()
-        .map_err(ContinuityMigrationError::LocatorDatabase)?;
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
     let generation = generation.ok_or(ContinuityMigrationError::LocatorInvalid)?;
-    validate_generation_id(&generation)?;
+    validate_generation_id(&generation).map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
     Ok(Some(generation))
+}
+
+fn classify_locator_schema(
+    connection: &Connection,
+) -> Result<LocatorSchemaState, ContinuityMigrationError> {
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "schema_version", |row| row.get(0))
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    let objects = read_locator_schema_objects(connection)?;
+    if objects.is_empty() && schema_version == 0 {
+        return Ok(LocatorSchemaState::Empty);
+    }
+
+    let locator_sql = objects
+        .iter()
+        .find(|object| {
+            object.kind == "table"
+                && object.name == "continuity_generation_locator"
+                && object.table == "continuity_generation_locator"
+        })
+        .and_then(|object| object.sql.as_deref());
+    let receipts_sql = objects
+        .iter()
+        .find(|object| {
+            object.kind == "table"
+                && object.name == "continuity_migration_receipts"
+                && object.table == "continuity_migration_receipts"
+        })
+        .and_then(|object| object.sql.as_deref());
+    let has_exact_internal_index = objects.iter().any(|object| {
+        object.kind == "index"
+            && object.name == "sqlite_autoindex_continuity_migration_receipts_1"
+            && object.table == "continuity_migration_receipts"
+            && object.sql.is_none()
+    });
+    if objects.len() != 3
+        || !has_exact_internal_index
+        || !matches_locator_table_sql(locator_sql)
+        || !matches_receipts_table_sql(receipts_sql)
+    {
+        return Err(ContinuityMigrationError::LocatorInvalid);
+    }
+
+    validate_locator_table_columns(connection)?;
+    validate_receipts_table_columns(connection)?;
+    validate_locator_indexes(connection)?;
+    Ok(LocatorSchemaState::Valid)
+}
+
+fn read_locator_schema_objects(
+    connection: &Connection,
+) -> Result<Vec<LocatorSchemaObject>, ContinuityMigrationError> {
+    let mut statement = connection
+        .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(LocatorSchemaObject {
+                kind: row.get(0)?,
+                name: row.get(1)?,
+                table: row.get(2)?,
+                sql: row.get(3)?,
+            })
+        })
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)
+}
+
+fn matches_locator_table_sql(sql: Option<&str>) -> bool {
+    matches_table_sql(
+        sql,
+        "createtablecontinuity_generation_locator(slotintegerprimarykeycheck(slot=1),generation_idtextnotnull)",
+    )
+}
+
+fn matches_receipts_table_sql(sql: Option<&str>) -> bool {
+    matches_table_sql(
+        sql,
+        "createtablecontinuity_migration_receipts(source_generationtextnotnull,target_generationtextnotnull,before_incarnation_idblobnotnull,before_revisionintegernotnull,before_state_digestblobnotnull,before_graph_digestblobnotnull,before_history_digestblobnotnull,after_incarnation_idblobnotnull,after_revisionintegernotnull,after_state_digestblobnotnull,after_graph_digestblobnotnull,after_history_digestblobnotnull,replayintegernotnull,decisiontextnotnull,primarykey(source_generation,target_generation))",
+    )
+}
+
+fn matches_table_sql(sql: Option<&str>, expected: &str) -> bool {
+    let Some(sql) = sql else {
+        return false;
+    };
+    let normalized = normalize_schema_sql(sql);
+    normalized == expected
+        || normalized == expected.replacen("createtable", "createtableifnotexists", 1)
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    let mut normalized = sql
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if normalized.ends_with(';') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn validate_locator_table_columns(connection: &Connection) -> Result<(), ContinuityMigrationError> {
+    validate_table_columns(
+        connection,
+        "PRAGMA table_info(continuity_generation_locator)",
+        &[
+            (0, "slot", "INTEGER", 0, None, 1),
+            (1, "generation_id", "TEXT", 1, None, 0),
+        ],
+    )
+}
+
+fn validate_receipts_table_columns(
+    connection: &Connection,
+) -> Result<(), ContinuityMigrationError> {
+    validate_table_columns(
+        connection,
+        "PRAGMA table_info(continuity_migration_receipts)",
+        &[
+            (0, "source_generation", "TEXT", 1, None, 1),
+            (1, "target_generation", "TEXT", 1, None, 2),
+            (2, "before_incarnation_id", "BLOB", 1, None, 0),
+            (3, "before_revision", "INTEGER", 1, None, 0),
+            (4, "before_state_digest", "BLOB", 1, None, 0),
+            (5, "before_graph_digest", "BLOB", 1, None, 0),
+            (6, "before_history_digest", "BLOB", 1, None, 0),
+            (7, "after_incarnation_id", "BLOB", 1, None, 0),
+            (8, "after_revision", "INTEGER", 1, None, 0),
+            (9, "after_state_digest", "BLOB", 1, None, 0),
+            (10, "after_graph_digest", "BLOB", 1, None, 0),
+            (11, "after_history_digest", "BLOB", 1, None, 0),
+            (12, "replay", "INTEGER", 1, None, 0),
+            (13, "decision", "TEXT", 1, None, 0),
+        ],
+    )
+}
+
+fn validate_table_columns(
+    connection: &Connection,
+    pragma: &str,
+    expected: &[LocatorColumnSpec],
+) -> Result<(), ContinuityMigrationError> {
+    let mut statement = connection
+        .prepare(pragma)
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    if columns.len() != expected.len()
+        || columns.iter().zip(expected).any(|(actual, expected)| {
+            actual.0 != expected.0
+                || actual.1 != expected.1
+                || actual.2 != expected.2
+                || actual.3 != expected.3
+                || actual.4.as_deref() != expected.4
+                || actual.5 != expected.5
+        })
+    {
+        return Err(ContinuityMigrationError::LocatorInvalid);
+    }
+    Ok(())
+}
+
+fn validate_locator_indexes(connection: &Connection) -> Result<(), ContinuityMigrationError> {
+    let mut locator_statement = connection
+        .prepare("PRAGMA index_list(continuity_generation_locator)")
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    let locator_indexes = locator_statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    if !locator_indexes.is_empty() {
+        return Err(ContinuityMigrationError::LocatorInvalid);
+    }
+
+    let mut receipts_statement = connection
+        .prepare("PRAGMA index_list(continuity_migration_receipts)")
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    let receipts_indexes = receipts_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    if receipts_indexes.as_slice()
+        != [(
+            0,
+            "sqlite_autoindex_continuity_migration_receipts_1".to_owned(),
+            1,
+            "pk".to_owned(),
+            0,
+        )]
+    {
+        return Err(ContinuityMigrationError::LocatorInvalid);
+    }
+
+    let mut index_info_statement = connection
+        .prepare("PRAGMA index_info(sqlite_autoindex_continuity_migration_receipts_1)")
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    let index_columns = index_info_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ContinuityMigrationError::LocatorInvalid)?;
+    if index_columns.as_slice()
+        != [
+            (0, 0, "source_generation".to_owned()),
+            (1, 1, "target_generation".to_owned()),
+        ]
+    {
+        return Err(ContinuityMigrationError::LocatorInvalid);
+    }
+    Ok(())
 }
 
 fn compare_and_swap_locator(
@@ -505,6 +786,7 @@ fn compare_and_swap_locator(
         ));
     }
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    classify_locator_schema(&transaction)?;
     prepare_locator_schema(&transaction, fault)?;
     transaction.execute(
         "INSERT OR IGNORE INTO continuity_generation_locator (slot, generation_id) VALUES (?1, ?2)",
@@ -545,6 +827,7 @@ fn record_replay_receipt(
     let mut connection = Connection::open(&path)?;
     configure_locator_connection(&connection)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    classify_locator_schema(&transaction)?;
     prepare_locator_schema(&transaction, None)?;
     transaction.execute(
         "INSERT OR IGNORE INTO continuity_generation_locator (slot, generation_id) VALUES (?1, ?2)",
@@ -614,6 +897,9 @@ fn prepare_locator_schema(
         return Err(ContinuityMigrationError::InjectedFault(
             ContinuityMigrationFault::AfterSecondLocatorSchemaDdl,
         ));
+    }
+    if classify_locator_schema(transaction)? != LocatorSchemaState::Valid {
+        return Err(ContinuityMigrationError::LocatorInvalid);
     }
     Ok(())
 }
@@ -691,15 +977,9 @@ fn sync_file(path: &Path) -> Result<(), ContinuityMigrationError> {
         .read(true)
         .write(true)
         .open(path)
-        .map_err(|source| ContinuityMigrationError::StageIo {
-            stage: "opening a durable file flush handle",
-            source,
-        })?;
+        .map_err(|_| ContinuityMigrationError::StageIo(ContinuityMigrationStage::OpenFile))?;
     file.sync_all()
-        .map_err(|source| ContinuityMigrationError::StageIo {
-            stage: "flushing durable file contents",
-            source,
-        })?;
+        .map_err(|_| ContinuityMigrationError::StageIo(ContinuityMigrationStage::FlushFile))?;
     Ok(())
 }
 
@@ -716,16 +996,11 @@ fn sync_directory(path: &Path) -> Result<(), ContinuityMigrationError> {
     };
     #[cfg(not(windows))]
     let directory = fs::File::open(path);
-    let directory = directory.map_err(|source| ContinuityMigrationError::StageIo {
-        stage: "opening a durable directory flush handle",
-        source,
-    })?;
+    let directory = directory
+        .map_err(|_| ContinuityMigrationError::StageIo(ContinuityMigrationStage::OpenDirectory))?;
     directory
         .sync_all()
-        .map_err(|source| ContinuityMigrationError::StageIo {
-            stage: "flushing durable directory entries",
-            source,
-        })
+        .map_err(|_| ContinuityMigrationError::StageIo(ContinuityMigrationStage::FlushDirectory))
 }
 
 fn capture_authority(
@@ -785,9 +1060,9 @@ fn read_single_binding(
     let Some(row) = rows.next()? else {
         return Err(ContinuityMigrationError::AuthorityMissingOrAmbiguous);
     };
-    let bot_token = id_from_blob(row.get(0)?, "bot_token")?;
-    let persona_token = id_from_blob(row.get(1)?, "persona_token")?;
-    let incarnation_id = digest_from_blob(row.get(2)?, "incarnation_id")?;
+    let bot_token = id_from_blob(row.get(0)?)?;
+    let persona_token = id_from_blob(row.get(1)?)?;
+    let incarnation_id = digest_from_blob(row.get(2)?)?;
     let revision_value: i64 = row.get(3)?;
     let revision =
         u64::try_from(revision_value).map_err(|_| ContinuityMigrationError::RevisionOutOfRange)?;
@@ -810,26 +1085,23 @@ where
     let Some(row) = rows.next()? else {
         return Err(ContinuityMigrationError::AuthorityMissingOrAmbiguous);
     };
-    let digest = digest_from_blob(row.get(0)?, "digest")?;
+    let digest = digest_from_blob(row.get(0)?)?;
     if rows.next()?.is_some() {
         return Err(ContinuityMigrationError::AuthorityMissingOrAmbiguous);
     }
     Ok(digest)
 }
 
-fn id_from_blob(value: Vec<u8>, field: &'static str) -> Result<[u8; 16], ContinuityMigrationError> {
+fn id_from_blob(value: Vec<u8>) -> Result<[u8; 16], ContinuityMigrationError> {
     value
         .try_into()
-        .map_err(|_| ContinuityMigrationError::InvalidAuthorityBytes(field))
+        .map_err(|_| ContinuityMigrationError::InvalidAuthorityBytes)
 }
 
-fn digest_from_blob(
-    value: Vec<u8>,
-    field: &'static str,
-) -> Result<Digest, ContinuityMigrationError> {
+fn digest_from_blob(value: Vec<u8>) -> Result<Digest, ContinuityMigrationError> {
     value
         .try_into()
-        .map_err(|_| ContinuityMigrationError::InvalidAuthorityBytes(field))
+        .map_err(|_| ContinuityMigrationError::InvalidAuthorityBytes)
 }
 
 #[cfg(test)]

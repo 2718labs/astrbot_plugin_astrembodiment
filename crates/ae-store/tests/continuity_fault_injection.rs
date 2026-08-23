@@ -127,6 +127,30 @@ fn create_source_store(root: &Path) -> ExpectedAuthority {
     expected
 }
 
+fn create_unflushed_equivalent_orphan(root: &Path, expected: &ExpectedAuthority) -> PathBuf {
+    let beta = root.join("generations").join("generation-beta");
+    let orphan = root.join("generations").join("generation-gamma");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::copy(
+        beta.join("authority.sqlite"),
+        orphan.join("authority.sqlite"),
+    )
+    .unwrap();
+    fs::write(
+        orphan.join("migration.intent"),
+        format!(
+            "source_generation=generation-alpha\ntarget_generation=generation-gamma\nincarnation_id={}\nrevision={}\nstate_digest={}\ngraph_digest={}\nhistory_digest={}\n",
+            hex(&expected.incarnation_id),
+            expected.revision,
+            hex(&expected.state_digest),
+            hex(&expected.graph_digest),
+            hex(&expected.history_digest),
+        ),
+    )
+    .unwrap();
+    orphan
+}
+
 #[test]
 fn injected_failures_never_publish_partial_target_or_fallback_to_genesis() {
     for point in [
@@ -389,26 +413,23 @@ fn retry_promotes_a_complete_orphan_from_an_equivalent_prior_source_generation()
     let expected = create_source_store(&root);
     migrate_continuity(&root, "generation-beta", None).unwrap();
 
-    let beta = root.join("generations").join("generation-beta");
-    let orphan = root.join("generations").join("generation-gamma");
-    fs::create_dir_all(&orphan).unwrap();
-    fs::copy(
-        beta.join("authority.sqlite"),
-        orphan.join("authority.sqlite"),
+    let orphan = create_unflushed_equivalent_orphan(&root, &expected);
+
+    let fault = migrate_continuity(
+        &root,
+        "generation-gamma",
+        Some(ContinuityMigrationFault::BeforeLocatorCas),
     )
-    .unwrap();
-    fs::write(
-        orphan.join("migration.intent"),
-        format!(
-            "source_generation=generation-alpha\ntarget_generation=generation-gamma\nincarnation_id={}\nrevision={}\nstate_digest={}\ngraph_digest={}\nhistory_digest={}\n",
-            hex(&expected.incarnation_id),
-            expected.revision,
-            hex(&expected.state_digest),
-            hex(&expected.graph_digest),
-            hex(&expected.history_digest),
-        ),
-    )
-    .unwrap();
+    .unwrap_err();
+    assert!(matches!(
+        fault,
+        ContinuityMigrationError::InjectedFault(ContinuityMigrationFault::BeforeLocatorCas)
+    ));
+    let old = open_current_generation(&root).unwrap();
+    assert_eq!(old.generation_id, "generation-beta");
+    assert_eq!(old.authority.incarnation_id, expected.incarnation_id);
+    assert!(orphan.join("authority.sqlite").is_file());
+    assert!(orphan.join("migration.intent").is_file());
 
     let resumed = migrate_continuity(&root, "generation-gamma", None).unwrap();
 
@@ -418,6 +439,30 @@ fn retry_promotes_a_complete_orphan_from_an_equivalent_prior_source_generation()
     let current = open_current_generation(&root).unwrap();
     assert_eq!(current.generation_id, "generation-gamma");
     assert_eq!(current.authority, resumed.after);
+}
+
+#[test]
+fn preexisting_orphan_durability_barrier_rejects_unflushable_authority_or_intent() {
+    for protected_file in ["authority.sqlite", "migration.intent"] {
+        let root = fixture_root("orphan-durability-barrier");
+        let expected = create_source_store(&root);
+        migrate_continuity(&root, "generation-beta", None).unwrap();
+        let orphan = create_unflushed_equivalent_orphan(&root, &expected);
+        let protected = orphan.join(protected_file);
+        let mut permissions = fs::metadata(&protected).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&protected, permissions).unwrap();
+
+        let error = migrate_continuity(&root, "generation-gamma", None).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "CONTINUITY_MIGRATION_DURABILITY_FILE_OPEN_FAILED"
+        );
+        let current = open_current_generation(&root).unwrap();
+        assert_eq!(current.generation_id, "generation-beta");
+        assert_eq!(current.authority.incarnation_id, expected.incarnation_id);
+    }
 }
 
 #[test]
