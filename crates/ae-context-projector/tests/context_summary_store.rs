@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ae_context_projector::{
     ContextSummaryStore, ContextSummaryV1, DeliveryOutcome, ReceiptCommitStatus, ReceiptEnvelopeV1,
-    ReceiptValidationError, ValidatedCommittedReceiptV1,
+    ReceiptValidationError, StoreError, ValidatedCommittedReceiptV1,
 };
 
 static NEXT_DB: AtomicU64 = AtomicU64::new(1);
@@ -105,7 +105,7 @@ fn summary_schema_is_fixed_canonical_and_has_no_text_payload() {
         "canonical summary must remain bounded"
     );
     assert_eq!(canonical.len(), ContextSummaryV1::CANONICAL_BYTES_LEN);
-    assert_eq!(summary.summary_revision, ContextSummaryV1::SUMMARY_REVISION);
+    assert_eq!(summary.summary_revision, ContextSummaryV1::SCHEMA_VERSION);
     assert_eq!(summary.dimensions_ema_fxp6, [2_000_000; 15]);
     assert_eq!(
         summary.summary_digest,
@@ -132,6 +132,69 @@ fn committed_receipt_replay_is_idempotent() {
 
     assert_eq!(replay, first);
     assert_eq!(replay.repetition_count, 1);
+}
+
+#[test]
+fn summary_revision_increments_per_relation_and_survives_reopen() {
+    let path = db_path("summary-revision");
+    let first = {
+        let mut store = ContextSummaryStore::open(&path).expect("open store");
+        store
+            .apply_committed_receipt(&receipt(8, 1, 1_000_000))
+            .expect("first committed receipt")
+    };
+    assert_eq!(first.summary_revision, 1);
+
+    let second = {
+        let mut store = ContextSummaryStore::open(&path).expect("reopen for second receipt");
+        let second = store
+            .apply_committed_receipt(&receipt(8, 2, 2_000_000))
+            .expect("second committed receipt");
+        assert_eq!(second.summary_revision, 2);
+        let replay = store
+            .apply_committed_receipt(&receipt(8, 2, 2_000_000))
+            .expect("replayed second receipt");
+        assert_eq!(replay.summary_revision, 2);
+        second
+    };
+
+    let mut reopened = ContextSummaryStore::open(&path).expect("reopen for third receipt");
+    let third = reopened
+        .apply_committed_receipt(&receipt(8, 3, 3_000_000))
+        .expect("third committed receipt");
+    assert_eq!(third.summary_revision, 3);
+    assert_ne!(third.summary_digest, second.summary_digest);
+}
+
+#[test]
+fn summary_revision_overflow_rejects_before_partial_write() {
+    let path = db_path("summary-overflow");
+    let mut store = ContextSummaryStore::open(&path).expect("open store");
+    let mut maximum = store
+        .apply_committed_receipt(&receipt(9, 1, 1_000_000))
+        .expect("seed committed receipt");
+    maximum.summary_revision = u32::MAX;
+    maximum.summary_digest = ContextSummaryV1::digest_of(&maximum.canonical_bytes());
+
+    let inspect = rusqlite::Connection::open(&path).expect("inspect seeded store");
+    inspect
+        .execute(
+            "UPDATE relation_summaries SET summary_revision = ?1, summary_digest = ?2",
+            rusqlite::params![i64::from(u32::MAX), &maximum.summary_digest[..]],
+        )
+        .expect("force revision boundary");
+    let before_turns: i64 = inspect
+        .query_row("SELECT COUNT(*) FROM relation_turns", [], |row| row.get(0))
+        .expect("count turns before overflow");
+
+    assert!(matches!(
+        store.apply_committed_receipt(&receipt(9, 2, 2_000_000)),
+        Err(StoreError::SummaryRevisionOverflow)
+    ));
+    let after_turns: i64 = inspect
+        .query_row("SELECT COUNT(*) FROM relation_turns", [], |row| row.get(0))
+        .expect("count turns after overflow");
+    assert_eq!(after_turns, before_turns);
 }
 
 #[test]

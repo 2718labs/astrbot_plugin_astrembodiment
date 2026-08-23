@@ -45,12 +45,13 @@ pub struct ContextSummaryV1 {
 }
 
 impl ContextSummaryV1 {
-    pub const SUMMARY_REVISION: u32 = 1;
-    pub const CANONICAL_BYTES_LEN: usize = 8 + 4 + 8 + (DIMENSION_COUNT * 8) + 1 + 1 + 8 + 1;
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const CANONICAL_BYTES_LEN: usize = 8 + 4 + 4 + 8 + (DIMENSION_COUNT * 8) + 1 + 1 + 8 + 1;
 
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(Self::CANONICAL_BYTES_LEN);
         bytes.extend_from_slice(b"AECSUMV1");
+        bytes.extend_from_slice(&Self::SCHEMA_VERSION.to_le_bytes());
         bytes.extend_from_slice(&self.summary_revision.to_le_bytes());
         bytes.extend_from_slice(&self.source_continuum_revision.to_le_bytes());
         for value in self.dimensions_ema_fxp6 {
@@ -68,6 +69,7 @@ impl ContextSummaryV1 {
     }
 
     fn new(
+        summary_revision: u32,
         source_continuum_revision: u64,
         dimensions_ema_fxp6: [i64; DIMENSION_COUNT],
         unresolved_boundary: bool,
@@ -76,7 +78,7 @@ impl ContextSummaryV1 {
         delivery_outcome: DeliveryOutcome,
     ) -> Self {
         let mut summary = Self {
-            summary_revision: Self::SUMMARY_REVISION,
+            summary_revision,
             source_continuum_revision,
             dimensions_ema_fxp6,
             unresolved_boundary,
@@ -194,6 +196,7 @@ impl std::error::Error for ReceiptValidationError {}
 pub enum StoreError {
     Sqlite(rusqlite::Error),
     CorruptPayload,
+    SummaryRevisionOverflow,
 }
 
 impl fmt::Display for StoreError {
@@ -201,6 +204,9 @@ impl fmt::Display for StoreError {
         match self {
             Self::Sqlite(error) => write!(formatter, "sqlite error: {error}"),
             Self::CorruptPayload => formatter.write_str("stored context summary is corrupt"),
+            Self::SummaryRevisionOverflow => {
+                formatter.write_str("context summary revision overflow")
+            }
         }
     }
 }
@@ -263,7 +269,8 @@ impl ContextSummaryStore {
         }
 
         let transaction = self.connection.transaction()?;
-        let relation_exists = summary_for_hmac(&*transaction, &relation_hmac)?.is_some();
+        let previous_summary = summary_for_hmac(&*transaction, &relation_hmac)?;
+        let relation_exists = previous_summary.is_some();
         if !relation_exists && relation_count(&*transaction)? >= MAX_RELATIONS {
             let evicted: Vec<u8> = transaction.query_row(
                 "SELECT relation_hmac FROM relation_summaries ORDER BY relation_hmac ASC LIMIT 1",
@@ -279,6 +286,14 @@ impl ContextSummaryStore {
                 params![evicted],
             )?;
         }
+
+        let next_revision = match previous_summary {
+            Some(summary) => summary
+                .summary_revision
+                .checked_add(1)
+                .ok_or(StoreError::SummaryRevisionOverflow)?,
+            None => 1,
+        };
 
         transaction.execute(
             "INSERT INTO relation_turns (
@@ -309,7 +324,7 @@ impl ContextSummaryStore {
             params![&relation_hmac[..], MAX_TURNS_PER_RELATION],
         )?;
 
-        let summary = summary_from_turns(&*transaction, &relation_hmac)?;
+        let summary = summary_from_turns(&*transaction, &relation_hmac, next_revision)?;
         transaction.execute(
             "INSERT INTO relation_summaries (
                 relation_hmac, summary_revision, source_continuum_revision, dimensions_ema_fxp6,
@@ -417,7 +432,7 @@ fn summary_for_hmac(
     let delivery_outcome: i64 = row.get(6)?;
     let summary_digest: Vec<u8> = row.get(7)?;
 
-    if summary_revision != i64::from(ContextSummaryV1::SUMMARY_REVISION) || repetition_count < 0 {
+    if summary_revision <= 0 || repetition_count < 0 {
         return Err(StoreError::CorruptPayload);
     }
     let summary = ContextSummaryV1 {
@@ -441,6 +456,7 @@ fn summary_for_hmac(
 fn summary_from_turns(
     connection: &Connection,
     relation_hmac: &[u8; 32],
+    summary_revision: u32,
 ) -> Result<ContextSummaryV1, StoreError> {
     let mut statement = connection.prepare(
         "SELECT source_continuum_revision, dimensions_fxp6, unresolved_boundary,
@@ -488,6 +504,7 @@ fn summary_from_turns(
         return Err(StoreError::CorruptPayload);
     }
     Ok(ContextSummaryV1::new(
+        summary_revision,
         source_continuum_revision,
         dimensions_ema_fxp6,
         unresolved_boundary,
