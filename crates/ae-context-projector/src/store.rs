@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 use hmac::{Hmac, Mac};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Sha256;
 
 const DIMENSION_COUNT: usize = 15;
@@ -125,7 +125,7 @@ pub struct ValidatedCommittedReceiptV1 {
 }
 
 impl ValidatedCommittedReceiptV1 {
-    pub const MAX_ABS_DIMENSION_FXP6: i64 = 1_000_000_000_000;
+    pub const MAX_DIMENSION_FXP6: i64 = 1_000_000;
     pub const MAX_REPETITION_INCREMENT: u64 = 4_096;
 
     pub fn try_from_envelope(envelope: ReceiptEnvelopeV1) -> Result<Self, ReceiptValidationError> {
@@ -144,7 +144,7 @@ impl ValidatedCommittedReceiptV1 {
         if envelope
             .dimensions_fxp6
             .iter()
-            .any(|dimension| dimension.unsigned_abs() > Self::MAX_ABS_DIMENSION_FXP6 as u64)
+            .any(|dimension| *dimension < 0 || *dimension > Self::MAX_DIMENSION_FXP6)
         {
             return Err(ReceiptValidationError::DimensionOutOfRange);
         }
@@ -163,6 +163,20 @@ impl ValidatedCommittedReceiptV1 {
             repetition_increment: envelope.repetition_increment,
             delivery_outcome: envelope.delivery_outcome,
         })
+    }
+
+    fn canonical_digest(&self) -> [u8; 32] {
+        let mut bytes = Vec::with_capacity(8 + 16 + 16 + 8 + (DIMENSION_COUNT * 8) + 1 + 1 + 8 + 1);
+        bytes.extend_from_slice(b"AECRPTV1");
+        bytes.extend_from_slice(&self.event_id);
+        bytes.extend_from_slice(&self.relation_token);
+        bytes.extend_from_slice(&self.source_continuum_revision.to_le_bytes());
+        bytes.extend_from_slice(&encode_dimensions(&self.dimensions_fxp6));
+        bytes.push(u8::from(self.unresolved_boundary));
+        bytes.push(u8::from(self.unresolved_repair));
+        bytes.extend_from_slice(&self.repetition_increment.to_le_bytes());
+        bytes.push(self.delivery_outcome as u8);
+        *blake3::hash(&bytes).as_bytes()
     }
 }
 
@@ -197,6 +211,8 @@ pub enum StoreError {
     Sqlite(rusqlite::Error),
     CorruptPayload,
     SummaryRevisionOverflow,
+    EventIdentityConflict,
+    StaleSourceRevision,
 }
 
 impl fmt::Display for StoreError {
@@ -207,6 +223,10 @@ impl fmt::Display for StoreError {
             Self::SummaryRevisionOverflow => {
                 formatter.write_str("context summary revision overflow")
             }
+            Self::EventIdentityConflict => {
+                formatter.write_str("event identity conflicts with receipt")
+            }
+            Self::StaleSourceRevision => formatter.write_str("source continuum revision is stale"),
         }
     }
 }
@@ -242,6 +262,7 @@ impl ContextSummaryStore {
             CREATE TABLE IF NOT EXISTS relation_turns (
                 relation_hmac BLOB NOT NULL CHECK(length(relation_hmac) = 32),
                 event_id BLOB NOT NULL CHECK(length(event_id) = 16),
+                receipt_digest BLOB NOT NULL CHECK(length(receipt_digest) = 32),
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_continuum_revision BLOB NOT NULL CHECK(length(source_continuum_revision) = 8),
                 dimensions_fxp6 BLOB NOT NULL CHECK(length(dimensions_fxp6) = 120),
@@ -263,15 +284,24 @@ impl ContextSummaryStore {
         receipt: &ValidatedCommittedReceiptV1,
     ) -> Result<ContextSummaryV1, StoreError> {
         let relation_hmac = relation_hmac(receipt.relation_token);
-        if self.event_exists(&relation_hmac, &receipt.event_id)? {
+        let receipt_digest = receipt.canonical_digest();
+        if let Some(stored_digest) = self.stored_event_digest(&relation_hmac, &receipt.event_id)? {
+            if stored_digest != receipt_digest {
+                return Err(StoreError::EventIdentityConflict);
+            }
             return summary_for_hmac(&self.connection, &relation_hmac)?
                 .ok_or(StoreError::CorruptPayload);
         }
 
         let transaction = self.connection.transaction()?;
-        let previous_summary = summary_for_hmac(&*transaction, &relation_hmac)?;
+        let previous_summary = summary_for_hmac(&transaction, &relation_hmac)?;
+        if let Some(summary) = &previous_summary {
+            if receipt.source_continuum_revision <= summary.source_continuum_revision {
+                return Err(StoreError::StaleSourceRevision);
+            }
+        }
         let relation_exists = previous_summary.is_some();
-        if !relation_exists && relation_count(&*transaction)? >= MAX_RELATIONS {
+        if !relation_exists && relation_count(&transaction)? >= MAX_RELATIONS {
             let evicted: Vec<u8> = transaction.query_row(
                 "SELECT relation_hmac FROM relation_summaries ORDER BY relation_hmac ASC LIMIT 1",
                 [],
@@ -297,12 +327,13 @@ impl ContextSummaryStore {
 
         transaction.execute(
             "INSERT INTO relation_turns (
-                relation_hmac, event_id, source_continuum_revision, dimensions_fxp6,
+                relation_hmac, event_id, receipt_digest, source_continuum_revision, dimensions_fxp6,
                 unresolved_boundary, unresolved_repair, repetition_increment, delivery_outcome
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &relation_hmac[..],
                 &receipt.event_id[..],
+                &receipt_digest[..],
                 receipt.source_continuum_revision.to_le_bytes().to_vec(),
                 encode_dimensions(&receipt.dimensions_fxp6),
                 i64::from(receipt.unresolved_boundary),
@@ -324,7 +355,7 @@ impl ContextSummaryStore {
             params![&relation_hmac[..], MAX_TURNS_PER_RELATION],
         )?;
 
-        let summary = summary_from_turns(&*transaction, &relation_hmac, next_revision)?;
+        let summary = summary_from_turns(&transaction, &relation_hmac, next_revision)?;
         transaction.execute(
             "INSERT INTO relation_summaries (
                 relation_hmac, summary_revision, source_continuum_revision, dimensions_ema_fxp6,
@@ -376,18 +407,20 @@ impl ContextSummaryStore {
         usize::try_from(count).map_err(|_| StoreError::CorruptPayload)
     }
 
-    fn event_exists(
+    fn stored_event_digest(
         &self,
         relation_hmac: &[u8; 32],
         event_id: &[u8; 16],
-    ) -> Result<bool, StoreError> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM relation_turns WHERE relation_hmac = ?1 AND event_id = ?2
-             )",
-            params![&relation_hmac[..], &event_id[..]],
-            |row| row.get(0),
-        )?)
+    ) -> Result<Option<[u8; 32]>, StoreError> {
+        let digest: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT receipt_digest FROM relation_turns WHERE relation_hmac = ?1 AND event_id = ?2",
+                params![&relation_hmac[..], &event_id[..]],
+                |row| row.get(0),
+            )
+            .optional()?;
+        digest.map(|value| decode_32(&value)).transpose()
     }
 }
 

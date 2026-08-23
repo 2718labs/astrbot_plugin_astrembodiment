@@ -28,10 +28,10 @@ fn envelope(relation: u8, event: u8, value: i64) -> ReceiptEnvelopeV1 {
         relation_token: [relation; 16],
         source_continuum_revision: u64::from(event),
         dimensions_fxp6: [value; 15],
-        unresolved_boundary: event % 2 == 0,
-        unresolved_repair: event % 3 == 0,
+        unresolved_boundary: event.is_multiple_of(2),
+        unresolved_repair: event.is_multiple_of(3),
         repetition_increment: 1,
-        delivery_outcome: if event % 2 == 0 {
+        delivery_outcome: if event.is_multiple_of(2) {
             DeliveryOutcome::Delivered
         } else {
             DeliveryOutcome::Pending
@@ -73,7 +73,7 @@ fn non_committed_or_forged_envelopes_are_rejected_before_sqlite_mutation() {
     );
 
     let mut out_of_range = envelope(1, 1, 1_000_000);
-    out_of_range.dimensions_fxp6 = [ValidatedCommittedReceiptV1::MAX_ABS_DIMENSION_FXP6 + 1; 15];
+    out_of_range.dimensions_fxp6 = [ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6 + 1; 15];
     assert_eq!(
         ValidatedCommittedReceiptV1::try_from_envelope(out_of_range),
         Err(ReceiptValidationError::DimensionOutOfRange)
@@ -96,7 +96,7 @@ fn summary_schema_is_fixed_canonical_and_has_no_text_payload() {
     let path = db_path("schema");
     let mut store = ContextSummaryStore::open(&path).expect("open store");
     let summary = store
-        .apply_committed_receipt(&receipt(1, 1, 2_000_000))
+        .apply_committed_receipt(&receipt(1, 1, 200_000))
         .expect("write committed receipt");
 
     let canonical = summary.canonical_bytes();
@@ -106,7 +106,7 @@ fn summary_schema_is_fixed_canonical_and_has_no_text_payload() {
     );
     assert_eq!(canonical.len(), ContextSummaryV1::CANONICAL_BYTES_LEN);
     assert_eq!(summary.summary_revision, ContextSummaryV1::SCHEMA_VERSION);
-    assert_eq!(summary.dimensions_ema_fxp6, [2_000_000; 15]);
+    assert_eq!(summary.dimensions_ema_fxp6, [200_000; 15]);
     assert_eq!(
         summary.summary_digest,
         ContextSummaryV1::digest_of(&canonical)
@@ -121,7 +121,7 @@ fn summary_schema_is_fixed_canonical_and_has_no_text_payload() {
 fn committed_receipt_replay_is_idempotent() {
     let path = db_path("replay");
     let mut store = ContextSummaryStore::open(&path).expect("open store");
-    let committed = receipt(2, 7, 4_000_000);
+    let committed = receipt(2, 7, 400_000);
 
     let first = store
         .apply_committed_receipt(&committed)
@@ -132,6 +132,60 @@ fn committed_receipt_replay_is_idempotent() {
 
     assert_eq!(replay, first);
     assert_eq!(replay.repetition_count, 1);
+}
+
+#[test]
+fn same_event_id_with_different_canonical_receipt_is_rejected_without_mutation() {
+    let path = db_path("event-identity-conflict");
+    let mut store = ContextSummaryStore::open(&path).expect("open store");
+    let accepted = store
+        .apply_committed_receipt(&receipt(10, 1, 100_000))
+        .expect("accept original event");
+
+    assert!(matches!(
+        store.apply_committed_receipt(&receipt(10, 1, 200_000)),
+        Err(StoreError::EventIdentityConflict)
+    ));
+    assert_eq!(store.turn_count_for_relation([10; 16]).unwrap(), 1);
+    assert_eq!(
+        store.summary_for_relation([10; 16]).unwrap(),
+        Some(accepted)
+    );
+}
+
+#[test]
+fn source_revision_must_strictly_increase_after_reopen_without_mutation() {
+    let path = db_path("stale-source-revision");
+    {
+        let mut store = ContextSummaryStore::open(&path).expect("open initial store");
+        store
+            .apply_committed_receipt(&receipt(11, 2, 100_000))
+            .expect("accept source revision two");
+    }
+
+    let mut stale_envelope = envelope(11, 3, 200_000);
+    stale_envelope.source_continuum_revision = 2;
+    let stale = ValidatedCommittedReceiptV1::try_from_envelope(stale_envelope)
+        .expect("stale source revision is syntactically valid");
+    let mut reopened = ContextSummaryStore::open(&path).expect("reopen store");
+    assert!(matches!(
+        reopened.apply_committed_receipt(&stale),
+        Err(StoreError::StaleSourceRevision)
+    ));
+    assert_eq!(reopened.turn_count_for_relation([11; 16]).unwrap(), 1);
+}
+
+#[test]
+fn fxp6_dimensions_are_bounded_to_the_closed_unit_interval() {
+    for value in [0, ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6] {
+        assert!(ValidatedCommittedReceiptV1::try_from_envelope(envelope(12, 1, value)).is_ok());
+    }
+    for value in [-1, ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6 + 1] {
+        assert_eq!(
+            ValidatedCommittedReceiptV1::try_from_envelope(envelope(12, 1, value)),
+            Err(ReceiptValidationError::DimensionOutOfRange)
+        );
+    }
 }
 
 #[test]
@@ -148,11 +202,11 @@ fn summary_revision_increments_per_relation_and_survives_reopen() {
     let second = {
         let mut store = ContextSummaryStore::open(&path).expect("reopen for second receipt");
         let second = store
-            .apply_committed_receipt(&receipt(8, 2, 2_000_000))
+            .apply_committed_receipt(&receipt(8, 2, 200_000))
             .expect("second committed receipt");
         assert_eq!(second.summary_revision, 2);
         let replay = store
-            .apply_committed_receipt(&receipt(8, 2, 2_000_000))
+            .apply_committed_receipt(&receipt(8, 2, 200_000))
             .expect("replayed second receipt");
         assert_eq!(replay.summary_revision, 2);
         second
@@ -160,7 +214,7 @@ fn summary_revision_increments_per_relation_and_survives_reopen() {
 
     let mut reopened = ContextSummaryStore::open(&path).expect("reopen for third receipt");
     let third = reopened
-        .apply_committed_receipt(&receipt(8, 3, 3_000_000))
+        .apply_committed_receipt(&receipt(8, 3, 300_000))
         .expect("third committed receipt");
     assert_eq!(third.summary_revision, 3);
     assert_ne!(third.summary_digest, second.summary_digest);
@@ -188,7 +242,7 @@ fn summary_revision_overflow_rejects_before_partial_write() {
         .expect("count turns before overflow");
 
     assert!(matches!(
-        store.apply_committed_receipt(&receipt(9, 2, 2_000_000)),
+        store.apply_committed_receipt(&receipt(9, 2, 200_000)),
         Err(StoreError::SummaryRevisionOverflow)
     ));
     let after_turns: i64 = inspect
@@ -206,7 +260,7 @@ fn relation_scopes_are_isolated() {
         .apply_committed_receipt(&receipt(3, 1, 1_000_000))
         .expect("left relation");
     let right = store
-        .apply_committed_receipt(&receipt(4, 1, 9_000_000))
+        .apply_committed_receipt(&receipt(4, 1, 900_000))
         .expect("right relation");
 
     assert_ne!(left.summary_digest, right.summary_digest);
@@ -220,7 +274,7 @@ fn reopen_preserves_summary_digest() {
     let expected = {
         let mut store = ContextSummaryStore::open(&path).expect("open first store");
         store
-            .apply_committed_receipt(&receipt(5, 1, 3_000_000))
+            .apply_committed_receipt(&receipt(5, 1, 300_000))
             .expect("write receipt")
     };
 
@@ -241,7 +295,7 @@ fn per_relation_window_is_32_turns() {
 
     for event in 1..=33 {
         store
-            .apply_committed_receipt(&receipt(6, event, i64::from(event) * 1_000_000))
+            .apply_committed_receipt(&receipt(6, event, i64::from(event) * 10_000))
             .expect("write bounded turn");
     }
 
