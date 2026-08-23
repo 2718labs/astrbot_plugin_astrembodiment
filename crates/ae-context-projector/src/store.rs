@@ -90,10 +90,18 @@ impl ContextSummaryV1 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptCommitStatus {
+    Pending,
+    Committed,
+    Rejected,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommittedReceiptV1 {
+pub struct ReceiptEnvelopeV1 {
+    pub commit_status: ReceiptCommitStatus,
     pub event_id: [u8; 16],
-    pub relation_scope: [u8; 16],
+    pub relation_token: [u8; 16],
     pub source_continuum_revision: u64,
     pub dimensions_fxp6: [i64; DIMENSION_COUNT],
     pub unresolved_boundary: bool,
@@ -101,6 +109,86 @@ pub struct CommittedReceiptV1 {
     pub repetition_increment: u64,
     pub delivery_outcome: DeliveryOutcome,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ValidatedCommittedReceiptV1 {
+    event_id: [u8; 16],
+    relation_token: [u8; 16],
+    source_continuum_revision: u64,
+    dimensions_fxp6: [i64; DIMENSION_COUNT],
+    unresolved_boundary: bool,
+    unresolved_repair: bool,
+    repetition_increment: u64,
+    delivery_outcome: DeliveryOutcome,
+}
+
+impl ValidatedCommittedReceiptV1 {
+    pub const MAX_ABS_DIMENSION_FXP6: i64 = 1_000_000_000_000;
+    pub const MAX_REPETITION_INCREMENT: u64 = 4_096;
+
+    pub fn try_from_envelope(envelope: ReceiptEnvelopeV1) -> Result<Self, ReceiptValidationError> {
+        if envelope.commit_status != ReceiptCommitStatus::Committed {
+            return Err(ReceiptValidationError::NotCommitted);
+        }
+        if envelope.event_id == [0; 16] {
+            return Err(ReceiptValidationError::InvalidEventId);
+        }
+        if envelope.relation_token == [0; 16] {
+            return Err(ReceiptValidationError::InvalidRelationToken);
+        }
+        if envelope.source_continuum_revision == 0 {
+            return Err(ReceiptValidationError::InvalidSourceRevision);
+        }
+        if envelope
+            .dimensions_fxp6
+            .iter()
+            .any(|dimension| dimension.unsigned_abs() > Self::MAX_ABS_DIMENSION_FXP6 as u64)
+        {
+            return Err(ReceiptValidationError::DimensionOutOfRange);
+        }
+        if envelope.repetition_increment == 0
+            || envelope.repetition_increment > Self::MAX_REPETITION_INCREMENT
+        {
+            return Err(ReceiptValidationError::InvalidRepetitionIncrement);
+        }
+        Ok(Self {
+            event_id: envelope.event_id,
+            relation_token: envelope.relation_token,
+            source_continuum_revision: envelope.source_continuum_revision,
+            dimensions_fxp6: envelope.dimensions_fxp6,
+            unresolved_boundary: envelope.unresolved_boundary,
+            unresolved_repair: envelope.unresolved_repair,
+            repetition_increment: envelope.repetition_increment,
+            delivery_outcome: envelope.delivery_outcome,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptValidationError {
+    NotCommitted,
+    InvalidEventId,
+    InvalidRelationToken,
+    InvalidSourceRevision,
+    DimensionOutOfRange,
+    InvalidRepetitionIncrement,
+}
+
+impl fmt::Display for ReceiptValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::NotCommitted => "receipt is not committed",
+            Self::InvalidEventId => "receipt event id is invalid",
+            Self::InvalidRelationToken => "receipt relation token is invalid",
+            Self::InvalidSourceRevision => "receipt source revision is invalid",
+            Self::DimensionOutOfRange => "receipt dimension is outside the fixed range",
+            Self::InvalidRepetitionIncrement => "receipt repetition increment is invalid",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for ReceiptValidationError {}
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -166,9 +254,9 @@ impl ContextSummaryStore {
 
     pub fn apply_committed_receipt(
         &mut self,
-        receipt: &CommittedReceiptV1,
+        receipt: &ValidatedCommittedReceiptV1,
     ) -> Result<ContextSummaryV1, StoreError> {
-        let relation_hmac = relation_hmac(receipt.relation_scope);
+        let relation_hmac = relation_hmac(receipt.relation_token);
         if self.event_exists(&relation_hmac, &receipt.event_id)? {
             return summary_for_hmac(&self.connection, &relation_hmac)?
                 .ok_or(StoreError::CorruptPayload);

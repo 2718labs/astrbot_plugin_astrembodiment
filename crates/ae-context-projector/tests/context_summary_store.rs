@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ae_context_projector::{
-    CommittedReceiptV1, ContextSummaryStore, ContextSummaryV1, DeliveryOutcome,
+    ContextSummaryStore, ContextSummaryV1, DeliveryOutcome, ReceiptCommitStatus, ReceiptEnvelopeV1,
+    ReceiptValidationError, ValidatedCommittedReceiptV1,
 };
 
 static NEXT_DB: AtomicU64 = AtomicU64::new(1);
@@ -15,10 +16,16 @@ fn db_path(label: &str) -> PathBuf {
     root.join(format!("{label}-{}-{sequence}.sqlite", std::process::id()))
 }
 
-fn receipt(relation: u8, event: u8, value: i64) -> CommittedReceiptV1 {
-    CommittedReceiptV1 {
+fn receipt(relation: u8, event: u8, value: i64) -> ValidatedCommittedReceiptV1 {
+    ValidatedCommittedReceiptV1::try_from_envelope(envelope(relation, event, value))
+        .expect("fixture is a valid committed receipt")
+}
+
+fn envelope(relation: u8, event: u8, value: i64) -> ReceiptEnvelopeV1 {
+    ReceiptEnvelopeV1 {
+        commit_status: ReceiptCommitStatus::Committed,
         event_id: [event; 16],
-        relation_scope: [relation; 16],
+        relation_token: [relation; 16],
         source_continuum_revision: u64::from(event),
         dimensions_fxp6: [value; 15],
         unresolved_boundary: event % 2 == 0,
@@ -30,6 +37,58 @@ fn receipt(relation: u8, event: u8, value: i64) -> CommittedReceiptV1 {
             DeliveryOutcome::Pending
         },
     }
+}
+
+#[test]
+fn non_committed_or_forged_envelopes_are_rejected_before_sqlite_mutation() {
+    let path = db_path("receipt-validation");
+    let store = ContextSummaryStore::open(&path).expect("open store");
+
+    let mut non_committed = envelope(1, 1, 1_000_000);
+    non_committed.commit_status = ReceiptCommitStatus::Pending;
+    assert_eq!(
+        ValidatedCommittedReceiptV1::try_from_envelope(non_committed),
+        Err(ReceiptValidationError::NotCommitted)
+    );
+
+    let mut zero_event = envelope(1, 1, 1_000_000);
+    zero_event.event_id = [0; 16];
+    assert_eq!(
+        ValidatedCommittedReceiptV1::try_from_envelope(zero_event),
+        Err(ReceiptValidationError::InvalidEventId)
+    );
+
+    let mut zero_relation = envelope(1, 1, 1_000_000);
+    zero_relation.relation_token = [0; 16];
+    assert_eq!(
+        ValidatedCommittedReceiptV1::try_from_envelope(zero_relation),
+        Err(ReceiptValidationError::InvalidRelationToken)
+    );
+
+    let mut zero_revision = envelope(1, 1, 1_000_000);
+    zero_revision.source_continuum_revision = 0;
+    assert_eq!(
+        ValidatedCommittedReceiptV1::try_from_envelope(zero_revision),
+        Err(ReceiptValidationError::InvalidSourceRevision)
+    );
+
+    let mut out_of_range = envelope(1, 1, 1_000_000);
+    out_of_range.dimensions_fxp6 = [ValidatedCommittedReceiptV1::MAX_ABS_DIMENSION_FXP6 + 1; 15];
+    assert_eq!(
+        ValidatedCommittedReceiptV1::try_from_envelope(out_of_range),
+        Err(ReceiptValidationError::DimensionOutOfRange)
+    );
+
+    let inspect = rusqlite::Connection::open(&path).expect("inspect rejected store");
+    let rows: i64 = inspect
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM relation_summaries) + (SELECT COUNT(*) FROM relation_turns)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count rows");
+    assert_eq!(rows, 0);
+    drop(store);
 }
 
 #[test]
