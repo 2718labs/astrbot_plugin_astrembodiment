@@ -13,9 +13,11 @@ use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
 
 mod graph_development;
+mod graph_replay;
 mod structural_delta;
 
 pub use graph_development::{develop_graph, GraphDevelopmentError, GraphFormula};
+pub use graph_replay::{GraphReplayError, GraphReplayV1, GraphSnapshotV1, GRAPH_REPLAY_FORMULA_V1};
 pub use structural_delta::{apply_delta, DeltaError, EdgeOperationV1, StructuralDeltaV1};
 
 pub const NEURON_SLOTS: usize = 16_384;
