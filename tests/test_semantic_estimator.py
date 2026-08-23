@@ -8,7 +8,6 @@ import pytest
 from astr_embodiment.contracts import FrozenTurn, ScopeTokens
 from astr_embodiment.semantic_estimator import (
     DIMENSION_NAMES,
-    LOAD_DIMENSIONS,
     SemanticEstimateError,
     SemanticProposalError,
     build_perception_proposal,
@@ -126,8 +125,7 @@ def test_estimate_v2_distinguishes_available_zero_from_unavailable() -> None:
     available_payload = {
         "schema": "astr-embodiment.semantic-estimate.v2",
         "dimensions": {
-            name: {"state": "AVAILABLE", "value_fxp6": 0}
-            for name in DIMENSION_NAMES
+            name: {"state": "AVAILABLE", "value_fxp6": 0} for name in DIMENSION_NAMES
         },
         "estimator_confidence": 1,
     }
@@ -176,8 +174,7 @@ def test_estimate_v2_rejects_non_closed_dimension_slots(slot: dict) -> None:
     payload = {
         "schema": "astr-embodiment.semantic-estimate.v2",
         "dimensions": {
-            name: {"state": "AVAILABLE", "value_fxp6": 0}
-            for name in DIMENSION_NAMES
+            name: {"state": "AVAILABLE", "value_fxp6": 0} for name in DIMENSION_NAMES
         },
         "estimator_confidence": 1,
     }

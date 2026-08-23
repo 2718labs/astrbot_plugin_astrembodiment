@@ -150,9 +150,7 @@ def _legacy_unattested_result(
 ) -> dict:
     """The v1 receipt stays byte-shape compatible but cannot attest v2 facts."""
 
-    return _valid_result(
-        deduplicated=deduplicated, **receipt_overrides
-    ) | {
+    return _valid_result(deduplicated=deduplicated, **receipt_overrides) | {
         "semantic_vector_receipt": None,
         "node_observability": None,
         "full_vector_state": "LEGACY_UNATTESTED",
@@ -238,8 +236,7 @@ def _valid_full_vector_result(
             "evaluated_dimension_count": 15,
             "injected_dimension_count": 15,
             "nonzero_evidence_dimension_count": nonzero_evidence_dimension_count,
-            "neutral_baseline_dimension_count": 15
-            - nonzero_evidence_dimension_count,
+            "neutral_baseline_dimension_count": 15 - nonzero_evidence_dimension_count,
             "unavailable_dimension_count": 0,
             "state_changed": state_changed,
         },
@@ -718,9 +715,7 @@ def test_all_zero_available_vector_commits_through_native() -> None:
 
     assert calls == ["request"]
     assert len(native.apply_calls) == 1
-    assert native.apply_calls[0]["dimensions"] == {
-        name: 0 for name in DIMENSION_NAMES
-    }
+    assert native.apply_calls[0]["dimensions"] == {name: 0 for name in DIMENSION_NAMES}
     assert result["status"] == "SUCCESS"
     assert result["code"] == "SEMANTIC_COMMITTED"
     assert result["result"]["semantic_vector_receipt"] == {
@@ -735,9 +730,10 @@ def test_all_zero_available_vector_commits_through_native() -> None:
         "state_changed": False,
     }
     assert result["result"]["receipt"]["next_revision"] == 1
-    assert result["result"]["receipt"]["state_before"] == result["result"]["receipt"][
-        "state_after"
-    ]
+    assert (
+        result["result"]["receipt"]["state_before"]
+        == result["result"]["receipt"]["state_after"]
+    )
     assert result["diagnostic"]["calculation_state"] == "CONFIRMED"
     assert result["diagnostic"]["native_calculation"] == {
         "state_changed": False,

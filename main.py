@@ -708,7 +708,9 @@ class AstrEmbodimentPlugin(Star):
 
         return type(
             self._config_values.get("node_observability_detailed_logging", False)
-        ) is bool and self._config_values.get("node_observability_detailed_logging", False)
+        ) is bool and self._config_values.get(
+            "node_observability_detailed_logging", False
+        )
 
     @staticmethod
     def _closed_observatory_dimensions(value: Any) -> dict[str, int] | None:
@@ -795,9 +797,10 @@ class AstrEmbodimentPlugin(Star):
             }
         if type(raw_outcome) is not dict:
             raise ValueError("raw outcome")
-        if raw_outcome.get("status") != closed["status"] or raw_outcome.get("code") != closed[
-            "code"
-        ]:
+        if (
+            raw_outcome.get("status") != closed["status"]
+            or raw_outcome.get("code") != closed["code"]
+        ):
             raise ValueError("outcome mismatch")
         diagnostic = raw_outcome.get("diagnostic")
         allowed_fields = _SPC1_DIAGNOSTIC_FIELDS | {"dimension_summary"}
@@ -1462,8 +1465,7 @@ class AstrEmbodimentPlugin(Star):
                         expected_base_revision=common["base_revision"],
                     )
                     if (
-                        canonical_result["full_vector_state"]
-                        != "LEGACY_UNATTESTED"
+                        canonical_result["full_vector_state"] != "LEGACY_UNATTESTED"
                         or canonical_result["node_observability_state"] != "UNAVAILABLE"
                         or canonical_result["semantic_vector_receipt"] is not None
                         or canonical_result["node_observability"] is not None
@@ -1499,13 +1501,19 @@ class AstrEmbodimentPlugin(Star):
                 )
                 return f"AstrEmbodiment：运算已完成｜十五维：{values}", False
             if common["status"] == "NOOP" and common["code"] == "EMPTY_REQUEST":
-                return "AstrEmbodiment：未执行运算｜原因=EMPTY_REQUEST｜十五维：不可用", False
+                return (
+                    "AstrEmbodiment：未执行运算｜原因=EMPTY_REQUEST｜十五维：不可用",
+                    False,
+                )
             return (
                 f"AstrEmbodiment：运算失败｜失败码={common['code']}｜阶段={common['stage']}",
                 True,
             )
         except BaseException:
-            return "AstrEmbodiment：运算失败｜失败码=NATIVE_MALFORMED｜阶段=INTERNAL", True
+            return (
+                "AstrEmbodiment：运算失败｜失败码=NATIVE_MALFORMED｜阶段=INTERNAL",
+                True,
+            )
 
     def _emit_semantic_observatory(
         self,

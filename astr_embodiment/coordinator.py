@@ -290,7 +290,9 @@ class GenesisCoordinator:
 
         if type(estimate) is not SemanticEstimate:
             return None
-        if type(injected_dimension_count) is not int or injected_dimension_count not in {
+        if type(
+            injected_dimension_count
+        ) is not int or injected_dimension_count not in {
             0,
             len(DIMENSION_NAMES),
         }:

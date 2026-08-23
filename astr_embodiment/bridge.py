@@ -234,9 +234,7 @@ _NODE_OBSERVABILITY_COUNTS_FIELDS = frozenset(
         "signal_nonzero_after_count",
     }
 )
-_NODE_OBSERVABILITY_RESIDUAL_FIELDS = frozenset(
-    {"state", "formula", "values_fxp6"}
-)
+_NODE_OBSERVABILITY_RESIDUAL_FIELDS = frozenset({"state", "formula", "values_fxp6"})
 _NODE_OBSERVABILITY_REGION_FIELDS = frozenset(
     {
         "region_id",
@@ -521,7 +519,9 @@ def _validate_receipt(
             canonical_digests[field] = _canonical_hex(value[field], 32)
         except (TypeError, ValueError):
             raise ValueError("semantic receipt digest") from None
-    state_changed = canonical_digests["state_before"] != canonical_digests["state_after"]
+    state_changed = (
+        canonical_digests["state_before"] != canonical_digests["state_after"]
+    )
     if not state_changed and not allow_unchanged_state:
         raise ValueError("semantic receipt transition")
     if type(value["status"]) is not str or value["status"] != "committed":
@@ -532,8 +532,7 @@ def _validate_receipt(
     if set(residuals) != _RESIDUAL_FIELDS:
         raise ValueError("semantic receipt residuals")
     if any(
-        type(residuals[name]) is not int
-        or not _I64_MIN <= residuals[name] <= _I64_MAX
+        type(residuals[name]) is not int or not _I64_MIN <= residuals[name] <= _I64_MAX
         for name in _RESIDUAL_FIELDS
     ):
         raise ValueError("semantic receipt residuals")
@@ -620,12 +619,8 @@ def _validate_semantic_vector_receipt(
         "dimension_slot_count": 15,
         "evaluated_dimension_count": 15,
         "injected_dimension_count": 15,
-        "nonzero_evidence_dimension_count": value[
-            "nonzero_evidence_dimension_count"
-        ],
-        "neutral_baseline_dimension_count": value[
-            "neutral_baseline_dimension_count"
-        ],
+        "nonzero_evidence_dimension_count": value["nonzero_evidence_dimension_count"],
+        "neutral_baseline_dimension_count": value["neutral_baseline_dimension_count"],
         "unavailable_dimension_count": 0,
         "state_changed": expected_state_changed,
     }
@@ -678,7 +673,10 @@ def _validate_node_observability(
     if set(counts) != _NODE_OBSERVABILITY_COUNTS_FIELDS:
         raise ValueError("node observability counts")
     for field in _NODE_OBSERVABILITY_COUNTS_FIELDS:
-        if type(counts[field]) is not int or not 0 <= counts[field] <= _NODE_OBSERVABILITY_CAPACITY:
+        if (
+            type(counts[field]) is not int
+            or not 0 <= counts[field] <= _NODE_OBSERVABILITY_CAPACITY
+        ):
             raise ValueError("node observability count")
     if (
         counts["selected_node_count"] != expected_selected_node_count
@@ -706,12 +704,16 @@ def _validate_node_observability(
     }:
         raise ValueError("node observability residuals")
     regions = value["regions"]
-    if type(regions) is not list or len(regions) != len(_NODE_OBSERVABILITY_REGION_LAYOUT):
+    if type(regions) is not list or len(regions) != len(
+        _NODE_OBSERVABILITY_REGION_LAYOUT
+    ):
         raise ValueError("node observability regions")
     canonical_regions: list[dict[str, Any]] = []
     selected_total = activated_total = changed_total = 0
     potential_nonzero_total = excitation_nonzero_total = 0
-    for region_id, (region_name, capacity) in enumerate(_NODE_OBSERVABILITY_REGION_LAYOUT):
+    for region_id, (region_name, capacity) in enumerate(
+        _NODE_OBSERVABILITY_REGION_LAYOUT
+    ):
         region = regions[region_id]
         if type(region) is not dict or any(type(key) is not str for key in region):
             raise ValueError("node observability region")

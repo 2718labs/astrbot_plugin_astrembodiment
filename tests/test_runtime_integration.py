@@ -1567,7 +1567,9 @@ async def _run_spc1_request_with_outcome(
     return instance, event, request
 
 
-def test_node_observability_detailed_logging_defaults_false_and_rejects_truthy_values() -> None:
+def test_node_observability_detailed_logging_defaults_false_and_rejects_truthy_values() -> (
+    None
+):
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
     assert schema["node_observability_detailed_logging"] == {
@@ -1577,7 +1579,9 @@ def test_node_observability_detailed_logging_defaults_false_and_rejects_truthy_v
         "default": False,
     }
     assert (
-        plugin(FakeConfig(observatory_enabled=True), FakeContext())._node_observability_detailed_logging_enabled()
+        plugin(
+            FakeConfig(observatory_enabled=True), FakeContext()
+        )._node_observability_detailed_logging_enabled()
         is False
     )
     for invalid in ("true", 1, 0, None, object()):
@@ -1666,9 +1670,10 @@ def test_detailed_switch_selects_complete_v3_json(
         "active_edges": 23,
     }
     assert record["node_observability_state"] == "CONFIRMED"
-    assert record["node_observability"]["counts"] == _spc1_full_node_observability()[
-        "counts"
-    ]
+    assert (
+        record["node_observability"]["counts"]
+        == _spc1_full_node_observability()["counts"]
+    )
     assert len(record["node_observability"]["regions"]) == 9
     assert record["node_observability"]["residuals"] == {
         "state": "NOT_COMPUTED",
@@ -1805,8 +1810,7 @@ def test_spc1_observatory_default_success_emits_compact_full_vector_dimensions(
     assert recorder.info_messages == [
         "AstrEmbodiment：运算已完成｜十五维："
         + ",".join(
-            f"{name}={_spc1_full_vector_dimensions()[name]}"
-            for name in DIMENSION_NAMES
+            f"{name}={_spc1_full_vector_dimensions()[name]}" for name in DIMENSION_NAMES
         )
     ]
 

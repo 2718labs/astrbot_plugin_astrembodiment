@@ -264,7 +264,10 @@ def _parse_estimator_output(value: Any) -> SemanticEstimate:
         confidence_payload = payload.get("estimator_confidence")
         dimensions = _validate_dimension_map(dimensions_payload)
         schema = None
-    elif keys == _ESTIMATE_V2_FIELDS and payload.get("schema") == SEMANTIC_ESTIMATE_V2_SCHEMA:
+    elif (
+        keys == _ESTIMATE_V2_FIELDS
+        and payload.get("schema") == SEMANTIC_ESTIMATE_V2_SCHEMA
+    ):
         dimensions_payload = payload.get("dimensions")
         confidence_payload = payload.get("estimator_confidence")
         dimensions = _validate_dimension_slots_v2(dimensions_payload)
