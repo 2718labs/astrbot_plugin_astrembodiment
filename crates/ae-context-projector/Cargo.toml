@@ -1,0 +1,16 @@
+[package]
+name = "ae-context-projector"
+version = "1.0.0-rc2"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[workspace]
+
+[dependencies]
+blake3 = "=1.8.6"
+hmac = "=0.12.1"
+rusqlite = { version = "=0.32.1", features = ["bundled"] }
+sha2 = "=0.10.9"
+
+[dev-dependencies]
+rusqlite = { version = "=0.32.1", features = ["bundled"] }

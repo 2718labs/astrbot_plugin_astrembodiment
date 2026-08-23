@@ -1,0 +1,192 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use ae_context_projector::{
+    CommittedReceiptV1, ContextSummaryStore, ContextSummaryV1, DeliveryOutcome,
+};
+
+static NEXT_DB: AtomicU64 = AtomicU64::new(1);
+
+fn db_path(label: &str) -> PathBuf {
+    let root = std::env::var_os("CODEX_TASK_TEMP")
+        .map(PathBuf::from)
+        .expect("CODEX_TASK_TEMP must be provided by the task harness");
+    let sequence = NEXT_DB.fetch_add(1, Ordering::Relaxed);
+    root.join(format!("{label}-{}-{sequence}.sqlite", std::process::id()))
+}
+
+fn receipt(relation: u8, event: u8, value: i64) -> CommittedReceiptV1 {
+    CommittedReceiptV1 {
+        event_id: [event; 16],
+        relation_scope: [relation; 16],
+        source_continuum_revision: u64::from(event),
+        dimensions_fxp6: [value; 15],
+        unresolved_boundary: event % 2 == 0,
+        unresolved_repair: event % 3 == 0,
+        repetition_increment: 1,
+        delivery_outcome: if event % 2 == 0 {
+            DeliveryOutcome::Delivered
+        } else {
+            DeliveryOutcome::Pending
+        },
+    }
+}
+
+#[test]
+fn summary_schema_is_fixed_canonical_and_has_no_text_payload() {
+    let path = db_path("schema");
+    let mut store = ContextSummaryStore::open(&path).expect("open store");
+    let summary = store
+        .apply_committed_receipt(&receipt(1, 1, 2_000_000))
+        .expect("write committed receipt");
+
+    let canonical = summary.canonical_bytes();
+    assert!(
+        canonical.len() <= 4096,
+        "canonical summary must remain bounded"
+    );
+    assert_eq!(canonical.len(), ContextSummaryV1::CANONICAL_BYTES_LEN);
+    assert_eq!(summary.summary_revision, ContextSummaryV1::SUMMARY_REVISION);
+    assert_eq!(summary.dimensions_ema_fxp6, [2_000_000; 15]);
+    assert_eq!(
+        summary.summary_digest,
+        ContextSummaryV1::digest_of(&canonical)
+    );
+    assert!(canonical.windows(b"pending".len()).all(|w| w != b"pending"));
+    assert!(canonical
+        .windows(b"delivered".len())
+        .all(|w| w != b"delivered"));
+}
+
+#[test]
+fn committed_receipt_replay_is_idempotent() {
+    let path = db_path("replay");
+    let mut store = ContextSummaryStore::open(&path).expect("open store");
+    let committed = receipt(2, 7, 4_000_000);
+
+    let first = store
+        .apply_committed_receipt(&committed)
+        .expect("first receipt");
+    let replay = store
+        .apply_committed_receipt(&committed)
+        .expect("replayed receipt");
+
+    assert_eq!(replay, first);
+    assert_eq!(replay.repetition_count, 1);
+}
+
+#[test]
+fn relation_scopes_are_isolated() {
+    let path = db_path("isolation");
+    let mut store = ContextSummaryStore::open(&path).expect("open store");
+
+    let left = store
+        .apply_committed_receipt(&receipt(3, 1, 1_000_000))
+        .expect("left relation");
+    let right = store
+        .apply_committed_receipt(&receipt(4, 1, 9_000_000))
+        .expect("right relation");
+
+    assert_ne!(left.summary_digest, right.summary_digest);
+    assert_eq!(store.summary_for_relation([3; 16]).unwrap(), Some(left));
+    assert_eq!(store.summary_for_relation([4; 16]).unwrap(), Some(right));
+}
+
+#[test]
+fn reopen_preserves_summary_digest() {
+    let path = db_path("reopen");
+    let expected = {
+        let mut store = ContextSummaryStore::open(&path).expect("open first store");
+        store
+            .apply_committed_receipt(&receipt(5, 1, 3_000_000))
+            .expect("write receipt")
+    };
+
+    let reopened = ContextSummaryStore::open(&path).expect("reopen store");
+    let actual = reopened
+        .summary_for_relation([5; 16])
+        .expect("read summary")
+        .expect("summary remains present");
+
+    assert_eq!(actual.summary_digest, expected.summary_digest);
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn per_relation_window_is_32_turns() {
+    let path = db_path("window");
+    let mut store = ContextSummaryStore::open(&path).expect("open store");
+
+    for event in 1..=33 {
+        store
+            .apply_committed_receipt(&receipt(6, event, i64::from(event) * 1_000_000))
+            .expect("write bounded turn");
+    }
+
+    let summary = store
+        .summary_for_relation([6; 16])
+        .expect("read bounded summary")
+        .expect("summary exists");
+    assert_eq!(summary.repetition_count, 32);
+    assert_eq!(store.turn_count_for_relation([6; 16]).unwrap(), 32);
+}
+
+#[test]
+fn relation_cap_is_eight_and_eviction_is_stable() {
+    let first_path = db_path("cap-one");
+    let second_path = db_path("cap-two");
+
+    let first_membership = populate_and_read_membership(&first_path);
+    let second_membership = populate_and_read_membership(&second_path);
+
+    assert_eq!(first_membership, second_membership);
+    assert_eq!(first_membership.len(), 8);
+}
+
+fn populate_and_read_membership(path: &PathBuf) -> Vec<u8> {
+    let mut store = ContextSummaryStore::open(path).expect("open capped store");
+    for relation in 1..=9 {
+        store
+            .apply_committed_receipt(&receipt(relation, 1, i64::from(relation)))
+            .expect("write relation");
+    }
+    assert_eq!(store.active_relation_count().unwrap(), 8);
+
+    (1..=9)
+        .filter(|relation| {
+            store
+                .summary_for_relation([*relation; 16])
+                .expect("read relation")
+                .is_some()
+        })
+        .collect()
+}
+
+#[test]
+fn public_receipt_and_summary_are_aggregate_only() {
+    let path = db_path("privacy");
+    let mut store = ContextSummaryStore::open(&path).expect("open store");
+    let summary = store
+        .apply_committed_receipt(&receipt(7, 1, 1_000_000))
+        .expect("write aggregate receipt");
+
+    let payload = summary.canonical_bytes();
+    assert!(payload.len() <= ContextSummaryV1::CANONICAL_BYTES_LEN);
+
+    let inspect = rusqlite::Connection::open(&path).expect("inspect persisted store");
+    let schema: String = inspect
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'relation_summaries'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read schema");
+    assert!(!schema.contains("hmac_key"));
+    assert!(!schema.contains("relation_scope"));
+    let relation_hmac: Vec<u8> = inspect
+        .query_row("SELECT relation_hmac FROM relation_summaries", [], |row| {
+            row.get(0)
+        })
+        .expect("read stored relation digest");
+    assert_ne!(relation_hmac, vec![7; 16]);
+}
