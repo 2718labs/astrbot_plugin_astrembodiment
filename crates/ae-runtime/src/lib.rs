@@ -113,9 +113,13 @@ pub struct PerceptionProposalDecisionV1 {
     pub receipt: TransitionReceipt,
     /// Canonical full-vector proof. Its exact v2 bytes are atomically stored in
     /// the semantic snapshot and returned verbatim-by-codec on deduplication.
-    /// The legacy receipt above retains its exact v1 codec and journal shape.
-    pub semantic_vector_receipt: TransitionReceiptV2,
-    pub node_observability: NodeObservabilityProjectionV1,
+    /// A historical plain-v1 snapshot has no such attestation and is surfaced
+    /// explicitly as `None`; the legacy receipt below remains authoritative.
+    pub semantic_vector_receipt: Option<TransitionReceiptV2>,
+    /// Aggregated node projection for a v2 full-vector attestation. Historical
+    /// plain-v1 snapshots deliberately return `None` rather than fabricating
+    /// 15-dimensional observability from their legacy state.
+    pub node_observability: Option<NodeObservabilityProjectionV1>,
     pub revision: u64,
     pub deduplicated: bool,
     pub expression_projection: ExpressionProjectionV1,
@@ -2473,7 +2477,7 @@ impl AstrRuntime {
         formula_digest: &Digest,
         receipt: &TransitionReceipt,
         revision: u64,
-    ) -> Result<TransitionReceiptV2, RuntimeError> {
+    ) -> Result<Option<TransitionReceiptV2>, RuntimeError> {
         if receipt.schema_version != 1
             || receipt.status != CommitStatus::Committed
             || receipt.action_contract.is_some()
@@ -2498,7 +2502,7 @@ impl AstrRuntime {
             &receipt.graph_after,
             Some(receipt),
         )?;
-        semantic_receipt.ok_or(RuntimeError::LegacySemanticUnattested)
+        Ok(semantic_receipt)
     }
 
     fn node_observability_for_semantic_receipt_v1(
@@ -2709,14 +2713,19 @@ impl AstrRuntime {
                 &receipt,
                 row.revision,
             )?;
-            let node_observability = self.node_observability_for_semantic_receipt_v1(
-                &semantic_persona_scope,
-                &formula_digest,
-                &baseline_field,
-                &receipt,
-                proposal,
-                row.revision,
-            )?;
+            let node_observability = semantic_vector_receipt
+                .as_ref()
+                .map(|_| {
+                    self.node_observability_for_semantic_receipt_v1(
+                        &semantic_persona_scope,
+                        &formula_digest,
+                        &baseline_field,
+                        &receipt,
+                        proposal,
+                        row.revision,
+                    )
+                })
+                .transpose()?;
             let expression_projection = self.expression_projection_for_semantic_snapshot(
                 &semantic_persona_scope,
                 &formula_digest,
@@ -2834,8 +2843,8 @@ impl AstrRuntime {
                 }
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
-                    semantic_vector_receipt,
-                    node_observability,
+                    semantic_vector_receipt: Some(semantic_vector_receipt),
+                    node_observability: Some(node_observability),
                     revision,
                     deduplicated: false,
                     expression_projection,
@@ -2861,14 +2870,19 @@ impl AstrRuntime {
                     &receipt,
                     revision,
                 )?;
-                let node_observability = self.node_observability_for_semantic_receipt_v1(
-                    &semantic_persona_scope,
-                    &formula_digest,
-                    &baseline_field,
-                    &receipt,
-                    proposal,
-                    revision,
-                )?;
+                let node_observability = semantic_vector_receipt
+                    .as_ref()
+                    .map(|_| {
+                        self.node_observability_for_semantic_receipt_v1(
+                            &semantic_persona_scope,
+                            &formula_digest,
+                            &baseline_field,
+                            &receipt,
+                            proposal,
+                            revision,
+                        )
+                    })
+                    .transpose()?;
                 let expression_projection = self.expression_projection_for_semantic_snapshot(
                     &semantic_persona_scope,
                     &formula_digest,
@@ -2925,14 +2939,19 @@ impl AstrRuntime {
                     &receipt,
                     revision,
                 )?;
-                let node_observability = self.node_observability_for_semantic_receipt_v1(
-                    &semantic_persona_scope,
-                    &formula_digest,
-                    &baseline_field,
-                    &receipt,
-                    proposal,
-                    revision,
-                )?;
+                let node_observability = semantic_vector_receipt
+                    .as_ref()
+                    .map(|_| {
+                        self.node_observability_for_semantic_receipt_v1(
+                            &semantic_persona_scope,
+                            &formula_digest,
+                            &baseline_field,
+                            &receipt,
+                            proposal,
+                            revision,
+                        )
+                    })
+                    .transpose()?;
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
@@ -4707,7 +4726,15 @@ finally:
         assert_eq!(decision.receipt.next_revision, 1);
         assert_eq!(decision.receipt.state_before, decision.receipt.state_after);
         assert_eq!(decision.receipt.active_nodes, 0);
-        let semantic_vector = &decision.semantic_vector_receipt.semantic_vector;
+        let semantic_vector_receipt = decision
+            .semantic_vector_receipt
+            .as_ref()
+            .expect("current semantic commits carry a v2 receipt");
+        let node_observability = decision
+            .node_observability
+            .as_ref()
+            .expect("current semantic commits carry node observability");
+        let semantic_vector = &semantic_vector_receipt.semantic_vector;
         assert_eq!(semantic_vector.dimension_slot_count, 15);
         assert_eq!(semantic_vector.evaluated_dimension_count, 15);
         assert_eq!(semantic_vector.injected_dimension_count, 15);
@@ -4715,10 +4742,10 @@ finally:
         assert_eq!(semantic_vector.neutral_baseline_dimension_count, 15);
         assert_eq!(semantic_vector.unavailable_dimension_count, 0);
         assert!(!semantic_vector.state_changed);
-        assert_eq!(decision.semantic_vector_receipt.active_nodes, 0);
-        assert_eq!(decision.node_observability.counts.selected_node_count, 0);
-        assert_eq!(decision.node_observability.counts.activated_node_count, 0);
-        assert_eq!(decision.node_observability.counts.changed_node_count, 0);
+        assert_eq!(semantic_vector_receipt.active_nodes, 0);
+        assert_eq!(node_observability.counts.selected_node_count, 0);
+        assert_eq!(node_observability.counts.activated_node_count, 0);
+        assert_eq!(node_observability.counts.changed_node_count, 0);
         assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
 
         runtime.flush_and_close().expect("close");
@@ -4740,7 +4767,15 @@ finally:
         let decision = runtime
             .apply_perception_proposal_v1(&request_scope, &full_vector)
             .expect("full vector evidence and neutral slots must commit");
-        let semantic_vector = &decision.semantic_vector_receipt.semantic_vector;
+        let semantic_vector_receipt = decision
+            .semantic_vector_receipt
+            .as_ref()
+            .expect("current semantic commits carry a v2 receipt");
+        let node_observability = decision
+            .node_observability
+            .as_ref()
+            .expect("current semantic commits carry node observability");
+        let semantic_vector = &semantic_vector_receipt.semantic_vector;
         assert_eq!(semantic_vector.dimension_slot_count, 15);
         assert_eq!(semantic_vector.evaluated_dimension_count, 15);
         assert_eq!(semantic_vector.injected_dimension_count, 15);
@@ -4749,10 +4784,10 @@ finally:
         assert_eq!(semantic_vector.unavailable_dimension_count, 0);
         assert!(semantic_vector.state_changed);
         assert_eq!(
-            decision.semantic_vector_receipt.active_nodes,
+            semantic_vector_receipt.active_nodes,
             decision.receipt.active_nodes
         );
-        let projection = &decision.node_observability;
+        let projection = node_observability;
         assert_eq!(projection.schema, NODE_OBSERVABILITY_SCHEMA_V1);
         assert_eq!(projection.revision, decision.revision);
         assert_eq!(projection.field_node_capacity, NEURON_SLOTS as u32);

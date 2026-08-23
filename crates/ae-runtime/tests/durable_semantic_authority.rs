@@ -1308,52 +1308,54 @@ macro_rules! durable_semantic_authority_test_contents {
                 .expect("commit full-vector semantic proposal");
             assert!(!first.deduplicated);
             assert_eq!(first.revision, 1);
+            let first_semantic_vector_receipt = first
+                .semantic_vector_receipt
+                .as_ref()
+                .expect("new full-vector commit carries canonical v2 receipt");
+            let first_node_observability = first
+                .node_observability
+                .as_ref()
+                .expect("new full-vector commit carries node projection");
             assert_eq!(
-                first
-                    .semantic_vector_receipt
+                first_semantic_vector_receipt
                     .semantic_vector
                     .dimension_slot_count,
                 15
             );
             assert_eq!(
-                first
-                    .semantic_vector_receipt
+                first_semantic_vector_receipt
                     .semantic_vector
                     .evaluated_dimension_count,
                 15
             );
             assert_eq!(
-                first
-                    .semantic_vector_receipt
+                first_semantic_vector_receipt
                     .semantic_vector
                     .injected_dimension_count,
                 15
             );
             assert_eq!(
-                first
-                    .semantic_vector_receipt
+                first_semantic_vector_receipt
                     .semantic_vector
                     .unavailable_dimension_count,
                 0
             );
             assert_eq!(
-                first
-                    .semantic_vector_receipt
+                first_semantic_vector_receipt
                     .semantic_vector
                     .nonzero_evidence_dimension_count
-                    + first
-                        .semantic_vector_receipt
+                    + first_semantic_vector_receipt
                         .semantic_vector
                         .neutral_baseline_dimension_count,
                 15
             );
             assert_eq!(
-                first.semantic_vector_receipt.active_nodes,
-                first.node_observability.counts.selected_node_count
+                first_semantic_vector_receipt.active_nodes,
+                first_node_observability.counts.selected_node_count
             );
 
-            let first_v2_bytes = wire::encode_transition_receipt_v2(&first.semantic_vector_receipt);
-            let first_node_observability = first.node_observability.clone();
+            let first_v2_bytes = wire::encode_transition_receipt_v2(first_semantic_vector_receipt);
+            let first_node_observability = first_node_observability.clone();
             let semantic_scope = semantic_persona_scope(&scope);
             let store = Store::open(&database).expect("open durable semantic store");
             let snapshot = store
@@ -1381,10 +1383,15 @@ macro_rules! durable_semantic_authority_test_contents {
             assert!(retry.deduplicated);
             assert_eq!(retry.revision, first.revision);
             assert_eq!(
-                wire::encode_transition_receipt_v2(&retry.semantic_vector_receipt),
+                wire::encode_transition_receipt_v2(
+                    retry
+                        .semantic_vector_receipt
+                        .as_ref()
+                        .expect("durable v2 retry retains canonical receipt"),
+                ),
                 first_v2_bytes
             );
-            assert_eq!(retry.node_observability, first_node_observability);
+            assert_eq!(retry.node_observability, Some(first_node_observability));
             assert_eq!(
                 reopened
                     .semantic_revision_v1(&scope)
@@ -1394,6 +1401,79 @@ macro_rules! durable_semantic_authority_test_contents {
             reopened
                 .flush_and_close()
                 .expect("close restarted semantic runtime");
+        }
+
+        #[test]
+        fn legacy_plain_v1_semantic_snapshot_exact_retry_returns_unattested_success() {
+            let request = request(114);
+            let mut scope = scope_for(&request);
+            scope.session_token = [115; 16];
+            let database = unique_database("legacy-v1-semantic-exact-retry");
+            let mut runtime = AstrRuntime::open(&database).expect("open runtime");
+            runtime.ensure_genesis(&request).expect("commit genesis");
+
+            let proposal = r7_contracts::PerceptionProposalV1 {
+                schema_version: r7_contracts::PerceptionProposalV1::SCHEMA_VERSION,
+                event_id: [116; 16],
+                turn_id: [117; 16],
+                observed_at_ms: request.observed_at_ms,
+                base_revision: 0,
+                dimensions: r7_contracts::EvidenceVector {
+                    positive: Fixed::from_raw(600_000),
+                    affiliation: Fixed::from_raw(400_000),
+                    engagement: Fixed::from_raw(500_000),
+                    ..r7_contracts::EvidenceVector::default()
+                },
+                estimator_confidence: Fixed::from_raw(900_000),
+                protocol_version: r7_contracts::PerceptionProposalV1::PROTOCOL_VERSION,
+                request_nonce_digest: [118; 32],
+            };
+            let first = runtime
+                .apply_perception_proposal_v1(&scope, &proposal)
+                .expect("commit current full-vector semantic proposal");
+            let preserved_receipt = first.receipt.clone();
+            let preserved_revision = first.revision;
+            let preserved_active_nodes = first.receipt.active_nodes;
+            runtime
+                .flush_and_close()
+                .expect("close current semantic runtime");
+            drop(runtime);
+
+            let semantic_scope = semantic_persona_scope(&scope);
+            let mut store = Store::open(&database).expect("open semantic store");
+            let snapshot = store
+                .read_snapshot(&semantic_scope, preserved_revision)
+                .expect("read current semantic snapshot")
+                .expect("current semantic snapshot");
+            assert_eq!(&snapshot.state_bytes[..8], b"AESEMV2\0");
+            let hot_state_len = u32::from_le_bytes(
+                snapshot.state_bytes[10..14]
+                    .try_into()
+                    .expect("v2 hot-state length"),
+            ) as usize;
+            let hot_state_end = 14 + hot_state_len;
+            let legacy_hot_state = snapshot.state_bytes[14..hot_state_end].to_vec();
+            assert_eq!(&legacy_hot_state[..8], b"AEHOTST\0");
+            store
+                .write_snapshot(
+                    &semantic_scope,
+                    preserved_revision,
+                    &preserved_receipt.state_after,
+                    &legacy_hot_state,
+                )
+                .expect("replace only the historical semantic snapshot codec");
+            drop(store);
+
+            let mut reopened = AstrRuntime::open(&database).expect("reopen legacy snapshot");
+            let retry = reopened
+                .apply_perception_proposal_v1(&scope, &proposal)
+                .expect("exact retry of a historical plain-v1 semantic snapshot succeeds");
+            assert!(retry.deduplicated);
+            assert_eq!(retry.revision, preserved_revision);
+            assert_eq!(retry.receipt, preserved_receipt);
+            assert_eq!(retry.receipt.active_nodes, preserved_active_nodes);
+            assert!(retry.semantic_vector_receipt.is_none());
+            assert!(retry.node_observability.is_none());
         }
 
         #[test]

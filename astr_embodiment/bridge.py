@@ -815,7 +815,14 @@ def _validate_semantic_result(
         _SEMANTIC_RESULT_FULL_VECTOR_FIELDS,
         _SEMANTIC_RESULT_FULL_VECTOR_WITH_EXPRESSION_FIELDS,
     }:
-        full_vector = True
+        # A current PyO3 closure always carries both independent v2
+        # projections.  A historical v1 snapshot intentionally has both keys
+        # with null values so callers can distinguish its unattested retry
+        # from a malformed partial v2 payload.
+        full_vector = (
+            payload.get("semantic_vector_receipt") is not None
+            or payload.get("node_observability") is not None
+        )
     elif payload_fields in {
         _SEMANTIC_RESULT_LEGACY_CANONICAL_FIELDS,
         _SEMANTIC_RESULT_LEGACY_CANONICAL_WITH_EXPRESSION_FIELDS,

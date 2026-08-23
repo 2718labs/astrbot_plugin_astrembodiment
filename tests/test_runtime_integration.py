@@ -1678,6 +1678,49 @@ def test_detailed_switch_selects_complete_v3_json(
     assert "residuals_fxp6" not in record
 
 
+def test_detailed_log_warns_for_unattested_legacy_v1_exact_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance = plugin(
+        FakeConfig(node_observability_detailed_logging=True),
+        FakeContext(),
+    )
+    outcome = _spc1_full_vector_success_outcome()
+    outcome["diagnostic"] = dict(outcome["diagnostic"]) | {
+        "commit_state": "CONFIRMED_EXISTING",
+        "deduplicated": True,
+    }
+    outcome["result"] = dict(outcome["result"]) | {
+        "semantic_vector_receipt": None,
+        "node_observability": None,
+        "full_vector_state": "LEGACY_UNATTESTED",
+        "node_observability_state": "UNAVAILABLE",
+        "deduplicated": True,
+    }
+
+    instance._emit_semantic_observatory(
+        outcome, {"status": "SUCCESS", "code": "SEMANTIC_COMMITTED"}
+    )
+
+    assert recorder.info_messages == []
+    assert len(recorder.warning_messages) == 1
+    prefix = "AstrEmbodiment SPC1 observatory: "
+    assert recorder.warning_messages[0].startswith(prefix)
+    record = json.loads(recorder.warning_messages[0][len(prefix) :])
+    assert record["status"] == "SUCCESS"
+    assert record["code"] == "SEMANTIC_COMMITTED"
+    assert record["revision"] == 8
+    assert record["deduplicated"] is True
+    assert record["full_vector_state"] == "LEGACY_UNATTESTED"
+    assert record["semantic_vector"] is None
+    assert record["node_observability_state"] == "UNAVAILABLE"
+    assert record["node_observability"] is None
+    assert record["native_calculation"] is None
+    assert record["calculation_state"] == "FAILED"
+
+
 @pytest.mark.parametrize("detailed", [False, True])
 def test_failure_is_logged_with_code_and_stage_in_both_modes(
     monkeypatch: pytest.MonkeyPatch, detailed: bool

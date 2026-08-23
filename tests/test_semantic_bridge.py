@@ -483,6 +483,37 @@ def test_bridge_marks_v1_semantic_receipt_legacy_unattested() -> None:
     }
 
 
+def test_bridge_preserves_pyo3_legacy_v1_retry_with_null_v2_projections() -> None:
+    raw_result = _valid_result(deduplicated=True)
+    raw_result["receipt"]["active_nodes"] = 17
+    raw_result |= {
+        "semantic_vector_receipt": None,
+        "node_observability": None,
+    }
+
+    class Native:
+        def apply_perception_proposal_v1(self, _scope: str, _proposal: str) -> str:
+            return json.dumps(raw_result)
+
+    bridge = NativeBridge()
+    bridge._native = Native()
+
+    result = bridge.apply_perception_proposal_v1(
+        _scope().scope_json(), json.dumps(_proposal())
+    )
+
+    assert result == raw_result | {
+        "full_vector_state": "LEGACY_UNATTESTED",
+        "node_observability_state": "UNAVAILABLE",
+    }
+    assert result["receipt"] == raw_result["receipt"]
+    assert result["receipt"]["active_nodes"] == 17
+    assert result["revision"] == raw_result["revision"]
+    assert result["deduplicated"] is True
+    assert result["semantic_vector_receipt"] is None
+    assert result["node_observability"] is None
+
+
 def test_bridge_discards_invalid_node_projection_as_rejected() -> None:
     raw_result = _valid_full_vector_result()
     raw_result["node_observability"] = {"raw_text": "RAW_SENTINEL"}

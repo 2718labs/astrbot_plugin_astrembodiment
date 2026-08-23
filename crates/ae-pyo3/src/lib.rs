@@ -123,22 +123,32 @@ fn semantic_perception_payload(
         ];
         receipt_object.retain(|key, _| CLOSED_RECEIPT_FIELDS.contains(&key.as_str()));
     }
-    let semantic_vector = &decision.semantic_vector_receipt.semantic_vector;
-    let node_observability = serde_json::to_value(&decision.node_observability)?;
+    let semantic_vector_receipt = decision
+        .semantic_vector_receipt
+        .as_ref()
+        .map(|receipt| {
+            let semantic_vector = &receipt.semantic_vector;
+            serde_json::json!({
+                "schema": ae_contracts::SEMANTIC_VECTOR_RECEIPT_SCHEMA_V2,
+                "formula": semantic_vector.formula,
+                "dimension_slot_count": semantic_vector.dimension_slot_count,
+                "evaluated_dimension_count": semantic_vector.evaluated_dimension_count,
+                "injected_dimension_count": semantic_vector.injected_dimension_count,
+                "nonzero_evidence_dimension_count": semantic_vector.nonzero_evidence_dimension_count,
+                "neutral_baseline_dimension_count": semantic_vector.neutral_baseline_dimension_count,
+                "unavailable_dimension_count": semantic_vector.unavailable_dimension_count,
+                "state_changed": semantic_vector.state_changed,
+            })
+        })
+        .unwrap_or(serde_json::Value::Null);
+    let node_observability = match decision.node_observability.as_ref() {
+        Some(projection) => serde_json::to_value(projection)?,
+        None => serde_json::Value::Null,
+    };
     Ok(serde_json::json!({
         "schema": "astrembodiment.semantic-perception-closure.v1",
         "receipt": receipt,
-        "semantic_vector_receipt": {
-            "schema": ae_contracts::SEMANTIC_VECTOR_RECEIPT_SCHEMA_V2,
-            "formula": semantic_vector.formula,
-            "dimension_slot_count": semantic_vector.dimension_slot_count,
-            "evaluated_dimension_count": semantic_vector.evaluated_dimension_count,
-            "injected_dimension_count": semantic_vector.injected_dimension_count,
-            "nonzero_evidence_dimension_count": semantic_vector.nonzero_evidence_dimension_count,
-            "neutral_baseline_dimension_count": semantic_vector.neutral_baseline_dimension_count,
-            "unavailable_dimension_count": semantic_vector.unavailable_dimension_count,
-            "state_changed": semantic_vector.state_changed,
-        },
+        "semantic_vector_receipt": semantic_vector_receipt,
         "node_observability": node_observability,
         "revision": decision.revision,
         "deduplicated": decision.deduplicated,
@@ -586,8 +596,8 @@ mod native_private_projection_absence_tests {
     fn semantic_perception_payload_exposes_bounded_v2_receipt_and_observability() {
         let decision = ae_runtime::PerceptionProposalDecisionV1 {
             receipt: semantic_test_receipt(),
-            semantic_vector_receipt: semantic_test_vector_receipt(),
-            node_observability: semantic_test_node_observability(),
+            semantic_vector_receipt: Some(semantic_test_vector_receipt()),
+            node_observability: Some(semantic_test_node_observability()),
             revision: 1,
             deduplicated: false,
             expression_projection: ae_runtime::ExpressionProjectionV1 {
@@ -735,6 +745,42 @@ mod native_private_projection_absence_tests {
         let parse_error = parse_semantic_proposal_json(malformed).expect_err("malformed proposal");
         assert_eq!(parse_error, "invalid perception proposal");
         assert!(!parse_error.contains("RAW_TEXT_SENTINEL"));
+    }
+
+    #[test]
+    fn semantic_perception_payload_preserves_unattested_legacy_v1_retry() {
+        let receipt = semantic_test_receipt();
+        let decision = ae_runtime::PerceptionProposalDecisionV1 {
+            receipt: receipt.clone(),
+            semantic_vector_receipt: None,
+            node_observability: None,
+            revision: receipt.next_revision,
+            deduplicated: true,
+            expression_projection: ae_runtime::ExpressionProjectionV1 {
+                revision: receipt.next_revision,
+                profile_fxp6: ae_runtime::ExpressionProfileFxP6 {
+                    warmth: 0,
+                    sensitivity: 0,
+                    guardedness: 0,
+                    repair_orientation: 0,
+                    engagement: 0,
+                    epistemic_caution: 0,
+                },
+            },
+        };
+
+        let payload = semantic_perception_payload(&decision).expect("legacy retry payload");
+        let mut expected_receipt = serde_json::to_value(&receipt).expect("test receipt JSON");
+        expected_receipt
+            .as_object_mut()
+            .expect("receipt object")
+            .remove("action_contract");
+        assert_eq!(payload["receipt"], expected_receipt);
+        assert_eq!(payload["revision"], receipt.next_revision);
+        assert_eq!(payload["deduplicated"], true);
+        assert!(payload["semantic_vector_receipt"].is_null());
+        assert!(payload["node_observability"].is_null());
+        assert!(payload["receipt"].get("action_contract").is_none());
     }
 
     struct AlwaysFailsSerialization;
