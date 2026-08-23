@@ -18,6 +18,7 @@ pub const GRAPH_REPLAY_FORMULA_V1: u16 = 1;
 
 const V1_OPERATOR_TYPE_COUNT: u8 = 4;
 const V1_DELAY_CLASS_COUNT: u8 = 8;
+const GRAPH_REPLAY_RULE_DIGEST_V1: Digest = [7; 32];
 
 /// A complete, canonical graph checkpoint.
 ///
@@ -142,6 +143,9 @@ fn replay_snapshot(
     let mut expected_delta_sequence = 1u64;
 
     for delta in deltas {
+        if delta.rule_digest != GRAPH_REPLAY_RULE_DIGEST_V1 {
+            return Err(GraphReplayError::DeltaRejected);
+        }
         if delta.base_revision != revision {
             return Err(GraphReplayError::RevisionDiscontinuity);
         }

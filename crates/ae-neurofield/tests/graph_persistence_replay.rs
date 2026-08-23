@@ -118,6 +118,38 @@ fn replay_rejects_deletion_or_tampering_of_every_persisted_delta() {
 }
 
 #[test]
+fn replay_rejects_rule_digest_only_tampering() {
+    let (history, _, _) = sealed_history();
+    let mut tampered = history.clone();
+    tampered.deltas[0].rule_digest[0] ^= 0x80;
+
+    assert_eq!(tampered.anchor, history.anchor);
+    assert_eq!(tampered.authoritative, history.authoritative);
+    assert_eq!(
+        tampered.deltas[0].base_revision,
+        history.deltas[0].base_revision
+    );
+    assert_eq!(
+        tampered.deltas[0].base_graph_digest,
+        history.deltas[0].base_graph_digest
+    );
+    assert_eq!(
+        tampered.deltas[0].delta_sequence,
+        history.deltas[0].delta_sequence
+    );
+    assert_eq!(tampered.deltas[0].operations, history.deltas[0].operations);
+    assert_eq!(
+        tampered.deltas[0].after_graph_digest,
+        history.deltas[0].after_graph_digest
+    );
+    assert_eq!(tampered.deltas[1..], history.deltas[1..]);
+    assert!(
+        matches!(tampered.reopen(), Err(GraphReplayError::DeltaRejected)),
+        "changing only a persisted rule digest must fail closed"
+    );
+}
+
+#[test]
 fn replay_rejects_formula_revision_digest_and_noncanonical_snapshot_mismatches() {
     let (history, _, _) = sealed_history();
 
