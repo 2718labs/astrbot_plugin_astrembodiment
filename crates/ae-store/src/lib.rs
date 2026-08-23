@@ -8,6 +8,9 @@
 //! Identity-bearing data is stored as canonical binary bytes; JSON is used
 //! only for debugging provenance columns.
 
+pub mod continuity_vault;
+pub use continuity_vault::{locate_vault, VaultLocateError, VaultLocation, VaultMode};
+
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
     wire, Digest, GenesisManifest, GenesisReceipt, GenesisStatus, PersonaSourceRef,
