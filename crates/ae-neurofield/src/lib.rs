@@ -12,6 +12,10 @@ use ae_contracts::{wire, Digest, GenesisManifest};
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
 
+mod graph_development;
+
+pub use graph_development::{develop_graph, GraphDevelopmentError, GraphFormula};
+
 pub const NEURON_SLOTS: usize = 16_384;
 pub const EDGE_CAPACITY: usize = 524_288;
 pub const NODE_DOF: usize = 8;
@@ -100,9 +104,31 @@ pub struct SparseGraph {
 
 impl SparseGraph {
     pub fn validate(&self) -> bool {
-        self.edges.len() <= EDGE_CAPACITY
-            && self.row_offsets.len() == NEURON_SLOTS + 1
-            && self.row_offsets.last().copied().unwrap_or(0) as usize == self.edges.len()
+        if self.edges.len() > EDGE_CAPACITY
+            || self.row_offsets.len() != NEURON_SLOTS + 1
+            || self.row_offsets.first().copied() != Some(0)
+            || self.row_offsets.last().copied().unwrap_or(0) as usize != self.edges.len()
+        {
+            return false;
+        }
+
+        for source in 0..NEURON_SLOTS {
+            let start = self.row_offsets[source] as usize;
+            let end = self.row_offsets[source + 1] as usize;
+            if start > end || end > self.edges.len() {
+                return false;
+            }
+            let mut previous_target = None;
+            for edge in &self.edges[start..end] {
+                if edge.target as usize >= NEURON_SLOTS
+                    || previous_target.is_some_and(|previous| previous >= edge.target)
+                {
+                    return false;
+                }
+                previous_target = Some(edge.target);
+            }
+        }
+        true
     }
 
     pub fn empty() -> Self {
@@ -189,28 +215,9 @@ pub fn state_digest(field: &NeuralField, formula_digest: &Digest) -> Digest {
     wire::domain_hash(wire::STATE_DOMAIN, &[&body])
 }
 
-fn encode_synapse(out: &mut Vec<u8>, synapse: &Synapse) {
-    out.extend_from_slice(&synapse.target.to_le_bytes());
-    out.extend_from_slice(&synapse.weight.to_le_bytes());
-    out.extend_from_slice(&synapse.eligibility.to_le_bytes());
-    out.extend_from_slice(&synapse.stability.to_le_bytes());
-    out.extend_from_slice(&synapse.last_used_epoch.to_le_bytes());
-    out.push(synapse.operator_id);
-    out.push(synapse.delay_class);
-    out.extend_from_slice(&synapse.flags.to_le_bytes());
-}
-
 /// Canonical graph digest over row offsets and packed edges.
 pub fn graph_digest(graph: &SparseGraph) -> Digest {
-    let mut body = Vec::with_capacity(graph.row_offsets.len() * 4 + graph.edges.len() * 16);
-    body.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
-    for offset in &graph.row_offsets {
-        body.extend_from_slice(&offset.to_le_bytes());
-    }
-    body.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
-    for edge in &graph.edges {
-        encode_synapse(&mut body, edge);
-    }
+    let body = graph.canonical_bytes();
     wire::domain_hash(wire::GRAPH_DOMAIN, &[&body])
 }
 
