@@ -8,6 +8,9 @@ use sha2::Sha256;
 const DIMENSION_COUNT: usize = 15;
 const MAX_TURNS_PER_RELATION: i64 = 32;
 const MAX_RELATIONS: i64 = 8;
+const PROJECTION_STATE_MAGIC: &[u8; 8] = b"AECPSTV1";
+const PROJECTION_STATE_SCHEMA_VERSION: u32 = 1;
+const PROJECTION_TURN_BYTES_LEN: usize = 16 + 32 + 8 + (DIMENSION_COUNT * 8) + 1 + 1 + 8 + 1;
 const RELATION_HMAC_KEY: [u8; 32] = [
     0x6d, 0x18, 0x4a, 0xf3, 0x82, 0x97, 0x51, 0x0c, 0x34, 0xbe, 0x76, 0x29, 0xd1, 0x45, 0xa8, 0x63,
     0x9b, 0x27, 0xce, 0x40, 0x75, 0x1f, 0xe2, 0x5a, 0xb4, 0x08, 0x9d, 0x36, 0xc1, 0x7e, 0x52, 0xfa,
@@ -89,6 +92,148 @@ impl ContextSummaryV1 {
         };
         summary.summary_digest = Self::digest_of(&summary.canonical_bytes());
         summary
+    }
+}
+
+/// A sealed, bounded, aggregate-only state for projecting one relation's next
+/// context summary.  It deliberately contains no raw turn content, entity,
+/// provider, platform, or path data, so the authority writer can persist its
+/// canonical bytes without importing this crate's SQLite implementation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextProjectionStateV1 {
+    relation_hmac: [u8; 32],
+    summary_revision: u32,
+    turns: Vec<ProjectionTurnV1>,
+    summary: ContextSummaryV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectionTurnV1 {
+    event_id: [u8; 16],
+    receipt_digest: [u8; 32],
+    source_continuum_revision: u64,
+    dimensions_fxp6: [i64; DIMENSION_COUNT],
+    unresolved_boundary: bool,
+    unresolved_repair: bool,
+    repetition_increment: u64,
+    delivery_outcome: DeliveryOutcome,
+}
+
+impl ContextProjectionStateV1 {
+    pub fn summary(&self) -> &ContextSummaryV1 {
+        &self.summary
+    }
+
+    pub fn relation_hmac(&self) -> [u8; 32] {
+        self.relation_hmac
+    }
+
+    pub fn canonical_state_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(
+            PROJECTION_STATE_MAGIC.len()
+                + 4
+                + 32
+                + 4
+                + 4
+                + (self.turns.len() * PROJECTION_TURN_BYTES_LEN),
+        );
+        bytes.extend_from_slice(PROJECTION_STATE_MAGIC);
+        bytes.extend_from_slice(&PROJECTION_STATE_SCHEMA_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.relation_hmac);
+        bytes.extend_from_slice(&self.summary_revision.to_le_bytes());
+        bytes.extend_from_slice(&(self.turns.len() as u32).to_le_bytes());
+        for turn in &self.turns {
+            bytes.extend_from_slice(&turn.event_id);
+            bytes.extend_from_slice(&turn.receipt_digest);
+            bytes.extend_from_slice(&turn.source_continuum_revision.to_le_bytes());
+            bytes.extend_from_slice(&encode_dimensions(&turn.dimensions_fxp6));
+            bytes.push(u8::from(turn.unresolved_boundary));
+            bytes.push(u8::from(turn.unresolved_repair));
+            bytes.extend_from_slice(&turn.repetition_increment.to_le_bytes());
+            bytes.push(turn.delivery_outcome as u8);
+        }
+        bytes
+    }
+
+    pub fn try_from_canonical_state_bytes(bytes: &[u8]) -> Result<Self, StoreError> {
+        let header_len = PROJECTION_STATE_MAGIC.len() + 4 + 32 + 4 + 4;
+        if bytes.len() < header_len
+            || &bytes[..PROJECTION_STATE_MAGIC.len()] != PROJECTION_STATE_MAGIC
+        {
+            return Err(StoreError::CorruptPayload);
+        }
+        let mut offset = PROJECTION_STATE_MAGIC.len();
+        let schema_version = read_u32(bytes, &mut offset)?;
+        if schema_version != PROJECTION_STATE_SCHEMA_VERSION {
+            return Err(StoreError::CorruptPayload);
+        }
+        let relation_hmac = read_32(bytes, &mut offset)?;
+        if relation_hmac == [0; 32] {
+            return Err(StoreError::CorruptPayload);
+        }
+        let summary_revision = read_u32(bytes, &mut offset)?;
+        if summary_revision == 0 {
+            return Err(StoreError::CorruptPayload);
+        }
+        let turn_count = usize::try_from(read_u32(bytes, &mut offset)?)
+            .map_err(|_| StoreError::CorruptPayload)?;
+        if turn_count == 0 || turn_count > MAX_TURNS_PER_RELATION as usize {
+            return Err(StoreError::CorruptPayload);
+        }
+        let expected_len = header_len
+            .checked_add(
+                turn_count
+                    .checked_mul(PROJECTION_TURN_BYTES_LEN)
+                    .ok_or(StoreError::CorruptPayload)?,
+            )
+            .ok_or(StoreError::CorruptPayload)?;
+        if bytes.len() != expected_len {
+            return Err(StoreError::CorruptPayload);
+        }
+
+        let mut turns = Vec::with_capacity(turn_count);
+        let mut previous_source_revision = 0_u64;
+        for _ in 0..turn_count {
+            let event_id = read_16(bytes, &mut offset)?;
+            let receipt_digest = read_32(bytes, &mut offset)?;
+            let source_continuum_revision = read_u64(bytes, &mut offset)?;
+            let dimensions_fxp6 = read_dimensions(bytes, &mut offset)?;
+            let unresolved_boundary = read_bool(bytes, &mut offset)?;
+            let unresolved_repair = read_bool(bytes, &mut offset)?;
+            let repetition_increment = read_u64(bytes, &mut offset)?;
+            let delivery_outcome =
+                DeliveryOutcome::from_code(i64::from(read_u8(bytes, &mut offset)?))?;
+            if event_id == [0; 16]
+                || receipt_digest == [0; 32]
+                || source_continuum_revision == 0
+                || source_continuum_revision <= previous_source_revision
+                || dimensions_fxp6.iter().any(|dimension| {
+                    *dimension < 0 || *dimension > ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6
+                })
+                || repetition_increment == 0
+                || repetition_increment > ValidatedCommittedReceiptV1::MAX_REPETITION_INCREMENT
+            {
+                return Err(StoreError::CorruptPayload);
+            }
+            previous_source_revision = source_continuum_revision;
+            turns.push(ProjectionTurnV1 {
+                event_id,
+                receipt_digest,
+                source_continuum_revision,
+                dimensions_fxp6,
+                unresolved_boundary,
+                unresolved_repair,
+                repetition_increment,
+                delivery_outcome,
+            });
+        }
+        let summary = summary_from_projection_turns(&turns, summary_revision)?;
+        Ok(Self {
+            relation_hmac,
+            summary_revision,
+            turns,
+            summary,
+        })
     }
 }
 
@@ -178,6 +323,75 @@ impl ValidatedCommittedReceiptV1 {
         bytes.push(self.delivery_outcome as u8);
         *blake3::hash(&bytes).as_bytes()
     }
+}
+
+/// Project one already-validated committed receipt without opening or writing
+/// a database.  The returned bytes are sealed aggregate state for the single
+/// authority writer; callers must persist them atomically with the receipt.
+pub fn project_committed_receipt(
+    previous_state: Option<&[u8]>,
+    receipt: &ValidatedCommittedReceiptV1,
+) -> Result<ContextProjectionStateV1, StoreError> {
+    let previous = previous_state
+        .map(ContextProjectionStateV1::try_from_canonical_state_bytes)
+        .transpose()?;
+    project_from_previous(previous, receipt)
+}
+
+fn project_from_previous(
+    previous: Option<ContextProjectionStateV1>,
+    receipt: &ValidatedCommittedReceiptV1,
+) -> Result<ContextProjectionStateV1, StoreError> {
+    let expected_relation_hmac = relation_hmac(receipt.relation_token);
+    let (mut turns, summary_revision) = match previous {
+        Some(previous) => {
+            if previous.relation_hmac != expected_relation_hmac {
+                return Err(StoreError::CorruptPayload);
+            }
+            if let Some(existing) = previous
+                .turns
+                .iter()
+                .find(|turn| turn.event_id == receipt.event_id)
+            {
+                if existing.receipt_digest != receipt.canonical_digest() {
+                    return Err(StoreError::EventIdentityConflict);
+                }
+                return Ok(previous);
+            }
+            if receipt.source_continuum_revision <= previous.summary.source_continuum_revision {
+                return Err(StoreError::StaleSourceRevision);
+            }
+            (
+                previous.turns,
+                previous
+                    .summary_revision
+                    .checked_add(1)
+                    .ok_or(StoreError::SummaryRevisionOverflow)?,
+            )
+        }
+        None => (Vec::new(), 1),
+    };
+
+    turns.push(ProjectionTurnV1 {
+        event_id: receipt.event_id,
+        receipt_digest: receipt.canonical_digest(),
+        source_continuum_revision: receipt.source_continuum_revision,
+        dimensions_fxp6: receipt.dimensions_fxp6,
+        unresolved_boundary: receipt.unresolved_boundary,
+        unresolved_repair: receipt.unresolved_repair,
+        repetition_increment: receipt.repetition_increment,
+        delivery_outcome: receipt.delivery_outcome,
+    });
+    if turns.len() > MAX_TURNS_PER_RELATION as usize {
+        turns.remove(0);
+    }
+    let summary = summary_from_projection_turns(&turns, summary_revision)?;
+    Ok(ContextProjectionStateV1 {
+        relation_hmac: expected_relation_hmac,
+        summary_revision,
+        turns,
+        summary,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,13 +508,8 @@ impl ContextSummaryStore {
         }
 
         let transaction = self.connection.transaction()?;
-        let previous_summary = summary_for_hmac(&transaction, &relation_hmac)?;
-        if let Some(summary) = &previous_summary {
-            if receipt.source_continuum_revision <= summary.source_continuum_revision {
-                return Err(StoreError::StaleSourceRevision);
-            }
-        }
-        let relation_exists = previous_summary.is_some();
+        let previous = projection_state_for_hmac(&transaction, &relation_hmac)?;
+        let relation_exists = previous.is_some();
         if !relation_exists && relation_count(&transaction)? >= MAX_RELATIONS {
             let evicted: Vec<u8> = transaction.query_row(
                 "SELECT relation_hmac FROM relation_summaries ORDER BY relation_hmac ASC LIMIT 1",
@@ -317,30 +526,25 @@ impl ContextSummaryStore {
             )?;
         }
 
-        let next_revision = match previous_summary {
-            Some(summary) => summary
-                .summary_revision
-                .checked_add(1)
-                .ok_or(StoreError::SummaryRevisionOverflow)?,
-            None => 1,
-        };
+        let projected = project_from_previous(previous, receipt)?;
+        let latest = projected.turns.last().ok_or(StoreError::CorruptPayload)?;
 
         transaction.execute(
             "INSERT INTO relation_turns (
                 relation_hmac, event_id, receipt_digest, source_continuum_revision, dimensions_fxp6,
                 unresolved_boundary, unresolved_repair, repetition_increment, delivery_outcome
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &relation_hmac[..],
-                &receipt.event_id[..],
-                &receipt_digest[..],
-                receipt.source_continuum_revision.to_le_bytes().to_vec(),
-                encode_dimensions(&receipt.dimensions_fxp6),
-                i64::from(receipt.unresolved_boundary),
-                i64::from(receipt.unresolved_repair),
-                i64::try_from(receipt.repetition_increment)
+                &latest.event_id[..],
+                &latest.receipt_digest[..],
+                latest.source_continuum_revision.to_le_bytes().to_vec(),
+                encode_dimensions(&latest.dimensions_fxp6),
+                i64::from(latest.unresolved_boundary),
+                i64::from(latest.unresolved_repair),
+                i64::try_from(latest.repetition_increment)
                     .map_err(|_| StoreError::CorruptPayload)?,
-                receipt.delivery_outcome as i64,
+                latest.delivery_outcome as i64,
             ],
         )?;
         transaction.execute(
@@ -355,7 +559,7 @@ impl ContextSummaryStore {
             params![&relation_hmac[..], MAX_TURNS_PER_RELATION],
         )?;
 
-        let summary = summary_from_turns(&transaction, &relation_hmac, next_revision)?;
+        let summary = projected.summary();
         transaction.execute(
             "INSERT INTO relation_summaries (
                 relation_hmac, summary_revision, source_continuum_revision, dimensions_ema_fxp6,
@@ -383,7 +587,7 @@ impl ContextSummaryStore {
             ],
         )?;
         transaction.commit()?;
-        Ok(summary)
+        Ok(summary.clone())
     }
 
     pub fn summary_for_relation(
@@ -486,55 +690,102 @@ fn summary_for_hmac(
     Ok(Some(summary))
 }
 
-fn summary_from_turns(
+fn projection_state_for_hmac(
     connection: &Connection,
     relation_hmac: &[u8; 32],
-    summary_revision: u32,
-) -> Result<ContextSummaryV1, StoreError> {
+) -> Result<Option<ContextProjectionStateV1>, StoreError> {
+    let Some(stored_summary) = summary_for_hmac(connection, relation_hmac)? else {
+        return Ok(None);
+    };
     let mut statement = connection.prepare(
-        "SELECT source_continuum_revision, dimensions_fxp6, unresolved_boundary,
-                unresolved_repair, repetition_increment, delivery_outcome
+        "SELECT event_id, receipt_digest, source_continuum_revision, dimensions_fxp6,
+                unresolved_boundary, unresolved_repair, repetition_increment, delivery_outcome
          FROM relation_turns WHERE relation_hmac = ?1 ORDER BY sequence ASC",
     )?;
     let mut rows = statement.query(params![&relation_hmac[..]])?;
+    let mut turns = Vec::new();
+    while let Some(row) = rows.next()? {
+        let event_id: Vec<u8> = row.get(0)?;
+        let receipt_digest: Vec<u8> = row.get(1)?;
+        let source_revision: Vec<u8> = row.get(2)?;
+        let dimensions: Vec<u8> = row.get(3)?;
+        let row_unresolved_boundary: i64 = row.get(4)?;
+        let row_unresolved_repair: i64 = row.get(5)?;
+        let row_repetition_increment: i64 = row.get(6)?;
+        let row_delivery_outcome: i64 = row.get(7)?;
+        if row_repetition_increment < 0 {
+            return Err(StoreError::CorruptPayload);
+        }
+        turns.push(ProjectionTurnV1 {
+            event_id: event_id
+                .try_into()
+                .map_err(|_| StoreError::CorruptPayload)?,
+            receipt_digest: receipt_digest
+                .try_into()
+                .map_err(|_| StoreError::CorruptPayload)?,
+            source_continuum_revision: decode_u64(&source_revision)?,
+            dimensions_fxp6: decode_dimensions(&dimensions)?,
+            unresolved_boundary: row_unresolved_boundary != 0,
+            unresolved_repair: row_unresolved_repair != 0,
+            repetition_increment: u64::try_from(row_repetition_increment)
+                .map_err(|_| StoreError::CorruptPayload)?,
+            delivery_outcome: DeliveryOutcome::from_code(row_delivery_outcome)?,
+        });
+    }
+    if turns.is_empty() || turns.len() > MAX_TURNS_PER_RELATION as usize {
+        return Err(StoreError::CorruptPayload);
+    }
+    let summary = summary_from_projection_turns(&turns, stored_summary.summary_revision)?;
+    if summary != stored_summary {
+        return Err(StoreError::CorruptPayload);
+    }
+    Ok(Some(ContextProjectionStateV1 {
+        relation_hmac: *relation_hmac,
+        summary_revision: summary.summary_revision,
+        turns,
+        summary,
+    }))
+}
+
+fn summary_from_projection_turns(
+    turns: &[ProjectionTurnV1],
+    summary_revision: u32,
+) -> Result<ContextSummaryV1, StoreError> {
+    if turns.is_empty() {
+        return Err(StoreError::CorruptPayload);
+    }
     let mut dimensions_ema_fxp6 = [0; DIMENSION_COUNT];
     let mut source_continuum_revision = 0;
     let mut unresolved_boundary = false;
     let mut unresolved_repair = false;
     let mut repetition_count = 0_u64;
     let mut delivery_outcome = DeliveryOutcome::Pending;
-    let mut turn_index = 0_u32;
-
-    while let Some(row) = rows.next()? {
-        let source_revision: Vec<u8> = row.get(0)?;
-        let dimensions: Vec<u8> = row.get(1)?;
-        let row_unresolved_boundary: i64 = row.get(2)?;
-        let row_unresolved_repair: i64 = row.get(3)?;
-        let row_repetition_increment: i64 = row.get(4)?;
-        let row_delivery_outcome: i64 = row.get(5)?;
-        if row_repetition_increment < 0 {
+    for (turn_index, turn) in turns.iter().enumerate() {
+        if turn.source_continuum_revision == 0
+            || (turn_index > 0
+                && turn.source_continuum_revision
+                    <= turns[turn_index - 1].source_continuum_revision)
+            || turn.dimensions_fxp6.iter().any(|dimension| {
+                *dimension < 0 || *dimension > ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6
+            })
+            || turn.repetition_increment == 0
+            || turn.repetition_increment > ValidatedCommittedReceiptV1::MAX_REPETITION_INCREMENT
+        {
             return Err(StoreError::CorruptPayload);
         }
-
-        let dimensions = decode_dimensions(&dimensions)?;
         if turn_index == 0 {
-            dimensions_ema_fxp6 = dimensions;
+            dimensions_ema_fxp6 = turn.dimensions_fxp6;
         } else {
-            for (ema, sample) in dimensions_ema_fxp6.iter_mut().zip(dimensions) {
+            for (ema, sample) in dimensions_ema_fxp6.iter_mut().zip(turn.dimensions_fxp6) {
                 let next = ((*ema as i128) * 7 + (sample as i128)) / 8;
                 *ema = next.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
             }
         }
-        source_continuum_revision = decode_u64(&source_revision)?;
-        unresolved_boundary |= row_unresolved_boundary != 0;
-        unresolved_repair |= row_unresolved_repair != 0;
-        repetition_count = repetition_count.saturating_add(row_repetition_increment as u64);
-        delivery_outcome = DeliveryOutcome::from_code(row_delivery_outcome)?;
-        turn_index += 1;
-    }
-
-    if turn_index == 0 {
-        return Err(StoreError::CorruptPayload);
+        source_continuum_revision = turn.source_continuum_revision;
+        unresolved_boundary |= turn.unresolved_boundary;
+        unresolved_repair |= turn.unresolved_repair;
+        repetition_count = repetition_count.saturating_add(turn.repetition_increment);
+        delivery_outcome = turn.delivery_outcome;
     }
     Ok(ContextSummaryV1::new(
         summary_revision,
@@ -574,4 +825,51 @@ fn decode_u64(encoded: &[u8]) -> Result<u64, StoreError> {
 
 fn decode_32(encoded: &[u8]) -> Result<[u8; 32], StoreError> {
     encoded.try_into().map_err(|_| StoreError::CorruptPayload)
+}
+
+fn read_exact<const N: usize>(bytes: &[u8], offset: &mut usize) -> Result<[u8; N], StoreError> {
+    let end = offset.checked_add(N).ok_or(StoreError::CorruptPayload)?;
+    let value = bytes
+        .get(*offset..end)
+        .ok_or(StoreError::CorruptPayload)?
+        .try_into()
+        .map_err(|_| StoreError::CorruptPayload)?;
+    *offset = end;
+    Ok(value)
+}
+
+fn read_u8(bytes: &[u8], offset: &mut usize) -> Result<u8, StoreError> {
+    Ok(read_exact::<1>(bytes, offset)?[0])
+}
+
+fn read_bool(bytes: &[u8], offset: &mut usize) -> Result<bool, StoreError> {
+    match read_u8(bytes, offset)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(StoreError::CorruptPayload),
+    }
+}
+
+fn read_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, StoreError> {
+    Ok(u32::from_le_bytes(read_exact::<4>(bytes, offset)?))
+}
+
+fn read_u64(bytes: &[u8], offset: &mut usize) -> Result<u64, StoreError> {
+    Ok(u64::from_le_bytes(read_exact::<8>(bytes, offset)?))
+}
+
+fn read_16(bytes: &[u8], offset: &mut usize) -> Result<[u8; 16], StoreError> {
+    read_exact::<16>(bytes, offset)
+}
+
+fn read_32(bytes: &[u8], offset: &mut usize) -> Result<[u8; 32], StoreError> {
+    read_exact::<32>(bytes, offset)
+}
+
+fn read_dimensions(bytes: &[u8], offset: &mut usize) -> Result<[i64; DIMENSION_COUNT], StoreError> {
+    let mut dimensions = [0; DIMENSION_COUNT];
+    for dimension in &mut dimensions {
+        *dimension = i64::from_le_bytes(read_exact::<8>(bytes, offset)?);
+    }
+    Ok(dimensions)
 }

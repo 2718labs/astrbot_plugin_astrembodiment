@@ -12,6 +12,7 @@ members = [
   "crates/ae-agent",
   "crates/ae-continuum",
   "crates/ae-store",
+  "crates/ae-context-projector",
   "crates/ae-runtime",
   "crates/ae-pyo3",
 ]
@@ -41,4 +42,5 @@ ae-renorm = { path = "crates/ae-renorm" }
 ae-agent = { path = "crates/ae-agent" }
 ae-continuum = { path = "crates/ae-continuum" }
 ae-store = { path = "crates/ae-store" }
+ae-context-projector = { path = "crates/ae-context-projector" }
 ae-runtime = { path = "crates/ae-runtime" }

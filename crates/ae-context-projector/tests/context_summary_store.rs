@@ -2,8 +2,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ae_context_projector::{
-    ContextSummaryStore, ContextSummaryV1, DeliveryOutcome, ReceiptCommitStatus, ReceiptEnvelopeV1,
-    ReceiptValidationError, StoreError, ValidatedCommittedReceiptV1,
+    project_committed_receipt, ContextSummaryStore, ContextSummaryV1, DeliveryOutcome,
+    ReceiptCommitStatus, ReceiptEnvelopeV1, ReceiptValidationError, StoreError,
+    ValidatedCommittedReceiptV1,
 };
 
 static NEXT_DB: AtomicU64 = AtomicU64::new(1);
@@ -132,6 +133,42 @@ fn committed_receipt_replay_is_idempotent() {
 
     assert_eq!(replay, first);
     assert_eq!(replay.repetition_count, 1);
+}
+
+#[test]
+fn pure_projection_plan_matches_the_standalone_store_and_reopens_from_canonical_bytes() {
+    let first_receipt = receipt(21, 1, 400_000);
+    let second_receipt = receipt(21, 2, 200_000);
+    let path = db_path("pure-projection-plan");
+
+    let mut store = ContextSummaryStore::open(&path).expect("open standalone store");
+    let expected_first = store
+        .apply_committed_receipt(&first_receipt)
+        .expect("apply first standalone receipt");
+    let expected_second = store
+        .apply_committed_receipt(&second_receipt)
+        .expect("apply second standalone receipt");
+
+    let first = project_committed_receipt(None, &first_receipt)
+        .expect("project first committed receipt without a store write");
+    assert_eq!(first.summary(), &expected_first);
+    let canonical = first.canonical_state_bytes();
+    assert!(
+        canonical.len() <= 8192,
+        "projection state must stay bounded"
+    );
+    assert!(canonical
+        .windows(b"RAW_HISTORY_SENTINEL".len())
+        .all(|window| window != b"RAW_HISTORY_SENTINEL"));
+    assert!(canonical
+        .windows(b"provider-response".len())
+        .all(|window| window != b"provider-response"));
+
+    let second = project_committed_receipt(Some(&canonical), &second_receipt)
+        .expect("project second receipt from sealed canonical state");
+    assert_eq!(second.summary(), &expected_second);
+    assert_eq!(second.summary().source_continuum_revision, 2);
+    assert_ne!(second.canonical_state_bytes(), canonical);
 }
 
 #[test]
