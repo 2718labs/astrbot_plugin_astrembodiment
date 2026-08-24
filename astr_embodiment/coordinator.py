@@ -16,9 +16,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .bridge import (
+    ContextProjectionIntegrity,
     GenesisUnavailable,
     NativeBridge,
     RetryWait,
+    validate_context_summary_payload,
 )
 from .contracts import (
     ScopeTokens,
@@ -235,6 +237,19 @@ class GenesisCoordinator:
             return previous
 
         decision = self._bridge.apply_event(scope.scope_json(), event)
+        if not isinstance(decision, dict):
+            raise ContextProjectionIntegrity(
+                "CONTEXT_PROJECTION", "native decision must be an object"
+            )
+        if decision.get("schema") == "astrembodiment.decision.v1":
+            summary = decision.get("context_summary")
+            if summary is None:
+                raise ContextProjectionIntegrity(
+                    "CONTEXT_PROJECTION",
+                    "native decision is missing its committed context summary",
+                )
+            decision = dict(decision)
+            decision["context_summary"] = validate_context_summary_payload(summary)
         if decision.get("deduplicated"):
             # The native lane had already applied this exact event: reuse the
             # original decision instead of double-applying.

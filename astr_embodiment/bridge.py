@@ -68,6 +68,10 @@ class StaleCausalBase(NativeCoreError):
     pass
 
 
+class ContextProjectionIntegrity(NativeCoreError):
+    pass
+
+
 _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "GENESIS_UNAVAILABLE": GenesisUnavailable,
     "RETRY_WAIT": RetryWait,
@@ -78,7 +82,86 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "GENESIS_REQUIRED": GenesisRequired,
     "GENESIS_MANIFEST_MISMATCH": GenesisManifestMismatch,
     "STALE_CAUSAL_BASE": StaleCausalBase,
+    "CONTEXT_RECEIPT_INVALID": ContextProjectionIntegrity,
+    "CONTEXT_PROJECTION": ContextProjectionIntegrity,
+    "CONTEXT_COMMIT_MISSING": ContextProjectionIntegrity,
+    "CONTEXT_COMMIT_INTEGRITY": ContextProjectionIntegrity,
 }
+
+_CONTEXT_SUMMARY_SCHEMA = "astrembodiment.context-summary.v1"
+_CONTEXT_SUMMARY_KEYS = frozenset(
+    {
+        "schema",
+        "summary_revision",
+        "source_continuum_revision",
+        "dimensions_ema_fxp6",
+        "unresolved_boundary",
+        "unresolved_repair",
+        "repetition_count",
+        "delivery_outcome",
+        "summary_digest",
+    }
+)
+_CONTEXT_DELIVERY_OUTCOMES = frozenset({"pending", "delivered", "failed"})
+_CONTEXT_DIMENSION_COUNT = 15
+_CONTEXT_DIMENSION_MAX = 1_000_000
+
+
+def _context_integrity_error(detail: str) -> ContextProjectionIntegrity:
+    return ContextProjectionIntegrity("CONTEXT_PROJECTION", detail)
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def validate_context_summary_payload(payload: Any) -> dict[str, Any]:
+    """Accept the native aggregate-only context schema and nothing else.
+
+    The bridge is deliberately a second privacy boundary: an unexpected field
+    could carry raw dialogue or host identifiers, so it is rejected before a
+    result is cached or reaches the host prompt.
+    """
+    if not isinstance(payload, dict) or set(payload) != _CONTEXT_SUMMARY_KEYS:
+        raise _context_integrity_error(
+            "context summary must use the closed aggregate schema"
+        )
+    if payload["schema"] != _CONTEXT_SUMMARY_SCHEMA:
+        raise _context_integrity_error("context summary schema is invalid")
+    if not _positive_int(payload["summary_revision"]):
+        raise _context_integrity_error("context summary revision is invalid")
+    if not _positive_int(payload["source_continuum_revision"]):
+        raise _context_integrity_error("context source revision is invalid")
+    if not _positive_int(payload["repetition_count"]):
+        raise _context_integrity_error("context repetition count is invalid")
+    dimensions = payload["dimensions_ema_fxp6"]
+    if (
+        not isinstance(dimensions, list)
+        or len(dimensions) != _CONTEXT_DIMENSION_COUNT
+        or any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > _CONTEXT_DIMENSION_MAX
+            for value in dimensions
+        )
+    ):
+        raise _context_integrity_error("context dimensions are invalid")
+    if not isinstance(payload["unresolved_boundary"], bool) or not isinstance(
+        payload["unresolved_repair"], bool
+    ):
+        raise _context_integrity_error("context unresolved flags are invalid")
+    if payload["delivery_outcome"] not in _CONTEXT_DELIVERY_OUTCOMES:
+        raise _context_integrity_error("context delivery outcome is invalid")
+    digest = payload["summary_digest"]
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise _context_integrity_error("context summary digest is invalid")
+    try:
+        if len(bytes.fromhex(digest)) != 32:
+            raise ValueError("digest length")
+    except ValueError as exc:
+        raise _context_integrity_error("context summary digest is invalid") from exc
+    return dict(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +327,15 @@ class NativeBridge:
             )
         except Exception as exc:
             raise _classify(exc) from exc
-        return _parse_payload(result)
+        payload = _parse_payload(result)
+        if payload.get("schema") == "astrembodiment.decision.v1":
+            summary = payload.get("context_summary")
+            if summary is None:
+                raise _context_integrity_error(
+                    "native decision is missing its committed context summary"
+                )
+            payload["context_summary"] = validate_context_summary_payload(summary)
+        return payload
 
     def inspect(self, scope: dict[str, Any]) -> dict[str, Any]:
         native = self._require()

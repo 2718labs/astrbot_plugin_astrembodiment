@@ -15,4 +15,5 @@ ae-renorm.workspace = true
 ae-agent.workspace = true
 ae-continuum.workspace = true
 ae-store.workspace = true
+ae-context-projector.workspace = true
 thiserror.workspace = true

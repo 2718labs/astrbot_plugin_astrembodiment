@@ -7,6 +7,7 @@
 //! residual writers, no import-from-SeedCode entry point. JSON is exchanged
 //! as closed, deny-unknown-field payloads; identity is computed in Rust.
 
+use ae_context_projector::{ContextSummaryV1, DeliveryOutcome as ContextDeliveryOutcome};
 use ae_contracts::{hex, CanonicalEvent, PersonaGenesisRequest, ScopeRef};
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -60,12 +61,41 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
         ae_runtime::RuntimeError::UnsupportedEvent(_) => ("UNSUPPORTED_EVENT", error.to_string()),
         ae_runtime::RuntimeError::Closed => ("CLOSED", error.to_string()),
         ae_runtime::RuntimeError::InvalidNeuralState => ("INVALID_NEURAL_STATE", error.to_string()),
+        ae_runtime::RuntimeError::ContextReceipt(_) => {
+            ("CONTEXT_RECEIPT_INVALID", error.to_string())
+        }
+        ae_runtime::RuntimeError::ContextProjection(_) => ("CONTEXT_PROJECTION", error.to_string()),
+        ae_runtime::RuntimeError::ContextCommitMissing => {
+            ("CONTEXT_COMMIT_MISSING", error.to_string())
+        }
+        ae_runtime::RuntimeError::ContextCommitIntegrity => {
+            ("CONTEXT_COMMIT_INTEGRITY", error.to_string())
+        }
     };
     NativeCoreError::new_err(format!("{code}::{message}"))
 }
 
 fn closed_schema(message: String) -> PyErr {
     NativeCoreError::new_err(format!("CLOSED_SCHEMA::{message}"))
+}
+
+fn context_summary_payload(summary: &ContextSummaryV1) -> serde_json::Value {
+    let delivery_outcome = match summary.delivery_outcome {
+        ContextDeliveryOutcome::Pending => "pending",
+        ContextDeliveryOutcome::Delivered => "delivered",
+        ContextDeliveryOutcome::Failed => "failed",
+    };
+    serde_json::json!({
+        "schema": "astrembodiment.context-summary.v1",
+        "summary_revision": summary.summary_revision,
+        "source_continuum_revision": summary.source_continuum_revision,
+        "dimensions_ema_fxp6": summary.dimensions_ema_fxp6,
+        "unresolved_boundary": summary.unresolved_boundary,
+        "unresolved_repair": summary.unresolved_repair,
+        "repetition_count": summary.repetition_count,
+        "delivery_outcome": delivery_outcome,
+        "summary_digest": hex::encode32(&summary.summary_digest),
+    })
 }
 
 #[derive(Deserialize)]
@@ -187,6 +217,7 @@ fn apply_event(scope_json: &str, event_json: &str) -> PyResult<String> {
         "receipt": decision.receipt,
         "revision": decision.revision,
         "deduplicated": decision.deduplicated,
+        "context_summary": context_summary_payload(&decision.context_summary),
     });
     serde_json::to_string(&payload)
         .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))

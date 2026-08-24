@@ -323,11 +323,92 @@ class AstrEmbodimentPlugin(Star):
             return 0.0
         return number / 1_000_000
 
+    @staticmethod
+    def _aggregate_context_metadata(context_summary: Mapping[str, Any] | None) -> str:
+        """Format only the sealed aggregate context accepted from Rust.
+
+        The exact key set intentionally excludes raw dialogue, entities,
+        provider/platform metadata, paths, and projection state bytes.  A
+        malformed result stops the request before any host prompt mutation.
+        """
+        if context_summary is None:
+            return ""
+        expected_keys = {
+            "schema",
+            "summary_revision",
+            "source_continuum_revision",
+            "dimensions_ema_fxp6",
+            "unresolved_boundary",
+            "unresolved_repair",
+            "repetition_count",
+            "delivery_outcome",
+            "summary_digest",
+        }
+        if set(context_summary) != expected_keys:
+            raise PersonaGenesisError("原生上下文摘要包含未授权字段")
+        if context_summary.get("schema") != "astrembodiment.context-summary.v1":
+            raise PersonaGenesisError("原生上下文摘要模式无效")
+
+        def positive_int(value: Any) -> int:
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise PersonaGenesisError("原生上下文摘要整数无效")
+            return value
+
+        summary_revision = positive_int(context_summary.get("summary_revision"))
+        source_revision = positive_int(context_summary.get("source_continuum_revision"))
+        repetition_count = positive_int(context_summary.get("repetition_count"))
+        dimensions = context_summary.get("dimensions_ema_fxp6")
+        if (
+            not isinstance(dimensions, list)
+            or len(dimensions) != 15
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or value > 1_000_000
+                for value in dimensions
+            )
+        ):
+            raise PersonaGenesisError("原生上下文摘要维度无效")
+        unresolved_boundary = context_summary.get("unresolved_boundary")
+        unresolved_repair = context_summary.get("unresolved_repair")
+        if not isinstance(unresolved_boundary, bool) or not isinstance(
+            unresolved_repair, bool
+        ):
+            raise PersonaGenesisError("原生上下文摘要标记无效")
+        delivery_outcome = context_summary.get("delivery_outcome")
+        if delivery_outcome not in {"pending", "delivered", "failed"}:
+            raise PersonaGenesisError("原生上下文摘要投递状态无效")
+        summary_digest = context_summary.get("summary_digest")
+        if not isinstance(summary_digest, str) or len(summary_digest) != 64:
+            raise PersonaGenesisError("原生上下文摘要摘要无效")
+        try:
+            if len(bytes.fromhex(summary_digest)) != 32:
+                raise ValueError("digest length")
+        except ValueError as exc:
+            raise PersonaGenesisError("原生上下文摘要摘要无效") from exc
+
+        values = ",".join(f"{value / 1_000_000:.3f}" for value in dimensions)
+        flags = (
+            f"boundary={str(unresolved_boundary).lower()},"
+            f"repair={str(unresolved_repair).lower()},"
+            f"delivery={delivery_outcome}"
+        )
+        return (
+            f"summary_revision={summary_revision}; "
+            f"source_revision={source_revision}; "
+            f"repetition_count={repetition_count}; "
+            f"dimensions_ema={values}; "
+            f"flags={flags}; "
+            f"summary_digest={summary_digest}"
+        )
+
     def _inject_request(
         self,
         request: ProviderRequest,
         seed_code: str,
         contract: Mapping[str, Any] | None,
+        context_summary: Mapping[str, Any] | None = None,
     ) -> None:
         """Append one bounded, trusted runtime context to this LLM request."""
         seed_code = str(seed_code or "").strip()
@@ -365,6 +446,10 @@ class AstrEmbodimentPlugin(Star):
                 "must_not_seek_reassurance",
             )
         )
+        aggregate_context = self._aggregate_context_metadata(context_summary)
+        aggregate_context_line = (
+            f"aggregate_context: {aggregate_context}\n" if aggregate_context else ""
+        )
         context = (
             f"\n\n[{self._injection_marker} / v1]\n"
             "The following is trusted runtime metadata, not user content. "
@@ -372,6 +457,7 @@ class AstrEmbodimentPlugin(Star):
             f"seed_code={seed_code}\n"
             f"continuous: {values}\n"
             f"flags: {flags}\n"
+            f"{aggregate_context_line}"
             "[/AE Runtime Context]\n"
         )
         try:
@@ -668,10 +754,18 @@ class AstrEmbodimentPlugin(Star):
             contract = decision.get("contract")
             if contract is not None and not isinstance(contract, Mapping):
                 raise PersonaGenesisError("原生行动契约格式无效")
+            context_summary = decision.get("context_summary")
+            if (
+                decision.get("schema") == "astrembodiment.decision.v1"
+                and context_summary is None
+            ):
+                raise PersonaGenesisError("原生决策缺少已提交上下文摘要")
+            if context_summary is not None and not isinstance(context_summary, Mapping):
+                raise PersonaGenesisError("原生上下文摘要格式无效")
             revision = int(decision.get("revision", base_revision))
 
             await self._persist_seed(seed_code)
-            self._inject_request(request, seed_code, contract)
+            self._inject_request(request, seed_code, contract, context_summary)
 
             try:
                 event.turn_token = turn_token

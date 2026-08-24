@@ -8,6 +8,11 @@
 
 use ae_agent::noop_action_contract;
 use ae_authority::authority_projection_digest;
+use ae_context_projector::{
+    project_committed_receipt, ContextProjectionStateV1, ContextSummaryV1,
+    DeliveryOutcome as ContextDeliveryOutcome, ReceiptCommitStatus, ReceiptEnvelopeV1,
+    ReceiptValidationError, StoreError as ContextProjectorError, ValidatedCommittedReceiptV1,
+};
 use ae_continuum::{CommitEnvelope, ReplayReport};
 use ae_contracts::{
     wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisReceipt, GenesisStatus,
@@ -16,7 +21,10 @@ use ae_contracts::{
 use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
 };
-use ae_store::{ClaimOutcome, GenesisCommit, Store, StoreError};
+use ae_store::{
+    ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1, GenesisCommit, GraphCommitV1,
+    SnapshotCommitV1, Store, StoreError,
+};
 use std::path::Path;
 use thiserror::Error;
 
@@ -40,6 +48,14 @@ pub enum RuntimeError {
     Closed,
     #[error("invalid neural state")]
     InvalidNeuralState,
+    #[error("context receipt validation error: {0}")]
+    ContextReceipt(#[from] ReceiptValidationError),
+    #[error("context projection error: {0}")]
+    ContextProjection(#[from] ContextProjectorError),
+    #[error("committed event is missing its context projection")]
+    ContextCommitMissing,
+    #[error("context projection does not match its committed integrity fence")]
+    ContextCommitIntegrity,
 }
 
 #[derive(Debug)]
@@ -47,6 +63,7 @@ pub struct ApplyDecision {
     pub contract: ActionContract,
     pub receipt: TransitionReceipt,
     pub revision: u64,
+    pub context_summary: ContextSummaryV1,
     /// True when this exact event had already been applied; the state was not
     /// changed and the returned receipt is the originally committed one.
     pub deduplicated: bool,
@@ -86,6 +103,14 @@ pub struct AstrRuntime {
 
 fn fixed_zero_vector() -> InvariantResiduals {
     InvariantResiduals::default()
+}
+
+fn continuity_scope(scope: &ScopeRef) -> Digest {
+    wire::persona_scope_digest(
+        &scope.bot_token,
+        &scope.persona_token,
+        scope.relation_token.as_ref(),
+    )
 }
 
 impl AstrRuntime {
@@ -182,7 +207,7 @@ impl AstrRuntime {
                     compiled_at_ms: effective.observed_at_ms,
                     receipt: receipt.clone(),
                     initial_snapshot_digest,
-                    state_bytes: self.encode_state(&field, &graph),
+                    state_bytes: Self::encode_state(&field, &graph),
                     graph_digest,
                 };
 
@@ -223,7 +248,7 @@ impl AstrRuntime {
         }
     }
 
-    fn encode_state(&self, field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
+    fn encode_state(field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
         // G0 snapshot bytes: the canonical fixed-layout field encoding plus
         // the graph body; nothing else is needed to re-derive every digest.
         let mut body = Vec::with_capacity(16_384 * 8 * 8 + 65_540);
@@ -297,6 +322,119 @@ impl AstrRuntime {
             .ok_or(RuntimeError::PersonaGenesisRequired)
     }
 
+    fn committed_context_receipt(
+        event: &CanonicalEvent,
+        relation_scope_token: Id128,
+        source_continuum_revision: u64,
+    ) -> Result<ValidatedCommittedReceiptV1, RuntimeError> {
+        let (event_id, dimensions_fxp6, unresolved_boundary, unresolved_repair, delivery_outcome) =
+            match event {
+                CanonicalEvent::UserStimulus(stimulus) => {
+                    let dimensions = &stimulus.evidence.dimensions;
+                    let bounded = |value: ae_fixed::Fixed| {
+                        value
+                            .raw()
+                            .clamp(0, ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6)
+                    };
+                    (
+                        stimulus.event_id,
+                        [
+                            bounded(dimensions.positive),
+                            bounded(dimensions.affiliation),
+                            bounded(dimensions.harm),
+                            bounded(dimensions.boundary),
+                            bounded(dimensions.repair),
+                            bounded(dimensions.repetition),
+                            bounded(dimensions.new_information),
+                            bounded(dimensions.constraint_instability),
+                            bounded(dimensions.epistemic_conflict),
+                            bounded(dimensions.self_responsibility),
+                            bounded(dimensions.other_responsibility),
+                            bounded(dimensions.hostility),
+                            bounded(dimensions.publicness),
+                            bounded(dimensions.engagement),
+                            bounded(dimensions.rejection),
+                        ],
+                        dimensions.boundary.raw() > 0,
+                        dimensions.repair.raw() > 0,
+                        ContextDeliveryOutcome::Pending,
+                    )
+                }
+                CanonicalEvent::DeliveryOutcome(outcome) => (
+                    outcome.event_id,
+                    [0; 15],
+                    false,
+                    false,
+                    if outcome.delivered {
+                        ContextDeliveryOutcome::Delivered
+                    } else {
+                        ContextDeliveryOutcome::Failed
+                    },
+                ),
+                CanonicalEvent::TimeAdvance(advance) => (
+                    advance.event_id,
+                    [0; 15],
+                    false,
+                    false,
+                    ContextDeliveryOutcome::Pending,
+                ),
+                _ => return Err(RuntimeError::UnsupportedEvent(wire::event_kind_name(event))),
+            };
+        Ok(ValidatedCommittedReceiptV1::try_from_envelope(
+            ReceiptEnvelopeV1 {
+                commit_status: ReceiptCommitStatus::Committed,
+                event_id,
+                relation_token: relation_scope_token,
+                source_continuum_revision,
+                dimensions_fxp6,
+                unresolved_boundary,
+                unresolved_repair,
+                repetition_increment: 1,
+                delivery_outcome,
+            },
+        )?)
+    }
+
+    fn context_summary_for_persona_scope(
+        &self,
+        persona_scope: &Digest,
+        relation_scope_token: &Id128,
+    ) -> Result<Option<ContextSummaryV1>, RuntimeError> {
+        let Some(row) = self
+            .store
+            .read_context_commit(persona_scope, relation_scope_token)?
+        else {
+            return Ok(None);
+        };
+        if row.scope_digest != *persona_scope || row.relation_scope_token != *relation_scope_token {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        if ae_store::continuity_context_digest(&row.canonical_state_bytes) != row.context_digest {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        let projection =
+            ContextProjectionStateV1::try_from_canonical_state_bytes(&row.canonical_state_bytes)?;
+        if projection.relation_hmac() != row.relation_hmac
+            || projection.summary().source_continuum_revision != row.revision
+        {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        Ok(Some(projection.summary().clone()))
+    }
+
+    /// Return the committed aggregate-only context for the relation selected
+    /// by this scope.  The Store remains the authority: absent or malformed
+    /// bytes never fall back to an in-memory or standalone projector state.
+    pub fn context_summary_for_scope(
+        &mut self,
+        scope: &ScopeRef,
+    ) -> Result<Option<ContextSummaryV1>, RuntimeError> {
+        self.hot_for(scope)?;
+        let continuity_scope = continuity_scope(scope);
+        let relation_scope_token = scope.relation_token.unwrap_or(scope.session_token);
+        self.context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)
+    }
+
     // --------------------------------------------------------------- events
 
     /// Apply one canonical event through the G0 no-op lane and commit it.
@@ -331,13 +469,13 @@ impl AstrRuntime {
         let (
             hot_bot_token,
             hot_persona_token,
-            persona_scope,
-            hot_revision,
             formula_digest,
             manifest_digest,
             initial_snapshot_digest,
             state_before,
             graph_after,
+            snapshot_state_bytes,
+            graph_replay_state_bytes,
             active_nodes,
             active_edges,
         ) = {
@@ -345,13 +483,13 @@ impl AstrRuntime {
             (
                 hot.bot_token,
                 hot.persona_token,
-                hot.persona_scope,
-                hot.revision,
                 hot.formula_digest,
                 hot.identity.manifest_digest,
                 hot.initial_snapshot_digest,
                 state_digest(&hot.field, &hot.formula_digest),
                 graph_digest(&hot.graph),
+                Self::encode_state(&hot.field, &hot.graph),
+                hot.graph.canonical_bytes(),
                 hot.field.active_node_count(),
                 hot.graph.edges.len() as u32,
             )
@@ -366,6 +504,11 @@ impl AstrRuntime {
         {
             return Err(RuntimeError::GenesisManifestMismatch);
         }
+        let relation_scope_token = event_scope
+            .relation_token
+            .unwrap_or(event_scope.session_token);
+        let continuity_scope = continuity_scope(event_scope);
+        let current_revision = self.store.current_revision(&continuity_scope)?;
 
         let event_bytes = wire::encode_event(event);
         let event_digest = wire::event_digest(event);
@@ -374,14 +517,18 @@ impl AstrRuntime {
 
         // Idempotency: an event that was already applied is never applied
         // twice; the original receipt is returned unchanged.
-        if let Some(row) = self.store.lookup_event(&persona_scope, &event_digest)? {
+        if let Some(row) = self.store.lookup_event(&continuity_scope, &event_digest)? {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            let context_summary = self
+                .context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)?
+                .ok_or(RuntimeError::ContextCommitMissing)?;
             return Ok(ApplyDecision {
                 contract,
                 receipt,
                 revision: row.revision,
+                context_summary,
                 deduplicated: true,
             });
         }
@@ -389,12 +536,12 @@ impl AstrRuntime {
         let causal_base = match event {
             CanonicalEvent::UserStimulus(e) => e.causal.base_revision,
             CanonicalEvent::DeliveryOutcome(e) => e.causal.base_revision,
-            CanonicalEvent::TimeAdvance(_) => hot_revision,
+            CanonicalEvent::TimeAdvance(_) => current_revision,
             _ => unreachable!(),
         };
-        if causal_base != hot_revision {
+        if causal_base != current_revision {
             return Err(RuntimeError::StaleCausalBase {
-                expected: hot_revision,
+                expected: current_revision,
                 actual: causal_base,
             });
         }
@@ -403,11 +550,11 @@ impl AstrRuntime {
         let receipt = TransitionReceipt {
             schema_version: 1,
             formula_digest,
-            scope_digest: persona_scope,
+            scope_digest: continuity_scope,
             event_digest,
             authority_digest,
-            base_revision: hot_revision,
-            next_revision: hot_revision + 1,
+            base_revision: current_revision,
+            next_revision: current_revision + 1,
             state_before,
             state_after: state_before,
             graph_after,
@@ -418,45 +565,95 @@ impl AstrRuntime {
             status: CommitStatus::Committed,
         };
 
+        let context_receipt =
+            Self::committed_context_receipt(event, relation_scope_token, receipt.next_revision)?;
+        let previous_context = self
+            .store
+            .read_context_commit(&continuity_scope, &relation_scope_token)?;
+        if previous_context.is_some()
+            && self
+                .context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)?
+                .is_none()
+        {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        let context_projection = project_committed_receipt(
+            previous_context
+                .as_ref()
+                .map(|row| row.canonical_state_bytes.as_slice()),
+            &context_receipt,
+        )?;
+        let context_summary = context_projection.summary().clone();
+        let canonical_context_state = context_projection.canonical_state_bytes();
+        let context_commit = ContextCommitV1 {
+            relation_scope_token,
+            relation_hmac: context_projection.relation_hmac(),
+            source_continuum_revision: receipt.next_revision,
+            context_digest: ae_store::continuity_context_digest(&canonical_context_state),
+            canonical_state_bytes: canonical_context_state,
+        };
+
         // An empty journal is the normal first-turn case: start the chain at
         // the committed Genesis snapshot. Only a store error should fail the
         // event; ``Ok(None)`` is not evidence that Genesis is missing.
         let chain_seed = self
             .store
-            .last_chain_digest(&persona_scope)?
+            .last_chain_digest(&continuity_scope)?
             .unwrap_or(initial_snapshot_digest);
         let envelope = CommitEnvelope {
             event_kind: wire::event_kind_name(event).to_string(),
             event_bytes,
-            receipt,
+            receipt: receipt.clone(),
             chain_seed,
             delta_bytes: vec![],
         };
+        let bundle = ContinuityCommitBundleV1 {
+            envelope,
+            snapshot: SnapshotCommitV1 {
+                state_digest: state_before,
+                state_bytes: snapshot_state_bytes,
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest: graph_after,
+                graph_digest: graph_after,
+                formula_digest,
+                delta_bytes: vec![],
+                replay_state_bytes: graph_replay_state_bytes,
+            },
+            context: context_commit,
+        };
 
-        match self.store.commit_journal(&envelope) {
+        match self.store.commit_continuity_bundle(&bundle) {
             Ok((revision, _row)) => {
                 if let Some(hot) = self.hot.as_mut() {
-                    hot.revision = revision;
+                    if hot.persona_scope == continuity_scope {
+                        hot.revision = revision;
+                    }
                 }
                 Ok(ApplyDecision {
                     contract,
-                    receipt: envelope.receipt,
+                    receipt,
                     revision,
+                    context_summary,
                     deduplicated: false,
                 })
             }
             Err(StoreError::DuplicateEvent(revision)) => {
                 let row = self
                     .store
-                    .lookup_event(&persona_scope, &event_digest)?
+                    .lookup_event(&continuity_scope, &event_digest)?
                     .ok_or(RuntimeError::RetryWait)?;
                 let receipt = row
                     .decode_receipt()
                     .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+                let context_summary = self
+                    .context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)?
+                    .ok_or(RuntimeError::ContextCommitMissing)?;
                 Ok(ApplyDecision {
                     contract,
                     receipt,
                     revision,
+                    context_summary,
                     deduplicated: true,
                 })
             }
@@ -539,7 +736,7 @@ impl AstrRuntime {
                 &hot.persona_scope,
                 hot.revision,
                 &state,
-                &self.encode_state(&hot.field, &hot.graph),
+                &Self::encode_state(&hot.field, &hot.graph),
             )?;
         }
         self.store.flush()?;
@@ -551,8 +748,8 @@ impl AstrRuntime {
     }
 
     pub fn current_revision(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
-        let hot = self.hot_for(scope)?;
-        Ok(hot.revision)
+        self.hot_for(scope)?;
+        Ok(self.store.current_revision(&continuity_scope(scope))?)
     }
 }
 
