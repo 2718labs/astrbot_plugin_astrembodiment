@@ -262,7 +262,9 @@ def test_real_native_vault_context_artifacts_contain_no_dynamic_raw_sentinels(
         )
         assert replay["ok"] is True
         assert replay["checked"] == 1
-        assert legacy_database_path.is_file() and legacy_database_path.stat().st_size > 0
+        assert (
+            legacy_database_path.is_file() and legacy_database_path.stat().st_size > 0
+        )
 
         authority_database_path = _current_authority_database_path(vault_root)
         assert authority_database_path != legacy_database_path
