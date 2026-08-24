@@ -96,10 +96,7 @@ fn assert_commits_once_and_replays_after_restart(path: &Path, action: RebirthAct
     let prepare = prepare_request(&scope, genesis.incarnation_id, action);
 
     let challenge = runtime.prepare_rebirth_v1(&scope, &prepare).unwrap();
-    assert_eq!(
-        challenge.state,
-        RebirthResponseStateV1::ConfirmationPending
-    );
+    assert_eq!(challenge.state, RebirthResponseStateV1::ConfirmationPending);
     assert_ne!(challenge.request_nonce, [0; 32]);
     assert_ne!(challenge.request_nonce_digest, [0; 32]);
     assert_ne!(challenge.binding_digest, [0; 32]);
@@ -117,12 +114,17 @@ fn assert_commits_once_and_replays_after_restart(path: &Path, action: RebirthAct
     let mut reopened = AstrRuntime::open(path).unwrap();
     let committed = reopened.confirm_rebirth_v1(&scope, &confirmation).unwrap();
     assert_eq!(committed.state, RebirthResponseStateV1::Committed);
-    let receipt = committed.receipt.expect("commit must issue an audit receipt");
+    let receipt = committed
+        .receipt
+        .expect("commit must issue an audit receipt");
     assert_eq!(receipt.before_revision, 0);
     assert_eq!(receipt.after_revision, 0);
     assert_eq!(receipt.outcome, RebirthOutcomeV1::Committed);
     assert!(receipt.audit_time_ms > 0);
-    assert_ne!(receipt.parent_incarnation_short, receipt.child_incarnation_short);
+    assert_ne!(
+        receipt.parent_incarnation_short,
+        receipt.child_incarnation_short
+    );
     assert_eq!(reopened.current_revision(&scope).unwrap(), 0);
     reopened.flush_and_close().unwrap();
     drop(reopened);
