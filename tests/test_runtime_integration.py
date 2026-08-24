@@ -17,6 +17,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import astr_embodiment.bridge as bridge_module  # noqa: E402
+import main as main_module  # noqa: E402
+from astr_embodiment.contracts import ScopeTokens  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
 from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
@@ -1233,3 +1235,357 @@ def test_runtime_commands_and_hooks_expose_chinese_descriptions_without_webui():
         in source
     )
     assert "无需 WebUI" in inspect.getdoc(AstrEmbodimentPlugin.seed_command)
+
+
+_V3_TEST_DIMENSIONS = (
+    "positive",
+    "affiliation",
+    "harm",
+    "boundary",
+    "repair",
+    "repetition",
+    "new_information",
+    "constraint_instability",
+    "epistemic_conflict",
+    "self_responsibility",
+    "other_responsibility",
+    "hostility",
+    "publicness",
+    "engagement",
+    "rejection",
+)
+_V3_TEST_REGIONS = (
+    ("interoception_allostasis", 2_048),
+    ("affective_valuation", 2_048),
+    ("salience", 1_024),
+    ("epistemic_fallibility", 2_048),
+    ("social_boundary", 2_048),
+    ("temper_inhibitory", 1_024),
+    ("world_model_imagination", 4_096),
+    ("global_workspace", 1_024),
+    ("action_expression", 1_024),
+)
+
+
+class _SemanticRecordingLogger:
+    def __init__(self) -> None:
+        self.warning_messages: list[str] = []
+        self.info_messages: list[str] = []
+
+    def warning(self, template: str, *args: object) -> None:
+        self.warning_messages.append(template % args if args else template)
+
+    def info(self, template: str, *args: object) -> None:
+        self.info_messages.append(template % args if args else template)
+
+    def error(self, _template: str, *_args: object) -> None:
+        return None
+
+    def debug(self, _template: str, *_args: object) -> None:
+        return None
+
+    def exception(self, _template: str, *_args: object) -> None:
+        return None
+
+
+def _v3_test_scope() -> ScopeTokens:
+    return ScopeTokens(
+        bot_token="11" * 16,
+        persona_token="22" * 16,
+        session_token="33" * 16,
+    )
+
+
+def _v3_test_context_summary() -> dict:
+    return {
+        "schema": "astrembodiment.context-summary.v1",
+        "summary_revision": 1,
+        "source_continuum_revision": 8,
+        "dimensions_ema_fxp6": [0] * 15,
+        "unresolved_boundary": False,
+        "unresolved_repair": False,
+        "repetition_count": 1,
+        "delivery_outcome": "pending",
+        "summary_digest": "ab" * 32,
+    }
+
+
+def _v3_test_genesis_result(scope: ScopeTokens) -> tuple:
+    return (
+        {
+            "genesis": {
+                "seed_code": "AE-S1-SEMANTIC",
+                "incarnation_id": "AE-I1-SEMANTIC",
+            },
+            "seed_code": "AE-S1-SEMANTIC",
+            "incarnation_id": "AE-I1-SEMANTIC",
+            "revision": 8,
+            "contract": {"continuous": {"directness": 500_000}},
+            "context_summary": _v3_test_context_summary(),
+        },
+        scope,
+        scope.session_token,
+        0,
+        "44" * 16,
+        7,
+    )
+
+
+def _v3_test_estimate() -> dict:
+    dimensions = {
+        name: {
+            "state": "ABSENT",
+            "intensity_fxp6": 0,
+            "confidence_fxp6": 900_000,
+        }
+        for name in _V3_TEST_DIMENSIONS
+    }
+    dimensions["rejection"] = {
+        "state": "PRESENT",
+        "intensity_fxp6": 900_000,
+        "confidence_fxp6": 900_000,
+    }
+    return {"schema": "astr-embodiment.semantic-estimate.v3", "dimensions": dimensions}
+
+
+def _v3_test_native_closure() -> dict:
+    regions = []
+    for region_id, (region_name, capacity) in enumerate(_V3_TEST_REGIONS):
+        selected = 1 if region_name == "affective_valuation" else 0
+        component = {
+            "before_mean_fxp6": 0,
+            "after_mean_fxp6": selected,
+            "delta_mean_fxp6": selected,
+            "changed_node_count": selected,
+            "nonzero_after_count": selected,
+        }
+        regions.append(
+            {
+                "region_id": region_id,
+                "region_name": region_name,
+                "node_capacity": capacity,
+                "selected_node_count": selected,
+                "activated_node_count": selected,
+                "changed_node_count": selected,
+                "potential": dict(component),
+                "excitation": dict(component),
+            }
+        )
+    return {
+        "schema": "astrembodiment.semantic-perception-closure.v1",
+        "receipt": {
+            "schema_version": 1,
+            "formula_digest": "00" * 32,
+            "scope_digest": "11" * 32,
+            "event_digest": "22" * 32,
+            "authority_digest": "33" * 32,
+            "base_revision": 0,
+            "next_revision": 1,
+            "state_before": "44" * 32,
+            "state_after": "55" * 32,
+            "graph_after": "66" * 32,
+            "active_nodes": 1,
+            "active_edges": 0,
+            "residuals": {
+                "authority": 0,
+                "continuity": 0,
+                "energy": 0,
+                "renormalization": 0,
+                "capacity": 0,
+            },
+            "status": "committed",
+        },
+        "semantic_vector_receipt": {
+            "schema": "astr-embodiment.semantic-vector-receipt.v2",
+            "formula": "full-vector-route-neutral-relaxation-v1",
+            "dimension_slot_count": 15,
+            "evaluated_dimension_count": 15,
+            "injected_dimension_count": 15,
+            "nonzero_evidence_dimension_count": 1,
+            "neutral_baseline_dimension_count": 14,
+            "unavailable_dimension_count": 0,
+            "state_changed": True,
+        },
+        "node_observability": {
+            "schema": "astr-embodiment.node-observability.v1",
+            "formula": "spc1-node-observability-v1",
+            "revision": 1,
+            "field_node_capacity": 16_384,
+            "region_layout": "regions-v1",
+            "counts": {
+                "selected_node_count": 1,
+                "activated_node_count": 1,
+                "changed_node_count": 1,
+                "potential_nonzero_after_count": 1,
+                "excitation_nonzero_after_count": 1,
+                "signal_nonzero_after_count": 1,
+            },
+            "residuals": {
+                "state": "NOT_COMPUTED",
+                "formula": None,
+                "values_fxp6": None,
+            },
+            "regions": regions,
+        },
+        "revision": 1,
+        "deduplicated": False,
+        "expression_projection": {
+            "schema": "astr-embodiment.expression-projection.v1",
+            "revision": 1,
+            "profile_fxp6": {
+                "warmth": 100_000,
+                "sensitivity": 200_000,
+                "guardedness": 800_000,
+                "repair_orientation": 0,
+                "engagement": 100_000,
+                "epistemic_caution": 300_000,
+            },
+        },
+    }
+
+
+def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expression(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class NativeAbi:
+        def __init__(self) -> None:
+            self.cursor_calls = 0
+            self.proposals: list[dict] = []
+
+        def semantic_revision_v1(self, _scope_json: str) -> str:
+            self.cursor_calls += 1
+            return json.dumps(
+                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+            )
+
+        def apply_perception_proposal_v1(
+            self, _scope_json: str, proposal_json: str
+        ) -> str:
+            self.proposals.append(json.loads(proposal_json))
+            return json.dumps(_v3_test_native_closure())
+
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
+
+        context.llm_generate = generate
+        instance = plugin(
+            FakeConfig(
+                model_settings={"semantic_estimator_provider_id": "semantic"},
+                observatory_enabled=False,
+            ),
+            context,
+        )
+        native = NativeAbi()
+        bridge = bridge_module.NativeBridge()
+        bridge._native = native
+        instance._bridge = bridge
+        instance._coordinator = GenesisCoordinator(bridge)
+        scope = _v3_test_scope()
+
+        async def run_genesis(*_args, **_kwargs):
+            return _v3_test_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        request = FakeRequest()
+        request.prompt = "请不要再联系我，我明确拒绝。"
+        event = FakeEvent()
+        await instance.on_llm_request(event, request)
+        return instance, context, native, event, request
+
+    recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    instance, context, native, event, request = asyncio.run(run())
+
+    assert event.stopped is False
+    assert native.cursor_calls == 1
+    assert len(native.proposals) == 1
+    assert native.proposals[0]["dimensions"]["rejection"] == 900_000
+    assert native.proposals[0]["dimensions"] != {name: 0 for name in _V3_TEST_DIMENSIONS}
+    assert native.proposals[0]["estimator_confidence"] == 900_000
+    assert len(context.generate_calls) == 1
+    provider_call = context.generate_calls[0]
+    assert provider_call["chat_provider_id"] == "semantic"
+    assert provider_call["prompt"] == "请不要再联系我，我明确拒绝。"
+    assert provider_call["contexts"] is None
+    assert provider_call["tools"] is None
+    assert provider_call["temperature"] == 0
+    assert provider_call["prompt"] not in provider_call["system_prompt"]
+    assert request.prompt == "请不要再联系我，我明确拒绝。"
+    assert request.contexts == [{"role": "user", "content": "历史"}]
+    assert request.system_prompt.count("AE Affect Expression Context") == 1
+    semantic_record = getattr(
+        request, "_astrembodiment_semantic_observatory_record_v1", {}
+    )
+    assert {
+        key: semantic_record.get(key)
+        for key in ("status", "code", "calibration_state", "expression_state")
+    } == {
+        "status": "DEGRADED",
+        "code": "HUMAN_GOLD_UNVERIFIED",
+        "calibration_state": "UNVERIFIED_HUMAN_GOLD",
+        "expression_state": "APPLIED",
+    }
+    assert len(recorder.warning_messages) == 1
+    assert recorder.info_messages == []
+
+
+def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class NativeAbi:
+        def semantic_revision_v1(self, _scope_json: str) -> str:
+            return json.dumps(
+                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+            )
+
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+
+        async def unavailable_generate(**_kwargs):
+            raise RuntimeError("provider unavailable")
+
+        context.llm_generate = unavailable_generate
+        instance = plugin(
+            FakeConfig(
+                model_settings={"semantic_estimator_provider_id": "semantic"},
+                observatory_enabled=False,
+            ),
+            context,
+        )
+        bridge = bridge_module.NativeBridge()
+        bridge._native = NativeAbi()
+        instance._bridge = bridge
+        instance._coordinator = GenesisCoordinator(bridge)
+        scope = _v3_test_scope()
+
+        async def run_genesis(*_args, **_kwargs):
+            return _v3_test_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        request = FakeRequest()
+        request.prompt = "请停止。"
+        await instance.on_llm_request(FakeEvent(), request)
+        return request
+
+    recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    request = asyncio.run(run())
+
+    semantic_record = getattr(
+        request, "_astrembodiment_semantic_observatory_record_v1", {}
+    )
+    assert {
+        key: semantic_record.get(key)
+        for key in ("expression_state", "code", "reason", "cause_code")
+    } == {
+        "expression_state": "NOT_ATTEMPTED",
+        "code": "EXPRESSION_NOT_ATTEMPTED",
+        "reason": "EXPRESSION_NOT_ATTEMPTED",
+        "cause_code": "ESTIMATOR_UNAVAILABLE",
+    }
+    assert len(recorder.warning_messages) == 1
+    assert recorder.info_messages == []

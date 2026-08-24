@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import tempfile
@@ -59,7 +60,11 @@ except ImportError:  # Static checks outside AstrBot.
 
 try:
     from .astr_embodiment import NativeBridge, NativeCoreUnavailable
-    from .astr_embodiment.contracts import ScopeTokens, build_delivery_outcome_json
+    from .astr_embodiment.contracts import (
+        FrozenTurn,
+        ScopeTokens,
+        build_delivery_outcome_json,
+    )
     from .astr_embodiment.coordinator import GenesisCoordinator
     from .astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
@@ -74,9 +79,17 @@ try:
         session_token,
         turn_id,
     )
+    from .astr_embodiment.semantic_estimator import (
+        SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
+        SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
+    )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment import NativeBridge, NativeCoreUnavailable
-    from astr_embodiment.contracts import ScopeTokens, build_delivery_outcome_json
+    from astr_embodiment.contracts import (
+        FrozenTurn,
+        ScopeTokens,
+        build_delivery_outcome_json,
+    )
     from astr_embodiment.coordinator import GenesisCoordinator
     from astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
@@ -90,6 +103,10 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
         persona_token,
         session_token,
         turn_id,
+    )
+    from astr_embodiment.semantic_estimator import (
+        SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
+        SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
     )
 
 _G0_FORMULA_DIGEST = "00" * 32
@@ -165,7 +182,6 @@ _OBSERVATORY_FIELDS = (
     "expression_profile_fxp6",
 )
 _OBSERVATORY_CODES = {
-    "SEMANTIC_COMMITTED",
     "EMPTY_REQUEST",
     "NATIVE_ERROR",
     "NATIVE_MALFORMED",
@@ -209,6 +225,22 @@ _OBSERVATORY_EXPRESSION_STATES = {
     "REJECTED",
     "INJECTION_FAILED",
 }
+_SEMANTIC_OBSERVATORY_SCHEMA = "astr-embodiment.semantic-observatory.v1"
+_SEMANTIC_CLOSURE_SCHEMA = "astrembodiment.semantic-perception-closure.v1"
+_SEMANTIC_CALIBRATION_UNVERIFIED = "UNVERIFIED_HUMAN_GOLD"
+_SEMANTIC_NOT_ATTEMPTED_CAUSES = frozenset(
+    {
+        "EMPTY_REQUEST",
+        "ESTIMATOR_UNAVAILABLE",
+        "ESTIMATOR_MALFORMED",
+        "SEMANTIC_VECTOR_UNAVAILABLE",
+        "ESTIMATOR_UNCERTAIN",
+        "NATIVE_SYMBOL_UNAVAILABLE",
+        "NATIVE_MALFORMED",
+        "NATIVE_ERROR",
+        "EXPRESSION_PROJECTION_UNAVAILABLE",
+    }
+)
 
 
 class AstrEmbodimentPlugin(Star):
@@ -229,6 +261,11 @@ class AstrEmbodimentPlugin(Star):
         self._seed_receipts: dict[str, dict[str, Any]] = {}
         self._injection_marker = "AstrEmbodiment Runtime Context"
         self._request_injected_attr = "_astrembodiment_runtime_injected_v1"
+        self._expression_injection_marker = "AE Affect Expression Context"
+        self._request_expression_attr = "_astrembodiment_expression_injected_v1"
+        self._request_semantic_record_attr = (
+            "_astrembodiment_semantic_observatory_record_v1"
+        )
 
     async def initialize(self) -> None:
         try:
@@ -411,6 +448,21 @@ class AstrEmbodimentPlugin(Star):
     def _assistant_provider_id(self) -> str:
         return str(self._config_value("assistant_provider_id", "") or "").strip()
 
+    def _semantic_estimator_provider_id(self) -> str:
+        """Return only the explicit V3 estimator provider selection."""
+
+        return str(
+            self._config_value("semantic_estimator_provider_id", "") or ""
+        ).strip()
+
+    def _semantic_estimator_timeout_seconds(self) -> float:
+        """Keep the V3 provider timeout bounded even for malformed config."""
+
+        value = self._config_value("semantic_estimator_timeout_ms", 8_000)
+        if type(value) is not int or not 1_000 <= value <= 15_000:
+            value = 8_000
+        return value / 1_000
+
     @staticmethod
     async def _maybe_await(value: Any) -> Any:
         """Await only real awaitables; AstrBotConfig is synchronous in v4.26.7."""
@@ -448,6 +500,76 @@ class AstrEmbodimentPlugin(Star):
             tools=None,
             temperature=0,
         )
+
+    async def _semantic_estimate_v3(
+        self,
+        event: Any,
+        request_mapping: Mapping[str, Any],
+    ) -> Any:
+        """Adapt the V3-only provider mapping without history or tool leakage."""
+
+        if type(request_mapping) is not dict or set(request_mapping) != {
+            "current_turn_text",
+            "system_prompt",
+            "structured_schema",
+            "input",
+        }:
+            raise ValueError("invalid semantic estimate request")
+        current_turn_text = request_mapping["current_turn_text"]
+        system_prompt = request_mapping["system_prompt"]
+        structured_schema = request_mapping["structured_schema"]
+        provider_input = request_mapping["input"]
+        if (
+            type(current_turn_text) is not str
+            or type(system_prompt) is not str
+            or system_prompt != SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT
+            or type(structured_schema) is not dict
+            or structured_schema != SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA
+            or type(provider_input) is not dict
+            or set(provider_input) != {"context_summary"}
+            or type(provider_input["context_summary"]) is not dict
+        ):
+            raise ValueError("invalid semantic estimate request")
+
+        provider_id = (
+            self._semantic_estimator_provider_id() or self._assistant_provider_id()
+        )
+        if provider_id:
+            get_provider = getattr(self.context, "get_provider_by_id", None)
+            if callable(get_provider) and get_provider(provider_id) is None:
+                raise ValueError("semantic estimator provider unavailable")
+        else:
+            get_current = getattr(self.context, "get_current_chat_provider_id", None)
+            if not callable(get_current):
+                raise RuntimeError("semantic estimator provider unavailable")
+            provider_id = await self._maybe_await(
+                get_current(umo=getattr(event, "unified_msg_origin", None))
+            )
+            if type(provider_id) is not str or not provider_id.strip():
+                raise ValueError("semantic estimator provider unavailable")
+
+        generate = getattr(self.context, "llm_generate", None)
+        if not callable(generate):
+            raise TypeError("semantic estimator provider unavailable")
+        generated = generate(
+            chat_provider_id=provider_id,
+            prompt=current_turn_text,
+            system_prompt=system_prompt,
+            contexts=None,
+            tools=None,
+            temperature=0,
+        )
+        if inspect.isawaitable(generated):
+            result = await asyncio.wait_for(
+                generated,
+                timeout=self._semantic_estimator_timeout_seconds(),
+            )
+        else:
+            result = generated
+        if type(result) is str:
+            return result
+        completion_text = getattr(result, "completion_text", None)
+        return completion_text if type(completion_text) is str else result
 
     async def _persist_seed(self, seed_code: str) -> None:
         """Persist the latest native SeedCode through AstrBotConfig."""
@@ -826,123 +948,6 @@ class AstrEmbodimentPlugin(Star):
             logger.info(self._compact_observatory_message(record))
         return record
 
-    @classmethod
-    def _unconfirmed_receipt_observatory(
-        cls,
-        decision: Mapping[str, Any],
-        *,
-        base_revision: int | None,
-    ) -> dict[str, Any]:
-        """Project a v1 decision with no trustworthy native receipt.
-
-        G0's zero semantic estimate is closed and known independently of a
-        receipt, while native counts and residuals are not.  Keep the known
-        scalars visible in the mandatory failure warning without inventing a
-        commit or calculation confirmation.
-        """
-
-        def known_revision(value: Any) -> int | None:
-            try:
-                return cls._closed_int(value, minimum=0, maximum=(2**64) - 1)
-            except (TypeError, ValueError):
-                return None
-
-        deduplicated = decision.get("deduplicated")
-        return {
-            "status": "FAILED",
-            "code": "NATIVE_MALFORMED",
-            "stage": "RECEIPT",
-            "commit_state": "UNKNOWN",
-            "values_state": "ESTIMATED_NOT_CONFIRMED",
-            "dimensions_fxp6": {name: 0 for name in _OBSERVATORY_DIMENSIONS},
-            "estimator_confidence_fxp6": 0,
-            "dimension_confidence_fxp6": None,
-            "base_revision": known_revision(base_revision),
-            "revision": known_revision(decision.get("revision")),
-            "deduplicated": deduplicated if type(deduplicated) is bool else False,
-            "receipt_status": "unavailable",
-            "calculation_state": "UNCONFIRMED",
-            "native_calculation": None,
-            "expression_state": "NOT_ATTEMPTED",
-            "expression_profile_fxp6": None,
-        }
-
-    def _observatory_outcome_from_decision(
-        self,
-        decision: Mapping[str, Any],
-        *,
-        base_revision: int | None = None,
-    ) -> dict[str, Any] | None:
-        """Project the current native G0 receipt into the D2 closed schema."""
-        if decision.get("schema") != "astrembodiment.decision.v1":
-            return None
-        receipt = decision.get("receipt")
-        if receipt is None:
-            return self._unconfirmed_receipt_observatory(
-                decision, base_revision=base_revision
-            )
-        if not isinstance(receipt, Mapping):
-            return self._unconfirmed_receipt_observatory(
-                decision, base_revision=base_revision
-            )
-        try:
-            base_revision = self._closed_int(
-                receipt.get("base_revision"), minimum=0, maximum=(2**64) - 1
-            )
-            receipt_revision = self._closed_int(
-                receipt.get("next_revision"), minimum=0, maximum=(2**64) - 1
-            )
-            revision = self._closed_int(
-                decision.get("revision"), minimum=0, maximum=(2**64) - 1
-            )
-            deduplicated = decision.get("deduplicated")
-            if type(deduplicated) is not bool or receipt_revision != revision:
-                raise ValueError("receipt revision mismatch")
-            if str(receipt.get("status", "")).casefold() != "committed":
-                raise ValueError("receipt is not committed")
-            residuals = self._closed_fxp6_map(
-                receipt.get("residuals"),
-                names=_OBSERVATORY_RESIDUALS,
-                minimum=-(2**63),
-                maximum=(2**63) - 1,
-            )
-            active_nodes = self._closed_int(
-                receipt.get("active_nodes"), minimum=0, maximum=(2**32) - 1
-            )
-            active_edges = self._closed_int(
-                receipt.get("active_edges"), minimum=0, maximum=(2**32) - 1
-            )
-        except (TypeError, ValueError):
-            return self._unconfirmed_receipt_observatory(
-                decision, base_revision=base_revision
-            )
-
-        return {
-            "status": "SUCCESS",
-            "code": "SEMANTIC_COMMITTED",
-            "stage": "RECEIPT",
-            "commit_state": ("CONFIRMED_EXISTING" if deduplicated else "CONFIRMED_NEW"),
-            "values_state": "COMMITTED",
-            # The G0 native event is a closed, zero-valued semantic estimate;
-            # no host/user text enters this projection.
-            "dimensions_fxp6": {name: 0 for name in _OBSERVATORY_DIMENSIONS},
-            "estimator_confidence_fxp6": 0,
-            "dimension_confidence_fxp6": None,
-            "base_revision": base_revision,
-            "revision": revision,
-            "deduplicated": deduplicated,
-            "receipt_status": "committed",
-            "calculation_state": "CONFIRMED",
-            "native_calculation": {
-                "state_changed": not deduplicated,
-                "active_nodes": active_nodes,
-                "active_edges": active_edges,
-                "residuals_fxp6": residuals,
-            },
-            "expression_state": "NOT_ATTEMPTED",
-            "expression_profile_fxp6": None,
-        }
-
     @staticmethod
     def _aggregate_context_metadata(context_summary: Mapping[str, Any] | None) -> str:
         """Format only the sealed aggregate context accepted from Rust.
@@ -1086,6 +1091,247 @@ class AstrEmbodimentPlugin(Star):
         except BaseException:
             request.system_prompt = current
             raise
+
+    @classmethod
+    def _expression_profile_from_semantic_outcome(
+        cls,
+        outcome: Mapping[str, Any],
+    ) -> dict[str, int] | None:
+        """Accept only a confirmed shared closure expression projection."""
+
+        if not isinstance(outcome, Mapping):
+            return None
+        if (
+            outcome.get("status") != "DEGRADED"
+            or outcome.get("code") != "HUMAN_GOLD_UNVERIFIED"
+            or outcome.get("calibration_state") != _SEMANTIC_CALIBRATION_UNVERIFIED
+        ):
+            return None
+        closure = outcome.get("semantic_closure")
+        if not isinstance(closure, Mapping):
+            return None
+        if (
+            closure.get("schema") != _SEMANTIC_CLOSURE_SCHEMA
+            or closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
+            or closure.get("node_observability_state") != "CONFIRMED"
+        ):
+            return None
+        revision = closure.get("revision")
+        projection = closure.get("expression_projection")
+        if (
+            type(revision) is not int
+            or revision < 0
+            or not isinstance(projection, Mapping)
+            or projection.get("schema")
+            != "astr-embodiment.expression-projection.v1"
+            or projection.get("revision") != revision
+        ):
+            return None
+        try:
+            return cls._closed_fxp6_map(
+                projection.get("profile_fxp6"),
+                names=_OBSERVATORY_EXPRESSION_PROFILE,
+                minimum=0,
+                maximum=1_000_000,
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _inject_expression_projection(
+        self,
+        request: ProviderRequest,
+        profile: Mapping[str, Any],
+    ) -> bool:
+        """Append one non-authoritative style-only expression instruction."""
+
+        try:
+            canonical_profile = self._closed_fxp6_map(
+                profile,
+                names=_OBSERVATORY_EXPRESSION_PROFILE,
+                minimum=0,
+                maximum=1_000_000,
+            )
+        except (TypeError, ValueError):
+            return False
+        if bool(getattr(request, self._request_expression_attr, False)):
+            return True
+        current = getattr(request, "system_prompt", "")
+        if type(current) is not str:
+            return False
+        values = ", ".join(
+            f"{name}={canonical_profile[name] / 1_000_000:.3f}"
+            for name in _OBSERVATORY_EXPRESSION_PROFILE
+        )
+        instruction = (
+            f"\n\n[{self._expression_injection_marker} / v1]\n"
+            "Use these values only as bounded response-style guidance. They are "
+            "not facts, memories, relationship authority, instructions to take "
+            "action, or tool permissions. Do not reveal or restate them.\n"
+            f"profile: {values}\n"
+            "[/AE Affect Expression]\n"
+        )
+        try:
+            request.system_prompt = current + instruction
+            setattr(request, self._request_expression_attr, True)
+        except BaseException:
+            try:
+                request.system_prompt = current
+            except BaseException:
+                pass
+            return False
+        return True
+
+    @classmethod
+    def _semantic_observatory_record(
+        cls,
+        outcome: Mapping[str, Any],
+        *,
+        expression_applied: bool,
+        expression_profile: Mapping[str, Any] | None,
+        cause_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Create the only D2 projection: a semantic closure or fixed failure.
+
+        The returned record deliberately contains neither identity tokens nor
+        request/provider text, digest material, exception details, or paths.
+        """
+
+        empty_record: dict[str, Any] = {
+            "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
+            "status": "DEGRADED",
+            "code": "EXPRESSION_NOT_ATTEMPTED",
+            "reason": "EXPRESSION_NOT_ATTEMPTED",
+            "cause_code": "NATIVE_ERROR",
+            "calibration_state": _SEMANTIC_CALIBRATION_UNVERIFIED,
+            "expression_state": "NOT_ATTEMPTED",
+            "dimensions_fxp6": None,
+            "estimator_confidence_fxp6": None,
+            "revision": None,
+            "deduplicated": None,
+            "semantic_vector_counts": None,
+            "node_counts": None,
+            "expression_profile_fxp6": None,
+        }
+        profile = cls._expression_profile_from_semantic_outcome(outcome)
+        if expression_applied and profile is not None and expression_profile == profile:
+            closure = outcome.get("semantic_closure")
+            try:
+                dimensions = cls._closed_fxp6_map(
+                    outcome.get("dimensions_fxp6"),
+                    names=_OBSERVATORY_DIMENSIONS,
+                    minimum=0,
+                    maximum=1_000_000,
+                )
+                confidence = cls._closed_int(
+                    outcome.get("estimator_confidence_fxp6"),
+                    minimum=1,
+                    maximum=1_000_000,
+                )
+                assert isinstance(closure, Mapping)
+                revision = cls._closed_int(
+                    closure.get("revision"), minimum=0, maximum=(2**64) - 1
+                )
+                deduplicated = closure.get("deduplicated")
+                if type(deduplicated) is not bool:
+                    raise ValueError("deduplicated")
+                vector = closure.get("semantic_vector_receipt")
+                nodes = closure.get("node_observability")
+                if not isinstance(vector, Mapping) or not isinstance(nodes, Mapping):
+                    raise ValueError("semantic closure")
+                vector_counts = {
+                    name: cls._closed_int(
+                        vector.get(name), minimum=0, maximum=15
+                    )
+                    for name in (
+                        "dimension_slot_count",
+                        "evaluated_dimension_count",
+                        "injected_dimension_count",
+                        "nonzero_evidence_dimension_count",
+                        "neutral_baseline_dimension_count",
+                        "unavailable_dimension_count",
+                    )
+                }
+                node_counts_source = nodes.get("counts")
+                if not isinstance(node_counts_source, Mapping):
+                    raise ValueError("node counts")
+                node_counts = {
+                    name: cls._closed_int(
+                        node_counts_source.get(name), minimum=0, maximum=16_384
+                    )
+                    for name in (
+                        "selected_node_count",
+                        "activated_node_count",
+                        "changed_node_count",
+                        "potential_nonzero_after_count",
+                        "excitation_nonzero_after_count",
+                        "signal_nonzero_after_count",
+                    )
+                }
+            except (AssertionError, TypeError, ValueError):
+                cause_code = "NATIVE_MALFORMED"
+            else:
+                return {
+                    "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
+                    "status": "DEGRADED",
+                    "code": "HUMAN_GOLD_UNVERIFIED",
+                    "reason": "CALIBRATION_HUMAN_GOLD_REQUIRED",
+                    "cause_code": None,
+                    "calibration_state": _SEMANTIC_CALIBRATION_UNVERIFIED,
+                    "expression_state": "APPLIED",
+                    "dimensions_fxp6": dimensions,
+                    "estimator_confidence_fxp6": confidence,
+                    "revision": revision,
+                    "deduplicated": deduplicated,
+                    "semantic_vector_counts": vector_counts,
+                    "node_counts": node_counts,
+                    "expression_profile_fxp6": profile,
+                }
+        if cause_code is None and isinstance(outcome, Mapping):
+            candidate = outcome.get("code")
+            cause_code = candidate if type(candidate) is str else None
+        if cause_code not in _SEMANTIC_NOT_ATTEMPTED_CAUSES:
+            cause_code = "NATIVE_ERROR"
+        empty_record["cause_code"] = cause_code
+        return empty_record
+
+    def _emit_semantic_observatory(
+        self,
+        outcome: Mapping[str, Any],
+        *,
+        expression_applied: bool,
+        expression_profile: Mapping[str, Any] | None,
+        cause_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Always warn for preview and expression omissions, independent of config."""
+
+        record = self._semantic_observatory_record(
+            outcome,
+            expression_applied=expression_applied,
+            expression_profile=expression_profile,
+            cause_code=cause_code,
+        )
+        try:
+            message = _OBSERVATORY_PREFIX + json.dumps(
+                record,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            record = self._semantic_observatory_record(
+                {"status": "DEGRADED", "code": "NATIVE_ERROR"},
+                expression_applied=False,
+                expression_profile=None,
+                cause_code="NATIVE_ERROR",
+            )
+            message = _OBSERVATORY_PREFIX + json.dumps(
+                record,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        logger.warning(message)
+        return record
 
     async def _save_receipt(self, receipt: Mapping[str, Any]) -> str:
         seed_code = str(receipt.get("seed_code", "") or "").strip()
@@ -1437,8 +1683,19 @@ class AstrEmbodimentPlugin(Star):
         **kwargs: Any,
     ) -> None:
         del args, kwargs
+        # Read exactly once before any G0/action or system-prompt mutation.
+        frozen_request_text = getattr(request, "prompt", None)
+        if type(frozen_request_text) is not str:
+            frozen_request_text = None
         if bool(getattr(request, self._request_injected_attr, False)):
             return
+
+        semantic_outcome: Mapping[str, Any] = {
+            "status": "DEGRADED",
+            "code": "EMPTY_REQUEST" if frozen_request_text is None else "NATIVE_ERROR",
+        }
+        semantic_profile: Mapping[str, Any] | None = None
+        semantic_record_emitted = False
 
         try:
             (
@@ -1454,6 +1711,15 @@ class AstrEmbodimentPlugin(Star):
                 apply_stimulus=True,
             )
         except (PersonaCompilerMalformed, PersonaGenesisError) as exc:
+            semantic_record = self._emit_semantic_observatory(
+                semantic_outcome,
+                expression_applied=False,
+                expression_profile=None,
+            )
+            try:
+                setattr(request, self._request_semantic_record_attr, semantic_record)
+            except (AttributeError, TypeError):
+                pass
             self._emit_observatory(
                 self._failed_observatory("GENESIS_UNAVAILABLE", "NATIVE_APPLY")
             )
@@ -1463,6 +1729,15 @@ class AstrEmbodimentPlugin(Star):
             await self._stop_genesis_turn(event, str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - fail closed before host LLM
+            semantic_record = self._emit_semantic_observatory(
+                semantic_outcome,
+                expression_applied=False,
+                expression_profile=None,
+            )
+            try:
+                setattr(request, self._request_semantic_record_attr, semantic_record)
+            except (AttributeError, TypeError):
+                pass
             self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))
             logger.error("AstrEmbodiment request lane failed: %s", exc)
             await self._stop_genesis_turn(event, str(exc))
@@ -1506,8 +1781,55 @@ class AstrEmbodimentPlugin(Star):
                 raise PersonaGenesisError("原生上下文摘要格式无效")
             revision = int(decision.get("revision", base_revision))
 
+            if context_summary is None:
+                semantic_outcome = {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+            else:
+                semantic_turn = FrozenTurn(
+                    scope=scope,
+                    event_id=event_id(f"{session_key}#{seq}"),
+                    turn_id=turn_token,
+                    base_revision=base_revision,
+                    observed_at_ms=int(time.time() * 1000),
+                )
+
+                async def semantic_estimator(
+                    request_mapping: Mapping[str, Any],
+                ) -> Any:
+                    return await self._semantic_estimate_v3(event, request_mapping)
+
+                semantic_outcome = await self._coordinator.preflight_semantic_v3(
+                    scope=scope,
+                    frozen_turn=semantic_turn,
+                    request_text=frozen_request_text,
+                    context_summary=context_summary,
+                    estimator=semantic_estimator,
+                )
+            semantic_profile = self._expression_profile_from_semantic_outcome(
+                semantic_outcome
+            )
+
             await self._persist_seed(seed_code)
             self._inject_request(request, seed_code, contract, context_summary)
+
+            expression_applied = False
+            expression_cause: str | None = None
+            if semantic_profile is not None:
+                expression_applied = self._inject_expression_projection(
+                    request, semantic_profile
+                )
+                if not expression_applied:
+                    expression_cause = "EXPRESSION_PROJECTION_UNAVAILABLE"
+            semantic_record = self._emit_semantic_observatory(
+                semantic_outcome,
+                expression_applied=expression_applied,
+                expression_profile=semantic_profile,
+                cause_code=expression_cause,
+            )
+            semantic_record_emitted = True
+            try:
+                setattr(request, self._request_semantic_record_attr, semantic_record)
+            except (AttributeError, TypeError):
+                pass
 
             try:
                 event.turn_token = turn_token
@@ -1528,18 +1850,35 @@ class AstrEmbodimentPlugin(Star):
                 "base_revision": revision,
                 "contract": contract,
             }
-            observatory = self._observatory_outcome_from_decision(
-                decision, base_revision=base_revision
-            )
-            if observatory is not None:
-                self._emit_observatory(observatory)
         except PersonaGenesisError as exc:
+            if not semantic_record_emitted:
+                semantic_record = self._emit_semantic_observatory(
+                    semantic_outcome,
+                    expression_applied=False,
+                    expression_profile=None,
+                    cause_code="EXPRESSION_PROJECTION_UNAVAILABLE",
+                )
+                try:
+                    setattr(request, self._request_semantic_record_attr, semantic_record)
+                except (AttributeError, TypeError):
+                    pass
             self._emit_observatory(
                 self._failed_observatory("NATIVE_MALFORMED", "RECEIPT")
             )
             logger.error("AstrEmbodiment Genesis result rejected: %s", exc)
             await self._stop_genesis_turn(event, str(exc))
         except Exception:
+            if not semantic_record_emitted:
+                semantic_record = self._emit_semantic_observatory(
+                    semantic_outcome,
+                    expression_applied=False,
+                    expression_profile=None,
+                    cause_code="EXPRESSION_PROJECTION_UNAVAILABLE",
+                )
+                try:
+                    setattr(request, self._request_semantic_record_attr, semantic_record)
+                except (AttributeError, TypeError):
+                    pass
             self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))
             logger.exception("AstrEmbodiment Genesis result processing failed")
             await self._stop_genesis_turn(event, "创世结果处理失败")
@@ -1591,11 +1930,6 @@ class AstrEmbodimentPlugin(Star):
             if revision < int(frozen["base_revision"]):
                 raise PersonaGenesisError("原生交付回执版本倒退")
             self._revisions[scope.persona_token] = revision
-            observatory = self._observatory_outcome_from_decision(
-                result, base_revision=int(frozen["base_revision"])
-            )
-            if observatory is not None:
-                self._emit_observatory(observatory)
         except Exception as exc:  # noqa: BLE001 - delivery fact, log only
             self._emit_observatory(
                 self._failed_observatory("NATIVE_ERROR", "NATIVE_APPLY")

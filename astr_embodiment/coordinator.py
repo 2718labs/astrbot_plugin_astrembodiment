@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from .bridge import (
@@ -23,23 +23,49 @@ from .bridge import (
     validate_context_summary_payload,
 )
 from .contracts import (
+    FrozenTurn,
     ScopeTokens,
     build_delivery_outcome_json,
     build_user_stimulus_json,
 )
+from .context_binding import ContextBindingV1, adapt_native_context_summary_v1
 from .persona_genesis import (
     PersonaCompilerMalformed,
     PersonaSourceSnapshot,
     build_closed_request,
     validate_proposal,
 )
+from .semantic_estimator import (
+    ESTIMATOR_FORMULA_DIGEST,
+    SemanticEstimateError,
+    SemanticProposalError,
+    build_perception_proposal_v3,
+    estimate_context_bound,
+    make_request_nonce_digest,
+)
 
 FORMULA_DIGEST = "00" * 32  # placeholder; G2 fills the real FormulaProfile digest
 
 Compiler = Callable[[PersonaSourceSnapshot], Awaitable[dict[str, Any]]]
+ContextBoundEstimatorProvider = Callable[[Mapping[str, Any]], Any]
 
 _RETRY_WAIT_ATTEMPTS = 40
 _RETRY_WAIT_DELAY_S = 0.05
+_SEMANTIC_FAILURE_CODES = frozenset(
+    {
+        "EMPTY_REQUEST",
+        "INVALID_TURN",
+        "ESTIMATOR_UNAVAILABLE",
+        "ESTIMATOR_MALFORMED",
+        "SEMANTIC_VECTOR_UNAVAILABLE",
+        "ESTIMATOR_UNCERTAIN",
+        "NATIVE_SYMBOL_UNAVAILABLE",
+        "NATIVE_MALFORMED",
+        "STALE_REVISION",
+        "NATIVE_ERROR",
+        "EXPRESSION_PROJECTION_UNAVAILABLE",
+    }
+)
 
 
 class GenesisCoordinator:
@@ -50,6 +76,8 @@ class GenesisCoordinator:
         self._inflight: dict[str, asyncio.Future] = {}
         self._committed: dict[str, dict[str, Any]] = {}
         self._applied: dict[str, dict[str, Any]] = {}
+        self._semantic_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._semantic_results: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _scope_key(scope: ScopeTokens, source_digest: str) -> str:
@@ -93,6 +121,12 @@ class GenesisCoordinator:
         for key in tuple(self._applied):
             if key.startswith(prefix):
                 self._applied.pop(key, None)
+        for key in tuple(self._semantic_results):
+            if key.startswith(prefix):
+                self._semantic_results.pop(key, None)
+        for key in tuple(self._semantic_inflight):
+            if key.startswith(prefix):
+                self._semantic_inflight.pop(key, None)
 
     async def ensure_genesis(
         self,
@@ -239,6 +273,195 @@ class GenesisCoordinator:
         )
         return await self._apply_once(scope, event_id, event)
 
+    @staticmethod
+    def _semantic_failure(code: str) -> dict[str, str]:
+        """Return one non-echoing V3 preview failure."""
+
+        if code not in _SEMANTIC_FAILURE_CODES:
+            code = "NATIVE_ERROR"
+        return {"status": "DEGRADED", "code": code}
+
+    @staticmethod
+    def _semantic_key(scope: ScopeTokens, frozen_turn: FrozenTurn) -> str:
+        return ":".join(
+            (
+                scope.bot_token,
+                scope.persona_token,
+                frozen_turn.event_id,
+                frozen_turn.turn_id,
+            )
+        )
+
+    @staticmethod
+    def _valid_semantic_request(
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+    ) -> bool:
+        """Validate opaque turn identity before opening the native cursor."""
+
+        if type(scope) is not ScopeTokens or type(frozen_turn) is not FrozenTurn:
+            return False
+        if frozen_turn.scope != scope or type(request_text) is not str or not request_text:
+            return False
+        try:
+            # The nonce builder performs the exact closed scope/turn validation.
+            make_request_nonce_digest(scope, frozen_turn)
+        except SemanticProposalError:
+            return False
+        return True
+
+    async def preflight_semantic_v3(
+        self,
+        *,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        context_summary: Mapping[str, Any],
+        estimator: ContextBoundEstimatorProvider,
+    ) -> dict[str, Any]:
+        """Run the isolated V3 preview lane at most once for one frozen turn.
+
+        The singleflight key deliberately excludes request text: a concurrent
+        retry with different text joins the first frozen turn instead of
+        producing a second semantic estimate or native proposal.
+        """
+
+        if type(request_text) is not str or not request_text:
+            return self._semantic_failure("EMPTY_REQUEST")
+        if not self._valid_semantic_request(scope, frozen_turn, request_text):
+            return self._semantic_failure("INVALID_TURN")
+        key = self._semantic_key(scope, frozen_turn)
+        previous = self._semantic_results.get(key)
+        if previous is not None:
+            return copy.deepcopy(previous)
+        task = self._semantic_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(
+                self._run_semantic_v3(
+                    scope=scope,
+                    frozen_turn=frozen_turn,
+                    request_text=request_text,
+                    context_summary=context_summary,
+                    estimator=estimator,
+                )
+            )
+            self._semantic_inflight[key] = task
+        try:
+            result = await asyncio.shield(task)
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            result = self._semantic_failure("NATIVE_ERROR")
+        self._semantic_results[key] = copy.deepcopy(result)
+        if task.done() and self._semantic_inflight.get(key) is task:
+            self._semantic_inflight.pop(key, None)
+        return copy.deepcopy(result)
+
+    async def _run_semantic_v3(
+        self,
+        *,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        context_summary: Mapping[str, Any],
+        estimator: ContextBoundEstimatorProvider,
+    ) -> dict[str, Any]:
+        """Execute the V3-only path without consulting the G0 zero builder."""
+
+        try:
+            native_summary = validate_context_summary_payload(context_summary)
+        except BaseException:
+            return self._semantic_failure("NATIVE_MALFORMED")
+
+        cursor = self._bridge.semantic_revision_v1(scope)
+        if type(cursor) is not dict:
+            return self._semantic_failure("NATIVE_MALFORMED")
+        if cursor.get("status") == "DEGRADED":
+            return self._semantic_failure(str(cursor.get("code", "NATIVE_ERROR")))
+        if set(cursor) != {"schema", "revision"}:
+            return self._semantic_failure("NATIVE_MALFORMED")
+        cursor_revision = cursor.get("revision")
+        if type(cursor_revision) is not int or cursor_revision < 0:
+            return self._semantic_failure("NATIVE_MALFORMED")
+
+        semantic_turn = FrozenTurn(
+            scope=scope,
+            event_id=frozen_turn.event_id,
+            turn_id=frozen_turn.turn_id,
+            base_revision=cursor_revision,
+            observed_at_ms=frozen_turn.observed_at_ms,
+        )
+        try:
+            nonce_digest = make_request_nonce_digest(scope, semantic_turn)
+            adapted_summary = adapt_native_context_summary_v1(
+                native_summary,
+                scope=scope,
+                nonce_digest=nonce_digest,
+                estimator_formula_digest=ESTIMATOR_FORMULA_DIGEST,
+            )
+            binding = ContextBindingV1.from_json(adapted_summary["binding"])
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return self._semantic_failure("NATIVE_MALFORMED")
+
+        try:
+            estimate = await estimate_context_bound(
+                estimator,
+                request_text,
+                binding=binding,
+                summary=adapted_summary,
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except SemanticEstimateError as exc:
+            return self._semantic_failure(exc.code)
+        except BaseException:
+            return self._semantic_failure("ESTIMATOR_UNAVAILABLE")
+
+        try:
+            proposal = build_perception_proposal_v3(
+                scope=scope,
+                turn=semantic_turn,
+                estimate=estimate,
+                base_revision=cursor_revision,
+                nonce_digest=nonce_digest,
+            )
+        except SemanticProposalError as exc:
+            return self._semantic_failure(exc.code)
+        except BaseException:
+            return self._semantic_failure("ESTIMATOR_MALFORMED")
+
+        closure = self._bridge.apply_perception_proposal_v1(scope, proposal)
+        if type(closure) is not dict:
+            return self._semantic_failure("NATIVE_MALFORMED")
+        if closure.get("status") == "DEGRADED":
+            return self._semantic_failure(str(closure.get("code", "NATIVE_ERROR")))
+        if closure.get("schema") != "astrembodiment.semantic-perception-closure.v1":
+            return self._semantic_failure("NATIVE_MALFORMED")
+        vector = closure.get("semantic_vector_receipt")
+        if (
+            closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
+            or closure.get("node_observability_state") != "CONFIRMED"
+            or type(vector) is not dict
+            or vector.get("dimension_slot_count") != 15
+            or vector.get("evaluated_dimension_count") != 15
+            or vector.get("injected_dimension_count") != 15
+            or vector.get("unavailable_dimension_count") != 0
+        ):
+            return self._semantic_failure("SEMANTIC_VECTOR_UNAVAILABLE")
+        if closure.get("expression_projection") is None:
+            return self._semantic_failure("EXPRESSION_PROJECTION_UNAVAILABLE")
+        return {
+            "status": "DEGRADED",
+            "code": "HUMAN_GOLD_UNVERIFIED",
+            "calibration_state": "UNVERIFIED_HUMAN_GOLD",
+            "dimensions_fxp6": dict(proposal["dimensions"]),
+            "estimator_confidence_fxp6": proposal["estimator_confidence"],
+            "semantic_closure": copy.deepcopy(closure),
+        }
+
     async def apply_delivery(
         self,
         *,
@@ -304,3 +527,5 @@ class GenesisCoordinator:
         self._inflight.clear()
         self._committed.clear()
         self._applied.clear()
+        self._semantic_inflight.clear()
+        self._semantic_results.clear()

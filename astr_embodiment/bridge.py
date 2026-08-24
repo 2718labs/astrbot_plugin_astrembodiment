@@ -16,6 +16,15 @@ from importlib import util as importlib_util
 from pathlib import Path
 from typing import Any
 
+from .contracts import ScopeTokens
+from .semantic_estimator import (
+    SemanticProposalError,
+    _canonical_hex,
+    _canonical_nonzero_hex,
+    proposal_to_json,
+    validate_perception_proposal,
+)
+
 _STORE_FILENAME = "astrembodiment.sqlite3"
 
 
@@ -84,6 +93,26 @@ class ContextProjectionIntegrity(NativeCoreError):
     pass
 
 
+class InvalidPerceptionProposal(NativeCoreError):
+    pass
+
+
+class InvalidPerceptionScope(NativeCoreError):
+    pass
+
+
+class SemanticIdentityConflict(NativeCoreError):
+    pass
+
+
+class SemanticRevisionOverflow(NativeCoreError):
+    pass
+
+
+class SemanticStateUnchanged(NativeCoreError):
+    pass
+
+
 _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "GENESIS_UNAVAILABLE": GenesisUnavailable,
     "RETRY_WAIT": RetryWait,
@@ -101,7 +130,70 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "CONTEXT_PROJECTION": ContextProjectionIntegrity,
     "CONTEXT_COMMIT_MISSING": ContextProjectionIntegrity,
     "CONTEXT_COMMIT_INTEGRITY": ContextProjectionIntegrity,
+    "INVALID_PERCEPTION_PROPOSAL": InvalidPerceptionProposal,
+    "INVALID_PERCEPTION_SCOPE": InvalidPerceptionScope,
+    "SEMANTIC_IDENTITY_CONFLICT": SemanticIdentityConflict,
+    "SEMANTIC_REVISION_OVERFLOW": SemanticRevisionOverflow,
+    "SEMANTIC_STATE_UNCHANGED": SemanticStateUnchanged,
 }
+
+_SEMANTIC_CURSOR_SCHEMA = "astrembodiment.semantic-revision.v1"
+_SEMANTIC_RESULT_SCHEMA = "astrembodiment.semantic-perception-closure.v1"
+_SEMANTIC_RESULT_BASE_FIELDS = frozenset(
+    {
+        "schema",
+        "receipt",
+        "semantic_vector_receipt",
+        "node_observability",
+        "revision",
+        "deduplicated",
+    }
+)
+_SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS = frozenset(
+    {*_SEMANTIC_RESULT_BASE_FIELDS, "expression_projection"}
+)
+_EXPRESSION_PROJECTION_SCHEMA = "astr-embodiment.expression-projection.v1"
+_EXPRESSION_PROFILE_FIELDS = (
+    "warmth",
+    "sensitivity",
+    "guardedness",
+    "repair_orientation",
+    "engagement",
+    "epistemic_caution",
+)
+_SEMANTIC_VECTOR_RECEIPT_SCHEMA = "astr-embodiment.semantic-vector-receipt.v2"
+_SEMANTIC_VECTOR_FORMULA = "full-vector-route-neutral-relaxation-v1"
+_NODE_OBSERVABILITY_SCHEMA = "astr-embodiment.node-observability.v1"
+_NODE_OBSERVABILITY_FORMULA = "spc1-node-observability-v1"
+_NODE_REGION_LAYOUT = (
+    ("interoception_allostasis", 2_048),
+    ("affective_valuation", 2_048),
+    ("salience", 1_024),
+    ("epistemic_fallibility", 2_048),
+    ("social_boundary", 2_048),
+    ("temper_inhibitory", 1_024),
+    ("world_model_imagination", 4_096),
+    ("global_workspace", 1_024),
+    ("action_expression", 1_024),
+)
+_NODE_CAPACITY = 16_384
+_RESIDUAL_FIELDS = frozenset(
+    {"authority", "continuity", "energy", "renormalization", "capacity"}
+)
+_SEMANTIC_ERROR_CODES = frozenset(
+    {
+        "INVALID_PERCEPTION_PROPOSAL",
+        "INVALID_PERCEPTION_SCOPE",
+        "NATIVE_SYMBOL_UNAVAILABLE",
+        "SEMANTIC_IDENTITY_CONFLICT",
+        "SEMANTIC_REVISION_OVERFLOW",
+        "SEMANTIC_STATE_UNCHANGED",
+        "STALE_REVISION",
+        "STALE_CAUSAL_BASE",
+        "CLOSED_SCHEMA",
+        "GENESIS_REQUIRED",
+    }
+)
 
 _CONTEXT_SUMMARY_SCHEMA = "astrembodiment.context-summary.v1"
 _CONTEXT_SUMMARY_KEYS = frozenset(
@@ -361,6 +453,422 @@ def validate_context_summary_payload(payload: Any) -> dict[str, Any]:
     return dict(payload)
 
 
+def _semantic_degraded(code: str) -> dict[str, str]:
+    return {"status": "DEGRADED", "code": code}
+
+
+def _semantic_error_code(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    if not isinstance(code, str):
+        code = str(error).partition("::")[0]
+    if code in _SEMANTIC_ERROR_CODES:
+        return code
+    if isinstance(error, NativeCoreUnavailable):
+        return "NATIVE_SYMBOL_UNAVAILABLE"
+    return "NATIVE_ERROR"
+
+
+def _semantic_pairs_without_duplicates(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("semantic payload")
+        payload[key] = value
+    return payload
+
+
+def _semantic_json(value: Any) -> dict[str, Any]:
+    if type(value) is str:
+        payload = json.loads(value, object_pairs_hook=_semantic_pairs_without_duplicates)
+    else:
+        payload = value
+    if type(payload) is not dict or any(type(key) is not str for key in payload):
+        raise ValueError("semantic payload")
+    return payload
+
+
+def _semantic_closed_json(value: dict[str, Any]) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _semantic_scope_payload(scope: ScopeTokens | str | dict[str, Any]) -> dict[str, Any]:
+    if type(scope) is ScopeTokens:
+        payload: Any = scope.scope_json()
+    elif type(scope) is str:
+        payload = json.loads(scope, object_pairs_hook=_semantic_pairs_without_duplicates)
+    elif type(scope) is dict:
+        payload = scope
+    else:
+        raise ValueError("scope")
+    if type(payload) is not dict or set(payload) != {
+        "bot_token",
+        "persona_token",
+        "relation_token",
+        "session_token",
+    }:
+        raise ValueError("scope")
+    relation = payload["relation_token"]
+    if relation is not None and type(relation) is not str:
+        raise ValueError("scope")
+    return {
+        "bot_token": _canonical_nonzero_hex(payload["bot_token"], 16),
+        "persona_token": _canonical_nonzero_hex(payload["persona_token"], 16),
+        "relation_token": (
+            _canonical_nonzero_hex(relation, 16) if relation is not None else None
+        ),
+        "session_token": _canonical_nonzero_hex(payload["session_token"], 16),
+    }
+
+
+def _validate_cursor_payload(value: Any) -> dict[str, Any]:
+    payload = _semantic_json(value)
+    if set(payload) != {"schema", "revision"}:
+        raise ValueError("semantic cursor")
+    revision = payload["revision"]
+    if payload["schema"] != _SEMANTIC_CURSOR_SCHEMA or type(revision) is not int or revision < 0:
+        raise ValueError("semantic cursor")
+    return {"schema": _SEMANTIC_CURSOR_SCHEMA, "revision": revision}
+
+
+def _validate_receipt(
+    value: Any, *, revision: int, expected_base_revision: int | None
+) -> tuple[dict[str, Any], bool]:
+    fields = {
+        "schema_version",
+        "formula_digest",
+        "scope_digest",
+        "event_digest",
+        "authority_digest",
+        "base_revision",
+        "next_revision",
+        "state_before",
+        "state_after",
+        "graph_after",
+        "active_nodes",
+        "active_edges",
+        "residuals",
+        "status",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("semantic receipt")
+    if value["schema_version"] != 1 or type(value["schema_version"]) is not int:
+        raise ValueError("semantic receipt")
+    for field in ("base_revision", "next_revision", "active_nodes", "active_edges"):
+        if type(value[field]) is not int or value[field] < 0:
+            raise ValueError("semantic receipt")
+    if value["active_nodes"] > _NODE_CAPACITY:
+        raise ValueError("semantic receipt")
+    digests: dict[str, str] = {}
+    for field in (
+        "formula_digest",
+        "scope_digest",
+        "event_digest",
+        "authority_digest",
+        "state_before",
+        "state_after",
+        "graph_after",
+    ):
+        digests[field] = _canonical_hex(value[field], 32)
+    if value["status"] != "committed":
+        raise ValueError("semantic receipt")
+    if value["next_revision"] != revision or value["base_revision"] + 1 != revision:
+        raise ValueError("semantic receipt")
+    if expected_base_revision is not None and value["base_revision"] != expected_base_revision:
+        raise ValueError("semantic receipt")
+    residuals = value["residuals"]
+    if type(residuals) is not dict or set(residuals) != _RESIDUAL_FIELDS:
+        raise ValueError("semantic receipt")
+    if any(type(residuals[name]) is not int for name in _RESIDUAL_FIELDS):
+        raise ValueError("semantic receipt")
+    return (
+        {
+            "schema_version": 1,
+            **digests,
+            "base_revision": value["base_revision"],
+            "next_revision": revision,
+            "active_nodes": value["active_nodes"],
+            "active_edges": value["active_edges"],
+            "residuals": {name: residuals[name] for name in sorted(_RESIDUAL_FIELDS)},
+            "status": "committed",
+        },
+        digests["state_before"] != digests["state_after"],
+    )
+
+
+def _validate_semantic_vector_receipt(
+    value: Any, *, expected_state_changed: bool
+) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "formula",
+        "dimension_slot_count",
+        "evaluated_dimension_count",
+        "injected_dimension_count",
+        "nonzero_evidence_dimension_count",
+        "neutral_baseline_dimension_count",
+        "unavailable_dimension_count",
+        "state_changed",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("semantic vector receipt")
+    if (
+        value["schema"] != _SEMANTIC_VECTOR_RECEIPT_SCHEMA
+        or value["formula"] != _SEMANTIC_VECTOR_FORMULA
+    ):
+        raise ValueError("semantic vector receipt")
+    count_fields = (
+        "dimension_slot_count",
+        "evaluated_dimension_count",
+        "injected_dimension_count",
+        "nonzero_evidence_dimension_count",
+        "neutral_baseline_dimension_count",
+        "unavailable_dimension_count",
+    )
+    if any(type(value[field]) is not int or not 0 <= value[field] <= 15 for field in count_fields):
+        raise ValueError("semantic vector receipt")
+    if (
+        value["dimension_slot_count"] != 15
+        or value["evaluated_dimension_count"] != 15
+        or value["injected_dimension_count"] != 15
+        or value["unavailable_dimension_count"] != 0
+        or value["nonzero_evidence_dimension_count"] + value["neutral_baseline_dimension_count"] != 15
+        or type(value["state_changed"]) is not bool
+        or value["state_changed"] is not expected_state_changed
+    ):
+        raise ValueError("semantic vector receipt")
+    return {
+        "schema": _SEMANTIC_VECTOR_RECEIPT_SCHEMA,
+        "formula": _SEMANTIC_VECTOR_FORMULA,
+        **{field: value[field] for field in count_fields},
+        "state_changed": expected_state_changed,
+    }
+
+
+def _validate_node_component(value: Any, *, capacity: int) -> dict[str, int]:
+    fields = {
+        "before_mean_fxp6",
+        "after_mean_fxp6",
+        "delta_mean_fxp6",
+        "changed_node_count",
+        "nonzero_after_count",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("node component")
+    for field in ("before_mean_fxp6", "after_mean_fxp6", "delta_mean_fxp6"):
+        if type(value[field]) is not int:
+            raise ValueError("node component")
+    for field in ("changed_node_count", "nonzero_after_count"):
+        if type(value[field]) is not int or not 0 <= value[field] <= capacity:
+            raise ValueError("node component")
+    return {field: value[field] for field in fields}
+
+
+def _validate_node_observability(
+    value: Any,
+    *,
+    expected_revision: int,
+    expected_selected_node_count: int,
+    expected_state_changed: bool,
+) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "formula",
+        "revision",
+        "field_node_capacity",
+        "region_layout",
+        "counts",
+        "residuals",
+        "regions",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("node observability")
+    if (
+        value["schema"] != _NODE_OBSERVABILITY_SCHEMA
+        or value["formula"] != _NODE_OBSERVABILITY_FORMULA
+        or value["revision"] != expected_revision
+        or value["field_node_capacity"] != _NODE_CAPACITY
+        or value["region_layout"] != "regions-v1"
+    ):
+        raise ValueError("node observability")
+    counts = value["counts"]
+    count_fields = {
+        "selected_node_count",
+        "activated_node_count",
+        "changed_node_count",
+        "potential_nonzero_after_count",
+        "excitation_nonzero_after_count",
+        "signal_nonzero_after_count",
+    }
+    if type(counts) is not dict or set(counts) != count_fields:
+        raise ValueError("node observability")
+    if any(type(counts[field]) is not int or not 0 <= counts[field] <= _NODE_CAPACITY for field in count_fields):
+        raise ValueError("node observability")
+    if (
+        counts["selected_node_count"] != expected_selected_node_count
+        or counts["changed_node_count"] > counts["activated_node_count"]
+        or counts["activated_node_count"] > counts["selected_node_count"]
+        or counts["signal_nonzero_after_count"] < max(
+            counts["potential_nonzero_after_count"], counts["excitation_nonzero_after_count"]
+        )
+        or counts["signal_nonzero_after_count"] > counts["potential_nonzero_after_count"] + counts["excitation_nonzero_after_count"]
+        or (expected_state_changed and counts["changed_node_count"] == 0)
+        or (not expected_state_changed and counts["changed_node_count"] != 0)
+    ):
+        raise ValueError("node observability")
+    if value["residuals"] != {
+        "state": "NOT_COMPUTED",
+        "formula": None,
+        "values_fxp6": None,
+    }:
+        raise ValueError("node observability")
+    regions = value["regions"]
+    if type(regions) is not list or len(regions) != len(_NODE_REGION_LAYOUT):
+        raise ValueError("node observability")
+    canonical_regions: list[dict[str, Any]] = []
+    totals = {"selected": 0, "activated": 0, "changed": 0, "potential": 0, "excitation": 0}
+    region_fields = {
+        "region_id",
+        "region_name",
+        "node_capacity",
+        "selected_node_count",
+        "activated_node_count",
+        "changed_node_count",
+        "potential",
+        "excitation",
+    }
+    for region_id, (region_name, capacity) in enumerate(_NODE_REGION_LAYOUT):
+        region = regions[region_id]
+        if type(region) is not dict or set(region) != region_fields:
+            raise ValueError("node observability")
+        if (
+            region["region_id"] != region_id
+            or region["region_name"] != region_name
+            or region["node_capacity"] != capacity
+        ):
+            raise ValueError("node observability")
+        for field in ("selected_node_count", "activated_node_count", "changed_node_count"):
+            if type(region[field]) is not int or not 0 <= region[field] <= capacity:
+                raise ValueError("node observability")
+        if region["changed_node_count"] > region["activated_node_count"] or region["activated_node_count"] > region["selected_node_count"]:
+            raise ValueError("node observability")
+        potential = _validate_node_component(region["potential"], capacity=capacity)
+        excitation = _validate_node_component(region["excitation"], capacity=capacity)
+        if (
+            region["changed_node_count"] < max(potential["changed_node_count"], excitation["changed_node_count"])
+            or region["changed_node_count"] > potential["changed_node_count"] + excitation["changed_node_count"]
+        ):
+            raise ValueError("node observability")
+        totals["selected"] += region["selected_node_count"]
+        totals["activated"] += region["activated_node_count"]
+        totals["changed"] += region["changed_node_count"]
+        totals["potential"] += potential["nonzero_after_count"]
+        totals["excitation"] += excitation["nonzero_after_count"]
+        canonical_regions.append(
+            {
+                "region_id": region_id,
+                "region_name": region_name,
+                "node_capacity": capacity,
+                "selected_node_count": region["selected_node_count"],
+                "activated_node_count": region["activated_node_count"],
+                "changed_node_count": region["changed_node_count"],
+                "potential": potential,
+                "excitation": excitation,
+            }
+        )
+    if (
+        totals["selected"] != counts["selected_node_count"]
+        or totals["activated"] != counts["activated_node_count"]
+        or totals["changed"] != counts["changed_node_count"]
+        or totals["potential"] != counts["potential_nonzero_after_count"]
+        or totals["excitation"] != counts["excitation_nonzero_after_count"]
+    ):
+        raise ValueError("node observability")
+    return {
+        "schema": _NODE_OBSERVABILITY_SCHEMA,
+        "formula": _NODE_OBSERVABILITY_FORMULA,
+        "revision": expected_revision,
+        "field_node_capacity": _NODE_CAPACITY,
+        "region_layout": "regions-v1",
+        "counts": {field: counts[field] for field in count_fields},
+        "residuals": {"state": "NOT_COMPUTED", "formula": None, "values_fxp6": None},
+        "regions": canonical_regions,
+    }
+
+
+def _validate_expression_projection(value: Any, *, expected_revision: int) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != {"schema", "revision", "profile_fxp6"}:
+        raise ValueError("expression projection")
+    if value["schema"] != _EXPRESSION_PROJECTION_SCHEMA or value["revision"] != expected_revision:
+        raise ValueError("expression projection")
+    profile = value["profile_fxp6"]
+    if type(profile) is not dict or set(profile) != set(_EXPRESSION_PROFILE_FIELDS):
+        raise ValueError("expression projection")
+    if any(type(profile[name]) is not int or not 0 <= profile[name] <= 1_000_000 for name in _EXPRESSION_PROFILE_FIELDS):
+        raise ValueError("expression projection")
+    return {
+        "schema": _EXPRESSION_PROJECTION_SCHEMA,
+        "revision": expected_revision,
+        "profile_fxp6": {name: profile[name] for name in _EXPRESSION_PROFILE_FIELDS},
+    }
+
+
+def _validate_semantic_result(
+    value: Any, *, expected_base_revision: int | None = None
+) -> dict[str, Any]:
+    payload = _semantic_json(value)
+    if set(payload) not in {_SEMANTIC_RESULT_BASE_FIELDS, _SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS}:
+        raise ValueError("semantic result")
+    revision = payload["revision"]
+    if payload["schema"] != _SEMANTIC_RESULT_SCHEMA or type(revision) is not int or revision < 0:
+        raise ValueError("semantic result")
+    if type(payload["deduplicated"]) is not bool:
+        raise ValueError("semantic result")
+    receipt, state_changed = _validate_receipt(
+        payload["receipt"],
+        revision=revision,
+        expected_base_revision=expected_base_revision,
+    )
+    vector = _validate_semantic_vector_receipt(
+        payload["semantic_vector_receipt"], expected_state_changed=state_changed
+    )
+    nodes = _validate_node_observability(
+        payload["node_observability"],
+        expected_revision=revision,
+        expected_selected_node_count=receipt["active_nodes"],
+        expected_state_changed=state_changed,
+    )
+    expression = None
+    if "expression_projection" in payload and payload["expression_projection"] is not None:
+        expression = _validate_expression_projection(
+            payload["expression_projection"], expected_revision=revision
+        )
+    return {
+        "schema": _SEMANTIC_RESULT_SCHEMA,
+        "receipt": receipt,
+        "semantic_vector_receipt": vector,
+        "node_observability": nodes,
+        "full_vector_state": "FULL_VECTOR_CONFIRMED",
+        "node_observability_state": "CONFIRMED",
+        "revision": revision,
+        "deduplicated": payload["deduplicated"],
+        "expression_projection": expression,
+    }
+
+
+def validate_semantic_result(
+    value: Any, *, expected_base_revision: int | None = None
+) -> dict[str, Any]:
+    return _validate_semantic_result(value, expected_base_revision=expected_base_revision)
+
+
 @dataclass(frozen=True, slots=True)
 class NativeHealth:
     status: str
@@ -587,6 +1095,58 @@ class NativeBridge:
         except Exception as exc:
             raise _classify(exc) from exc
         return _parse_payload(result)
+
+    def semantic_revision_v1(
+        self, scope_json: ScopeTokens | str | dict[str, Any]
+    ) -> dict[str, Any]:
+        """Read the independent semantic cursor through a closed failure ABI."""
+
+        try:
+            scope = _semantic_scope_payload(scope_json)
+        except BaseException:
+            return _semantic_degraded("INVALID_PERCEPTION_SCOPE")
+        try:
+            native = self._require()
+            method = getattr(native, "semantic_revision_v1", None)
+            if not callable(method):
+                return _semantic_degraded("NATIVE_SYMBOL_UNAVAILABLE")
+            return _validate_cursor_payload(method(_semantic_closed_json(scope)))
+        except BaseException as exc:
+            if isinstance(exc, (TypeError, ValueError, json.JSONDecodeError)):
+                return _semantic_degraded("NATIVE_MALFORMED")
+            return _semantic_degraded(_semantic_error_code(exc))
+
+    def apply_perception_proposal_v1(
+        self,
+        scope_json: ScopeTokens | str | dict[str, Any],
+        proposal_json: str | dict[str, Any],
+    ) -> dict[str, Any]:
+        """Submit one V3-derived, closed 15D proposal to native exactly once."""
+
+        try:
+            scope = _semantic_scope_payload(scope_json)
+        except BaseException:
+            return _semantic_degraded("INVALID_PERCEPTION_SCOPE")
+        try:
+            proposal = validate_perception_proposal(proposal_json, scope=scope)
+            encoded_proposal = proposal_to_json(proposal, scope=scope)
+        except (SemanticProposalError, TypeError, ValueError, json.JSONDecodeError):
+            return _semantic_degraded("INVALID_PERCEPTION_PROPOSAL")
+        except BaseException:
+            return _semantic_degraded("INVALID_PERCEPTION_PROPOSAL")
+        try:
+            native = self._require()
+            method = getattr(native, "apply_perception_proposal_v1", None)
+            if not callable(method):
+                return _semantic_degraded("NATIVE_SYMBOL_UNAVAILABLE")
+            return _validate_semantic_result(
+                method(_semantic_closed_json(scope), encoded_proposal),
+                expected_base_revision=proposal["base_revision"],
+            )
+        except BaseException as exc:
+            if isinstance(exc, (TypeError, ValueError, json.JSONDecodeError)):
+                return _semantic_degraded("NATIVE_MALFORMED")
+            return _semantic_degraded(_semantic_error_code(exc))
 
     @property
     def loaded(self) -> bool:
