@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -11,15 +12,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-FRESH_WHEELS_DIR = ROOT.parents[1] / ".codex-task-temp"
-FRESH_WINDOWS_WHEEL = next(
-    (FRESH_WHEELS_DIR / "rebuild-native-win-current" / "dist").glob("*.whl"),
-    None,
-)
-FRESH_LINUX_WHEEL = next(
-    (FRESH_WHEELS_DIR / "rebuild-native-linux-current" / "dist").glob("*.whl"),
-    None,
-)
+FRESH_WHEELS_DIR_ENV = "ASTREMBODIMENT_FRESH_WHEELS_DIR"
+FRESH_WINDOWS_ARTIFACT = "native-wheel-windows"
+FRESH_LINUX_ARTIFACT = "native-wheel-linux"
 NATIVE_API = {
     "version",
     "health",
@@ -32,6 +27,41 @@ NATIVE_API = {
     "NativeCoreError",
 }
 NATIVE_API_PAYLOAD = b" ".join(marker.encode() for marker in sorted(NATIVE_API))
+
+
+def _fresh_wheels_root() -> Path:
+    configured = os.environ.get(FRESH_WHEELS_DIR_ENV)
+    root = Path(configured) if configured else ROOT / "wheels"
+    if not root.is_absolute():
+        root = ROOT / root
+    root = root.resolve()
+    if not root.is_dir():
+        pytest.fail(
+            f"fresh wheel directory is required at {root}; "
+            f"set {FRESH_WHEELS_DIR_ENV} or run from the assemble job"
+        )
+    return root
+
+
+def _single_fresh_wheel(wheels_root: Path, artifact: str) -> Path:
+    candidates = sorted(
+        path for path in (wheels_root / artifact).glob("*.whl") if path.is_file()
+    )
+    if len(candidates) != 1:
+        pytest.fail(
+            f"expected exactly one fresh wheel in {wheels_root / artifact}, "
+            f"found {len(candidates)}; no historical wheel fallback is allowed"
+        )
+    return candidates[0]
+
+
+@pytest.fixture(scope="module")
+def fresh_native_wheels() -> tuple[Path, Path]:
+    wheels_root = _fresh_wheels_root()
+    return (
+        _single_fresh_wheel(wheels_root, FRESH_WINDOWS_ARTIFACT),
+        _single_fresh_wheel(wheels_root, FRESH_LINUX_ARTIFACT),
+    )
 
 
 def test_release_metadata_and_required_files_are_present() -> None:
@@ -116,10 +146,10 @@ def test_release_archive_uses_current_native_initializer_and_not_wheels(
         assert not any(name.endswith(".whl") for name in archive.namelist())
 
 
-def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None, (
-        "build the native wheel before package verification"
-    )
+def test_release_archive_bundles_only_runtime_files(
+    tmp_path: Path, fresh_native_wheels: tuple[Path, Path]
+) -> None:
+    fresh_windows_wheel, _ = fresh_native_wheels
     output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-win_amd64.zip"
     result = subprocess.run(
         [
@@ -128,7 +158,7 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
             "--output",
             str(output),
             "--native-wheel",
-            str(FRESH_WINDOWS_WHEEL),
+            str(fresh_windows_wheel),
         ],
         cwd=ROOT,
         text=True,
@@ -141,7 +171,7 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
     assert "astrembodiment_core/__init__.py" in names
     assert "astrembodiment_core/_bundled/manifest.json" in names
     assert not any(name.startswith("astrembodiment_core/_native") for name in names)
-    assert FRESH_WINDOWS_WHEEL.name not in names
+    assert fresh_windows_wheel.name not in names
     assert "logo.png" in names
     assert "LICENSE" in names
     assert "CHANGELOG.md" in names
@@ -151,10 +181,9 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
 
 
 def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
-    tmp_path: Path,
+    tmp_path: Path, fresh_native_wheels: tuple[Path, Path]
 ) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None
-    assert FRESH_LINUX_WHEEL is not None
+    fresh_windows_wheel, fresh_linux_wheel = fresh_native_wheels
     output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-native-refresh.zip"
     command = [
         sys.executable,
@@ -162,9 +191,9 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
         "--output",
         str(output),
         "--native-wheel",
-        str(FRESH_WINDOWS_WHEEL),
+        str(fresh_windows_wheel),
         "--native-wheel",
-        str(FRESH_LINUX_WHEEL),
+        str(fresh_linux_wheel),
     ]
     result = subprocess.run(
         command,
@@ -183,7 +212,7 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
         manifest = json.loads(
             archive.read("astrembodiment_core/_bundled/manifest.json")
         )
-        for wheel_path in (FRESH_WINDOWS_WHEEL, FRESH_LINUX_WHEEL):
+        for wheel_path in (fresh_windows_wheel, fresh_linux_wheel):
             with zipfile.ZipFile(wheel_path) as wheel:
                 native_member = next(
                     name
@@ -213,9 +242,9 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires the Windows fresh wheel")
 def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
-    tmp_path: Path,
+    tmp_path: Path, fresh_native_wheels: tuple[Path, Path]
 ) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None
+    fresh_windows_wheel, _ = fresh_native_wheels
     output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-native-smoke.zip"
     result = subprocess.run(
         [
@@ -224,7 +253,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
             "--output",
             str(output),
             "--native-wheel",
-            str(FRESH_WINDOWS_WHEEL),
+            str(fresh_windows_wheel),
         ],
         cwd=ROOT,
         text=True,

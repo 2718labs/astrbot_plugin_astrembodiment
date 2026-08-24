@@ -90,12 +90,48 @@ def test_ci_and_release_workflows_are_cross_platform_and_dispatch_only() -> None
     package_matrix = ci.split("  native-package:\n", 1)[1].split(
         "\n  assemble-allowlisted-zip:", 1
     )[0]
+    release_contract = ci.split("  release-contract:\n", 1)[1].split(
+        "\n  native-package:", 1
+    )[0]
+    assemble = ci.split("  assemble-allowlisted-zip:\n", 1)[1]
+
+    release_test = "python -m pytest -q tests/test_production_release_contract.py"
+    assert "pytest>=8,<10" in release_contract
+    assert release_contract.index("pytest>=8,<10") < release_contract.index(
+        release_test
+    )
+
+    native_build = "python -m maturin build --release --out dist"
+    native_stage = (
+        "python scripts/stage_native_runtime.py --wheel-dir dist --destination ."
+    )
+    native_regressions = "python -m pytest -q --ignore=tests/test_release_contracts.py"
+    assert native_build in package_matrix
+    assert native_stage in package_matrix
+    assert native_regressions in package_matrix
+    assert package_matrix.index(native_build) < package_matrix.index(native_stage)
+    assert package_matrix.index(native_stage) < package_matrix.index(native_regressions)
+
+    package_contract = "python -m pytest -q tests/test_release_contracts.py"
+    assert "actions/download-artifact@" in assemble
+    assert "wheels/native-wheel-windows/*.whl" in assemble
+    assert "wheels/native-wheel-linux/*.whl" in assemble
+    assert "pytest>=8,<10" in assemble
+    assert package_contract in assemble
+    assert assemble.index("actions/download-artifact@") < assemble.index(
+        package_contract
+    )
+    assert assemble.index("python scripts/package_plugin.py") < assemble.index(
+        package_contract
+    )
+    assert assemble.index("pytest>=8,<10") < assemble.index(package_contract)
+
     for required in (
         "ruff format --check",
         "ruff check --select E,F",
         "cargo fmt --all -- --check",
         "cargo clippy --workspace --all-targets --locked -- -D warnings",
-        "python -m pytest -q --ignore=tests/test_release_contracts.py",
+        native_regressions,
         "cargo test --workspace --locked",
     ):
         assert required in package_matrix

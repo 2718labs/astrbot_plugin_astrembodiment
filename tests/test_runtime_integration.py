@@ -7,7 +7,6 @@ import inspect
 import json
 import shutil
 import sys
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -495,6 +494,7 @@ def test_reload_hydrates_revision_and_turn_id_without_reuse():
     async def run():
         instance = plugin(FakeConfig(), FakeContext())
         event = FakeEvent()
+        event.turn_token = "turn-before-plugin-reload"
         request = FakeRequest()
         calls: list[str] = []
         stimulus: dict = {}
@@ -504,26 +504,21 @@ def test_reload_hydrates_revision_and_turn_id_without_reuse():
 
         async def ensure_genesis(**_kwargs):
             calls.append("genesis")
-            return {
-                "seed_code": "AE-S1-RELOAD",
-                "incarnation_id": "AE-I1-RELOAD",
-            }
 
         def inspect(_scope):
-            assert calls == ["genesis"]
             calls.append("inspect")
-            return {"bound": True, "revision": 7}
+            return {
+                "bound": True,
+                "seed_code": "AE-S1-RELOAD",
+                "seed_code_short": "AE-S1-RELOAD",
+                "incarnation_id": "a" * 64,
+                "revision": 7,
+            }
 
-        async def first_turn(**kwargs):
+        async def apply_stimulus(**kwargs):
             calls.append("stimulus")
             stimulus.update(kwargs)
             return {
-                "genesis": {
-                    "seed_code": "AE-S1-RELOAD",
-                    "incarnation_id": "AE-I1-RELOAD",
-                },
-                "seed_code": "AE-S1-RELOAD",
-                "incarnation_id": "AE-I1-RELOAD",
                 "revision": 8,
                 "contract": {},
             }
@@ -532,7 +527,7 @@ def test_reload_hydrates_revision_and_turn_id_without_reuse():
         instance._coordinator.ensure_genesis = ensure_genesis
         instance._bridge._native = object()
         instance._bridge.inspect = inspect
-        instance._coordinator.first_turn = first_turn
+        instance._coordinator.apply_stimulus = apply_stimulus
         await instance.on_llm_request(event, request)
         scope = instance._scope_for(event, "persona-1")
         assert scope is not None
@@ -540,9 +535,11 @@ def test_reload_hydrates_revision_and_turn_id_without_reuse():
 
     instance, event, scope, calls, stimulus = asyncio.run(run())
 
-    assert calls == ["genesis", "inspect", "stimulus"]
+    assert calls == ["inspect", "stimulus"]
+    assert "genesis" not in calls
     assert stimulus["base_revision"] == 7
     assert stimulus["turn_id"] == event.turn_token
+    assert stimulus["turn_id"] != "turn-before-plugin-reload"
     assert instance._turn_seq[scope.session_token] == 8
 
 
@@ -1009,42 +1006,45 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
 def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
     tmp_path: Path,
 ):
-    """The package must not let a stale root _native.py shadow the bundled wheel."""
-    wheel_path = next(
-        (
-            ROOT.parents[1] / ".codex-task-temp" / "rebuild-native-win-current" / "dist"
-        ).glob("*.whl"),
-        None,
+    """The package must not let a stale root module shadow the fresh stage."""
+    staged_package = ROOT / "astrembodiment_core"
+    manifest_path = staged_package / "_bundled" / "manifest.json"
+    if not manifest_path.is_file():
+        pytest.fail(
+            "current fresh Windows native stage is required at "
+            f"{manifest_path}; do not substitute a historical wheel"
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert isinstance(manifest, dict), "fresh stage manifest must be an object"
+    assert manifest.get("schema") == "astrembodiment-native-bundle-v1", (
+        "fresh stage must use the content-addressed native manifest"
     )
-    assert wheel_path is not None
+    platforms = manifest.get("platforms") if isinstance(manifest, dict) else None
+    entry = platforms.get("win32") if isinstance(platforms, dict) else None
+    assert isinstance(entry, dict), "fresh stage must contain the win32 entry"
+    build_id = entry.get("build_id")
+    native_filename = entry.get("filename")
+    assert isinstance(build_id, str) and len(build_id) == 64
+    assert isinstance(native_filename, str) and native_filename.endswith(".pyd")
+    staged_native = staged_package / "_bundled" / build_id / native_filename
+    assert staged_native.is_file(), "fresh stage must contain its manifest binary"
+    bundled_payload = staged_native.read_bytes()
+    assert hashlib.sha256(bundled_payload).hexdigest() == build_id
+
     package_dir = tmp_path / "astrembodiment_core"
-    with zipfile.ZipFile(wheel_path) as wheel:
-        bundled_payload = wheel.read("astrembodiment_core/_native.pyd")
-    build_id = hashlib.sha256(bundled_payload).hexdigest()
     bundled_dir = package_dir / "_bundled" / build_id
     bundled_dir.mkdir(parents=True)
-    (bundled_dir / "_native.pyd").write_bytes(bundled_payload)
-    (package_dir / "_bundled" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "astrembodiment-native-bundle-v1",
-                "platforms": {
-                    "win32": {"build_id": build_id, "filename": "_native.pyd"}
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    copied_native = bundled_dir / native_filename
+    copied_native.write_bytes(bundled_payload)
+    assert hashlib.sha256(copied_native.read_bytes()).hexdigest() == build_id
+    shutil.copyfile(manifest_path, package_dir / "_bundled" / "manifest.json")
     (package_dir / "_native.py").write_text(
         "version=lambda: 'stale-root'\nhealth=lambda: '{}'\n",
         encoding="utf-8",
     )
-    (package_dir / "__init__.py").write_text(
-        (ROOT / "python" / "astrembodiment_core" / "__init__.py").read_text(
-            encoding="utf-8"
-        ),
-        encoding="utf-8",
-    )
+    staged_initializer = staged_package / "__init__.py"
+    assert staged_initializer.is_file(), "fresh stage must contain its initializer"
+    shutil.copyfile(staged_initializer, package_dir / "__init__.py")
 
     module_name = "_astrembodiment_core_bundled_regression"
     spec = importlib.util.spec_from_file_location(
@@ -1062,7 +1062,7 @@ def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
         assert Path(sys.modules[f"{module_name}._native"].__file__).parts[-3:] == (
             "_bundled",
             build_id,
-            "_native.pyd",
+            native_filename,
         )
     finally:
         sys.modules.pop(module_name, None)
