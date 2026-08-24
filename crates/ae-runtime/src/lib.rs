@@ -25,8 +25,8 @@ use ae_neurofield::{
 use ae_store::{
     ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1, GenesisCommit, GraphCommitV1,
     RebirthChildStageRequestV1, RebirthCommitPermitV1, RebirthLifecycleError, RebirthPreflightV1,
-    RebirthPrepareRequestV1, RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, Store,
-    StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
+    RebirthPrepareRequestV1, RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, SnapshotCommitV1,
+    Store, StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
 };
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -1028,6 +1028,7 @@ mod tests {
         PersonalityVector, SemanticEstimate, SocialPriors, UserStimulus,
     };
     use ae_fixed::Fixed;
+    use ae_store::{RebirthActionV1, RebirthPrepareRequestV1, RebirthPreflightV1, UserAuthorizedRebirthV1};
 
     fn request(seed: u8) -> PersonaGenesisRequest {
         let scope = PersonaScopeRef {
@@ -1313,6 +1314,54 @@ mod tests {
         assert_eq!(next.receipt.base_revision, 1);
         let again = reopened.ensure_genesis(&request).unwrap();
         assert_eq!(again, receipt);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconstructed_rebirth_child_genesis_commits_to_a_fresh_store() {
+        let dir = temp_dir("rebirth-child-genesis");
+        let path = dir.join("runtime.db");
+        let mut runtime = AstrRuntime::open(&path).unwrap();
+        let request = request(9);
+        let parent = runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let lifecycle = runtime.select_rebirth_authority(&scope).unwrap();
+        let prepared = lifecycle
+            .prepare_rebirth(RebirthPrepareRequestV1 {
+                scope_token,
+                expected_incarnation_id: parent.incarnation_id,
+                expected_revision: 0,
+                action: RebirthActionV1::Rebirth,
+            })
+            .unwrap();
+        let confirmation = UserAuthorizedRebirthV1 {
+            scope_token,
+            expected_incarnation_id: parent.incarnation_id,
+            expected_revision: 0,
+            request_nonce: prepared.request_nonce,
+            action: RebirthActionV1::Rebirth,
+            confirmed: true,
+        };
+        let permit = match lifecycle
+            .preflight_rebirth_confirmation(&confirmation)
+            .unwrap()
+        {
+            RebirthPreflightV1::Stage(permit) => permit,
+            RebirthPreflightV1::Replayed(_) => panic!("fresh confirmation must stage"),
+        };
+        let mut child = runtime.fresh_child_genesis(&scope, &permit).unwrap();
+        let mut child_store = Store::open(&dir.join("child.sqlite")).unwrap();
+        match child_store
+            .claim_lease(&child.scope_key, Some(child.nonce_digest))
+            .unwrap()
+        {
+            ClaimOutcome::Claimed { lease_epoch, nonce } if nonce == child.nonce_digest => {
+                child.lease_epoch = lease_epoch;
+            }
+            other => panic!("unexpected child lease outcome: {other:?}"),
+        }
+        child_store.commit_genesis(&child).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
