@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import inspect
+import json
+import tempfile
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 try:
@@ -92,6 +95,106 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
 _G0_FORMULA_DIGEST = "00" * 32
 _G0_PROTOCOL_DIGEST = "00" * 32
 
+_OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v3"
+_OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
+_OBSERVATORY_DIMENSIONS = (
+    "positive",
+    "affiliation",
+    "harm",
+    "boundary",
+    "repair",
+    "repetition",
+    "new_information",
+    "constraint_instability",
+    "epistemic_conflict",
+    "self_responsibility",
+    "other_responsibility",
+    "hostility",
+    "publicness",
+    "engagement",
+    "rejection",
+)
+_OBSERVATORY_RESIDUALS = (
+    "authority",
+    "continuity",
+    "energy",
+    "renormalization",
+    "capacity",
+)
+_OBSERVATORY_EXPRESSION_PROFILE = (
+    "warmth",
+    "sensitivity",
+    "guardedness",
+    "repair_orientation",
+    "engagement",
+    "epistemic_caution",
+)
+_OBSERVATORY_FIELDS = (
+    "schema",
+    "status",
+    "code",
+    "stage",
+    "commit_state",
+    "values_state",
+    "fxp_scale",
+    "dimensions_fxp6",
+    "estimator_confidence_fxp6",
+    "dimension_confidence_fxp6",
+    "base_revision",
+    "revision",
+    "deduplicated",
+    "receipt_status",
+    "calculation_state",
+    "native_calculation",
+    "expression_state",
+    "expression_profile_fxp6",
+)
+_OBSERVATORY_CODES = {
+    "SEMANTIC_COMMITTED",
+    "EMPTY_REQUEST",
+    "NATIVE_ERROR",
+    "NATIVE_MALFORMED",
+    "GENESIS_UNAVAILABLE",
+    "CONFIG_BLOCKED",
+    "EXPRESSION_INJECTION_FAILED",
+    "INTERNAL",
+    "OBSERVATORY_FORMATTER_FAILED",
+}
+_OBSERVATORY_STAGES = {
+    "INPUT",
+    "ESTIMATOR",
+    "CURSOR",
+    "PROPOSAL",
+    "NATIVE_APPLY",
+    "RECEIPT",
+    "EXPRESSION_INJECTION",
+    "INTERNAL",
+}
+_OBSERVATORY_COMMIT_STATES = {
+    "NOT_ATTEMPTED",
+    "UNKNOWN",
+    "CONFIRMED_NEW",
+    "CONFIRMED_EXISTING",
+}
+_OBSERVATORY_VALUES_STATES = {
+    "UNAVAILABLE",
+    "ESTIMATED_NOT_COMMITTED",
+    "ESTIMATED_NOT_CONFIRMED",
+    "COMMITTED",
+}
+_OBSERVATORY_CALCULATION_STATES = {
+    "NOT_ATTEMPTED",
+    "UNCONFIRMED",
+    "CONFIRMED",
+}
+_OBSERVATORY_EXPRESSION_STATES = {
+    "APPLIED",
+    "NOT_ATTEMPTED",
+    "UNAVAILABLE",
+    "REJECTED",
+    "INJECTION_FAILED",
+}
+
 
 class AstrEmbodimentPlugin(Star):
     """AstrBot-native shell. The Rust runtime owns all production state."""
@@ -113,15 +216,15 @@ class AstrEmbodimentPlugin(Star):
         self._request_injected_attr = "_astrembodiment_runtime_injected_v1"
 
     async def initialize(self) -> None:
-        data_dir = str(self._config_values.get("native_data_dir") or "")
-        if not data_dir:
-            try:
-                data_dir = str(StarTools.get_data_dir())
-            except Exception:  # noqa: BLE001 - static/fallback host
-                data_dir = "astrembodiment-data"
         try:
+            data_dir = self._runtime_data_dir()
             self._health = self._bridge.open(data_dir)
+        except PersonaGenesisError:
+            self._emit_observatory(self._failed_observatory("CONFIG_BLOCKED", "INPUT"))
+            logger.error("AstrEmbodiment runtime configuration blocked")
+            raise
         except NativeCoreUnavailable as exc:
+            self._emit_observatory(self._failed_observatory("NATIVE_ERROR", "INPUT"))
             logger.error("AstrEmbodiment native core unavailable: %s", exc)
             raise
         logger.info(
@@ -155,7 +258,7 @@ class AstrEmbodimentPlugin(Star):
         ``ae_seed`` 指令查看；因此服务器没有 WebUI 时也能完成首次配置。
         """
         existing = str(self._config_value("seed_code", "") or "").strip()
-        if existing:
+        if existing and not bool(getattr(self._bridge, "loaded", False)):
             yield event.plain_result(f"SeedCode: {existing}")
             return
 
@@ -224,6 +327,71 @@ class AstrEmbodimentPlugin(Star):
         if value is None:
             value = getattr(self.config, key, default)
         return default if value is None else value
+
+    def _observatory_enabled(self) -> bool:
+        """Only a native bool enables successful compact observatory output."""
+        return type(self._config_value("observatory_enabled", True)) is bool and bool(
+            self._config_value("observatory_enabled", True)
+        )
+
+    def _detailed_observatory_enabled(self) -> bool:
+        """Detailed logging is opt-in; truthy strings never broaden logging."""
+        value = self._config_value("node_observability_detailed_logging", False)
+        return type(value) is bool and value
+
+    @staticmethod
+    def _path_is_within(candidate: Path, parent: Path) -> bool:
+        try:
+            candidate.relative_to(parent)
+        except ValueError:
+            return False
+        return True
+
+    @classmethod
+    def _durable_directory(cls, raw: Any, *, label: str) -> Path:
+        value = str(raw or "").strip()
+        if not value:
+            raise PersonaGenesisError("CONFIG_BLOCKED")
+        try:
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                raise PersonaGenesisError("CONFIG_BLOCKED")
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise PersonaGenesisError("CONFIG_BLOCKED") from exc
+        plugin_root = Path(__file__).resolve().parent
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+        if cls._path_is_within(resolved, plugin_root) or cls._path_is_within(
+            resolved, temp_root
+        ):
+            raise PersonaGenesisError("CONFIG_BLOCKED")
+        if (
+            label == "continuity_vault"
+            and resolved.name.casefold() != "continuity-vault"
+        ):
+            raise PersonaGenesisError("CONFIG_BLOCKED")
+        if label == "native_data" and resolved.name.casefold() == "continuity-vault":
+            raise PersonaGenesisError("CONFIG_BLOCKED")
+        return resolved
+
+    def _runtime_data_dir(self) -> str:
+        """Choose one durable Store/Vault root without version-derived paths."""
+        vault_raw = self._config_value("continuity_vault_dir", "")
+        if str(vault_raw or "").strip():
+            # NativeBridge derives ``continuity-vault`` below its data root, so
+            # a configured direct Vault is passed to it through its parent.
+            return str(
+                self._durable_directory(vault_raw, label="continuity_vault").parent
+            )
+
+        data_raw = self._config_value("native_data_dir", "")
+        if str(data_raw or "").strip():
+            return str(self._durable_directory(data_raw, label="native_data"))
+        try:
+            host_data_dir = StarTools.get_data_dir()
+        except Exception as exc:  # noqa: BLE001 - host adapter boundary
+            raise PersonaGenesisError("CONFIG_BLOCKED") from exc
+        return str(self._durable_directory(host_data_dir, label="native_data"))
 
     def _assistant_provider_id(self) -> str:
         return str(self._config_value("assistant_provider_id", "") or "").strip()
@@ -322,6 +490,393 @@ class AstrEmbodimentPlugin(Star):
         except (TypeError, ValueError):
             return 0.0
         return number / 1_000_000
+
+    # ------------------------------------------------------------ observatory
+
+    @staticmethod
+    def _closed_int(
+        value: Any,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("integer required")
+        if value < minimum or value > maximum:
+            raise ValueError("integer outside closed range")
+        return value
+
+    @classmethod
+    def _closed_fxp6_map(
+        cls,
+        value: Any,
+        *,
+        names: tuple[str, ...],
+        minimum: int,
+        maximum: int,
+        optional: bool = False,
+    ) -> dict[str, int] | None:
+        if value is None and optional:
+            return None
+        if not isinstance(value, Mapping) or set(value) != set(names):
+            raise ValueError("closed scalar map required")
+        return {
+            name: cls._closed_int(value[name], minimum=minimum, maximum=maximum)
+            for name in names
+        }
+
+    @staticmethod
+    def _closed_choice(value: Any, allowed: set[str]) -> str:
+        if type(value) is not str or value not in allowed:
+            raise ValueError("closed enum required")
+        return value
+
+    @classmethod
+    def _closed_observatory_record(cls, outcome: Mapping[str, Any]) -> dict[str, Any]:
+        expected = {
+            "status",
+            "code",
+            "stage",
+            "commit_state",
+            "values_state",
+            "dimensions_fxp6",
+            "estimator_confidence_fxp6",
+            "dimension_confidence_fxp6",
+            "base_revision",
+            "revision",
+            "deduplicated",
+            "receipt_status",
+            "calculation_state",
+            "native_calculation",
+            "expression_state",
+            "expression_profile_fxp6",
+        }
+        if set(outcome) != expected:
+            raise ValueError("unexpected observatory field")
+
+        status = cls._closed_choice(outcome.get("status"), {"SUCCESS", "FAILED"})
+        code = cls._closed_choice(outcome.get("code"), _OBSERVATORY_CODES)
+        stage = cls._closed_choice(outcome.get("stage"), _OBSERVATORY_STAGES)
+        commit_state = cls._closed_choice(
+            outcome.get("commit_state"), _OBSERVATORY_COMMIT_STATES
+        )
+        values_state = cls._closed_choice(
+            outcome.get("values_state"), _OBSERVATORY_VALUES_STATES
+        )
+        dimensions = cls._closed_fxp6_map(
+            outcome.get("dimensions_fxp6"),
+            names=_OBSERVATORY_DIMENSIONS,
+            minimum=0,
+            maximum=1_000_000,
+            optional=values_state == "UNAVAILABLE",
+        )
+        if dimensions is None and values_state != "UNAVAILABLE":
+            raise ValueError("semantic values required")
+        estimator_confidence = outcome.get("estimator_confidence_fxp6")
+        if estimator_confidence is not None:
+            estimator_confidence = cls._closed_int(
+                estimator_confidence, minimum=0, maximum=1_000_000
+            )
+        elif values_state != "UNAVAILABLE":
+            raise ValueError("estimator confidence required")
+        dimension_confidence = cls._closed_fxp6_map(
+            outcome.get("dimension_confidence_fxp6"),
+            names=_OBSERVATORY_DIMENSIONS,
+            minimum=0,
+            maximum=1_000_000,
+            optional=True,
+        )
+
+        def optional_revision(name: str) -> int | None:
+            value = outcome.get(name)
+            if value is None:
+                return None
+            return cls._closed_int(value, minimum=0, maximum=(2**64) - 1)
+
+        base_revision = optional_revision("base_revision")
+        revision = optional_revision("revision")
+        deduplicated = outcome.get("deduplicated")
+        if type(deduplicated) is not bool:
+            raise ValueError("deduplicated must be bool")
+        receipt_status = cls._closed_choice(
+            outcome.get("receipt_status"),
+            {"committed", "unavailable", "not_attempted", "rejected"},
+        )
+        calculation_state = cls._closed_choice(
+            outcome.get("calculation_state"), _OBSERVATORY_CALCULATION_STATES
+        )
+        raw_calculation = outcome.get("native_calculation")
+        if calculation_state == "CONFIRMED":
+            if receipt_status != "committed" or not isinstance(
+                raw_calculation, Mapping
+            ):
+                raise ValueError("confirmed calculation requires committed receipt")
+            expected_calculation = {
+                "state_changed",
+                "active_nodes",
+                "active_edges",
+                "residuals_fxp6",
+            }
+            if set(raw_calculation) != expected_calculation:
+                raise ValueError("unexpected native calculation field")
+            state_changed = raw_calculation.get("state_changed")
+            if type(state_changed) is not bool:
+                raise ValueError("state_changed must be bool")
+            native_calculation: dict[str, Any] | None = {
+                "state_changed": state_changed,
+                "active_nodes": cls._closed_int(
+                    raw_calculation.get("active_nodes"),
+                    minimum=0,
+                    maximum=(2**32) - 1,
+                ),
+                "active_edges": cls._closed_int(
+                    raw_calculation.get("active_edges"),
+                    minimum=0,
+                    maximum=(2**32) - 1,
+                ),
+                "residuals_fxp6": cls._closed_fxp6_map(
+                    raw_calculation.get("residuals_fxp6"),
+                    names=_OBSERVATORY_RESIDUALS,
+                    minimum=-(2**63),
+                    maximum=(2**63) - 1,
+                ),
+            }
+        else:
+            if raw_calculation is not None:
+                raise ValueError("unconfirmed calculation must be absent")
+            native_calculation = None
+
+        expression_state = cls._closed_choice(
+            outcome.get("expression_state"), _OBSERVATORY_EXPRESSION_STATES
+        )
+        expression_profile = cls._closed_fxp6_map(
+            outcome.get("expression_profile_fxp6"),
+            names=_OBSERVATORY_EXPRESSION_PROFILE,
+            minimum=0,
+            maximum=1_000_000,
+            optional=True,
+        )
+        if expression_state == "APPLIED" and expression_profile is None:
+            raise ValueError("applied expression requires profile")
+        if expression_state in {"NOT_ATTEMPTED", "UNAVAILABLE", "REJECTED"} and (
+            expression_profile is not None
+        ):
+            raise ValueError("unapplied expression profile is forbidden")
+
+        return {
+            "schema": _OBSERVATORY_SCHEMA,
+            "status": status,
+            "code": code,
+            "stage": stage,
+            "commit_state": commit_state,
+            "values_state": values_state,
+            "fxp_scale": 1_000_000,
+            "dimensions_fxp6": dimensions,
+            "estimator_confidence_fxp6": estimator_confidence,
+            "dimension_confidence_fxp6": dimension_confidence,
+            "base_revision": base_revision,
+            "revision": revision,
+            "deduplicated": deduplicated,
+            "receipt_status": receipt_status,
+            "calculation_state": calculation_state,
+            "native_calculation": native_calculation,
+            "expression_state": expression_state,
+            "expression_profile_fxp6": expression_profile,
+        }
+
+    @staticmethod
+    def _failed_observatory(code: str, stage: str) -> dict[str, Any]:
+        if code not in _OBSERVATORY_CODES:
+            code = "INTERNAL"
+        if stage not in _OBSERVATORY_STAGES:
+            stage = "INTERNAL"
+        return {
+            "status": "FAILED",
+            "code": code,
+            "stage": stage,
+            "commit_state": "NOT_ATTEMPTED",
+            "values_state": "UNAVAILABLE",
+            "dimensions_fxp6": None,
+            "estimator_confidence_fxp6": None,
+            "dimension_confidence_fxp6": None,
+            "base_revision": None,
+            "revision": None,
+            "deduplicated": False,
+            "receipt_status": "unavailable",
+            "calculation_state": "NOT_ATTEMPTED",
+            "native_calculation": None,
+            "expression_state": "UNAVAILABLE",
+            "expression_profile_fxp6": None,
+        }
+
+    @staticmethod
+    def _observatory_scalar(value: int | None) -> str:
+        return "不可用" if value is None else str(value)
+
+    @classmethod
+    def _compact_observatory_message(cls, record: Mapping[str, Any]) -> str:
+        dimensions = record["dimensions_fxp6"]
+        dimension_text = ",".join(
+            f"{name}={cls._observatory_scalar(None if dimensions is None else dimensions[name])}"
+            for name in _OBSERVATORY_DIMENSIONS
+        )
+        if record["status"] == "SUCCESS":
+            return f"运算已完成｜十五维：{dimension_text}"
+
+        native_calculation = record["native_calculation"]
+        if native_calculation is None:
+            active_nodes = None
+            active_edges = None
+            residuals = None
+        else:
+            active_nodes = native_calculation["active_nodes"]
+            active_edges = native_calculation["active_edges"]
+            residuals = native_calculation["residuals_fxp6"]
+        residual_text = ",".join(
+            f"{name}={cls._observatory_scalar(None if residuals is None else residuals[name])}"
+            for name in _OBSERVATORY_RESIDUALS
+        )
+        expression_profile = record["expression_profile_fxp6"]
+        expression_suffix = ""
+        if expression_profile is not None:
+            expression_suffix = (
+                "["
+                + ",".join(
+                    f"{name}={expression_profile[name]}"
+                    for name in _OBSERVATORY_EXPRESSION_PROFILE
+                )
+                + "]"
+            )
+        message = (
+            f"运算失败｜失败码={record['code']}｜阶段={record['stage']}"
+            f"｜十五维：{dimension_text}"
+            f"｜confidence={cls._observatory_scalar(record['estimator_confidence_fxp6'])}"
+            f"｜base_revision={cls._observatory_scalar(record['base_revision'])}"
+            f"｜revision={cls._observatory_scalar(record['revision'])}"
+            f"｜receipt={record['receipt_status']}"
+            f"｜deduplicated={str(record['deduplicated']).lower()}"
+            f"｜active_nodes={cls._observatory_scalar(active_nodes)}"
+            f"｜active_edges={cls._observatory_scalar(active_edges)}"
+            f"｜residuals：{residual_text}"
+            f"｜expression={record['expression_state']}{expression_suffix}"
+            f"｜status={record['status']}｜commit_state={record['commit_state']}"
+            f"｜values_state={record['values_state']}"
+        )
+        if record["code"] == "EMPTY_REQUEST":
+            message += "｜原因=EMPTY_REQUEST"
+        return message
+
+    def _emit_observatory(self, outcome: Mapping[str, Any]) -> dict[str, Any]:
+        """Emit only a closed, aggregate observatory projection.
+
+        The formatter is intentionally a second fail-closed boundary: it never
+        serializes input mappings, receipts, exceptions, identities, or raw
+        diagnostics.  A formatting failure produces a fixed safe failure
+        record instead of suppressing the warning.
+        """
+        try:
+            record = self._closed_observatory_record(outcome)
+        except (KeyError, TypeError, ValueError):
+            record = self._closed_observatory_record(
+                self._failed_observatory("OBSERVATORY_FORMATTER_FAILED", "INTERNAL")
+            )
+
+        failed = record["status"] != "SUCCESS"
+        if self._detailed_observatory_enabled():
+            try:
+                message = _OBSERVATORY_PREFIX + json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError):
+                record = self._closed_observatory_record(
+                    self._failed_observatory("OBSERVATORY_FORMATTER_FAILED", "INTERNAL")
+                )
+                failed = True
+                message = _OBSERVATORY_PREFIX + json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            if failed:
+                logger.warning(message)
+            else:
+                logger.info(message)
+        elif failed:
+            logger.warning(self._compact_observatory_message(record))
+        elif self._observatory_enabled():
+            logger.info(self._compact_observatory_message(record))
+        return record
+
+    def _observatory_outcome_from_decision(
+        self, decision: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Project the current native G0 receipt into the D2 closed schema."""
+        receipt = decision.get("receipt")
+        if receipt is None:
+            # Compatibility mocks and non-decision command paths do not have a
+            # receipt.  They are not a successful observable calculation.
+            return None
+        if not isinstance(receipt, Mapping):
+            return self._failed_observatory("NATIVE_MALFORMED", "RECEIPT")
+        try:
+            base_revision = self._closed_int(
+                receipt.get("base_revision"), minimum=0, maximum=(2**64) - 1
+            )
+            receipt_revision = self._closed_int(
+                receipt.get("next_revision"), minimum=0, maximum=(2**64) - 1
+            )
+            revision = self._closed_int(
+                decision.get("revision"), minimum=0, maximum=(2**64) - 1
+            )
+            deduplicated = decision.get("deduplicated")
+            if type(deduplicated) is not bool or receipt_revision != revision:
+                raise ValueError("receipt revision mismatch")
+            if str(receipt.get("status", "")).casefold() != "committed":
+                raise ValueError("receipt is not committed")
+            residuals = self._closed_fxp6_map(
+                receipt.get("residuals"),
+                names=_OBSERVATORY_RESIDUALS,
+                minimum=-(2**63),
+                maximum=(2**63) - 1,
+            )
+            active_nodes = self._closed_int(
+                receipt.get("active_nodes"), minimum=0, maximum=(2**32) - 1
+            )
+            active_edges = self._closed_int(
+                receipt.get("active_edges"), minimum=0, maximum=(2**32) - 1
+            )
+        except (TypeError, ValueError):
+            return self._failed_observatory("NATIVE_MALFORMED", "RECEIPT")
+
+        return {
+            "status": "SUCCESS",
+            "code": "SEMANTIC_COMMITTED",
+            "stage": "RECEIPT",
+            "commit_state": ("CONFIRMED_EXISTING" if deduplicated else "CONFIRMED_NEW"),
+            "values_state": "COMMITTED",
+            # The G0 native event is a closed, zero-valued semantic estimate;
+            # no host/user text enters this projection.
+            "dimensions_fxp6": {name: 0 for name in _OBSERVATORY_DIMENSIONS},
+            "estimator_confidence_fxp6": 0,
+            "dimension_confidence_fxp6": None,
+            "base_revision": base_revision,
+            "revision": revision,
+            "deduplicated": deduplicated,
+            "receipt_status": "committed",
+            "calculation_state": "CONFIRMED",
+            "native_calculation": {
+                "state_changed": not deduplicated,
+                "active_nodes": active_nodes,
+                "active_edges": active_edges,
+                "residuals_fxp6": residuals,
+            },
+            "expression_state": "NOT_ATTEMPTED",
+            "expression_profile_fxp6": None,
+        }
 
     @staticmethod
     def _aggregate_context_metadata(context_summary: Mapping[str, Any] | None) -> str:
@@ -604,6 +1159,101 @@ class AstrEmbodimentPlugin(Star):
             raise PersonaGenesisError("原生修订检查状态不一致")
         return revision
 
+    def _existing_native_identity(self, scope: ScopeTokens) -> dict[str, Any] | None:
+        """Read one durable native binding; never synthesize an identity here."""
+        loaded = getattr(self._bridge, "loaded", False)
+        if type(loaded) is not bool:
+            raise PersonaGenesisError("原生运行状态无效")
+        if not loaded:
+            return None
+        inspected = self._bridge.inspect(scope.scope_json())
+        if not isinstance(inspected, Mapping):
+            raise PersonaGenesisError("原生身份检查格式无效")
+        bound = inspected.get("bound")
+        revision = inspected.get("revision")
+        if type(bound) is not bool:
+            raise PersonaGenesisError("原生身份检查绑定标志无效")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise PersonaGenesisError("原生身份检查版本无效")
+        if not bound:
+            if revision != 0:
+                raise PersonaGenesisError("原生身份检查状态不一致")
+            return None
+
+        seed_code = inspected.get("seed_code")
+        seed_code_short = inspected.get("seed_code_short", "")
+        incarnation_id = inspected.get("incarnation_id")
+        if (
+            not isinstance(seed_code, str)
+            or not seed_code.strip()
+            or len(seed_code) > 256
+            or not isinstance(seed_code_short, str)
+            or len(seed_code_short) > 256
+            or not isinstance(incarnation_id, str)
+            or len(incarnation_id) != 64
+        ):
+            raise PersonaGenesisError("原生身份检查身份字段无效")
+        try:
+            if len(bytes.fromhex(incarnation_id)) != 32:
+                raise ValueError("incarnation length")
+        except ValueError as exc:
+            raise PersonaGenesisError("原生身份检查身份字段无效") from exc
+        return {
+            "seed_code": seed_code,
+            "seed_code_short": seed_code_short,
+            "incarnation_id": incarnation_id,
+            "revision": revision,
+        }
+
+    def request_rebirth(
+        self,
+        *,
+        scope: ScopeTokens,
+        expected_incarnation_id: str,
+        expected_revision: int,
+        action: str,
+    ) -> dict[str, Any]:
+        """Start, but never auto-confirm, one D1.5 destructive-action gate."""
+        return self._coordinator.prepare_rebirth(
+            scope=scope,
+            expected_incarnation_id=expected_incarnation_id,
+            expected_revision=expected_revision,
+            action=action,
+        )
+
+    def confirm_rebirth_payload(
+        self,
+        *,
+        scope: ScopeTokens,
+        expected_incarnation_id: str,
+        expected_revision: int,
+        request_nonce: str,
+        action: str,
+        confirmed: bool | None = None,
+    ) -> dict[str, Any]:
+        """Forward explicit confirmation once; native D1.5 owns all replay state."""
+        payload: dict[str, Any] = {
+            "scope": scope.scope_json(),
+            "expected_incarnation_id": expected_incarnation_id,
+            "expected_revision": expected_revision,
+            "request_nonce": request_nonce,
+            "action": action,
+        }
+        if confirmed is not None:
+            payload["confirmed"] = confirmed
+        response = self._coordinator.confirm_rebirth_payload(payload)
+        if response.get("state") in {"COMMITTED", "REPLAYED"}:
+            # A new native incarnation invalidates only local mirrors.  No
+            # challenge, receipt, nonce, identity, or replay state is cached.
+            self._coordinator.forget_scope(scope)
+            self._revisions.pop(scope.persona_token, None)
+            self._seed_receipts.pop(scope.persona_token, None)
+            self._turn_seq.pop(scope.session_token, None)
+            for turn_token, pending in tuple(self._pending.items()):
+                if isinstance(pending, Mapping) and pending.get("scope") == scope:
+                    self._pending.pop(turn_token, None)
+        return response
+
     async def _run_genesis(
         self,
         event: Any,
@@ -625,14 +1275,43 @@ class AstrEmbodimentPlugin(Star):
         if scope is None:
             raise PersonaGenesisError("无法建立当前会话的运行范围")
 
-        source = PersonaSourceSnapshot.freeze(
-            persona_id=persona_id, persona=persona, selection=selection
-        )
         session_key = scope.session_token
         seq = self._turn_seq.get(session_key, 0)
         turn_token = None
         base_revision = self._revisions.get(scope.persona_token, 0)
         observed_at_ms = int(time.time() * 1000)
+
+        existing_identity = self._existing_native_identity(scope)
+        if existing_identity is not None:
+            # A normal plugin reopen/update reads the durable native binding
+            # first.  It must not invoke Genesis merely because Python process
+            # memory was lost or a plugin artifact changed.
+            base_revision = existing_identity["revision"]
+            self._revisions[scope.persona_token] = base_revision
+            seq = max(seq, base_revision)
+            genesis = dict(existing_identity)
+            if apply_stimulus:
+                turn_token = turn_id(session_key, seq)
+                decision = await self._coordinator.apply_stimulus(
+                    scope=scope,
+                    event_id=event_id(f"{session_key}#{seq}"),
+                    turn_id=turn_token,
+                    base_revision=base_revision,
+                    observed_at_ms=observed_at_ms,
+                )
+                decision = dict(decision)
+                decision["genesis"] = genesis
+                decision["seed_code"] = genesis["seed_code"]
+                decision["seed_code_short"] = genesis["seed_code_short"]
+                decision["incarnation_id"] = genesis["incarnation_id"]
+            else:
+                decision = dict(genesis)
+                decision["genesis"] = dict(genesis)
+            return decision, scope, session_key, seq, turn_token, base_revision
+
+        source = PersonaSourceSnapshot.freeze(
+            persona_id=persona_id, persona=persona, selection=selection
+        )
 
         async def generate(**prompt_kwargs: Any) -> Any:
             return await self._llm_generate(event, **prompt_kwargs)
@@ -716,12 +1395,16 @@ class AstrEmbodimentPlugin(Star):
                 apply_stimulus=True,
             )
         except (PersonaCompilerMalformed, PersonaGenesisError) as exc:
+            self._emit_observatory(
+                self._failed_observatory("GENESIS_UNAVAILABLE", "NATIVE_APPLY")
+            )
             logger.error(
                 "AstrEmbodiment: GENESIS_UNAVAILABLE (%s); no default brain", exc
             )
             await self._stop_genesis_turn(event, str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - fail closed before host LLM
+            self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))
             logger.error("AstrEmbodiment request lane failed: %s", exc)
             await self._stop_genesis_turn(event, str(exc))
             return
@@ -786,10 +1469,17 @@ class AstrEmbodimentPlugin(Star):
                 "base_revision": revision,
                 "contract": contract,
             }
+            observatory = self._observatory_outcome_from_decision(decision)
+            if observatory is not None:
+                self._emit_observatory(observatory)
         except PersonaGenesisError as exc:
+            self._emit_observatory(
+                self._failed_observatory("NATIVE_MALFORMED", "RECEIPT")
+            )
             logger.error("AstrEmbodiment Genesis result rejected: %s", exc)
             await self._stop_genesis_turn(event, str(exc))
         except Exception:
+            self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))
             logger.exception("AstrEmbodiment Genesis result processing failed")
             await self._stop_genesis_turn(event, "创世结果处理失败")
 
@@ -840,5 +1530,11 @@ class AstrEmbodimentPlugin(Star):
             if revision < int(frozen["base_revision"]):
                 raise PersonaGenesisError("原生交付回执版本倒退")
             self._revisions[scope.persona_token] = revision
+            observatory = self._observatory_outcome_from_decision(result)
+            if observatory is not None:
+                self._emit_observatory(observatory)
         except Exception as exc:  # noqa: BLE001 - delivery fact, log only
+            self._emit_observatory(
+                self._failed_observatory("NATIVE_ERROR", "NATIVE_APPLY")
+            )
             logger.warning("AstrEmbodiment delivery lane failed: %s", exc)

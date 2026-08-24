@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 import astr_embodiment.bridge as bridge_module  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
+from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
 
 
@@ -139,6 +140,69 @@ class DefaultPersonaManager(FakePersonaManager):
 
 def plugin(config=None, context=None):
     return AstrEmbodimentPlugin(context or FakeContext(), config or FakeConfig())
+
+
+def test_bound_scope_reuses_durable_identity_without_calling_genesis():
+    class BoundBridge:
+        loaded = True
+
+        def __init__(self) -> None:
+            self.genesis_calls = 0
+            self.apply_calls = 0
+
+        def inspect(self, _scope):
+            return {
+                "bound": True,
+                "seed_code": "AE-S1-0123456789ABCDEF",
+                "incarnation_id": "ab" * 32,
+                "revision": 14,
+            }
+
+        def ensure_genesis(self, _request):
+            self.genesis_calls += 1
+            raise AssertionError("ordinary reopen must not call ensure_genesis")
+
+        def apply_event(self, _scope, _event):
+            self.apply_calls += 1
+            return {
+                "schema": "astrembodiment.decision.v1",
+                "revision": 15,
+                "deduplicated": False,
+                "context_summary": {
+                    "schema": "astrembodiment.context-summary.v1",
+                    "summary_revision": 1,
+                    "source_continuum_revision": 15,
+                    "dimensions_ema_fxp6": [0] * 15,
+                    "unresolved_boundary": False,
+                    "unresolved_repair": False,
+                    "repetition_count": 1,
+                    "delivery_outcome": "pending",
+                    "summary_digest": "cd" * 32,
+                },
+            }
+
+    async def run():
+        instance = plugin()
+        bridge = BoundBridge()
+        instance._bridge = bridge
+        instance._coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
+
+        async def resolve(*_args, **_kwargs):
+            return "persona-a", {"prompt": "already durable"}, "conversation"
+
+        instance.resolve_effective_persona = resolve
+        result = await instance._run_genesis(
+            FakeEvent(), FakeRequest(), apply_stimulus=True
+        )
+        return bridge, result
+
+    bridge, result = asyncio.run(run())
+    decision, _scope, _session, _seq, _turn, base_revision = result
+    assert bridge.genesis_calls == 0
+    assert bridge.apply_calls == 1
+    assert base_revision == 14
+    assert decision["incarnation_id"] == "ab" * 32
+    assert decision["seed_code"] == "AE-S1-0123456789ABCDEF"
 
 
 def test_explicit_assistant_provider_is_used_without_fallback():

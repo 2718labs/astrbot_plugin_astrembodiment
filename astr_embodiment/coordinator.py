@@ -55,6 +55,45 @@ class GenesisCoordinator:
     def _scope_key(scope: ScopeTokens, source_digest: str) -> str:
         return f"{scope.bot_token}:{scope.persona_token}:{source_digest}"
 
+    def prepare_rebirth(
+        self,
+        *,
+        scope: ScopeTokens,
+        expected_incarnation_id: str,
+        expected_revision: int,
+        action: str,
+    ) -> dict[str, Any]:
+        """Forward one explicit D1.5 prepare request without retaining consent.
+
+        The Rust lifecycle owner creates and persists the challenge.  Python
+        deliberately keeps no nonce, receipt, replay, or incarnation state.
+        """
+        return self._bridge.prepare_rebirth_v1(
+            {
+                "scope": scope.scope_json(),
+                "expected_incarnation_id": expected_incarnation_id,
+                "expected_revision": expected_revision,
+                "action": action,
+            }
+        )
+
+    def confirm_rebirth_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Forward the user-supplied confirmation unchanged to D1.5."""
+        return self._bridge.confirm_rebirth_v1(dict(payload))
+
+    def forget_scope(self, scope: ScopeTokens) -> None:
+        """Discard process-local mirrors after a native incarnation changes."""
+        prefix = f"{scope.bot_token}:{scope.persona_token}:"
+        for key in tuple(self._committed):
+            if key.startswith(prefix):
+                self._committed.pop(key, None)
+        for key in tuple(self._applied):
+            if key.startswith(prefix):
+                self._applied.pop(key, None)
+
     async def ensure_genesis(
         self,
         *,

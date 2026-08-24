@@ -9,15 +9,27 @@
   },
   "native_data_dir": {
     "description": "原生核心数据目录",
-    "hint": "可填写绝对路径；留空时使用 AstrBot 为插件分配的数据目录。插件会在该目录内创建 astrembodiment.sqlite3。",
+    "hint": "可填写持久化宿主目录的绝对路径；留空时使用 AstrBot 为插件分配的数据目录。普通插件更新会继续使用同一目录中的 Store/Vault，不会因插件版本变更初始化身份。",
+    "type": "string",
+    "default": ""
+  },
+  "continuity_vault_dir": {
+    "description": "人格连续性 Vault 目录",
+    "hint": "可选。仅接受绝对路径且末级目录必须为 continuity-vault；用于明确复用既有连续性 Vault。留空时沿用原生核心数据目录。不要把此项用于新建身份；重生或清空只能由用户完成两步确认。",
     "type": "string",
     "default": ""
   },
   "observatory_enabled": {
     "description": "启用只读诊断",
-    "hint": "只记录不含消息正文的运行状态信息。",
+    "hint": "启用时成功运算输出一行中文简洁摘要；失败始终输出完整警告。日志不包含消息正文、身份标识、拓扑或内部神经状态。",
     "type": "bool",
     "default": true
+  },
+  "node_observability_detailed_logging": {
+    "description": "启用详细运行观测日志",
+    "hint": "仅原生布尔值 true 启用固定语义注入 JSON；它覆盖“启用只读诊断”的成功日志开关，失败警告无论开关均会保留。详细日志只含聚合标量，不含节点/边数组、端点、权重、拓扑或内部神经状态。",
+    "type": "bool",
+    "default": false
   },
   "proactive_enabled": {
     "description": "允许提出主动联系建议",
@@ -41,7 +53,7 @@
   },
   "seed_code": {
     "description": "SeedCode（身份种子）",
-    "hint": "系统生成，仅用于查看；生成后自动保存，重载插件后仍可见。",
+    "hint": "系统生成，仅用于查看；真实身份与连续状态由 durable Store/Vault 保存。重载或插件更新不会以 SeedCode 重新初始化；只有用户明确发起并确认的重生/清空动作才会创建新 incarnation。",
     "type": "text",
     "default": "",
     "readonly": true
