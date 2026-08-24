@@ -142,6 +142,11 @@ def plugin(config=None, context=None):
 
 
 def test_bound_scope_reuses_durable_identity_without_calling_genesis():
+    # format_incarnation_id(&[0; 32]) from ae-genesis: 13 Crockford groups.
+    durable_incarnation_id = (
+        "AE-I1-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000"
+    )
+
     class BoundBridge:
         loaded = True
 
@@ -153,7 +158,7 @@ def test_bound_scope_reuses_durable_identity_without_calling_genesis():
             return {
                 "bound": True,
                 "seed_code": "AE-S1-0123456789ABCDEF",
-                "incarnation_id": "ab" * 32,
+                "incarnation_id": durable_incarnation_id,
                 "revision": 14,
             }
 
@@ -200,7 +205,7 @@ def test_bound_scope_reuses_durable_identity_without_calling_genesis():
     assert bridge.genesis_calls == 0
     assert bridge.apply_calls == 1
     assert base_revision == 14
-    assert decision["incarnation_id"] == "ab" * 32
+    assert decision["incarnation_id"] == durable_incarnation_id
     assert decision["seed_code"] == "AE-S1-0123456789ABCDEF"
 
 

@@ -94,6 +94,21 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
 
 _G0_FORMULA_DIGEST = "00" * 32
 _G0_PROTOCOL_DIGEST = "00" * 32
+_INSPECT_INCARNATION_PREFIX = "AE-I1-"
+_INSPECT_INCARNATION_GROUP_COUNT = 13
+_INSPECT_CROCKFORD_ALPHABET = frozenset("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+
+def _is_inspect_display_incarnation_id(value: object) -> bool:
+    """Validate the AE-I1 Crockford display ID returned by inspect.v1."""
+    if not isinstance(value, str) or not value.startswith(_INSPECT_INCARNATION_PREFIX):
+        return False
+    groups = value.removeprefix(_INSPECT_INCARNATION_PREFIX).split("-")
+    return len(groups) == _INSPECT_INCARNATION_GROUP_COUNT and all(
+        len(group) == 4
+        and all(character in _INSPECT_CROCKFORD_ALPHABET for character in group)
+        for group in groups
+    )
 
 _OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v3"
 _OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
@@ -1239,15 +1254,9 @@ class AstrEmbodimentPlugin(Star):
             or len(seed_code) > 256
             or not isinstance(seed_code_short, str)
             or len(seed_code_short) > 256
-            or not isinstance(incarnation_id, str)
-            or len(incarnation_id) != 64
+            or not _is_inspect_display_incarnation_id(incarnation_id)
         ):
             raise PersonaGenesisError("原生身份检查身份字段无效")
-        try:
-            if len(bytes.fromhex(incarnation_id)) != 32:
-                raise ValueError("incarnation length")
-        except ValueError as exc:
-            raise PersonaGenesisError("原生身份检查身份字段无效") from exc
         return {
             "seed_code": seed_code,
             "seed_code_short": seed_code_short,
