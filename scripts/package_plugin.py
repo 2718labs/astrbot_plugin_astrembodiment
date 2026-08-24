@@ -73,13 +73,13 @@ def _validate_native_payload(member: str, payload: bytes) -> None:
         )
 
 
-def _write_native_package(archive: zipfile.ZipFile, wheel_paths: list[Path]) -> None:
+def native_package_entries(wheel_paths: list[Path]) -> list[tuple[str, bytes]]:
+    """Return validated content-addressed native runtime archive entries."""
     if not NATIVE_SOURCE_INIT.is_file():
         raise ValueError(
             f"native source initializer does not exist: {NATIVE_SOURCE_INIT}"
         )
-    init_payload = NATIVE_SOURCE_INIT.read_bytes()
-    archive.writestr(NATIVE_INIT, init_payload, compress_type=zipfile.ZIP_DEFLATED)
+    entries = [(NATIVE_INIT, NATIVE_SOURCE_INIT.read_bytes())]
     platforms: dict[str, dict[str, str]] = {}
     wheel_names: set[str] = set()
     for wheel_path in wheel_paths:
@@ -109,11 +109,7 @@ def _write_native_package(archive: zipfile.ZipFile, wheel_paths: list[Path]) -> 
             _validate_native_payload(native_extension, native_payload)
             build_id = hashlib.sha256(native_payload).hexdigest()
             archive_member = f"{NATIVE_BUNDLE_ROOT}/{build_id}/{PurePosixPath(native_extension).name}"
-            archive.writestr(
-                archive_member,
-                native_payload,
-                compress_type=zipfile.ZIP_DEFLATED,
-            )
+            entries.append((archive_member, native_payload))
             platforms[platform] = {
                 "build_id": build_id,
                 "filename": PurePosixPath(native_extension).name,
@@ -123,11 +119,18 @@ def _write_native_package(archive: zipfile.ZipFile, wheel_paths: list[Path]) -> 
         "schema": NATIVE_MANIFEST_SCHEMA,
         "platforms": platforms,
     }
-    archive.writestr(
-        NATIVE_MANIFEST,
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-        compress_type=zipfile.ZIP_DEFLATED,
+    entries.append(
+        (
+            NATIVE_MANIFEST,
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
     )
+    return entries
+
+
+def _write_native_package(archive: zipfile.ZipFile, wheel_paths: list[Path]) -> None:
+    for member, payload in native_package_entries(wheel_paths):
+        archive.writestr(member, payload, compress_type=zipfile.ZIP_DEFLATED)
 
 
 def main() -> None:
