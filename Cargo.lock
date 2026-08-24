@@ -123,6 +123,8 @@ dependencies = [
  "ae-neurofield",
  "ae-renorm",
  "ae-store",
+ "sha2",
+ "subtle",
  "thiserror",
 ]
 

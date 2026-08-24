@@ -23,10 +23,10 @@ use ae_context_projector::{
 };
 use ae_continuum::{CommitEnvelope, ReplayReport};
 use ae_contracts::{
-    perception_dimension_values, wire, ActionContract, CanonicalEvent, CausalRef, CommitStatus,
-    Digest, GenesisManifestProposal, GenesisReceipt, GenesisStatus, Id128, InvariantResiduals,
-    PerceptionProposalV1, PersonaGenesisRequest, PersonalityVector, ScopeRef, SemanticEstimate,
-    TransitionReceipt, TransitionReceiptV2, UserStimulus,
+    hex, perception_dimension_values, wire, ActionContract, CanonicalEvent, CausalRef,
+    CommitStatus, Digest, GenesisManifestProposal, GenesisReceipt, GenesisStatus, Id128,
+    InvariantResiduals, PerceptionProposalV1, PersonaGenesisRequest, PersonalityVector, ScopeRef,
+    SemanticEstimate, TransitionReceipt, TransitionReceiptV2, UserStimulus,
 };
 use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
@@ -37,7 +37,9 @@ use ae_store::{
     RebirthPrepareRequestV1, RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, SnapshotCommitV1,
     Store, StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
 };
+use sha2::{Digest as Sha2Digest, Sha256};
 use std::path::{Path, PathBuf};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -164,6 +166,49 @@ fn persona_scope_ref(bot_token: Id128, persona_token: Id128) -> ScopeRef {
 }
 
 const SEMANTIC_NAMESPACE_DOMAIN_V1: &[u8] = b"astr-embodiment/semantic-lane-namespace-v1";
+const REQUEST_NONCE_BINDING_DOMAIN_V1: &[u8] = b"astr-embodiment/spc1-request-nonce-binding-v1";
+
+fn canonical_request_nonce_digest_v1(scope: &ScopeRef, proposal: &PerceptionProposalV1) -> Digest {
+    let relation_token = scope
+        .relation_token
+        .as_ref()
+        .map(|token| format!("\"{}\"", hex::encode16(token)))
+        .unwrap_or_else(|| "null".to_owned());
+    let scope_json = format!(
+        "{{\"bot_token\":\"{}\",\"persona_token\":\"{}\",\"relation_token\":{},\"session_token\":\"{}\"}}",
+        hex::encode16(&scope.bot_token),
+        hex::encode16(&scope.persona_token),
+        relation_token,
+        hex::encode16(&scope.session_token),
+    );
+    let binding_json = format!(
+        "{{\"base_revision\":{},\"event_id\":\"{}\",\"observed_at_ms\":{},\"scope\":{},\"turn_id\":\"{}\"}}",
+        proposal.base_revision,
+        hex::encode16(&proposal.event_id),
+        proposal.observed_at_ms,
+        scope_json,
+        hex::encode16(&proposal.turn_id),
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(REQUEST_NONCE_BINDING_DOMAIN_V1);
+    hasher.update([0]);
+    hasher.update(binding_json.as_bytes());
+    let digest: Digest = hasher.finalize().into();
+    if digest != [0; 32] {
+        return digest;
+    }
+    let mut fallback = Sha256::new();
+    fallback.update(REQUEST_NONCE_BINDING_DOMAIN_V1);
+    fallback.update([1]);
+    fallback.update(binding_json.as_bytes());
+    fallback.finalize().into()
+}
+
+fn request_nonce_binding_matches_v1(scope: &ScopeRef, proposal: &PerceptionProposalV1) -> bool {
+    canonical_request_nonce_digest_v1(scope, proposal)
+        .ct_eq(&proposal.request_nonce_digest)
+        .into()
+}
 
 fn semantic_storage_scope(
     bot_token: Id128,
@@ -1289,6 +1334,9 @@ impl AstrRuntime {
         proposal
             .validate_v1()
             .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
+        if !request_nonce_binding_matches_v1(scope, proposal) {
+            return Err(RuntimeError::InvalidPerceptionProposal);
+        }
         let nonzero_evidence_dimension_count = perception_nonzero_dimension_count(proposal);
         let (
             hot_bot_token,
@@ -1968,7 +2016,11 @@ mod tests {
             dimensions: EvidenceVector::default(),
             estimator_confidence: Fixed::ONE,
             protocol_version: 1,
-            request_nonce_digest: [45; 32],
+            request_nonce_digest: [
+                0xa8, 0xd3, 0x8b, 0x2c, 0xa2, 0x8a, 0xaf, 0x6d, 0x3a, 0xba, 0xd2, 0x18, 0x20, 0x02,
+                0x16, 0xe6, 0xb5, 0x59, 0x32, 0x40, 0x76, 0x10, 0xa4, 0xf1, 0x61, 0x1b, 0xef, 0x05,
+                0xd6, 0x91, 0x02, 0xe5,
+            ],
         };
 
         let decision = runtime
@@ -2033,6 +2085,54 @@ mod tests {
         ] {
             assert!(value <= 1_000_000);
         }
+    }
+
+    #[test]
+    fn semantic_nonce_binding_mismatch_is_rejected_without_semantic_write() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the nonce-binding task directory");
+        let dir = root.join(format!("focused-semantic-nonce-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(41);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
+            relation_token: None,
+            session_token: [42; 16],
+        };
+        let canonical = PerceptionProposalV1 {
+            schema_version: 1,
+            event_id: [43; 16],
+            turn_id: [44; 16],
+            observed_at_ms: 1_700_000_000_200,
+            base_revision: 0,
+            dimensions: EvidenceVector::default(),
+            estimator_confidence: Fixed::ONE,
+            protocol_version: 1,
+            request_nonce_digest: [
+                0xa8, 0xd3, 0x8b, 0x2c, 0xa2, 0x8a, 0xaf, 0x6d, 0x3a, 0xba, 0xd2, 0x18, 0x20, 0x02,
+                0x16, 0xe6, 0xb5, 0x59, 0x32, 0x40, 0x76, 0x10, 0xa4, 0xf1, 0x61, 0x1b, 0xef, 0x05,
+                0xd6, 0x91, 0x02, 0xe5,
+            ],
+        };
+        let mut mismatched = canonical.clone();
+        mismatched.request_nonce_digest = [0x01; 32];
+        assert_ne!(
+            mismatched.request_nonce_digest,
+            canonical.request_nonce_digest
+        );
+
+        assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 0);
+        assert!(matches!(
+            runtime.apply_perception_proposal_v1(&scope, &mismatched),
+            Err(RuntimeError::InvalidPerceptionProposal)
+        ));
+        assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

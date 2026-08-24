@@ -17,3 +17,5 @@ ae-continuum.workspace = true
 ae-store.workspace = true
 ae-context-projector.workspace = true
 thiserror.workspace = true
+sha2 = "0.10"
+subtle = "2"
