@@ -906,6 +906,17 @@ def version():
     )
     monkeypatch.delitem(sys.modules, "astrembodiment_core", raising=False)
 
+    original_import_module = bridge_module.import_module
+
+    def missing_top_level_core(name: str, package: str | None = None):
+        if name == "astrembodiment_core" and package is None:
+            raise ModuleNotFoundError(
+                "No module named 'astrembodiment_core'", name="astrembodiment_core"
+            )
+        return original_import_module(name, package)
+
+    monkeypatch.setattr(bridge_module, "import_module", missing_top_level_core)
+
     health = bridge_module.NativeBridge().open(str(tmp_path / "runtime"))
 
     assert health.status == "test"

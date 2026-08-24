@@ -186,6 +186,41 @@ def _sqlite_surface_counts(database_path: Path) -> tuple[dict[str, int], bytes]:
     return counts, raw_database
 
 
+def _current_authority_database_path(vault_root: Path) -> Path:
+    current_path = vault_root / "current"
+    current_lines = current_path.read_text(encoding="utf-8").splitlines()
+    generation_ids = [
+        line.removeprefix("generation_id=")
+        for line in current_lines
+        if line.startswith("generation_id=")
+    ]
+    assert len(generation_ids) == 1
+    generation_id = generation_ids[0]
+    assert generation_id
+    assert "mode=ready" in current_lines
+
+    locator_path = vault_root / "continuity_locator.sqlite"
+    with sqlite3.connect(f"{locator_path.as_uri()}?mode=ro", uri=True) as connection:
+        locator_rows = list(
+            connection.execute(
+                "SELECT generation_id FROM continuity_generation_locator WHERE slot = 1"
+            )
+        )
+    assert locator_rows == [(generation_id,)]
+
+    authority_database_path = (
+        vault_root / "generations" / generation_id / "authority.sqlite"
+    )
+    current_authority_candidates = [
+        candidate
+        for candidate in (vault_root / "generations").glob("*/authority.sqlite")
+        if candidate.parent.name == generation_id
+    ]
+    assert current_authority_candidates == [authority_database_path]
+    assert authority_database_path.is_file()
+    return authority_database_path
+
+
 def test_real_native_vault_context_artifacts_contain_no_dynamic_raw_sentinels(
     tmp_path: Path,
 ) -> None:
@@ -200,7 +235,8 @@ def test_real_native_vault_context_artifacts_contain_no_dynamic_raw_sentinels(
     scope = _real_scope()
     bridge = NativeBridge()
     bridge.open(str(tmp_path))
-    database_path = tmp_path / "astrembodiment.sqlite3"
+    legacy_database_path = tmp_path / "astrembodiment.sqlite3"
+    vault_root = tmp_path / "continuity-vault"
     try:
         request = _closed_genesis_request(scope, "\n".join(sentinels))
         genesis = bridge.ensure_genesis(request)
@@ -226,11 +262,25 @@ def test_real_native_vault_context_artifacts_contain_no_dynamic_raw_sentinels(
         )
         assert replay["ok"] is True
         assert replay["checked"] == 1
-        assert database_path.is_file() and database_path.stat().st_size > 0
+        assert legacy_database_path.is_file() and legacy_database_path.stat().st_size > 0
 
-        counts, raw_database = _sqlite_surface_counts(database_path)
+        authority_database_path = _current_authority_database_path(vault_root)
+        assert authority_database_path != legacy_database_path
+        counts, raw_authority_database = _sqlite_surface_counts(authority_database_path)
+        durable_vault_files = tuple(
+            path for path in vault_root.rglob("*") if path.is_file()
+        )
+        control_and_locator_files = (
+            vault_root / "owner.cbor",
+            vault_root / "current",
+            vault_root / "continuity_locator.sqlite",
+        )
+        assert all(path.is_file() for path in control_and_locator_files)
+        assert all(path in durable_vault_files for path in control_and_locator_files)
         output_surfaces = (
-            raw_database,
+            legacy_database_path.read_bytes(),
+            raw_authority_database,
+            *(path.read_bytes() for path in durable_vault_files),
             json.dumps(request, ensure_ascii=False, sort_keys=True).encode(),
             json.dumps(genesis, ensure_ascii=False, sort_keys=True).encode(),
             json.dumps(decision, ensure_ascii=False, sort_keys=True).encode(),
