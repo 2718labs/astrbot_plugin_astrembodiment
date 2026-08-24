@@ -138,9 +138,9 @@ _REBIRTH_CONFIRM_REQUEST_REQUIRED_KEYS = frozenset(
         "action",
     }
 )
-_REBIRTH_CONFIRM_REQUEST_ALLOWED_KEYS = (
-    _REBIRTH_CONFIRM_REQUEST_REQUIRED_KEYS | {"confirmed"}
-)
+_REBIRTH_CONFIRM_REQUEST_ALLOWED_KEYS = _REBIRTH_CONFIRM_REQUEST_REQUIRED_KEYS | {
+    "confirmed"
+}
 _REBIRTH_PREPARE_RESPONSE_KEYS = frozenset(
     {"schema", "state", "request_nonce", "request_nonce_digest", "binding_digest"}
 )
@@ -187,25 +187,33 @@ def _is_token_hex(value: Any) -> bool:
 def _validate_rebirth_scope(scope: Any) -> None:
     if not isinstance(scope, dict) or set(scope) != _REBIRTH_SCOPE_KEYS:
         raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth scope is not closed")
-    if not _is_token_hex(scope["bot_token"]) or not _is_token_hex(
-        scope["persona_token"]
-    ) or not _is_token_hex(scope["session_token"]):
+    if (
+        not _is_token_hex(scope["bot_token"])
+        or not _is_token_hex(scope["persona_token"])
+        or not _is_token_hex(scope["session_token"])
+    ):
         raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth scope token is invalid")
     relation_token = scope["relation_token"]
     if relation_token is not None and not _is_token_hex(relation_token):
-        raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth relation token is invalid")
+        raise ClosedSchemaViolation(
+            "CLOSED_SCHEMA", "rebirth relation token is invalid"
+        )
 
 
 def _validate_rebirth_prepare_request(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) != _REBIRTH_PREPARE_REQUEST_KEYS:
-        raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth prepare request is not closed")
+        raise ClosedSchemaViolation(
+            "CLOSED_SCHEMA", "rebirth prepare request is not closed"
+        )
     _validate_rebirth_scope(payload["scope"])
     if not _is_digest_hex(payload["expected_incarnation_id"]):
         raise ClosedSchemaViolation(
             "CLOSED_SCHEMA", "rebirth expected incarnation is invalid"
         )
     if not _positive_int_or_zero(payload["expected_revision"]):
-        raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth expected revision is invalid")
+        raise ClosedSchemaViolation(
+            "CLOSED_SCHEMA", "rebirth expected revision is invalid"
+        )
     if payload["action"] not in _REBIRTH_ACTIONS:
         raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth action is invalid")
     return dict(payload)
@@ -218,21 +226,27 @@ def _validate_rebirth_confirm_request(payload: Any) -> dict[str, Any]:
     if not _REBIRTH_CONFIRM_REQUEST_REQUIRED_KEYS <= keys or not keys <= (
         _REBIRTH_CONFIRM_REQUEST_ALLOWED_KEYS
     ):
-        raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth confirmation is not closed")
+        raise ClosedSchemaViolation(
+            "CLOSED_SCHEMA", "rebirth confirmation is not closed"
+        )
     _validate_rebirth_scope(payload["scope"])
     if not _is_digest_hex(payload["expected_incarnation_id"]) or not _is_digest_hex(
         payload["request_nonce"]
     ):
         raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth digest is invalid")
     if not _positive_int_or_zero(payload["expected_revision"]):
-        raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth expected revision is invalid")
+        raise ClosedSchemaViolation(
+            "CLOSED_SCHEMA", "rebirth expected revision is invalid"
+        )
     if payload["action"] not in _REBIRTH_ACTIONS:
         raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth action is invalid")
     # ``confirmed`` deliberately remains optional at this layer.  When it is
     # absent, Rust must issue REBIRTH_CONFIRMATION_REQUIRED rather than Python
     # manufacturing consent or converting the request to a schema error.
     if "confirmed" in payload and type(payload["confirmed"]) is not bool:
-        raise ClosedSchemaViolation("CLOSED_SCHEMA", "rebirth confirmation flag is invalid")
+        raise ClosedSchemaViolation(
+            "CLOSED_SCHEMA", "rebirth confirmation flag is invalid"
+        )
     return dict(payload)
 
 
@@ -280,9 +294,10 @@ def _validate_rebirth_response(payload: Any) -> dict[str, Any]:
         )
     ):
         raise _rebirth_integrity_error("rebirth receipt short identifier is invalid")
-    if not _positive_int_or_zero(receipt["before_revision"]) or receipt[
-        "after_revision"
-    ] != 0:
+    if (
+        not _positive_int_or_zero(receipt["before_revision"])
+        or receipt["after_revision"] != 0
+    ):
         raise _rebirth_integrity_error("rebirth receipt revision is invalid")
     if not _positive_int(receipt["audit_time_ms"]):
         raise _rebirth_integrity_error("rebirth audit time is invalid")

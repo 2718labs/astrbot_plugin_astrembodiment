@@ -120,8 +120,6 @@ def test_real_vault_rebirth_challenge_keeps_the_raw_nonce_out_of_durable_files(
         bridge.close()
 
     durable_bytes = b"".join(
-        path.read_bytes()
-        for path in tmp_path.rglob("*")
-        if path.is_file()
+        path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
     )
     assert raw_nonce.encode() not in durable_bytes

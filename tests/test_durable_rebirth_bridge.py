@@ -40,8 +40,7 @@ def _genesis_request(scope: ScopeTokens) -> dict[str, object]:
         {
             "schema": PERSONA_COMPILER_SCHEMA,
             "traits": {
-                name: {"value": 0.5, "confidence": 0.5}
-                for name in _TRAIT_NAMES
+                name: {"value": 0.5, "confidence": 0.5} for name in _TRAIT_NAMES
             },
             "expression": {name: 0.5 for name in _EXPRESSION_NAMES},
             "allostasis": {name: 0.5 for name in _ALLOSTATIC_NAMES},
@@ -89,7 +88,9 @@ def _confirm_payload(
     }
 
 
-def _open_seeded_native(tmp_path: Path) -> tuple[NativeBridge, ScopeTokens, dict[str, Any]]:
+def _open_seeded_native(
+    tmp_path: Path,
+) -> tuple[NativeBridge, ScopeTokens, dict[str, Any]]:
     scope = _scope()
     bridge = NativeBridge()
     bridge.open(str(tmp_path))
@@ -150,6 +151,8 @@ def test_bridge_returns_committed_then_replayed_envelopes_after_reopen(
         assert replayed["receipt"] == committed["receipt"]
         assert "request_nonce" not in replayed
         assert "request_nonce" not in replayed["receipt"]
-        assert json.dumps(replayed, sort_keys=True).count(challenge["request_nonce"]) == 0
+        assert (
+            json.dumps(replayed, sort_keys=True).count(challenge["request_nonce"]) == 0
+        )
     finally:
         reopened.close()
