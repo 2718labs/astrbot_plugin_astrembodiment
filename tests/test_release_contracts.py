@@ -22,6 +22,8 @@ NATIVE_API = {
     "ensure_genesis",
     "prepare_rebirth_v1",
     "confirm_rebirth_v1",
+    "semantic_revision_v1",
+    "apply_perception_proposal_v1",
     "apply_event",
     "inspect",
     "verify_replay",

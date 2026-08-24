@@ -106,6 +106,8 @@ try:
     open = _native_module.open
     prepare_rebirth_v1 = _native_module.prepare_rebirth_v1
     confirm_rebirth_v1 = _native_module.confirm_rebirth_v1
+    semantic_revision_v1 = _native_module.semantic_revision_v1
+    apply_perception_proposal_v1 = _native_module.apply_perception_proposal_v1
     verify_replay = _native_module.verify_replay
     version = _native_module.version
 except (AttributeError, ImportError) as exc:  # pragma: no cover - install failure
@@ -131,6 +133,8 @@ __all__ = [
     "open",
     "prepare_rebirth_v1",
     "confirm_rebirth_v1",
+    "semantic_revision_v1",
+    "apply_perception_proposal_v1",
     "verify_replay",
     "version",
 ]
