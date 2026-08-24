@@ -36,7 +36,7 @@ NATIVE_API_PAYLOAD = b" ".join(marker.encode() for marker in sorted(NATIVE_API))
 
 def test_release_metadata_and_required_files_are_present() -> None:
     metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-    assert 'version: "1.0.0-rc1"' in metadata
+    assert 'version: "1.0.0"' in metadata
     assert 'astrbot_version: ">=4.16,<5"' in metadata
     assert "support_platforms:" in metadata
     for relative_path in ("LICENSE", "CHANGELOG.md", ".github/workflows/ci.yml"):
@@ -120,7 +120,7 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
     assert FRESH_WINDOWS_WHEEL is not None, (
         "build the native wheel before package verification"
     )
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-win_amd64.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-win_amd64.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -155,7 +155,7 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
 ) -> None:
     assert FRESH_WINDOWS_WHEEL is not None
     assert FRESH_LINUX_WHEEL is not None
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-native-refresh.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-native-refresh.zip"
     command = [
         sys.executable,
         str(ROOT / "scripts" / "package_plugin.py"),
@@ -216,7 +216,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
     tmp_path: Path,
 ) -> None:
     assert FRESH_WINDOWS_WHEEL is not None
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-native-smoke.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-native-smoke.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -284,7 +284,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
 
 def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
     linux_wheel = (
-        tmp_path / "astrembodiment_core-1.0.0-rc1-cp312-abi3-manylinux_2_17_x86_64.whl"
+        tmp_path / "astrembodiment_core-1.0.0-cp312-abi3-manylinux_2_17_x86_64.whl"
     )
     with zipfile.ZipFile(linux_wheel, "w") as wheel:
         wheel.writestr(
@@ -295,7 +295,7 @@ def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
             b"linux-native-placeholder " + NATIVE_API_PAYLOAD,
         )
 
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-linux_x86_64.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-linux_x86_64.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -340,7 +340,7 @@ def test_release_archive_can_bundle_windows_and_linux_extensions(
             b"linux-native-placeholder " + NATIVE_API_PAYLOAD,
         )
 
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-universal.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-universal.zip"
     result = subprocess.run(
         [
             sys.executable,

@@ -133,6 +133,11 @@ def _write_native_package(archive: zipfile.ZipFile, wheel_paths: list[Path]) -> 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--sha256-output",
+        type=Path,
+        help="write '<sha256>  <archive-name>' for the allowlisted ZIP",
+    )
     parser.add_argument("--native-wheel", type=Path, action="append", required=True)
     args = parser.parse_args()
     if args.output.suffix.lower() != ".zip":
@@ -151,6 +156,12 @@ def main() -> None:
     if args.output.stat().st_size > MAX_ARCHIVE_BYTES:
         args.output.unlink()
         raise SystemExit("release archive exceeds the 16 MB AstrBot marketplace limit")
+    if args.sha256_output is not None:
+        digest = hashlib.sha256(args.output.read_bytes()).hexdigest()
+        args.sha256_output.parent.mkdir(parents=True, exist_ok=True)
+        args.sha256_output.write_text(
+            f"{digest}  {args.output.name}\n", encoding="utf-8"
+        )
     print(args.output)
 
 

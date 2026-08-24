@@ -1,0 +1,131 @@
+name: Production release preparation
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Expected production tag (must be v1.0.0)
+        required: true
+        default: v1.0.0
+        type: string
+      channel:
+        description: Release channel; production is the only accepted value
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release-preparation-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-production-contract:
+    name: Validate production version and changelog contract
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Require manual production channel
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$RELEASE_CHANNEL" = production
+          test "$RELEASE_TAG" = v1.0.0
+          git rev-parse --verify "${GITHUB_SHA}^{commit}" >/dev/null
+          git fetch origin "$DEFAULT_BRANCH" --depth=1
+          default_branch_commit="$(git rev-parse "origin/$DEFAULT_BRANCH")"
+          test "$GITHUB_SHA" = "$default_branch_commit"
+      - name: Verify version and changelog coupling
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python scripts/verify_release_contract.py --tag "$RELEASE_TAG"
+
+  build-native:
+    name: Build native wheel (${{ matrix.name }})
+    needs: validate-production-contract
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            artifact: native-wheel-windows
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            artifact: native-wheel-linux
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install stable Rust and packaging tools
+        run: >-
+          rustup toolchain install stable --profile minimal;
+          python -m pip install --upgrade pip maturin==1.14.1 "pytest>=8,<10"
+      - name: Build native wheel
+        run: python -m maturin build --release --out dist
+      - name: Save native wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-candidate:
+    name: Assemble allowlisted ZIP and SHA256
+    needs: build-native
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: native-wheel-*
+          path: wheels
+      - name: Assemble allowlisted ZIP
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: >-
+          python scripts/package_plugin.py
+          --output "dist/astrbot_plugin_astrembodiment-${RELEASE_TAG}-win_linux_x86_64.zip"
+          --sha256-output "dist/astrbot_plugin_astrembodiment-${RELEASE_TAG}-win_linux_x86_64.zip.sha256"
+          --native-wheel wheels/native-wheel-windows/*.whl
+          --native-wheel wheels/native-wheel-linux/*.whl
+      - name: Verify allowlisted ZIP and SHA256
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: >-
+          cd dist && sha256sum --check
+          "astrbot_plugin_astrembodiment-${RELEASE_TAG}-win_linux_x86_64.zip.sha256"
+      - name: Upload review-only production-channel assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: astrbot-plugin-${{ inputs.tag }}-production-review
+          path: dist/astrbot_plugin_astrembodiment-${{ inputs.tag }}-win_linux_x86_64.zip*
+          if-no-files-found: error
+          retention-days: 14
+
+# This workflow is dispatch-only. It never creates a tag, a GitHub Release, a
+# marketplace upload, or a package upload. A maintainer must independently
+# review the evidence and perform any approved remote publication.
