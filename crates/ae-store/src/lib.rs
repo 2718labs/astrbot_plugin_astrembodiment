@@ -9,7 +9,14 @@
 //! only for debugging provenance columns.
 
 pub mod continuity_vault;
-pub use continuity_vault::{locate_vault, VaultLocateError, VaultLocation, VaultMode};
+pub use continuity_vault::{
+    locate_vault, RebirthActionV1, RebirthAuditReceiptV1, RebirthChallengeV1,
+    RebirthChildStageRequestV1, RebirthCommitPermitV1, RebirthCurrentV1, RebirthFaultV1,
+    RebirthLifecycleError, RebirthOutcomeV1, RebirthPreflightV1, RebirthPrepareRequestV1,
+    RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, RebirthResponseStateV1,
+    RebirthStagedChildV1, UserAuthorizedRebirthV1, VaultLifecycle, VaultLocateError, VaultLocation,
+    VaultMode,
+};
 pub mod continuity_migration;
 pub use continuity_migration::{
     migrate_continuity, open_current_generation, ContinuityAuthority, ContinuityMigrationDecision,
