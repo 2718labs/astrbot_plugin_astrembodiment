@@ -516,7 +516,9 @@ def test_reload_hydrates_revision_and_turn_id_without_reuse():
                 "bound": True,
                 "seed_code": "AE-S1-RELOAD",
                 "seed_code_short": "AE-S1-RELOAD",
-                "incarnation_id": "a" * 64,
+                "incarnation_id": (
+                    "AE-I1-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000"
+                ),
                 "revision": 7,
             }
 
