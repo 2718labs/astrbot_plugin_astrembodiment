@@ -1,8 +1,13 @@
-use ae_contracts::{wire, Digest};
+use ae_contracts::{
+    wire, AllostaticSetpoints, Digest, EpistemicPriors, ExpressionPhenotype, GenesisManifest,
+    GenesisReceipt, GenesisStatus, PersonaScopeRef, PersonaSelectionKind, PersonaSourceRef,
+    PersonalityVector, SocialPriors,
+};
+use ae_fixed::Fixed;
 use ae_store::{
-    ContinuityAuthority, RebirthActionV1, RebirthFaultV1, RebirthLifecycleError, RebirthOutcomeV1,
-    RebirthPreflightV1, RebirthPrepareRequestV1, RebirthResponseStateV1, RebirthStagedChildV1,
-    UserAuthorizedRebirthV1, VaultLifecycle,
+    ClaimOutcome, ContinuityAuthority, GenesisCommit, RebirthActionV1, RebirthFaultV1,
+    RebirthLifecycleError, RebirthOutcomeV1, RebirthPreflightV1, RebirthPrepareRequestV1,
+    RebirthResponseStateV1, RebirthStagedChildV1, Store, UserAuthorizedRebirthV1, VaultLifecycle,
 };
 use rusqlite::{params, Connection};
 use std::fs;
@@ -77,6 +82,88 @@ fn create_legacy_authority(path: &Path, incarnation_id: Digest, revision: u64) -
     scope
 }
 
+fn create_store_genesis_authority(path: &Path) -> (Digest, Digest, Digest) {
+    let bot = [0x51; 16];
+    let persona = [0x52; 16];
+    let source = PersonaSourceRef {
+        scope: PersonaScopeRef {
+            bot_token: bot,
+            persona_token: persona,
+        },
+        source_digest: [0x53; 32],
+        capability_digest: [0x54; 32],
+        selection: PersonaSelectionKind::Conversation,
+        prompt_chars: 1,
+        begin_dialog_count: 0,
+        mood_dialog_count: 0,
+    };
+    let mut manifest = GenesisManifest {
+        schema_version: 1,
+        traits: PersonalityVector::default(),
+        expression: ExpressionPhenotype::default(),
+        allostasis: AllostaticSetpoints::default(),
+        epistemic: EpistemicPriors::default(),
+        social: SocialPriors::default(),
+        manifest_digest: [0; 32],
+    };
+    manifest.manifest_digest = wire::manifest_body_digest(&manifest);
+    let scope_key =
+        ae_genesis::genesis_scope_key(&bot, &persona, &source.source_digest, &[0x55; 32]);
+    let mut store = Store::open(path).unwrap();
+    let ClaimOutcome::Claimed { lease_epoch, nonce } =
+        store.claim_lease(&scope_key, Some([0x56; 32])).unwrap()
+    else {
+        panic!("fresh Store must claim its Genesis lease");
+    };
+    let seed_code_digest = ae_genesis::derive_seed_code_digest(&manifest.manifest_digest);
+    let incarnation_id = [0x57; 32];
+    let initial_snapshot_digest = [0x58; 32];
+    let receipt = GenesisReceipt {
+        schema_version: 1,
+        seed_code_digest,
+        manifest_digest: manifest.manifest_digest,
+        incarnation_id,
+        formula_digest: [0x59; 32],
+        persona_source_digest: source.source_digest,
+        compiler_protocol_digest: [0x5a; 32],
+        compiler_model_digest: [0x5b; 32],
+        development_seed_digest: [0x5c; 32],
+        initial_snapshot_digest,
+        graph_digest: [0x5d; 32],
+        equilibrium_residual: Fixed::ZERO,
+        energy_residual: Fixed::ZERO,
+        capacity_residual: Fixed::ZERO,
+        sample_fit_residual: Fixed::ZERO,
+        status: GenesisStatus::Committed,
+    };
+    store
+        .commit_genesis(&GenesisCommit {
+            scope_key,
+            lease_epoch,
+            nonce_digest: nonce,
+            manifest: manifest.clone(),
+            manifest_body: wire::encode_manifest_body(&manifest),
+            seed_code_digest,
+            incarnation_id,
+            formula_digest: [0x59; 32],
+            source,
+            compiler_protocol_digest: [0x5a; 32],
+            compiler_model_digest: [0x5b; 32],
+            compiled_at_ms: 1,
+            receipt,
+            initial_snapshot_digest,
+            state_bytes: vec![0x5e; 16],
+            graph_digest: [0x5d; 32],
+        })
+        .unwrap();
+    drop(store);
+    (
+        wire::persona_scope_digest(&bot, &persona, None),
+        incarnation_id,
+        initial_snapshot_digest,
+    )
+}
+
 fn child_authority(incarnation_id: Digest) -> ContinuityAuthority {
     ContinuityAuthority {
         incarnation_id,
@@ -128,6 +215,58 @@ fn stage_manual_child(
         child_generation_id: child_generation,
         child_authority: child_authority(child_incarnation),
     }
+}
+
+#[test]
+fn bootstrap_reads_real_genesis_snapshot_zero_without_inventing_revision_one() {
+    let root = fixture_root("bootstrap-real-genesis");
+    let legacy = root.join("legacy.sqlite");
+    let vault = root.join("continuity-vault");
+    let (scope_token, incarnation_id, initial_snapshot_digest) =
+        create_store_genesis_authority(&legacy);
+
+    let legacy_connection = Connection::open(&legacy).unwrap();
+    let binding_revision: i64 = legacy_connection
+        .query_row("SELECT revision FROM active_bindings", [], |row| row.get(0))
+        .unwrap();
+    let snapshot_zero: i64 = legacy_connection
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE revision = 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let snapshot_one: i64 = legacy_connection
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE revision = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(binding_revision, 1);
+    assert_eq!(snapshot_zero, 1);
+    assert_eq!(snapshot_one, 0);
+    drop(legacy_connection);
+
+    let lifecycle = VaultLifecycle::open(&vault).unwrap();
+    let current = lifecycle.bootstrap_legacy_store_v1(&legacy).unwrap();
+
+    assert_eq!(current.authority.incarnation_id, incarnation_id);
+    assert_eq!(current.authority.revision, 0);
+    assert_eq!(current.authority.state_digest, initial_snapshot_digest);
+    assert_eq!(
+        lifecycle.current_fence(scope_token).unwrap(),
+        (incarnation_id, 0)
+    );
+    let copied = Connection::open(lifecycle.current_authority_database_path().unwrap()).unwrap();
+    let copied_snapshot_one: i64 = copied
+        .query_row(
+            "SELECT COUNT(*) FROM snapshots WHERE revision = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(copied_snapshot_one, 0);
 }
 
 #[test]

@@ -1451,10 +1451,8 @@ impl VaultLifecycle {
     fn current_with_scope(&self) -> Result<(RebirthCurrentV1, Digest), RebirthLifecycleError> {
         let current = self.current_authority_v1()?;
         let database = self.child_authority_database_path(&current.generation_id)?;
-        let (bot, persona, incarnation_id, revision) = read_single_binding(&database)?;
-        if incarnation_id != current.authority.incarnation_id
-            || revision != current.authority.revision
-        {
+        let (bot, persona, incarnation_id, _) = read_single_binding(&database)?;
+        if incarnation_id != current.authority.incarnation_id {
             return Err(RebirthLifecycleError::LocatorInvalid);
         }
         Ok((current, wire::persona_scope_digest(&bot, &persona, None)))
@@ -1905,11 +1903,38 @@ fn rebirth_receipt_id(permit: &RebirthCommitPermitV1, child: &RebirthStagedChild
 }
 
 fn capture_any_authority(database: &Path) -> Result<ContinuityAuthority, RebirthLifecycleError> {
-    let (bot, persona, incarnation_id, revision) = read_single_binding(database)?;
+    let (bot, persona, incarnation_id, _) = read_single_binding(database)?;
     let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| RebirthLifecycleError::ChildInvalid)?;
     let scope = wire::persona_scope_digest(&bot, &persona, None);
-    let revision_sql = revision_to_sql(revision)?;
+    // `active_bindings.revision` is a binding-row epoch: `Store::commit_genesis`
+    // writes it as 1 while the only initial snapshot is revision 0.  The
+    // authority fence is instead the continuity lane's journal/snapshot
+    // revision, exactly as Store::current_revision reports it.  This avoids
+    // fabricating a non-existent revision-1 state during legacy bootstrap.
+    let journal_revision: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(logical_revision) FROM journal WHERE scope_digest = ?1",
+            params![scope.to_vec()],
+            |row| row.get(0),
+        )
+        .map_err(|_| RebirthLifecycleError::ChildInvalid)?;
+    let revision_sql = match journal_revision {
+        None => 0,
+        Some(value) if value > 0 => value,
+        Some(_) => return Err(RebirthLifecycleError::ChildInvalid),
+    };
+    let revision = revision_from_sql(revision_sql)?;
+    let snapshot_revision: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(revision) FROM snapshots WHERE scope_digest = ?1",
+            params![scope.to_vec()],
+            |row| row.get(0),
+        )
+        .map_err(|_| RebirthLifecycleError::ChildInvalid)?;
+    if snapshot_revision != Some(revision_sql) {
+        return Err(RebirthLifecycleError::ChildInvalid);
+    }
     let graph_digest = connection
         .query_row(
             "SELECT graph_digest FROM incarnations WHERE incarnation_id = ?1",
@@ -1924,7 +1949,7 @@ fn capture_any_authority(database: &Path) -> Result<ContinuityAuthority, Rebirth
             |row| digest_from_blob(row.get(0)?).map_err(sqlite_conversion_error),
         )
         .map_err(|_| RebirthLifecycleError::ChildInvalid)?;
-    let history_digest = if revision == 0 {
+    let history_digest = if journal_revision.is_none() {
         wire::domain_hash(
             b"astr-embodiment/continuity-empty-history-v1",
             &[&incarnation_id, &revision.to_le_bytes()],
