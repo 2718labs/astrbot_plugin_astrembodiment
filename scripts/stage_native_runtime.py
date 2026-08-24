@@ -21,9 +21,7 @@ def _single_wheel(wheel_dir: Path) -> Path:
     if not wheel_dir.is_dir():
         raise ValueError(f"wheel directory does not exist: {wheel_dir}")
     wheels = sorted(
-        path
-        for path in wheel_dir.iterdir()
-        if path.is_file() and path.suffix == ".whl"
+        path for path in wheel_dir.iterdir() if path.is_file() and path.suffix == ".whl"
     )
     if len(wheels) != 1:
         raise ValueError(
@@ -79,7 +77,10 @@ def _verify_staged_runtime(destination: Path) -> Path:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid staged native manifest: {manifest_path}") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema") != NATIVE_MANIFEST_SCHEMA:
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != NATIVE_MANIFEST_SCHEMA
+    ):
         raise ValueError(f"unsupported staged native manifest: {manifest_path}")
 
     platforms = manifest.get("platforms")
