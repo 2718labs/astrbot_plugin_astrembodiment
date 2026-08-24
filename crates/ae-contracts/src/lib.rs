@@ -9,6 +9,7 @@
 
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
@@ -441,6 +442,130 @@ pub struct EvidenceVector {
     pub rejection: Fixed,
 }
 
+/// Closed request-local evidence proposal for the semantic perception preview.
+/// It deliberately contains neither provider text nor authority/action policy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerceptionProposalV1 {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d16")]
+    pub event_id: Id128,
+    #[serde(with = "crate::hex::d16")]
+    pub turn_id: Id128,
+    pub observed_at_ms: u64,
+    pub base_revision: u64,
+    pub dimensions: EvidenceVector,
+    pub estimator_confidence: Fixed,
+    pub protocol_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub request_nonce_digest: Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerceptionProposalErrorV1 {
+    InvalidSchemaVersion,
+    InvalidProtocolVersion,
+    InvalidIdentity,
+    InvalidObservedAt,
+    InvalidDimensions,
+    InvalidConfidence,
+    ZeroRequestNonce,
+}
+
+impl fmt::Display for PerceptionProposalErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidSchemaVersion => "invalid perception proposal schema",
+            Self::InvalidProtocolVersion => "invalid perception proposal protocol",
+            Self::InvalidIdentity => "invalid perception proposal identity",
+            Self::InvalidObservedAt => "invalid perception proposal observed time",
+            Self::InvalidDimensions => "invalid perception proposal dimensions",
+            Self::InvalidConfidence => "invalid perception proposal confidence",
+            Self::ZeroRequestNonce => "invalid perception proposal nonce",
+        })
+    }
+}
+
+impl std::error::Error for PerceptionProposalErrorV1 {}
+
+impl PerceptionProposalV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+    pub const PROTOCOL_VERSION: u16 = 1;
+    pub const DIGEST_DOMAIN_V1: &'static [u8] = b"astr-embodiment/semantic-perception-proposal-v1";
+
+    pub fn validate_v1(&self) -> Result<(), PerceptionProposalErrorV1> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            return Err(PerceptionProposalErrorV1::InvalidSchemaVersion);
+        }
+        if self.protocol_version != Self::PROTOCOL_VERSION {
+            return Err(PerceptionProposalErrorV1::InvalidProtocolVersion);
+        }
+        if self.event_id.iter().all(|byte| *byte == 0) || self.turn_id.iter().all(|byte| *byte == 0)
+        {
+            return Err(PerceptionProposalErrorV1::InvalidIdentity);
+        }
+        if self.observed_at_ms == 0 {
+            return Err(PerceptionProposalErrorV1::InvalidObservedAt);
+        }
+        if perception_dimension_values(&self.dimensions)
+            .into_iter()
+            .any(|value| !(Fixed::ZERO..=Fixed::ONE).contains(&value))
+        {
+            return Err(PerceptionProposalErrorV1::InvalidDimensions);
+        }
+        if !(Fixed::ZERO < self.estimator_confidence && self.estimator_confidence <= Fixed::ONE) {
+            return Err(PerceptionProposalErrorV1::InvalidConfidence);
+        }
+        if self.request_nonce_digest.iter().all(|byte| *byte == 0) {
+            return Err(PerceptionProposalErrorV1::ZeroRequestNonce);
+        }
+        Ok(())
+    }
+
+    /// Canonically commits the closed proposal together with the caller's
+    /// public request scope. The durable semantic namespace is deliberately
+    /// not an input to this commitment.
+    pub fn estimator_digest_v1(&self, scope: &ScopeRef) -> Digest {
+        let schema_version = self.schema_version.to_le_bytes();
+        let values = perception_dimension_values(&self.dimensions).map(Fixed::encode);
+        let confidence = self.estimator_confidence.encode();
+        let protocol_version = self.protocol_version.to_le_bytes();
+        let scope_digest = wire::scope_digest(scope);
+        let base_revision = self.base_revision.to_le_bytes();
+        let mut fields: Vec<&[u8]> = Vec::with_capacity(22);
+        fields.push(&schema_version);
+        fields.extend(values.iter().map(|value| value.as_slice()));
+        fields.push(&confidence);
+        fields.push(&protocol_version);
+        fields.push(&self.request_nonce_digest);
+        fields.push(&self.event_id);
+        fields.push(&scope_digest);
+        fields.push(&self.turn_id);
+        fields.push(&base_revision);
+        wire::domain_hash(Self::DIGEST_DOMAIN_V1, &fields)
+    }
+}
+
+pub fn perception_dimension_values(evidence: &EvidenceVector) -> [Fixed; 15] {
+    [
+        evidence.positive,
+        evidence.affiliation,
+        evidence.harm,
+        evidence.boundary,
+        evidence.repair,
+        evidence.repetition,
+        evidence.new_information,
+        evidence.constraint_instability,
+        evidence.epistemic_conflict,
+        evidence.self_responsibility,
+        evidence.other_responsibility,
+        evidence.hostility,
+        evidence.publicness,
+        evidence.engagement,
+        evidence.rejection,
+    ]
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticEstimate {
@@ -766,6 +891,116 @@ pub struct TransitionReceipt {
     pub status: CommitStatus,
 }
 
+pub const SEMANTIC_VECTOR_RECEIPT_SCHEMA_V2: &str = "astr-embodiment.semantic-vector-receipt.v2";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SemanticVectorFormulaV2 {
+    #[serde(rename = "full-vector-route-neutral-relaxation-v1")]
+    FullVectorRouteNeutralRelaxationV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticVectorReceiptV2 {
+    pub schema_version: u16,
+    pub formula: SemanticVectorFormulaV2,
+    pub dimension_slot_count: u8,
+    pub evaluated_dimension_count: u8,
+    pub injected_dimension_count: u8,
+    pub nonzero_evidence_dimension_count: u8,
+    pub neutral_baseline_dimension_count: u8,
+    pub unavailable_dimension_count: u8,
+    pub state_changed: bool,
+}
+
+impl SemanticVectorReceiptV2 {
+    pub const SCHEMA_VERSION: u16 = 2;
+
+    pub fn validate(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && self.dimension_slot_count == 15
+            && self.evaluated_dimension_count == 15
+            && self.injected_dimension_count == 15
+            && self.unavailable_dimension_count == 0
+            && self
+                .nonzero_evidence_dimension_count
+                .checked_add(self.neutral_baseline_dimension_count)
+                == Some(self.evaluated_dimension_count)
+    }
+}
+
+/// A separate semantic attestation. Its fixed v1-shaped prefix deliberately
+/// leaves the persisted D1 `TransitionReceipt` byte codec unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransitionReceiptV2 {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub scope_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub authority_digest: Digest,
+    pub base_revision: u64,
+    pub next_revision: u64,
+    #[serde(with = "crate::hex::d32")]
+    pub state_before: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub state_after: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub graph_after: Digest,
+    #[serde(with = "crate::hex::d32_opt")]
+    pub action_contract: Option<Digest>,
+    pub active_nodes: u32,
+    pub active_edges: u32,
+    pub residuals: InvariantResiduals,
+    pub status: CommitStatus,
+    pub semantic_vector: SemanticVectorReceiptV2,
+}
+
+impl TransitionReceiptV2 {
+    pub const SCHEMA_VERSION: u16 = 2;
+
+    pub fn from_legacy(
+        legacy: &TransitionReceipt,
+        semantic_vector: SemanticVectorReceiptV2,
+    ) -> Option<Self> {
+        if legacy.schema_version != 1 {
+            return None;
+        }
+        let receipt = Self {
+            schema_version: Self::SCHEMA_VERSION,
+            formula_digest: legacy.formula_digest,
+            scope_digest: legacy.scope_digest,
+            event_digest: legacy.event_digest,
+            authority_digest: legacy.authority_digest,
+            base_revision: legacy.base_revision,
+            next_revision: legacy.next_revision,
+            state_before: legacy.state_before,
+            state_after: legacy.state_after,
+            graph_after: legacy.graph_after,
+            action_contract: legacy.action_contract,
+            active_nodes: legacy.active_nodes,
+            active_edges: legacy.active_edges,
+            residuals: legacy.residuals.clone(),
+            status: legacy.status,
+            semantic_vector,
+        };
+        receipt.validate().then_some(receipt)
+    }
+
+    pub fn validate(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && self.status == CommitStatus::Committed
+            && self.action_contract.is_none()
+            && self.base_revision.checked_add(1) == Some(self.next_revision)
+            && self.semantic_vector.validate()
+            && self.semantic_vector.state_changed == (self.state_before != self.state_after)
+    }
+}
+
 pub mod wire {
     //! Canonical binary wire codec (fixed layout, little-endian, closed
     //! boundaries). Every struct here has exactly one encoding; a digest is
@@ -781,6 +1016,7 @@ pub mod wire {
     pub const EVENT_DOMAIN: &[u8] = b"ae.event.v1";
     pub const ACTION_CONTRACT_DOMAIN: &[u8] = b"ae.action-contract.v1";
     pub const TRANSITION_RECEIPT_DOMAIN: &[u8] = b"ae.transition-receipt.v1";
+    pub const TRANSITION_RECEIPT_V2_DOMAIN: &[u8] = b"ae.transition-receipt.v2";
     pub const SCOPE_DOMAIN: &[u8] = b"ae.journal.scope.v1";
     pub const AUTHORITY_DOMAIN: &[u8] = b"ae.authority.v1";
     pub const CAPSULE_DOMAIN: &[u8] = b"ae.genesis-capsule.v1";
@@ -1769,6 +2005,115 @@ pub mod wire {
         domain_hash(
             TRANSITION_RECEIPT_DOMAIN,
             &[&encode_transition_receipt(receipt)],
+        )
+    }
+
+    // ------------------------------------------------------ transition receipt v2
+
+    fn semantic_vector_formula_v2_code(formula: SemanticVectorFormulaV2) -> u8 {
+        match formula {
+            SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1 => 1,
+        }
+    }
+
+    fn semantic_vector_formula_v2_from_code(code: u8) -> Option<SemanticVectorFormulaV2> {
+        Some(match code {
+            1 => SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1,
+            _ => return None,
+        })
+    }
+
+    pub fn encode_transition_receipt_v2(receipt: &TransitionReceiptV2) -> Vec<u8> {
+        let mut out = Vec::with_capacity(272);
+        push_u16(&mut out, receipt.schema_version);
+        push_digest(&mut out, &receipt.formula_digest);
+        push_digest(&mut out, &receipt.scope_digest);
+        push_digest(&mut out, &receipt.event_digest);
+        push_digest(&mut out, &receipt.authority_digest);
+        push_u64(&mut out, receipt.base_revision);
+        push_u64(&mut out, receipt.next_revision);
+        push_digest(&mut out, &receipt.state_before);
+        push_digest(&mut out, &receipt.state_after);
+        push_digest(&mut out, &receipt.graph_after);
+        push_opt_digest(&mut out, &receipt.action_contract);
+        push_u32(&mut out, receipt.active_nodes);
+        push_u32(&mut out, receipt.active_edges);
+        for value in [
+            receipt.residuals.authority,
+            receipt.residuals.continuity,
+            receipt.residuals.energy,
+            receipt.residuals.renormalization,
+            receipt.residuals.capacity,
+        ] {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+        out.push(commit_status_code(receipt.status));
+        let vector = &receipt.semantic_vector;
+        push_u16(&mut out, vector.schema_version);
+        out.push(semantic_vector_formula_v2_code(vector.formula));
+        out.push(vector.dimension_slot_count);
+        out.push(vector.evaluated_dimension_count);
+        out.push(vector.injected_dimension_count);
+        out.push(vector.nonzero_evidence_dimension_count);
+        out.push(vector.neutral_baseline_dimension_count);
+        out.push(vector.unavailable_dimension_count);
+        push_bool(&mut out, vector.state_changed);
+        out
+    }
+
+    pub fn decode_transition_receipt_v2(bytes: &[u8]) -> Result<TransitionReceiptV2, WireError> {
+        let mut reader = Reader::new(bytes);
+        let schema_version = reader.u16()?;
+        if schema_version != TransitionReceiptV2::SCHEMA_VERSION {
+            return Err(WireError::SchemaVersion(schema_version));
+        }
+        let receipt = TransitionReceiptV2 {
+            schema_version,
+            formula_digest: reader.digest()?,
+            scope_digest: reader.digest()?,
+            event_digest: reader.digest()?,
+            authority_digest: reader.digest()?,
+            base_revision: reader.u64()?,
+            next_revision: reader.u64()?,
+            state_before: reader.digest()?,
+            state_after: reader.digest()?,
+            graph_after: reader.digest()?,
+            action_contract: reader.opt_digest()?,
+            active_nodes: reader.u32()?,
+            active_edges: reader.u32()?,
+            residuals: InvariantResiduals {
+                authority: reader.fixed()?,
+                continuity: reader.fixed()?,
+                energy: reader.fixed()?,
+                renormalization: reader.fixed()?,
+                capacity: reader.fixed()?,
+            },
+            status: commit_status_from_code(reader.u8()?)
+                .ok_or(WireError::InvalidEnum("commit status"))?,
+            semantic_vector: SemanticVectorReceiptV2 {
+                schema_version: reader.u16()?,
+                formula: semantic_vector_formula_v2_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("semantic vector formula v2"))?,
+                dimension_slot_count: reader.u8()?,
+                evaluated_dimension_count: reader.u8()?,
+                injected_dimension_count: reader.u8()?,
+                nonzero_evidence_dimension_count: reader.u8()?,
+                neutral_baseline_dimension_count: reader.u8()?,
+                unavailable_dimension_count: reader.u8()?,
+                state_changed: reader.bool()?,
+            },
+        };
+        reader.finish()?;
+        if !receipt.validate() {
+            return Err(WireError::InvalidEnum("transition receipt v2"));
+        }
+        Ok(receipt)
+    }
+
+    pub fn transition_receipt_v2_digest(receipt: &TransitionReceiptV2) -> Digest {
+        domain_hash(
+            TRANSITION_RECEIPT_V2_DOMAIN,
+            &[&encode_transition_receipt_v2(receipt)],
         )
     }
 

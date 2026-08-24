@@ -8,7 +8,9 @@
 //! as closed, deny-unknown-field payloads; identity is computed in Rust.
 
 use ae_context_projector::{ContextSummaryV1, DeliveryOutcome as ContextDeliveryOutcome};
-use ae_contracts::{hex, wire, CanonicalEvent, PersonaGenesisRequest, ScopeRef};
+use ae_contracts::{
+    hex, wire, CanonicalEvent, PerceptionProposalV1, PersonaGenesisRequest, ScopeRef,
+};
 use ae_store::{
     RebirthActionV1, RebirthAuditReceiptV1, RebirthOutcomeV1, RebirthPrepareRequestV1,
     RebirthResponseEnvelopeV1, RebirthResponseStateV1, UserAuthorizedRebirthV1,
@@ -66,6 +68,19 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
         ae_runtime::RuntimeError::UnsupportedEvent(_) => ("UNSUPPORTED_EVENT", error.to_string()),
         ae_runtime::RuntimeError::Closed => ("CLOSED", error.to_string()),
         ae_runtime::RuntimeError::InvalidNeuralState => ("INVALID_NEURAL_STATE", error.to_string()),
+        ae_runtime::RuntimeError::InvalidPerceptionProposal => {
+            ("INVALID_PERCEPTION_PROPOSAL", error.to_string())
+        }
+        ae_runtime::RuntimeError::InvalidPerceptionScope => {
+            ("INVALID_PERCEPTION_SCOPE", error.to_string())
+        }
+        ae_runtime::RuntimeError::SemanticIdentityConflict => {
+            ("SEMANTIC_IDENTITY_CONFLICT", error.to_string())
+        }
+        ae_runtime::RuntimeError::SemanticRevisionOverflow => {
+            ("SEMANTIC_REVISION_OVERFLOW", error.to_string())
+        }
+        ae_runtime::RuntimeError::LegacyUnattested => ("LEGACY_UNATTESTED", error.to_string()),
         ae_runtime::RuntimeError::ContextReceipt(_) => {
             ("CONTEXT_RECEIPT_INVALID", error.to_string())
         }
@@ -82,6 +97,224 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
 
 fn closed_schema(message: String) -> PyErr {
     NativeCoreError::new_err(format!("CLOSED_SCHEMA::{message}"))
+}
+
+fn strict_lower_hex(value: &serde_json::Value, expected_chars: usize) -> bool {
+    value.as_str().is_some_and(|text| {
+        text.len() == expected_chars
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn parse_semantic_scope_json(scope_json: &str) -> Result<ScopeRef, String> {
+    let scope: FfiScope = serde_json::from_str(scope_json).map_err(|error| error.to_string())?;
+    let raw: serde_json::Value =
+        serde_json::from_str(scope_json).map_err(|error| error.to_string())?;
+    let object = raw
+        .as_object()
+        .ok_or_else(|| "scope must be a JSON object".to_owned())?;
+    for name in ["bot_token", "persona_token", "session_token"] {
+        if !object
+            .get(name)
+            .is_some_and(|value| strict_lower_hex(value, 32))
+        {
+            return Err(format!("{name} must be exact lower hex"));
+        }
+    }
+    if object
+        .get("relation_token")
+        .is_some_and(|value| !value.is_null() && !strict_lower_hex(value, 32))
+    {
+        return Err("relation_token must be null or exact lower hex".to_owned());
+    }
+    scope.scope_ref()
+}
+
+fn parse_semantic_proposal_json(proposal_json: &str) -> Result<PerceptionProposalV1, &'static str> {
+    // Deserialize the typed closed schema first: serde rejects unknown and
+    // duplicate fields at both proposal and dimensions levels.
+    let proposal: PerceptionProposalV1 = serde_json::from_str(proposal_json)
+        .map_err(|_| "proposal must be a closed integer-only schema")?;
+    let raw: serde_json::Value =
+        serde_json::from_str(proposal_json).map_err(|_| "proposal must be valid JSON")?;
+    let object = raw.as_object().ok_or("proposal must be a JSON object")?;
+    for name in ["event_id", "turn_id"] {
+        if !object
+            .get(name)
+            .is_some_and(|value| strict_lower_hex(value, 32))
+        {
+            return Err("proposal identity must be exact lower hex");
+        }
+    }
+    if !object
+        .get("request_nonce_digest")
+        .is_some_and(|value| strict_lower_hex(value, 64))
+    {
+        return Err("request_nonce_digest must be exact lower hex");
+    }
+    let dimensions = object
+        .get("dimensions")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("dimensions must be an object")?;
+    for name in [
+        "positive",
+        "affiliation",
+        "harm",
+        "boundary",
+        "repair",
+        "repetition",
+        "new_information",
+        "constraint_instability",
+        "epistemic_conflict",
+        "self_responsibility",
+        "other_responsibility",
+        "hostility",
+        "publicness",
+        "engagement",
+        "rejection",
+    ] {
+        if !dimensions.get(name).is_some_and(serde_json::Value::is_i64) {
+            return Err("dimensions must use integer FxP6 values");
+        }
+    }
+    if !object
+        .get("estimator_confidence")
+        .is_some_and(serde_json::Value::is_i64)
+    {
+        return Err("estimator_confidence must be an integer FxP6 value");
+    }
+    proposal
+        .validate_v1()
+        .map_err(|_| "proposal values or nonce binding are invalid")?;
+    Ok(proposal)
+}
+
+fn semantic_perception_payload(
+    decision: &ae_runtime::PerceptionProposalDecisionV1,
+) -> PyResult<serde_json::Value> {
+    let semantic_receipt = decision
+        .semantic_vector_receipt
+        .as_ref()
+        .ok_or_else(|| NativeCoreError::new_err("LEGACY_UNATTESTED::semantic receipt is absent"))?;
+    let node = decision.node_observability.as_ref().ok_or_else(|| {
+        NativeCoreError::new_err("LEGACY_UNATTESTED::node observability is absent")
+    })?;
+    if decision.receipt.status != ae_contracts::CommitStatus::Committed
+        || semantic_receipt.semantic_vector.dimension_slot_count != 15
+        || semantic_receipt.semantic_vector.evaluated_dimension_count != 15
+        || semantic_receipt.semantic_vector.injected_dimension_count != 15
+        || semantic_receipt.semantic_vector.unavailable_dimension_count != 0
+        || semantic_receipt.next_revision != decision.revision
+        || node.revision != decision.revision
+        || decision.expression_projection.revision != decision.revision
+    {
+        return Err(NativeCoreError::new_err(
+            "LEGACY_UNATTESTED::semantic closure failed boundary validation",
+        ));
+    }
+    let residuals = &decision.receipt.residuals;
+    let node_residuals = match node.residuals.state {
+        ae_runtime::NodeObservabilityResidualStateV1::NotComputed => {
+            serde_json::json!({"state":"NOT_COMPUTED","formula":null,"values_fxp6":null})
+        }
+    };
+    let regions: Vec<serde_json::Value> = node
+        .regions
+        .iter()
+        .map(|region| {
+            serde_json::json!({
+                "region_id": region.region_id,
+                "region_name": region.region_name,
+                "node_capacity": region.node_capacity,
+                "selected_node_count": region.selected_node_count,
+                "activated_node_count": region.activated_node_count,
+                "changed_node_count": region.changed_node_count,
+                "potential": {
+                    "before_mean_fxp6": region.potential.before_mean_fxp6,
+                    "after_mean_fxp6": region.potential.after_mean_fxp6,
+                    "delta_mean_fxp6": region.potential.delta_mean_fxp6,
+                    "changed_node_count": region.potential.changed_node_count,
+                    "nonzero_after_count": region.potential.nonzero_after_count,
+                },
+                "excitation": {
+                    "before_mean_fxp6": region.excitation.before_mean_fxp6,
+                    "after_mean_fxp6": region.excitation.after_mean_fxp6,
+                    "delta_mean_fxp6": region.excitation.delta_mean_fxp6,
+                    "changed_node_count": region.excitation.changed_node_count,
+                    "nonzero_after_count": region.excitation.nonzero_after_count,
+                },
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "schema": "astrembodiment.semantic-perception-closure.v1",
+        "receipt": {
+            "schema_version": decision.receipt.schema_version,
+            "formula_digest": hex::encode32(&decision.receipt.formula_digest),
+            "scope_digest": hex::encode32(&decision.receipt.scope_digest),
+            "event_digest": hex::encode32(&decision.receipt.event_digest),
+            "authority_digest": hex::encode32(&decision.receipt.authority_digest),
+            "base_revision": decision.receipt.base_revision,
+            "next_revision": decision.receipt.next_revision,
+            "state_before": hex::encode32(&decision.receipt.state_before),
+            "state_after": hex::encode32(&decision.receipt.state_after),
+            "graph_after": hex::encode32(&decision.receipt.graph_after),
+            "active_nodes": decision.receipt.active_nodes,
+            "active_edges": decision.receipt.active_edges,
+            "residuals": {
+                "authority": residuals.authority.raw(),
+                "continuity": residuals.continuity.raw(),
+                "energy": residuals.energy.raw(),
+                "renormalization": residuals.renormalization.raw(),
+                "capacity": residuals.capacity.raw(),
+            },
+            "status": "committed",
+        },
+        "semantic_vector_receipt": {
+            "schema": "astr-embodiment.semantic-vector-receipt.v2",
+            "formula": "full-vector-route-neutral-relaxation-v1",
+            "dimension_slot_count": semantic_receipt.semantic_vector.dimension_slot_count,
+            "evaluated_dimension_count": semantic_receipt.semantic_vector.evaluated_dimension_count,
+            "injected_dimension_count": semantic_receipt.semantic_vector.injected_dimension_count,
+            "nonzero_evidence_dimension_count": semantic_receipt.semantic_vector.nonzero_evidence_dimension_count,
+            "neutral_baseline_dimension_count": semantic_receipt.semantic_vector.neutral_baseline_dimension_count,
+            "unavailable_dimension_count": semantic_receipt.semantic_vector.unavailable_dimension_count,
+            "state_changed": semantic_receipt.semantic_vector.state_changed,
+        },
+        "node_observability": {
+            "schema": "astr-embodiment.node-observability.v1",
+            "formula": "spc1-node-observability-v1",
+            "revision": node.revision,
+            "field_node_capacity": node.field_node_capacity,
+            "region_layout": "regions-v1",
+            "counts": {
+                "selected_node_count": node.counts.selected_node_count,
+                "activated_node_count": node.counts.activated_node_count,
+                "changed_node_count": node.counts.changed_node_count,
+                "potential_nonzero_after_count": node.counts.potential_nonzero_after_count,
+                "excitation_nonzero_after_count": node.counts.excitation_nonzero_after_count,
+                "signal_nonzero_after_count": node.counts.signal_nonzero_after_count,
+            },
+            "residuals": node_residuals,
+            "regions": regions,
+        },
+        "revision": decision.revision,
+        "deduplicated": decision.deduplicated,
+        "expression_projection": {
+            "schema": "astr-embodiment.expression-projection.v1",
+            "revision": decision.expression_projection.revision,
+            "profile_fxp6": {
+                "warmth": decision.expression_projection.profile_fxp6.warmth,
+                "sensitivity": decision.expression_projection.profile_fxp6.sensitivity,
+                "guardedness": decision.expression_projection.profile_fxp6.guardedness,
+                "repair_orientation": decision.expression_projection.profile_fxp6.repair_orientation,
+                "engagement": decision.expression_projection.profile_fxp6.engagement,
+                "epistemic_caution": decision.expression_projection.profile_fxp6.epistemic_caution,
+            },
+        },
+    }))
 }
 
 fn context_summary_payload(summary: &ContextSummaryV1) -> serde_json::Value {
@@ -396,6 +629,48 @@ fn apply_event(scope_json: &str, event_json: &str) -> PyResult<String> {
         .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
 }
 
+/// Read the closed per-persona semantic-lane cursor. This is intentionally
+/// separate from the legacy G0 continuity revision.
+#[pyfunction]
+fn semantic_revision_v1(scope_json: &str) -> PyResult<String> {
+    let scope_ref = parse_semantic_scope_json(scope_json)
+        .map_err(|error| NativeCoreError::new_err(format!("INVALID_PERCEPTION_SCOPE::{error}")))?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let revision = runtime
+        .semantic_revision_v1(&scope_ref)
+        .map_err(map_error)?;
+    serde_json::to_string(&serde_json::json!({
+        "schema": "astrembodiment.semantic-revision.v1",
+        "revision": revision,
+    }))
+    .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+}
+
+/// Apply a complete text-free semantic proposal. The FFI parser is the closed
+/// trust boundary: malformed, non-integer, unknown, duplicate, or noncanonical
+/// proposal fields never reach native state.
+#[pyfunction]
+fn apply_perception_proposal_v1(scope_json: &str, proposal_json: &str) -> PyResult<String> {
+    let scope_ref = parse_semantic_scope_json(scope_json)
+        .map_err(|error| NativeCoreError::new_err(format!("INVALID_PERCEPTION_SCOPE::{error}")))?;
+    let proposal = parse_semantic_proposal_json(proposal_json).map_err(|error| {
+        NativeCoreError::new_err(format!("INVALID_PERCEPTION_PROPOSAL::{error}"))
+    })?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let decision = runtime
+        .apply_perception_proposal_v1(&scope_ref, &proposal)
+        .map_err(map_error)?;
+    let payload = semantic_perception_payload(&decision)?;
+    serde_json::to_string(&payload)
+        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+}
+
 /// Content-free observatory projection for one (Bot, Persona) binding.
 #[pyfunction]
 fn inspect(scope_json: &str) -> PyResult<String> {
@@ -474,6 +749,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(prepare_rebirth_v1, module)?)?;
     module.add_function(wrap_pyfunction!(confirm_rebirth_v1, module)?)?;
     module.add_function(wrap_pyfunction!(apply_event, module)?)?;
+    module.add_function(wrap_pyfunction!(semantic_revision_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_perception_proposal_v1, module)?)?;
     module.add_function(wrap_pyfunction!(inspect, module)?)?;
     module.add_function(wrap_pyfunction!(verify_replay, module)?)?;
     module.add_function(wrap_pyfunction!(flush_and_close, module)?)?;
