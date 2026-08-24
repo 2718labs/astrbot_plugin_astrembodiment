@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import main as main_module
+from astr_embodiment.contracts import ScopeTokens
 from main import AstrEmbodimentPlugin
 
 
@@ -171,3 +173,85 @@ def test_observatory_uses_closed_compact_detailed_and_unmasked_failure(
     fallback = plugin._emit_observatory(malformed)
     assert fallback["code"] == "OBSERVATORY_FORMATTER_FAILED"
     assert all("RAW_" not in text for _, text in logs.entries)
+
+    class PersistConfig(dict):
+        async def save_config_async(self) -> None:
+            return None
+
+    class Event:
+        def set_extra(self, _name: str, _value: object) -> None:
+            return None
+
+    class Request:
+        system_prompt = ""
+
+    scope = ScopeTokens(
+        bot_token="10" * 16,
+        persona_token="20" * 16,
+        relation_token=None,
+        session_token="30" * 16,
+    )
+    plugin = AstrEmbodimentPlugin(None, PersistConfig(observatory_enabled=False))
+    context_summary = {
+        "schema": "astrembodiment.context-summary.v1",
+        "summary_revision": 1,
+        "source_continuum_revision": 15,
+        "dimensions_ema_fxp6": [0] * 15,
+        "unresolved_boundary": False,
+        "unresolved_repair": False,
+        "repetition_count": 1,
+        "delivery_outcome": "pending",
+        "summary_digest": "cd" * 32,
+    }
+
+    async def missing_receipt_request(*_args, **_kwargs):
+        return (
+            {
+                "schema": "astrembodiment.decision.v1",
+                "genesis": {
+                    "seed_code": "AE-S1-0123456789ABCDEF",
+                    "incarnation_id": "ab" * 32,
+                },
+                "seed_code": "AE-S1-0123456789ABCDEF",
+                "incarnation_id": "ab" * 32,
+                "contract": {},
+                "context_summary": context_summary,
+                "revision": 15,
+                "deduplicated": False,
+            },
+            scope,
+            scope.session_token,
+            15,
+            "turn-15",
+            14,
+        )
+
+    class MissingReceiptCoordinator:
+        async def apply_delivery(self, **_kwargs):
+            return {
+                "schema": "astrembodiment.decision.v1",
+                "revision": 16,
+                "deduplicated": False,
+            }
+
+    plugin._run_genesis = missing_receipt_request
+    event = Event()
+    logs.entries.clear()
+    asyncio.run(plugin.on_llm_request(event, Request()))
+    assert len(logs.entries) == 1
+    assert logs.entries[0][0] == "warning"
+    assert "失败码=NATIVE_MALFORMED｜阶段=RECEIPT" in logs.entries[0][1]
+    assert "positive=0" in logs.entries[0][1]
+    assert "base_revision=14" in logs.entries[0][1]
+    assert "revision=15" in logs.entries[0][1]
+    assert "active_nodes=不可用" in logs.entries[0][1]
+
+    plugin._coordinator = MissingReceiptCoordinator()
+    logs.entries.clear()
+    asyncio.run(plugin.after_message_sent(event))
+    assert len(logs.entries) == 1
+    assert logs.entries[0][0] == "warning"
+    assert "失败码=NATIVE_MALFORMED｜阶段=RECEIPT" in logs.entries[0][1]
+    assert "base_revision=15" in logs.entries[0][1]
+    assert "revision=16" in logs.entries[0][1]
+    assert "active_edges=不可用" in logs.entries[0][1]

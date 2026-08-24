@@ -811,17 +811,65 @@ class AstrEmbodimentPlugin(Star):
             logger.info(self._compact_observatory_message(record))
         return record
 
+    @classmethod
+    def _unconfirmed_receipt_observatory(
+        cls,
+        decision: Mapping[str, Any],
+        *,
+        base_revision: int | None,
+    ) -> dict[str, Any]:
+        """Project a v1 decision with no trustworthy native receipt.
+
+        G0's zero semantic estimate is closed and known independently of a
+        receipt, while native counts and residuals are not.  Keep the known
+        scalars visible in the mandatory failure warning without inventing a
+        commit or calculation confirmation.
+        """
+
+        def known_revision(value: Any) -> int | None:
+            try:
+                return cls._closed_int(value, minimum=0, maximum=(2**64) - 1)
+            except (TypeError, ValueError):
+                return None
+
+        deduplicated = decision.get("deduplicated")
+        return {
+            "status": "FAILED",
+            "code": "NATIVE_MALFORMED",
+            "stage": "RECEIPT",
+            "commit_state": "UNKNOWN",
+            "values_state": "ESTIMATED_NOT_CONFIRMED",
+            "dimensions_fxp6": {name: 0 for name in _OBSERVATORY_DIMENSIONS},
+            "estimator_confidence_fxp6": 0,
+            "dimension_confidence_fxp6": None,
+            "base_revision": known_revision(base_revision),
+            "revision": known_revision(decision.get("revision")),
+            "deduplicated": deduplicated if type(deduplicated) is bool else False,
+            "receipt_status": "unavailable",
+            "calculation_state": "UNCONFIRMED",
+            "native_calculation": None,
+            "expression_state": "NOT_ATTEMPTED",
+            "expression_profile_fxp6": None,
+        }
+
     def _observatory_outcome_from_decision(
-        self, decision: Mapping[str, Any]
+        self,
+        decision: Mapping[str, Any],
+        *,
+        base_revision: int | None = None,
     ) -> dict[str, Any] | None:
         """Project the current native G0 receipt into the D2 closed schema."""
+        if decision.get("schema") != "astrembodiment.decision.v1":
+            return None
         receipt = decision.get("receipt")
         if receipt is None:
-            # Compatibility mocks and non-decision command paths do not have a
-            # receipt.  They are not a successful observable calculation.
-            return None
+            return self._unconfirmed_receipt_observatory(
+                decision, base_revision=base_revision
+            )
         if not isinstance(receipt, Mapping):
-            return self._failed_observatory("NATIVE_MALFORMED", "RECEIPT")
+            return self._unconfirmed_receipt_observatory(
+                decision, base_revision=base_revision
+            )
         try:
             base_revision = self._closed_int(
                 receipt.get("base_revision"), minimum=0, maximum=(2**64) - 1
@@ -850,7 +898,9 @@ class AstrEmbodimentPlugin(Star):
                 receipt.get("active_edges"), minimum=0, maximum=(2**32) - 1
             )
         except (TypeError, ValueError):
-            return self._failed_observatory("NATIVE_MALFORMED", "RECEIPT")
+            return self._unconfirmed_receipt_observatory(
+                decision, base_revision=base_revision
+            )
 
         return {
             "status": "SUCCESS",
@@ -1469,7 +1519,9 @@ class AstrEmbodimentPlugin(Star):
                 "base_revision": revision,
                 "contract": contract,
             }
-            observatory = self._observatory_outcome_from_decision(decision)
+            observatory = self._observatory_outcome_from_decision(
+                decision, base_revision=base_revision
+            )
             if observatory is not None:
                 self._emit_observatory(observatory)
         except PersonaGenesisError as exc:
@@ -1530,7 +1582,9 @@ class AstrEmbodimentPlugin(Star):
             if revision < int(frozen["base_revision"]):
                 raise PersonaGenesisError("原生交付回执版本倒退")
             self._revisions[scope.persona_token] = revision
-            observatory = self._observatory_outcome_from_decision(result)
+            observatory = self._observatory_outcome_from_decision(
+                result, base_revision=int(frozen["base_revision"])
+            )
             if observatory is not None:
                 self._emit_observatory(observatory)
         except Exception as exc:  # noqa: BLE001 - delivery fact, log only
