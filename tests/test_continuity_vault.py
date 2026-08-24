@@ -91,3 +91,37 @@ def test_real_continuity_vault_reopens_and_deduplicates_without_new_genesis(
         assert replay["checked"] == 1
     finally:
         reopened.close()
+
+
+def test_real_vault_rebirth_challenge_keeps_the_raw_nonce_out_of_durable_files(
+    tmp_path: Path,
+) -> None:
+    scope = _scope()
+    bridge = NativeBridge()
+    bridge.open(str(tmp_path))
+    try:
+        genesis = bridge.ensure_genesis(_request(scope))
+        receipt = genesis["receipt"]
+        assert isinstance(receipt, dict)
+        incarnation_id = receipt["incarnation_id"]
+        assert isinstance(incarnation_id, str) and len(incarnation_id) == 64
+        challenge = bridge.prepare_rebirth_v1(
+            {
+                "scope": scope.scope_json(),
+                "expected_incarnation_id": incarnation_id,
+                "expected_revision": 0,
+                "action": "REBIRTH",
+            }
+        )
+        assert challenge["state"] == "CONFIRMATION_PENDING"
+        raw_nonce = challenge["request_nonce"]
+        assert isinstance(raw_nonce, str) and len(raw_nonce) == 64
+    finally:
+        bridge.close()
+
+    durable_bytes = b"".join(
+        path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    )
+    assert raw_nonce.encode() not in durable_bytes

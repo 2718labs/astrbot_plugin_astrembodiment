@@ -8,7 +8,11 @@
 //! as closed, deny-unknown-field payloads; identity is computed in Rust.
 
 use ae_context_projector::{ContextSummaryV1, DeliveryOutcome as ContextDeliveryOutcome};
-use ae_contracts::{hex, CanonicalEvent, PersonaGenesisRequest, ScopeRef};
+use ae_contracts::{hex, wire, CanonicalEvent, PersonaGenesisRequest, ScopeRef};
+use ae_store::{
+    RebirthActionV1, RebirthAuditReceiptV1, RebirthOutcomeV1, RebirthPrepareRequestV1,
+    RebirthResponseEnvelopeV1, RebirthResponseStateV1, UserAuthorizedRebirthV1,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -31,6 +35,7 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
     let (code, message) = match &error {
         ae_runtime::RuntimeError::Genesis(_) => ("GENESIS_UNAVAILABLE", error.to_string()),
         ae_runtime::RuntimeError::RetryWait => ("RETRY_WAIT", error.to_string()),
+        ae_runtime::RuntimeError::Rebirth(rebirth) => (rebirth.code(), error.to_string()),
         ae_runtime::RuntimeError::Store(ae_store::StoreError::SeedDigestCollision) => {
             ("SEED_DIGEST_COLLISION", error.to_string())
         }
@@ -98,6 +103,50 @@ fn context_summary_payload(summary: &ContextSummaryV1) -> serde_json::Value {
     })
 }
 
+fn rebirth_action_name(action: &RebirthActionV1) -> &'static str {
+    match action {
+        RebirthActionV1::Rebirth => "REBIRTH",
+        RebirthActionV1::ClearActiveState => "CLEAR_ACTIVE_STATE",
+    }
+}
+
+fn rebirth_response_state_name(state: &RebirthResponseStateV1) -> &'static str {
+    match state {
+        RebirthResponseStateV1::ConfirmationPending => "CONFIRMATION_PENDING",
+        RebirthResponseStateV1::Committed => "COMMITTED",
+        RebirthResponseStateV1::Replayed => "REPLAYED",
+    }
+}
+
+fn rebirth_outcome_name(outcome: &RebirthOutcomeV1) -> &'static str {
+    match outcome {
+        RebirthOutcomeV1::Committed => "COMMITTED",
+    }
+}
+
+fn rebirth_receipt_payload(receipt: &RebirthAuditReceiptV1) -> serde_json::Value {
+    serde_json::json!({
+        "receipt_id": hex::encode32(&receipt.receipt_id),
+        "action": rebirth_action_name(&receipt.action),
+        "scope_token_short": receipt.scope_token_short.as_str(),
+        "request_nonce_digest": hex::encode32(&receipt.request_nonce_digest),
+        "parent_incarnation_short": receipt.parent_incarnation_short.as_str(),
+        "child_incarnation_short": receipt.child_incarnation_short.as_str(),
+        "before_revision": receipt.before_revision,
+        "after_revision": receipt.after_revision,
+        "outcome": rebirth_outcome_name(&receipt.outcome),
+        "audit_time_ms": receipt.audit_time_ms,
+    })
+}
+
+fn rebirth_envelope_payload(envelope: &RebirthResponseEnvelopeV1) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "astrembodiment.rebirth-response.v1",
+        "state": rebirth_response_state_name(&envelope.state),
+        "receipt": envelope.receipt.as_ref().map(rebirth_receipt_payload),
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FfiScope {
@@ -113,6 +162,87 @@ struct FfiEventEnvelope {
     kind: String,
     #[serde(rename = "payload")]
     _payload: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum FfiRebirthActionV1 {
+    Rebirth,
+    ClearActiveState,
+}
+
+impl FfiRebirthActionV1 {
+    fn into_runtime(self) -> RebirthActionV1 {
+        match self {
+            Self::Rebirth => RebirthActionV1::Rebirth,
+            Self::ClearActiveState => RebirthActionV1::ClearActiveState,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FfiRebirthPrepareRequestV1 {
+    scope: FfiScope,
+    expected_incarnation_id: String,
+    expected_revision: u64,
+    action: FfiRebirthActionV1,
+}
+
+impl FfiRebirthPrepareRequestV1 {
+    fn into_runtime(self) -> Result<(ScopeRef, RebirthPrepareRequestV1), String> {
+        let scope = self.scope.scope_ref()?;
+        let scope_token = wire::persona_scope_digest(
+            &scope.bot_token,
+            &scope.persona_token,
+            scope.relation_token.as_ref(),
+        );
+        Ok((
+            scope,
+            RebirthPrepareRequestV1 {
+                scope_token,
+                expected_incarnation_id: hex::decode32(&self.expected_incarnation_id)?,
+                expected_revision: self.expected_revision,
+                action: self.action.into_runtime(),
+            },
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FfiUserAuthorizedRebirthV1 {
+    scope: FfiScope,
+    expected_incarnation_id: String,
+    expected_revision: u64,
+    request_nonce: String,
+    action: FfiRebirthActionV1,
+    confirmed: Option<bool>,
+}
+
+impl FfiUserAuthorizedRebirthV1 {
+    fn into_runtime(self) -> Result<(ScopeRef, UserAuthorizedRebirthV1), String> {
+        let scope = self.scope.scope_ref()?;
+        let scope_token = wire::persona_scope_digest(
+            &scope.bot_token,
+            &scope.persona_token,
+            scope.relation_token.as_ref(),
+        );
+        Ok((
+            scope,
+            UserAuthorizedRebirthV1 {
+                scope_token,
+                expected_incarnation_id: hex::decode32(&self.expected_incarnation_id)?,
+                expected_revision: self.expected_revision,
+                request_nonce: hex::decode32(&self.request_nonce)?,
+                action: self.action.into_runtime(),
+                // Missing consent deliberately becomes false so the durable
+                // lifecycle owner emits REBIRTH_CONFIRMATION_REQUIRED rather
+                // than serde text or an implicit Python/Rust default-true.
+                confirmed: self.confirmed.unwrap_or(false),
+            },
+        ))
+    }
 }
 
 fn is_known_g0_unsupported_event(kind: &str) -> bool {
@@ -187,6 +317,49 @@ fn ensure_genesis(request_json: &str) -> PyResult<String> {
         "incarnation_id": ae_genesis::format_incarnation_id(&receipt.incarnation_id),
     });
     serde_json::to_string(&payload)
+        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+}
+
+/// Create a durable confirmation challenge for one explicit destructive
+/// lifecycle action. The raw nonce is emitted only in this immediate response.
+#[pyfunction]
+fn prepare_rebirth_v1(request_json: &str) -> PyResult<String> {
+    let request: FfiRebirthPrepareRequestV1 =
+        serde_json::from_str(request_json).map_err(|error| closed_schema(error.to_string()))?;
+    let (scope, request) = request.into_runtime().map_err(closed_schema)?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let response = runtime
+        .prepare_rebirth_v1(&scope, &request)
+        .map_err(map_error)?;
+    let payload = serde_json::json!({
+        "schema": "astrembodiment.rebirth-prepare.v1",
+        "state": rebirth_response_state_name(&response.state),
+        "request_nonce": hex::encode32(&response.request_nonce),
+        "request_nonce_digest": hex::encode32(&response.request_nonce_digest),
+        "binding_digest": hex::encode32(&response.binding_digest),
+    });
+    serde_json::to_string(&payload)
+        .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
+}
+
+/// Confirm a previously prepared destructive lifecycle action. Missing or
+/// false consent stays a fixed Rust rejection; this boundary never supplies it.
+#[pyfunction]
+fn confirm_rebirth_v1(request_json: &str) -> PyResult<String> {
+    let request: FfiUserAuthorizedRebirthV1 =
+        serde_json::from_str(request_json).map_err(|error| closed_schema(error.to_string()))?;
+    let (scope, confirmation) = request.into_runtime().map_err(closed_schema)?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
+    let response = runtime
+        .confirm_rebirth_v1(&scope, &confirmation)
+        .map_err(map_error)?;
+    serde_json::to_string(&rebirth_envelope_payload(&response))
         .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
 }
 
@@ -298,6 +471,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(health, module)?)?;
     module.add_function(wrap_pyfunction!(open, module)?)?;
     module.add_function(wrap_pyfunction!(ensure_genesis, module)?)?;
+    module.add_function(wrap_pyfunction!(prepare_rebirth_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(confirm_rebirth_v1, module)?)?;
     module.add_function(wrap_pyfunction!(apply_event, module)?)?;
     module.add_function(wrap_pyfunction!(inspect, module)?)?;
     module.add_function(wrap_pyfunction!(verify_replay, module)?)?;

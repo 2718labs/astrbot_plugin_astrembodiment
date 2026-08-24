@@ -15,17 +15,20 @@ use ae_context_projector::{
 };
 use ae_continuum::{CommitEnvelope, ReplayReport};
 use ae_contracts::{
-    wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisReceipt, GenesisStatus,
-    Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
+    wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisManifestProposal,
+    GenesisReceipt, GenesisStatus, Id128, InvariantResiduals, PersonaGenesisRequest,
+    PersonalityVector, ScopeRef, TransitionReceipt,
 };
 use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
 };
 use ae_store::{
     ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1, GenesisCommit, GraphCommitV1,
-    SnapshotCommitV1, Store, StoreError,
+    RebirthChildStageRequestV1, RebirthCommitPermitV1, RebirthLifecycleError, RebirthPreflightV1,
+    RebirthPrepareRequestV1, RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, Store,
+    StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -34,6 +37,8 @@ pub enum RuntimeError {
     Store(#[from] StoreError),
     #[error("genesis error: {0}")]
     Genesis(#[from] ae_genesis::GenesisError),
+    #[error("rebirth lifecycle error: {0}")]
+    Rebirth(#[from] RebirthLifecycleError),
     #[error("persona genesis is required before production events")]
     PersonaGenesisRequired,
     #[error("event persona does not match the bound incarnation")]
@@ -99,6 +104,8 @@ struct HotBrain {
 pub struct AstrRuntime {
     store: Store,
     hot: Option<HotBrain>,
+    legacy_authority_database: PathBuf,
+    vault_root: PathBuf,
 }
 
 fn fixed_zero_vector() -> InvariantResiduals {
@@ -113,12 +120,106 @@ fn continuity_scope(scope: &ScopeRef) -> Digest {
     )
 }
 
+fn persona_scope_ref(bot_token: Id128, persona_token: Id128) -> ScopeRef {
+    ScopeRef {
+        bot_token,
+        persona_token,
+        relation_token: None,
+        session_token: [0; 16],
+    }
+}
+
+fn fully_confident_personality() -> PersonalityVector {
+    PersonalityVector {
+        baseline_warmth: ae_fixed::Fixed::ONE,
+        baseline_patience: ae_fixed::Fixed::ONE,
+        sensitivity: ae_fixed::Fixed::ONE,
+        irritability: ae_fixed::Fixed::ONE,
+        composure: ae_fixed::Fixed::ONE,
+        epistemic_pride: ae_fixed::Fixed::ONE,
+        epistemic_openness: ae_fixed::Fixed::ONE,
+        boundary_strength: ae_fixed::Fixed::ONE,
+        forgiveness: ae_fixed::Fixed::ONE,
+        attachment_propensity: ae_fixed::Fixed::ONE,
+        expression_drive: ae_fixed::Fixed::ONE,
+        curiosity: ae_fixed::Fixed::ONE,
+    }
+}
+
 impl AstrRuntime {
     pub fn open(path: &Path) -> Result<Self, RuntimeError> {
+        let legacy_authority_database = path.to_path_buf();
+        let storage_parent = path.parent().ok_or(RebirthLifecycleError::LocatorInvalid)?;
+        std::fs::create_dir_all(storage_parent).map_err(|source| {
+            RuntimeError::Store(StoreError::Io {
+                context: "creating runtime storage directory",
+                source,
+            })
+        })?;
+        let vault_root = storage_parent.join("continuity-vault");
+        let lifecycle = VaultLifecycle::open(&vault_root)?;
+        let store = match lifecycle.vault_mode_v1()? {
+            VaultMode::Unborn => Store::open(path)?,
+            VaultMode::Ready => Store::open(&lifecycle.current_authority_database_path()?)?,
+            VaultMode::Migrating
+            | VaultMode::RecoveryRequired
+            | VaultMode::ReadOnlyRecovery
+            | VaultMode::WriteRefusedIncompatible => {
+                return Err(RebirthLifecycleError::BootstrapConflict.into())
+            }
+        };
         Ok(Self {
-            store: Store::open(path)?,
+            store,
             hot: None,
+            legacy_authority_database,
+            vault_root,
         })
+    }
+
+    fn lifecycle(&self) -> Result<VaultLifecycle, RuntimeError> {
+        Ok(VaultLifecycle::open(&self.vault_root)?)
+    }
+
+    /// Select the Store named by the lifecycle owner, never by deriving or
+    /// mutating locator state in runtime.  The old connection is flushed
+    /// before it is dropped so bootstrap and explicit rebirth cannot lose a
+    /// committed authority to a WAL-only view.
+    fn reopen_authoritative_store(
+        &mut self,
+        lifecycle: &VaultLifecycle,
+        scope: &ScopeRef,
+    ) -> Result<(), RuntimeError> {
+        self.store.flush()?;
+        let database = lifecycle.current_authority_database_path()?;
+        self.store = Store::open(&database)?;
+        self.hot = None;
+        self.bind_hot(scope.bot_token, scope.persona_token)
+    }
+
+    /// The legacy direct Store becomes lifecycle authority only after it has
+    /// already committed a real Genesis.  A Ready vault is selected through
+    /// its owner; every recovery or incompatible state fails closed rather
+    /// than falling back to the legacy file or manufacturing a birth.
+    fn select_rebirth_authority(
+        &mut self,
+        scope: &ScopeRef,
+    ) -> Result<VaultLifecycle, RuntimeError> {
+        let lifecycle = self.lifecycle()?;
+        match lifecycle.vault_mode_v1()? {
+            VaultMode::Unborn => {
+                self.store.flush()?;
+                lifecycle.bootstrap_legacy_store_v1(&self.legacy_authority_database)?;
+            }
+            VaultMode::Ready => {}
+            VaultMode::Migrating
+            | VaultMode::RecoveryRequired
+            | VaultMode::ReadOnlyRecovery
+            | VaultMode::WriteRefusedIncompatible => {
+                return Err(RebirthLifecycleError::BootstrapConflict.into())
+            }
+        }
+        self.reopen_authoritative_store(&lifecycle, scope)?;
+        Ok(lifecycle)
     }
 
     // ------------------------------------------------------------- genesis
@@ -151,6 +252,10 @@ impl AstrRuntime {
                     committed.source.scope.bot_token,
                     committed.source.scope.persona_token,
                 )?;
+                self.select_rebirth_authority(&persona_scope_ref(
+                    request.source.scope.bot_token,
+                    request.source.scope.persona_token,
+                ))?;
                 Ok(committed.receipt)
             }
             ClaimOutcome::InFlight => Err(RuntimeError::RetryWait),
@@ -228,6 +333,10 @@ impl AstrRuntime {
                             initial_snapshot_digest,
                             revision: 0,
                         });
+                        self.select_rebirth_authority(&persona_scope_ref(
+                            request.source.scope.bot_token,
+                            request.source.scope.persona_token,
+                        ))?;
                         Ok(receipt)
                     }
                     Err(StoreError::LeaseConflict) => {
@@ -240,6 +349,10 @@ impl AstrRuntime {
                             committed.source.scope.bot_token,
                             committed.source.scope.persona_token,
                         )?;
+                        self.select_rebirth_authority(&persona_scope_ref(
+                            request.source.scope.bot_token,
+                            request.source.scope.persona_token,
+                        ))?;
                         Ok(committed.receipt)
                     }
                     Err(other) => Err(RuntimeError::Store(other)),
@@ -433,6 +546,159 @@ impl AstrRuntime {
         let continuity_scope = continuity_scope(scope);
         let relation_scope_token = scope.relation_token.unwrap_or(scope.session_token);
         self.context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)
+    }
+
+    // ------------------------------------------------------------- rebirth
+
+    /// Build the complete revision-zero child transaction from the currently
+    /// selected parent.  The lifecycle owner supplies both child identity and
+    /// nonce digest through its permit helpers; runtime never retains or
+    /// persists a raw confirmation nonce.
+    fn fresh_child_genesis(
+        &mut self,
+        scope: &ScopeRef,
+        permit: &RebirthCommitPermitV1,
+    ) -> Result<GenesisCommit, RuntimeError> {
+        if permit.scope_token != continuity_scope(scope) {
+            return Err(RebirthLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let committed = self
+            .store
+            .lookup_bound_genesis(&scope.bot_token, &scope.persona_token)?
+            .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        if committed.receipt.incarnation_id != permit.parent_authority.incarnation_id
+            || self.store.current_revision(&permit.scope_token)? != permit.parent_authority.revision
+        {
+            return Err(RebirthLifecycleError::FenceStale.into());
+        }
+
+        let compiled_at_ms = committed.born_at_ms;
+        let source = committed.source;
+        let manifest = committed.manifest;
+        let parent_receipt = committed.receipt;
+        let child_nonce_digest = VaultLifecycle::child_genesis_nonce_digest_for_permit(permit);
+        let child_request = PersonaGenesisRequest {
+            source: source.clone(),
+            proposal: GenesisManifestProposal {
+                schema_version: manifest.schema_version,
+                source: source.clone(),
+                traits: manifest.traits.clone(),
+                trait_confidence: fully_confident_personality(),
+                expression: manifest.expression.clone(),
+                allostasis: manifest.allostasis.clone(),
+                epistemic: manifest.epistemic.clone(),
+                social: manifest.social.clone(),
+                compiler_protocol_digest: parent_receipt.compiler_protocol_digest,
+                compiler_model_digest: parent_receipt.compiler_model_digest,
+            },
+            formula_digest: parent_receipt.formula_digest,
+            incarnation_nonce: child_nonce_digest,
+            parent_incarnation_id: Some(permit.parent_authority.incarnation_id),
+            observed_at_ms: compiled_at_ms,
+        };
+        let child_identity =
+            ae_genesis::derive_identity(&child_request, &ae_genesis::GenesisPrior::default())?;
+        if child_identity.manifest != manifest
+            || child_identity.seed_code_digest != parent_receipt.seed_code_digest
+            || child_identity.incarnation_id == permit.parent_authority.incarnation_id
+        {
+            return Err(RebirthLifecycleError::ChildInvalid.into());
+        }
+        let (field, graph) = initial_state_from_manifest(
+            &child_identity.manifest,
+            &parent_receipt.formula_digest,
+            &child_identity.development_seed_digest,
+        );
+        if !field.validate() || !graph.validate() {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let initial_snapshot_digest = state_digest(&field, &parent_receipt.formula_digest);
+        let initial_graph_digest = graph_digest(&graph);
+        let receipt = GenesisReceipt {
+            schema_version: 1,
+            seed_code_digest: child_identity.seed_code_digest,
+            manifest_digest: child_identity.manifest_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest: parent_receipt.formula_digest,
+            persona_source_digest: parent_receipt.persona_source_digest,
+            compiler_protocol_digest: parent_receipt.compiler_protocol_digest,
+            compiler_model_digest: parent_receipt.compiler_model_digest,
+            development_seed_digest: child_identity.development_seed_digest,
+            initial_snapshot_digest,
+            graph_digest: initial_graph_digest,
+            equilibrium_residual: ae_fixed::Fixed::ZERO,
+            energy_residual: ae_fixed::Fixed::ZERO,
+            capacity_residual: ae_fixed::Fixed::ZERO,
+            sample_fit_residual: ae_fixed::Fixed::ZERO,
+            status: GenesisStatus::Committed,
+        };
+        Ok(GenesisCommit {
+            scope_key: ae_genesis::genesis_scope_key(
+                &source.scope.bot_token,
+                &source.scope.persona_token,
+                &source.source_digest,
+                &parent_receipt.formula_digest,
+            ),
+            // Store owns child lease allocation and overwrites this field
+            // while staging its non-authoritative candidate generation.
+            lease_epoch: 0,
+            nonce_digest: child_nonce_digest,
+            manifest_body: wire::encode_manifest_body(&child_identity.manifest),
+            seed_code_digest: child_identity.seed_code_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest: parent_receipt.formula_digest,
+            source,
+            compiler_protocol_digest: parent_receipt.compiler_protocol_digest,
+            compiler_model_digest: parent_receipt.compiler_model_digest,
+            compiled_at_ms,
+            receipt,
+            initial_snapshot_digest,
+            state_bytes: Self::encode_state(&field, &graph),
+            graph_digest: initial_graph_digest,
+            manifest: child_identity.manifest,
+        })
+    }
+
+    /// First explicit destructive action: create only a durable challenge.
+    /// The caller's scope token must exactly name the active lifecycle lane.
+    pub fn prepare_rebirth_v1(
+        &mut self,
+        scope: &ScopeRef,
+        request: &RebirthPrepareRequestV1,
+    ) -> Result<RebirthPrepareResponseV1, RuntimeError> {
+        if request.scope_token != continuity_scope(scope) {
+            return Err(RebirthLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        Ok(lifecycle.prepare_rebirth(request.clone())?)
+    }
+
+    /// Second explicit destructive action: preflight/replay in the lifecycle
+    /// owner, stage exactly one complete child, then atomically switch its
+    /// authority.  A replay is returned before child staging.
+    pub fn confirm_rebirth_v1(
+        &mut self,
+        scope: &ScopeRef,
+        confirmation: &UserAuthorizedRebirthV1,
+    ) -> Result<RebirthResponseEnvelopeV1, RuntimeError> {
+        if confirmation.scope_token != continuity_scope(scope) {
+            return Err(RebirthLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        match lifecycle.preflight_rebirth_confirmation(confirmation)? {
+            RebirthPreflightV1::Replayed(envelope) => Ok(envelope),
+            RebirthPreflightV1::Stage(permit) => {
+                let genesis = self.fresh_child_genesis(scope, &permit)?;
+                let child = lifecycle
+                    .stage_rebirth_child_v1(&permit, RebirthChildStageRequestV1 { genesis })?;
+                let envelope = lifecycle.commit_rebirth(&permit, &child)?;
+                self.reopen_authoritative_store(&lifecycle, scope)?;
+                Ok(envelope)
+            }
+        }
     }
 
     // --------------------------------------------------------------- events
