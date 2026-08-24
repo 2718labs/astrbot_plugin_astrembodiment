@@ -116,7 +116,7 @@ jobs:
         run: cargo test --workspace --locked
       - name: Smoke-test staged native wheel
         run: >-
-          python -c "import hashlib, json, pathlib, sys; import astrembodiment_core as core; root=pathlib.Path('astrembodiment_core'); manifest_path=root/'_bundled'/'manifest.json'; manifest=json.loads(manifest_path.read_text(encoding='utf-8')); key='win32' if sys.platform == 'win32' else 'linux' if sys.platform.startswith('linux') else None; assert key is not None; entry=manifest['platforms'][key]; binary=manifest_path.parent/entry['build_id']/entry['filename']; assert binary.is_file(); assert hashlib.sha256(binary.read_bytes()).hexdigest() == entry['build_id']; assert not any(root.glob('_native*.pyd')); assert not any(root.glob('_native*.so')); assert core.version() == '1.0.0'; print(binary)"
+          python -c "import hashlib, json, pathlib, sys; import astrembodiment_core as core; root=pathlib.Path('astrembodiment_core'); manifest_path=root/'_bundled'/'manifest.json'; manifest=json.loads(manifest_path.read_text(encoding='utf-8')); key='win32' if sys.platform == 'win32' else 'linux' if sys.platform.startswith('linux') else None; assert key is not None; entry=manifest['platforms'][key]; binary=manifest_path.parent/entry['build_id']/entry['filename']; assert binary.is_file(); assert hashlib.sha256(binary.read_bytes()).hexdigest() == entry['build_id']; assert not any(root.glob('_native*.pyd')); assert not any(root.glob('_native*.so')); assert callable(core.prepare_rebirth_v1); assert callable(core.confirm_rebirth_v1); assert core.version() == '1.0.0'; print(binary)"
       - name: Save native wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

@@ -104,6 +104,8 @@ try:
     health = _native_module.health
     inspect = _native_module.inspect
     open = _native_module.open
+    prepare_rebirth_v1 = _native_module.prepare_rebirth_v1
+    confirm_rebirth_v1 = _native_module.confirm_rebirth_v1
     verify_replay = _native_module.verify_replay
     version = _native_module.version
 except (AttributeError, ImportError) as exc:  # pragma: no cover - install failure
@@ -127,6 +129,8 @@ __all__ = [
     "health",
     "inspect",
     "open",
+    "prepare_rebirth_v1",
+    "confirm_rebirth_v1",
     "verify_replay",
     "version",
 ]

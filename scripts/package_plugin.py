@@ -33,6 +33,8 @@ NATIVE_API_MARKERS = (
     "health",
     "open",
     "ensure_genesis",
+    "prepare_rebirth_v1",
+    "confirm_rebirth_v1",
     "apply_event",
     "inspect",
     "verify_replay",
