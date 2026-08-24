@@ -342,27 +342,38 @@ fn confirm_installs_one_complete_child_and_replays_after_restart() {
         RebirthActionV1::Rebirth,
         prepared.request_nonce,
     );
-    let permit = match lifecycle.preflight_rebirth_confirmation(&request).unwrap() {
+    let initial_permit = match lifecycle.preflight_rebirth_confirmation(&request).unwrap() {
         RebirthPreflightV1::Stage(permit) => permit,
         other => panic!("unexpected preflight result: {other:?}"),
     };
+    drop(lifecycle);
+
+    let reopened_staging = VaultLifecycle::open(&vault).unwrap();
+    let permit = match reopened_staging
+        .preflight_rebirth_confirmation(&request)
+        .unwrap()
+    {
+        RebirthPreflightV1::Stage(permit) => permit,
+        other => panic!("unexpected resumed preflight result: {other:?}"),
+    };
+    assert_eq!(permit, initial_permit);
     let child_incarnation = [0x32; 32];
     let staged = stage_manual_child(
-        &lifecycle,
+        &reopened_staging,
         &parent,
         scope_token,
         RebirthActionV1::Rebirth,
         child_incarnation,
     );
     let child_generation = staged.child_generation_id.clone();
-    let committed = lifecycle.commit_rebirth(&permit, &staged).unwrap();
+    let committed = reopened_staging.commit_rebirth(&permit, &staged).unwrap();
     assert_eq!(committed.state, RebirthResponseStateV1::Committed);
     let receipt = committed.receipt.clone().expect("committed receipt");
     assert_eq!(receipt.outcome, RebirthOutcomeV1::Committed);
     assert_eq!(receipt.before_revision, 14);
     assert_eq!(receipt.after_revision, 0);
     assert!(receipt.audit_time_ms > 0);
-    drop(lifecycle);
+    drop(reopened_staging);
 
     let reopened = VaultLifecycle::open(&vault).unwrap();
     let current = reopened.current_authority_v1().unwrap();

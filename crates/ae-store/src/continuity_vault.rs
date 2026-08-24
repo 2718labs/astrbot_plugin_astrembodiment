@@ -1066,32 +1066,36 @@ impl VaultLifecycle {
             return Err(RebirthLifecycleError::FenceStale);
         }
         ensure_ledger_current(&transaction, &current)?;
-        if stored.status == "staging" {
-            return Err(RebirthLifecycleError::InFlight);
-        }
-        if stored.status != "pending" {
-            return Err(RebirthLifecycleError::Durability);
-        }
-        let next_epoch = stored
-            .stage_epoch
-            .checked_add(1)
-            .ok_or(RebirthLifecycleError::Durability)?;
-        let updated = transaction
-            .execute(
-                "UPDATE rebirth_challenge_v1
-                 SET status = 'staging', stage_epoch = ?2, updated_at_ms = ?3
-                 WHERE request_nonce_digest = ?1 AND status = 'pending' AND stage_epoch = ?4",
-                params![
-                    request_nonce_digest.to_vec(),
-                    revision_to_sql(next_epoch)?,
-                    revision_to_sql(crate::now_ms())?,
-                    revision_to_sql(stored.stage_epoch)?,
-                ],
-            )
-            .map_err(|_| RebirthLifecycleError::Durability)?;
-        if updated != 1 {
-            return Err(RebirthLifecycleError::InFlight);
-        }
+        let stage_epoch = match stored.status.as_str() {
+            // A durable staging lease survives process restart.  Its exact
+            // persisted epoch is the only permit that may resume it.
+            "staging" if stored.stage_epoch != 0 => stored.stage_epoch,
+            "staging" => return Err(RebirthLifecycleError::Durability),
+            "pending" => {
+                let next_epoch = stored
+                    .stage_epoch
+                    .checked_add(1)
+                    .ok_or(RebirthLifecycleError::Durability)?;
+                let updated = transaction
+                    .execute(
+                        "UPDATE rebirth_challenge_v1
+                         SET status = 'staging', stage_epoch = ?2, updated_at_ms = ?3
+                         WHERE request_nonce_digest = ?1 AND status = 'pending' AND stage_epoch = ?4",
+                        params![
+                            request_nonce_digest.to_vec(),
+                            revision_to_sql(next_epoch)?,
+                            revision_to_sql(crate::now_ms())?,
+                            revision_to_sql(stored.stage_epoch)?,
+                        ],
+                    )
+                    .map_err(|_| RebirthLifecycleError::Durability)?;
+                if updated != 1 {
+                    return Err(RebirthLifecycleError::InFlight);
+                }
+                next_epoch
+            }
+            _ => return Err(RebirthLifecycleError::Durability),
+        };
         transaction
             .commit()
             .map_err(|_| RebirthLifecycleError::Durability)?;
@@ -1104,7 +1108,7 @@ impl VaultLifecycle {
             binding_digest,
             parent_generation_id: current.generation_id,
             parent_authority: current.authority,
-            stage_epoch: next_epoch,
+            stage_epoch,
         }))
     }
 
