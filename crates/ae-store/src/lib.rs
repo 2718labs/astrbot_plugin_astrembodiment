@@ -24,7 +24,8 @@ pub use legacy_discovery::{
 
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
-    wire, Digest, GenesisManifest, GenesisReceipt, GenesisStatus, PersonaSourceRef,
+    wire, CanonicalEvent, CommitStatus, Digest, GenesisManifest, GenesisReceipt, GenesisStatus,
+    PersonaSourceRef, ScopeRef,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::Path;
@@ -73,6 +74,12 @@ pub enum StoreError {
     GenesisNotFound,
     #[error("snapshot not found")]
     SnapshotNotFound,
+    #[error("continuity bundle fence failed: {0}")]
+    ContinuityFence(&'static str),
+    #[error("continuity duplicate does not match the complete stored authority")]
+    ContinuityDuplicateMismatch,
+    #[error("continuity duplicate points at an incomplete authority bundle")]
+    ContinuityIncomplete,
     #[error("store is closed")]
     Closed,
 }
@@ -196,12 +203,109 @@ pub struct SnapshotRow {
     pub state_bytes: Vec<u8>,
 }
 
+/// Stable digest boundary for the opaque, de-identified context projection
+/// state. The context projector and runtime call this helper rather than
+/// duplicating the domain-separation formula.
+pub const CONTINUITY_CONTEXT_DIGEST_DOMAIN: &[u8] = b"AE-CONTEXT-PROJECTION-STATE-V1";
+
+pub fn continuity_context_digest(canonical_state_bytes: &[u8]) -> Digest {
+    wire::domain_hash(CONTINUITY_CONTEXT_DIGEST_DOMAIN, &[canonical_state_bytes])
+}
+
+/// Opaque state checkpoint that belongs to one successful transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotCommitV1 {
+    pub state_digest: Digest,
+    pub state_bytes: Vec<u8>,
+}
+
+/// Opaque graph replay checkpoint that belongs to one successful transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphCommitV1 {
+    pub base_graph_digest: Digest,
+    pub graph_digest: Digest,
+    pub formula_digest: Digest,
+    pub delta_bytes: Vec<u8>,
+    pub replay_state_bytes: Vec<u8>,
+}
+
+/// Opaque, de-identified context projection checkpoint. `relation_hmac` is
+/// produced by the projector and retained only as its fixed-width ordering key;
+/// ae-store never receives the projection key or raw relation content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextCommitV1 {
+    pub relation_scope_token: [u8; 16],
+    pub relation_hmac: Digest,
+    pub source_continuum_revision: u64,
+    pub context_digest: Digest,
+    pub canonical_state_bytes: Vec<u8>,
+}
+
+/// One committed opaque context checkpoint returned by its raw storage key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextCommitRowV1 {
+    pub scope_digest: Digest,
+    pub relation_scope_token: [u8; 16],
+    pub relation_hmac: Digest,
+    pub revision: u64,
+    pub context_digest: Digest,
+    pub canonical_state_bytes: Vec<u8>,
+}
+
+/// Every durable mutation that must share a single Continuum authority
+/// transaction. The public boundary contains no SQLite handles or projector
+/// crate types.
+#[derive(Clone, Debug)]
+pub struct ContinuityCommitBundleV1 {
+    pub envelope: CommitEnvelope,
+    pub snapshot: SnapshotCommitV1,
+    pub graph: GraphCommitV1,
+    pub context: ContextCommitV1,
+}
+
+type StoredJournalColumns = (i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+type StoredGraphColumns = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+type StoredContextColumns = (Vec<u8>, Vec<u8>, i64, Vec<u8>, Vec<u8>);
+type StoredContextDuplicateColumns = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 pub struct Store {
     conn: Option<Connection>,
 }
 
 fn blob<const N: usize>(value: [u8; N]) -> Vec<u8> {
     value.to_vec()
+}
+
+fn digest_from_blob(bytes: &[u8], fence: &'static str) -> Result<Digest, StoreError> {
+    if bytes.len() != 32 {
+        return Err(StoreError::ContinuityFence(fence));
+    }
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(bytes);
+    Ok(digest)
+}
+
+fn token_from_blob(bytes: &[u8], fence: &'static str) -> Result<[u8; 16], StoreError> {
+    if bytes.len() != 16 {
+        return Err(StoreError::ContinuityFence(fence));
+    }
+    let mut token = [0u8; 16];
+    token.copy_from_slice(bytes);
+    Ok(token)
+}
+
+fn scope_from_event(event: &CanonicalEvent) -> &ScopeRef {
+    match event {
+        CanonicalEvent::UserStimulus(value) => &value.scope,
+        CanonicalEvent::UserReaction(value) => &value.scope,
+        CanonicalEvent::CorrectionClaim(value) => &value.scope,
+        CanonicalEvent::CorrectionVerdict(value) => &value.scope,
+        CanonicalEvent::SelfActionCandidate(value) => &value.scope,
+        CanonicalEvent::DeliveryOutcome(value) => &value.scope,
+        CanonicalEvent::SettlementEvidence(value) => &value.scope,
+        CanonicalEvent::TimeAdvance(value) => &value.scope,
+        CanonicalEvent::AdminAction(value) => &value.scope,
+    }
 }
 
 impl Store {
@@ -306,6 +410,25 @@ impl Store {
                 state_digest BLOB NOT NULL,
                 state_bytes BLOB NOT NULL,
                 PRIMARY KEY (revision, scope_digest)
+            );
+            CREATE TABLE IF NOT EXISTS graph_commits (
+                scope_digest BLOB NOT NULL,
+                revision INTEGER NOT NULL,
+                base_graph_digest BLOB NOT NULL CHECK (length(base_graph_digest) = 32),
+                graph_digest BLOB NOT NULL CHECK (length(graph_digest) = 32),
+                formula_digest BLOB NOT NULL CHECK (length(formula_digest) = 32),
+                delta_bytes BLOB NOT NULL,
+                replay_state_bytes BLOB NOT NULL,
+                PRIMARY KEY (scope_digest, revision)
+            );
+            CREATE TABLE IF NOT EXISTS context_commits (
+                scope_digest BLOB NOT NULL,
+                relation_scope_token BLOB NOT NULL CHECK (length(relation_scope_token) = 16),
+                relation_hmac BLOB NOT NULL CHECK (length(relation_hmac) = 32),
+                revision INTEGER NOT NULL,
+                context_digest BLOB NOT NULL CHECK (length(context_digest) = 32),
+                canonical_state_bytes BLOB NOT NULL,
+                PRIMARY KEY (scope_digest, relation_scope_token, revision)
             );
             "#,
         )?;
@@ -1123,6 +1246,458 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    fn validate_continuity_payloads(
+        bundle: &ContinuityCommitBundleV1,
+    ) -> Result<CanonicalEvent, StoreError> {
+        let event = wire::decode_event(&bundle.envelope.event_bytes)
+            .map_err(|_| StoreError::ContinuityFence("event_decode"))?;
+        let event_digest = wire::event_digest(&event);
+        if event_digest != bundle.envelope.receipt.event_digest {
+            return Err(StoreError::ContinuityFence("event_digest"));
+        }
+        if bundle.envelope.event_kind != wire::event_kind_name(&event) {
+            return Err(StoreError::ContinuityFence("event_kind"));
+        }
+        if bundle.envelope.receipt.status != CommitStatus::Committed {
+            return Err(StoreError::ContinuityFence("receipt_status"));
+        }
+        if bundle.envelope.receipt.next_revision
+            != bundle
+                .envelope
+                .receipt
+                .base_revision
+                .checked_add(1)
+                .ok_or(StoreError::ContinuityFence("revision_overflow"))?
+        {
+            return Err(StoreError::ContinuityFence("receipt_revision"));
+        }
+
+        let scope = scope_from_event(&event);
+        let expected_scope = wire::persona_scope_digest(
+            &scope.bot_token,
+            &scope.persona_token,
+            scope.relation_token.as_ref(),
+        );
+        if bundle.envelope.receipt.scope_digest != expected_scope {
+            return Err(StoreError::ContinuityFence("scope"));
+        }
+        let expected_relation_token = scope.relation_token.unwrap_or(scope.session_token);
+        if bundle.context.relation_scope_token != expected_relation_token {
+            return Err(StoreError::ContinuityFence("context_relation_scope"));
+        }
+        if bundle.snapshot.state_digest != bundle.envelope.receipt.state_after {
+            return Err(StoreError::ContinuityFence("snapshot_receipt_digest"));
+        }
+        if bundle.graph.graph_digest != bundle.envelope.receipt.graph_after {
+            return Err(StoreError::ContinuityFence("graph_receipt_digest"));
+        }
+        if bundle.graph.formula_digest != bundle.envelope.receipt.formula_digest {
+            return Err(StoreError::ContinuityFence("graph_formula"));
+        }
+        if bundle.graph.delta_bytes != bundle.envelope.delta_bytes {
+            return Err(StoreError::ContinuityFence("graph_delta"));
+        }
+        if bundle.context.source_continuum_revision != bundle.envelope.receipt.next_revision {
+            return Err(StoreError::ContinuityFence("context_revision"));
+        }
+        if continuity_context_digest(&bundle.context.canonical_state_bytes)
+            != bundle.context.context_digest
+        {
+            return Err(StoreError::ContinuityFence("context_digest"));
+        }
+        Ok(event)
+    }
+
+    fn read_journal_row_tx(
+        tx: &Transaction<'_>,
+        scope_digest: &Digest,
+        revision: u64,
+    ) -> Result<Option<JournalRow>, StoreError> {
+        let stored: Option<StoredJournalColumns> = tx
+            .query_row(
+                "SELECT base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest FROM journal WHERE scope_digest = ?1 AND logical_revision = ?2",
+                params![blob(*scope_digest), revision as i64],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            base_revision,
+            event_kind,
+            event_bytes,
+            event_digest,
+            receipt_bytes,
+            chain_digest,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        Ok(Some(JournalRow {
+            revision,
+            scope_digest: *scope_digest,
+            base_revision: base_revision as u64,
+            event_kind,
+            event_bytes,
+            event_digest: digest_from_blob(&event_digest, "stored_event_digest")?,
+            receipt_bytes,
+            chain_digest: digest_from_blob(&chain_digest, "stored_chain_digest")?,
+        }))
+    }
+
+    fn current_snapshot_digest_tx(
+        tx: &Transaction<'_>,
+        scope_digest: &Digest,
+    ) -> Result<Option<Digest>, StoreError> {
+        let bytes: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT state_digest FROM snapshots WHERE scope_digest = ?1 ORDER BY revision DESC LIMIT 1",
+                params![blob(*scope_digest)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        bytes
+            .map(|value| digest_from_blob(&value, "stored_snapshot_digest"))
+            .transpose()
+    }
+
+    fn current_graph_authority_tx(
+        tx: &Transaction<'_>,
+        scope_digest: &Digest,
+        event_scope: &ScopeRef,
+    ) -> Result<Option<(Digest, Digest)>, StoreError> {
+        let latest: Option<(Vec<u8>, Vec<u8>)> = tx
+            .query_row(
+                "SELECT graph_digest, formula_digest FROM graph_commits WHERE scope_digest = ?1 ORDER BY revision DESC LIMIT 1",
+                params![blob(*scope_digest)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let authority = match latest {
+            Some(value) => Some(value),
+            None => tx
+                .query_row(
+                    "SELECT i.graph_digest, i.formula_digest FROM active_bindings AS b JOIN incarnations AS i ON i.incarnation_id = b.incarnation_id WHERE b.bot_token = ?1 AND b.persona_token = ?2",
+                    params![
+                        blob(event_scope.bot_token),
+                        blob(event_scope.persona_token),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?,
+        };
+        authority
+            .map(|(graph_digest, formula_digest)| {
+                Ok((
+                    digest_from_blob(&graph_digest, "stored_graph_digest")?,
+                    digest_from_blob(&formula_digest, "stored_graph_formula")?,
+                ))
+            })
+            .transpose()
+    }
+
+    fn last_chain_digest_tx(
+        tx: &Transaction<'_>,
+        scope_digest: &Digest,
+    ) -> Result<Option<Digest>, StoreError> {
+        let bytes: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT chain_digest FROM journal WHERE scope_digest = ?1 ORDER BY logical_revision DESC LIMIT 1",
+                params![blob(*scope_digest)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        bytes
+            .map(|value| digest_from_blob(&value, "stored_chain_digest"))
+            .transpose()
+    }
+
+    fn duplicate_bundle_is_identical_tx(
+        tx: &Transaction<'_>,
+        bundle: &ContinuityCommitBundleV1,
+        row: &JournalRow,
+    ) -> Result<bool, StoreError> {
+        let receipt_bytes = wire::encode_transition_receipt(&bundle.envelope.receipt);
+        let expected_chain = ae_continuum::chain_link(
+            &bundle.envelope.chain_seed,
+            &bundle.envelope.event_bytes,
+            &receipt_bytes,
+        );
+        if row.revision != bundle.envelope.receipt.next_revision
+            || row.base_revision != bundle.envelope.receipt.base_revision
+            || row.event_kind != bundle.envelope.event_kind
+            || row.event_bytes != bundle.envelope.event_bytes
+            || row.event_digest != bundle.envelope.receipt.event_digest
+            || row.receipt_bytes != receipt_bytes
+            || row.chain_digest != expected_chain
+        {
+            return Ok(false);
+        }
+
+        let snapshot: Option<(Vec<u8>, Vec<u8>)> = tx
+            .query_row(
+                "SELECT state_digest, state_bytes FROM snapshots WHERE scope_digest = ?1 AND revision = ?2",
+                params![blob(bundle.envelope.receipt.scope_digest), row.revision as i64],
+                |stored| Ok((stored.get(0)?, stored.get(1)?)),
+            )
+            .optional()?;
+        if snapshot
+            != Some((
+                blob(bundle.snapshot.state_digest),
+                bundle.snapshot.state_bytes.clone(),
+            ))
+        {
+            return Ok(false);
+        }
+
+        let graph: Option<StoredGraphColumns> = tx
+            .query_row(
+                "SELECT base_graph_digest, graph_digest, formula_digest, delta_bytes, replay_state_bytes FROM graph_commits WHERE scope_digest = ?1 AND revision = ?2",
+                params![blob(bundle.envelope.receipt.scope_digest), row.revision as i64],
+                |stored| {
+                    Ok((
+                        stored.get(0)?,
+                        stored.get(1)?,
+                        stored.get(2)?,
+                        stored.get(3)?,
+                        stored.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if graph
+            != Some((
+                blob(bundle.graph.base_graph_digest),
+                blob(bundle.graph.graph_digest),
+                blob(bundle.graph.formula_digest),
+                bundle.graph.delta_bytes.clone(),
+                bundle.graph.replay_state_bytes.clone(),
+            ))
+        {
+            return Ok(false);
+        }
+
+        let context: Option<StoredContextDuplicateColumns> = tx
+            .query_row(
+                "SELECT relation_hmac, context_digest, canonical_state_bytes, relation_scope_token FROM context_commits WHERE scope_digest = ?1 AND relation_scope_token = ?2 AND revision = ?3",
+                params![
+                    blob(bundle.envelope.receipt.scope_digest),
+                    blob(bundle.context.relation_scope_token),
+                    row.revision as i64,
+                ],
+                |stored| Ok((stored.get(0)?, stored.get(1)?, stored.get(2)?, stored.get(3)?)),
+            )
+            .optional()?;
+        Ok(context
+            == Some((
+                blob(bundle.context.relation_hmac),
+                blob(bundle.context.context_digest),
+                bundle.context.canonical_state_bytes.clone(),
+                blob(bundle.context.relation_scope_token),
+            )))
+    }
+
+    /// Atomically append one transition and its state, graph and context
+    /// projections. Any validation or SQLite failure occurs before the one
+    /// commit boundary, so an observer sees the old complete authority or the
+    /// new complete authority and never a cross-domain partial write.
+    pub fn commit_continuity_bundle(
+        &mut self,
+        bundle: &ContinuityCommitBundleV1,
+    ) -> Result<(u64, JournalRow), StoreError> {
+        let event = Self::validate_continuity_payloads(bundle)?;
+        let event_scope = scope_from_event(&event);
+        let scope_digest = bundle.envelope.receipt.scope_digest;
+        let receipt_bytes = wire::encode_transition_receipt(&bundle.envelope.receipt);
+        let chain_digest = ae_continuum::chain_link(
+            &bundle.envelope.chain_seed,
+            &bundle.envelope.event_bytes,
+            &receipt_bytes,
+        );
+
+        let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let duplicate: Option<i64> = tx
+            .query_row(
+                "SELECT revision FROM applied_events WHERE scope_digest = ?1 AND event_digest = ?2",
+                params![
+                    blob(scope_digest),
+                    blob(bundle.envelope.receipt.event_digest)
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(revision) = duplicate {
+            let revision = revision as u64;
+            let row = Self::read_journal_row_tx(&tx, &scope_digest, revision)?
+                .ok_or(StoreError::ContinuityIncomplete)?;
+            if !Self::duplicate_bundle_is_identical_tx(&tx, bundle, &row)? {
+                return Err(StoreError::ContinuityDuplicateMismatch);
+            }
+            tx.commit()?;
+            return Ok((revision, row));
+        }
+
+        let current = tx.query_row(
+            "SELECT COALESCE(MAX(logical_revision), 0) FROM journal WHERE scope_digest = ?1",
+            params![blob(scope_digest)],
+            |row| row.get::<_, i64>(0),
+        )? as u64;
+        if bundle.envelope.receipt.base_revision != current {
+            return Err(StoreError::StaleRevision {
+                expected: bundle.envelope.receipt.base_revision,
+                actual: current,
+            });
+        }
+        let expected_next = current
+            .checked_add(1)
+            .ok_or(StoreError::ContinuityFence("revision_overflow"))?;
+        if bundle.envelope.receipt.next_revision != expected_next {
+            return Err(StoreError::StaleRevision {
+                expected: bundle.envelope.receipt.next_revision,
+                actual: expected_next,
+            });
+        }
+
+        match Self::current_snapshot_digest_tx(&tx, &scope_digest)? {
+            Some(current_state) => {
+                if bundle.envelope.receipt.state_before != current_state {
+                    return Err(StoreError::ContinuityFence("state_before"));
+                }
+            }
+            None if current != 0 => return Err(StoreError::ContinuityFence("missing_snapshot")),
+            None => {}
+        }
+        match Self::current_graph_authority_tx(&tx, &scope_digest, event_scope)? {
+            Some((current_graph, current_formula)) => {
+                if bundle.graph.base_graph_digest != current_graph {
+                    return Err(StoreError::ContinuityFence("graph_base"));
+                }
+                if bundle.graph.formula_digest != current_formula {
+                    return Err(StoreError::ContinuityFence("graph_current_formula"));
+                }
+            }
+            None if current != 0 => return Err(StoreError::ContinuityFence("missing_graph")),
+            None => {}
+        }
+        if let Some(last_chain) = Self::last_chain_digest_tx(&tx, &scope_digest)? {
+            if bundle.envelope.chain_seed != last_chain {
+                return Err(StoreError::ContinuityFence("chain_seed"));
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO journal (logical_revision, scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                expected_next as i64,
+                blob(scope_digest),
+                bundle.envelope.receipt.base_revision as i64,
+                bundle.envelope.event_kind.clone(),
+                bundle.envelope.event_bytes.clone(),
+                blob(bundle.envelope.receipt.event_digest),
+                receipt_bytes.clone(),
+                blob(chain_digest),
+                now_ms() as i64,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO applied_events (scope_digest, event_digest, revision) VALUES (?1, ?2, ?3)",
+            params![
+                blob(scope_digest),
+                blob(bundle.envelope.receipt.event_digest),
+                expected_next as i64,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO snapshots (revision, scope_digest, state_digest, state_bytes) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                expected_next as i64,
+                blob(scope_digest),
+                blob(bundle.snapshot.state_digest),
+                bundle.snapshot.state_bytes.clone(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO graph_commits (scope_digest, revision, base_graph_digest, graph_digest, formula_digest, delta_bytes, replay_state_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                blob(scope_digest),
+                expected_next as i64,
+                blob(bundle.graph.base_graph_digest),
+                blob(bundle.graph.graph_digest),
+                blob(bundle.graph.formula_digest),
+                bundle.graph.delta_bytes.clone(),
+                bundle.graph.replay_state_bytes.clone(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO context_commits (scope_digest, relation_scope_token, relation_hmac, revision, context_digest, canonical_state_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                blob(scope_digest),
+                blob(bundle.context.relation_scope_token),
+                blob(bundle.context.relation_hmac),
+                expected_next as i64,
+                blob(bundle.context.context_digest),
+                bundle.context.canonical_state_bytes.clone(),
+            ],
+        )?;
+        tx.commit()?;
+
+        let row = JournalRow {
+            revision: expected_next,
+            scope_digest,
+            base_revision: bundle.envelope.receipt.base_revision,
+            event_kind: bundle.envelope.event_kind.clone(),
+            event_bytes: bundle.envelope.event_bytes.clone(),
+            event_digest: bundle.envelope.receipt.event_digest,
+            receipt_bytes,
+            chain_digest,
+        };
+        Ok((expected_next, row))
+    }
+
+    /// Return the newest fully committed opaque context projection for one raw
+    /// relation storage token. Digest validation happens again on read so a
+    /// corrupt row can never become a projection input after restart.
+    pub fn read_context_commit(
+        &self,
+        scope_digest: &Digest,
+        relation_scope_token: &[u8; 16],
+    ) -> Result<Option<ContextCommitRowV1>, StoreError> {
+        let conn = self.connection()?;
+        let stored: Option<StoredContextColumns> = conn
+            .query_row(
+                "SELECT relation_scope_token, relation_hmac, revision, context_digest, canonical_state_bytes FROM context_commits WHERE scope_digest = ?1 AND relation_scope_token = ?2 ORDER BY revision DESC LIMIT 1",
+                params![blob(*scope_digest), blob(*relation_scope_token)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        let Some((stored_token, relation_hmac, revision, context_digest, canonical_state_bytes)) =
+            stored
+        else {
+            return Ok(None);
+        };
+        let context_digest = digest_from_blob(&context_digest, "stored_context_digest")?;
+        if continuity_context_digest(&canonical_state_bytes) != context_digest {
+            return Err(StoreError::ContinuityFence("stored_context_digest"));
+        }
+        Ok(Some(ContextCommitRowV1 {
+            scope_digest: *scope_digest,
+            relation_scope_token: token_from_blob(&stored_token, "stored_relation_scope_token")?,
+            relation_hmac: digest_from_blob(&relation_hmac, "stored_relation_hmac")?,
+            revision: revision as u64,
+            context_digest,
+            canonical_state_bytes,
+        }))
     }
 
     /// CAS commit of one journal entry. The caller supplies the chain seed
