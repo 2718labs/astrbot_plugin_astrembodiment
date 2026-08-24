@@ -1,0 +1,155 @@
+{
+  "schema": "astr-embodiment.release-1.0.0.d1-b3-b1-engineering.v1",
+  "status": "B3_B1_ENGINEERING_EVIDENCE",
+  "generated_at": "2026-08-24T23:04:00+08:00",
+  "acceptance": {
+    "self_accepted": false,
+    "fresh_sol_review_required": true,
+    "coordinator_acceptance_required": true,
+    "is_release_receipt": false,
+    "is_b3_final_receipt": false
+  },
+  "integration": {
+    "branch": "release/1.0.0-integration",
+    "baseline_commit": "653b682eabb0c6536cc3572b66339b99d927aace",
+    "baseline_tree": "b5f9b00ac5a6348205fa0e2fa966f509aa5578c9",
+    "candidate_commit": "d5d88fb00df2323eda9310e190eb5aec20f0313b",
+    "candidate_tree": "ff4992f8609e51c64e865f2c72f7a48ce3a5c85c",
+    "candidate_parent": "a99e81f96e44bc4b851d77fcce1147994242e069",
+    "candidate_subject": "feat: integrate continuity context and graph commits",
+    "code_candidate_tracked_clean_before_receipt": true
+  },
+  "input_hashes": {
+    "sol_review_zh_cn_sha256": "F7517FA7A4C3E4BA5DD1F78E7174DA3580993237076BF246DC21573D075FCFF0",
+    "d1_manifest_scope_addendum_sha256": "9384A57C0D0549A16CED0177584625324F89E8D34E3E4DA97A300D42E2BC4A9C",
+    "d1_atomicity_scope_addendum_sha256": "A1E49382A948E60F7975E558740259159D3D2FA14B42DAD214905EBB1FC2CF1D",
+    "d1_atomicity_scope_sidecar_sha256": "3E25CF54C208BAC6F86C940428B2CACF407C3A39766257A8294FFB691FE03101",
+    "b3_source_import_receipt_sha256": "1790FB05A84471F5E9CD77D2A7D7EA03DB9D88B152477E5A3F77966D0A5BD4E3",
+    "store_engineering_receipt_sha256": "DDD64900E561E3931054BB95C2856999033BCC30D5B3A13D688EA8F2D7A58EA7"
+  },
+  "commit_chain": [
+    {
+      "role": "projector_checkpoint",
+      "commit": "a61c374e1582392b1464c8ba3d823b12cb39d082",
+      "tree": "a8265331213d6819445ef6745b4b580120a0287d",
+      "parent": "653b682eabb0c6536cc3572b66339b99d927aace",
+      "subject": "feat(d1): checkpoint pure context projection adapter"
+    },
+    {
+      "role": "exact_store_writer_cherry_pick",
+      "source_commit": "61e932a8efb1110989b702db2ca5149aa1c9461e",
+      "commit": "a99e81f96e44bc4b851d77fcce1147994242e069",
+      "tree": "db22985eed80f48bbd2c4d4c412fe09c917b1552",
+      "parent": "a61c374e1582392b1464c8ba3d823b12cb39d082",
+      "subject": "feat(store): atomically commit continuity context bundle"
+    },
+    {
+      "role": "runtime_pyo3_bridge_integration",
+      "commit": "d5d88fb00df2323eda9310e190eb5aec20f0313b",
+      "tree": "ff4992f8609e51c64e865f2c72f7a48ce3a5c85c",
+      "parent": "a99e81f96e44bc4b851d77fcce1147994242e069",
+      "subject": "feat: integrate continuity context and graph commits"
+    }
+  ],
+  "changed_paths_from_baseline": [
+    {"path": "Cargo.lock", "status": "present", "blob": "80f14b892354be5653a06002afd14a983b932b51"},
+    {"path": "Cargo.toml", "status": "present", "blob": "19d3f760fa14cec925343c061354cfd76734eb25"},
+    {"path": "astr_embodiment/bridge.py", "status": "present", "blob": "c85109baa168438aee396c0417075ac60f7dc976"},
+    {"path": "astr_embodiment/coordinator.py", "status": "present", "blob": "58be3301dba4f9a0960eb42933a06e8eaa9c83d0"},
+    {"path": "crates/ae-context-projector/Cargo.lock", "status": "deleted", "blob": null},
+    {"path": "crates/ae-context-projector/Cargo.toml", "status": "present", "blob": "599cfbdc157c418fa19eba6ee4faa5649464f0c8"},
+    {"path": "crates/ae-context-projector/src/lib.rs", "status": "present", "blob": "1bac277e0f4622accaf4273689f91454af52aa90"},
+    {"path": "crates/ae-context-projector/src/store.rs", "status": "present", "blob": "62410f56bfa8bf5762b195aed960c0cac705de6e"},
+    {"path": "crates/ae-context-projector/tests/context_summary_store.rs", "status": "present", "blob": "b22c51bc2977f6e7217c55d4bf81a70610ff8c6e"},
+    {"path": "crates/ae-pyo3/Cargo.toml", "status": "present", "blob": "915a55e40a86905cb84fcd254eac3618215860a1"},
+    {"path": "crates/ae-pyo3/src/lib.rs", "status": "present", "blob": "48a6a6f9f89858e7082a9fbb64ccd67cf1cfe985"},
+    {"path": "crates/ae-runtime/Cargo.toml", "status": "present", "blob": "122dfab3ee63f3db43df1c78e56fe734a1c9c146"},
+    {"path": "crates/ae-runtime/src/lib.rs", "status": "present", "blob": "c9da7cbf769711ea7db4ea4caece97793c3723b8"},
+    {"path": "crates/ae-runtime/tests/continuity_context_graph_integration.rs", "status": "present", "blob": "5b7062fc295d169e0b97826122bfa0705275fa12"},
+    {"path": "crates/ae-store/src/lib.rs", "status": "present", "blob": "9a570ce2ac101d95b6d9d050d7076ce4eafbe6da"},
+    {"path": "crates/ae-store/tests/continuity_context_atomic_commit.rs", "status": "present", "blob": "c1923a602f4fc68e38670542f62aa4ef1a2f18ab"},
+    {"path": "main.py", "status": "present", "blob": "f5694fa5e81780dd2678de4e3ad56418028ed321"},
+    {"path": "tests/test_context_projector.py", "status": "present", "blob": "fde428644c9ecb89fb78fc4b52426301809138a8"},
+    {"path": "tests/test_continuity_runtime_integration.py", "status": "present", "blob": "2cea0d769d946be956c6712d7170da1eafe2c1e0"},
+    {"path": "tests/test_continuity_vault.py", "status": "present", "blob": "61371fc866b9e301c51a7dde1f956ab70e769087"}
+  ],
+  "red_evidence": [
+    {
+      "command": "cargo test --locked --offline -p ae-context-projector --no-run",
+      "exit_code": 101,
+      "result": "expected workspace-registration RED: package-id-not-found before root member registration"
+    },
+    {
+      "command": "cargo test --locked --offline -p ae-runtime --no-run",
+      "exit_code": 101,
+      "result": "expected integration RED: unresolved ae-context-projector import before runtime wiring"
+    },
+    {
+      "command": "python -m pytest -q tests/test_continuity_runtime_integration.py tests/test_continuity_vault.py tests/test_context_projector.py",
+      "exit_code": 1,
+      "result": "expected Python boundary RED: absent context validator/exception and injection argument before bridge/main integration"
+    }
+  ],
+  "green_evidence": [
+    {"command": "cargo fmt --all -- --check", "exit_code": 0, "result": "PASS"},
+    {"command": "cargo test --locked --offline -p ae-store -- --nocapture", "exit_code": 0, "result": "PASS; 53 tests including 6 atomic fault/restart/dedup tests"},
+    {"command": "cargo test --locked --offline -p ae-context-projector -- --nocapture", "exit_code": 0, "result": "PASS; 14 tests"},
+    {"command": "cargo test --locked --offline -p ae-runtime -- --nocapture", "exit_code": 0, "result": "PASS; 9 tests including relation-scoped reopen/dedup integration"},
+    {"command": "cargo test --locked --offline -p astrembodiment-core -- --nocapture", "exit_code": 0, "result": "PASS; native crate built and test harness completed"},
+    {"command": "cargo test --locked --offline --workspace", "exit_code": 0, "result": "PASS; full workspace, including Store atomic fault matrix"},
+    {"command": "cargo metadata --locked --offline --no-deps --format-version 1", "exit_code": 0, "result": "PASS; exactly one ae-context-projector workspace package; direct dependency edges from ae-runtime and astrembodiment-core"},
+    {"command": "python -m pytest --collect-only -q tests/test_continuity_runtime_integration.py tests/test_continuity_vault.py tests/test_context_projector.py", "exit_code": 0, "result": "PASS; 7 collected"},
+    {"command": "python -m pytest -q tests/test_continuity_runtime_integration.py tests/test_continuity_vault.py tests/test_context_projector.py", "exit_code": 0, "result": "PASS; 7 passed, 1 external dependency deprecation warning; executed against a freshly built private-G native extension"},
+    {"command": "python -m pytest -q tests/test_runtime_integration.py", "exit_code": 1, "result": "31 passed, 1 baseline stale-wheel version mismatch: expected 1.0.0, wheel returned 1.0.0-rc1"},
+    {"command": "python -m pytest -q tests/test_release_contracts.py -k not_version_mismatch_cases", "exit_code": 0, "result": "PASS; 8 passed, 2 deselected baseline release-version mismatch cases"},
+    {"command": "python -m pytest -q tests/test_static_contracts.py", "exit_code": 0, "result": "PASS; 4 passed"},
+    {"command": "python -m ruff format --check <D1 Python paths> && python -m ruff check <D1 Python paths>", "exit_code": 0, "result": "PASS"},
+    {"command": "git diff --check", "exit_code": 0, "result": "PASS"}
+  ],
+  "clippy_baseline_blocker": {
+    "command": "cargo clippy --locked --offline -p ae-store -p ae-context-projector -p ae-runtime --all-targets -- -D warnings",
+    "exit_code": 101,
+    "result": "BLOCKED outside this writer's mutable scope: ae-neurofield/src/lib.rs:180 clippy::eq_op; ae-store/src/lib.rs:117 clippy::should_implement_trait and :587 clippy::unnecessary_cast. The exact Store writer import was not edited after cherry-pick. A no-deps attempt additionally exposed the baseline ae-runtime test-only items-after-test-module lint. No out-of-scope repair was made."
+  },
+  "atomicity_evidence": {
+    "runtime_authority": "ae-store::Store::commit_continuity_bundle",
+    "standalone_context_store_runtime_authority": false,
+    "fault_matrix": "six Store atomic tests cover each pre-commit fault point, stale/base/revision/context/graph fences, rollback of journal/applied-event/snapshot/graph/context, reopen and duplicate receipt identity",
+    "restart_and_dedup": "runtime relation-scoped integration and Python vault tests reopen then return the original receipt/context summary without a second commit"
+  },
+  "runtime_privacy_evidence": {
+    "native_extension": {
+      "version": "1.0.0",
+      "build_location": "private G task cache only",
+      "binary_sha256": "748DA80D1C67628A4C4E8AEC0200C249D51F1396090015846C111F560349F44D"
+    },
+    "sentinel_list_encoding": "UTF-8, LF joined, source order in test_real_native_vault_context_artifacts_contain_no_dynamic_raw_sentinels",
+    "sentinel_count": 6,
+    "sentinel_set_sha256": "6303366896e7fe729aaed857ebd2fc8c6a4c9e87e2e646aee4a8dd74e2fccadb",
+    "real_vault_surface_counts": {
+      "vault_store_bytes": 4096,
+      "journal_rows": 1,
+      "snapshot_rows": 2,
+      "graph_rows": 1,
+      "context_rows": 1,
+      "migration_shadow_entries": 22,
+      "serialized_output_surfaces": 5
+    },
+    "real_vault_store_sha256": "1fe8f6113488865c546d2faa55b21482662ce4be19d4f505eeefa09bc3131489",
+    "raw_text_entity_platform_path_provider_nonce_zero_hit": true,
+    "surfaces": [
+      "real SQLite vault/store bytes including journal, snapshots, graph commits, context commits, and migration shadow",
+      "closed genesis request",
+      "genesis result and receipt",
+      "committed native decision and receipt/context summary",
+      "native replay result"
+    ]
+  },
+  "scope_assertions": {
+    "did_not_modify_tests_test_runtime_integration_py": true,
+    "did_not_modify_d1_5_d2_version_release_or_human_gold_scope": true,
+    "did_not_access_v_directory": true,
+    "no_network": true
+  },
+  "next_required_action": "Fresh Sol read-only D1/B3-B1 review and coordinator acceptance; this receipt is engineering evidence only."
+}
