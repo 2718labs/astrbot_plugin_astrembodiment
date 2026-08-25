@@ -3,9 +3,8 @@
 use crate::RuntimeError;
 use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
 use ae_contracts::{
-    evidence_vector_from_values, perception_dimension_values, wire, CommitStatus, EvidenceVector,
-    NativeTelemetryReceiptV1, PerceptionProposalV1, SemanticVectorFormulaV2,
-    SemanticVectorReceiptV2, TransitionReceipt, TransitionReceiptV2,
+    wire, CommitStatus, EvidenceVector, NativeTelemetryReceiptV1, PerceptionProposalV1,
+    SemanticVectorFormulaV2, SemanticVectorReceiptV2, TransitionReceipt, TransitionReceiptV2,
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
@@ -49,7 +48,6 @@ pub(crate) struct PreparedSemanticTransitionV2 {
     pub active_nodes: u32,
     pub full_vector_load: FullVectorLoad,
     pub local_by_region: [Fixed; REGION_LAYOUT.len()],
-    pub compensation_by_region: [Fixed; REGION_LAYOUT.len()],
     pub local_confidence_by_region: [Fixed; REGION_LAYOUT.len()],
     pub dynamics: PreparedSemanticDynamicsV2,
 }
@@ -233,7 +231,6 @@ pub(crate) fn prepare_semantic_transition_v2(
     manifest_digest: &[u8; 32],
     development_seed_digest: &[u8; 32],
     proposal: &PerceptionProposalV1,
-    compensation_by_region: [Fixed; REGION_LAYOUT.len()],
 ) -> Result<PreparedSemanticTransitionV2, RuntimeError> {
     proposal
         .validate_v1()
@@ -255,16 +252,14 @@ pub(crate) fn prepare_semantic_transition_v2(
         return Err(RuntimeError::InvalidNeuralState);
     }
     let local_by_region = full_vector_load.evidence_means;
-    // Perception proposal v1 carries an explicit scalar estimator confidence.
-    // It is used only for this direct perception projection; learning jobs
-    // require a separately supplied real 15D local-confidence vector.
+    // The Provider proposal and its supplied confidence are the complete
+    // native input. No local estimator or secondary vector is merged here.
     let local_confidence_by_region = [proposal.estimator_confidence; REGION_LAYOUT.len()];
     let dynamics = propagate_semantic_dynamics_v2(DynamicsInputV2 {
         field,
         baseline,
         graph: &next_graph,
         local_by_region,
-        compensation_by_region,
         local_confidence_by_region,
     })
     .map_err(|_| RuntimeError::InvalidNeuralState)?;
@@ -290,46 +285,9 @@ pub(crate) fn prepare_semantic_transition_v2(
         active_nodes,
         full_vector_load,
         local_by_region,
-        compensation_by_region,
         local_confidence_by_region,
         dynamics,
     })
-}
-
-/// Project the committed signed 15D compensation through the same frozen R7
-/// route used by local evidence. Positive and negative components are routed
-/// separately, then differenced, so compensation stays signed without ever
-/// abusing an unsigned evidence slot.
-pub(crate) fn compensation_by_region_from_vector_v1(
-    compensation: &EvidenceVector,
-) -> Result<[Fixed; REGION_LAYOUT.len()], RuntimeError> {
-    let values = perception_dimension_values(compensation);
-    if values
-        .into_iter()
-        .any(|value| !(-250_000..=250_000).contains(&value.raw()))
-    {
-        return Err(RuntimeError::InvalidLearningCompensation);
-    }
-    let positive = evidence_vector_from_values(std::array::from_fn(|index| {
-        Fixed::from_raw(values[index].raw().max(0))
-    }));
-    let negative = evidence_vector_from_values(std::array::from_fn(|index| {
-        Fixed::from_raw(values[index].raw().saturating_neg().max(0))
-    }));
-    let positive_load = assemble_full_vector_load(&positive)
-        .map_err(|_| RuntimeError::InvalidLearningCompensation)?;
-    let negative_load = assemble_full_vector_load(&negative)
-        .map_err(|_| RuntimeError::InvalidLearningCompensation)?;
-    let mut regions = [Fixed::ZERO; REGION_LAYOUT.len()];
-    for region in 0..REGION_LAYOUT.len() {
-        regions[region] = Fixed::from_raw(
-            positive_load.evidence_means[region]
-                .raw()
-                .checked_sub(negative_load.evidence_means[region].raw())
-                .ok_or(RuntimeError::InvalidLearningCompensation)?,
-        );
-    }
-    Ok(regions)
 }
 
 /// The route is fixed, so a neutral vector is sufficient to obtain the
@@ -1128,23 +1086,21 @@ pub(crate) fn encode_semantic_snapshot_v3(
     field: &NeuralField,
     graph: &SparseGraph,
     telemetry: &NativeTelemetryReceiptV1,
-    compensation_by_region: &[Fixed; REGION_LAYOUT.len()],
 ) -> Result<Vec<u8>, RuntimeError> {
     if !telemetry.validate()
         || telemetry.formula_digest != *formula_digest
         || telemetry.state_after != state_digest(field, formula_digest)
         || telemetry.graph_after != graph_digest(graph)
-        || telemetry.compensation_digest
-            != crate::semantic_telemetry_v1::compensation_vector_digest(compensation_by_region)
+        || telemetry.compensation_digest != ae_contracts::legacy_reserved_zero_digest_v1()
     {
         return Err(RuntimeError::InvalidNeuralState);
     }
     let field_bytes = encode_field(field)?;
     let graph_bytes = encode_graph(graph)?;
     let telemetry_bytes = wire::encode_native_telemetry_receipt_v1(telemetry);
-    let mut compensation_bytes = Vec::with_capacity(compensation_by_region.len() * 8);
-    for value in compensation_by_region {
-        compensation_bytes.extend_from_slice(&value.encode());
+    let mut reserved_zero_bytes = Vec::with_capacity(REGION_LAYOUT.len() * 8);
+    for _ in 0..REGION_LAYOUT.len() {
+        reserved_zero_bytes.extend_from_slice(&Fixed::ZERO.encode());
     }
     let mut out = Vec::with_capacity(
         SNAPSHOT_MAGIC_V3.len()
@@ -1156,7 +1112,7 @@ pub(crate) fn encode_semantic_snapshot_v3(
             + 4
             + telemetry_bytes.len()
             + 4
-            + compensation_bytes.len(),
+            + reserved_zero_bytes.len(),
     );
     out.extend_from_slice(SNAPSHOT_MAGIC_V3);
     out.extend_from_slice(&SNAPSHOT_SCHEMA_V3.to_le_bytes());
@@ -1164,7 +1120,7 @@ pub(crate) fn encode_semantic_snapshot_v3(
         &field_bytes,
         &graph_bytes,
         &telemetry_bytes,
-        &compensation_bytes,
+        &reserved_zero_bytes,
     ] {
         out.extend_from_slice(
             &(u32::try_from(bytes.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
@@ -1181,15 +1137,7 @@ pub(crate) fn decode_semantic_snapshot_v3(
     expected_state_digest: &[u8; 32],
     expected_graph_digest: &[u8; 32],
     legacy_receipt: &TransitionReceipt,
-) -> Result<
-    (
-        NeuralField,
-        SparseGraph,
-        NativeTelemetryReceiptV1,
-        [Fixed; REGION_LAYOUT.len()],
-    ),
-    RuntimeError,
-> {
+) -> Result<(NeuralField, SparseGraph, NativeTelemetryReceiptV1), RuntimeError> {
     let mut cursor = Cursor::new(bytes);
     if cursor.take(SNAPSHOT_MAGIC_V3.len())? != SNAPSHOT_MAGIC_V3
         || cursor.u16()? != SNAPSHOT_SCHEMA_V3
@@ -1203,46 +1151,150 @@ pub(crate) fn decode_semantic_snapshot_v3(
     let telemetry_len =
         usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
     let telemetry_bytes = cursor.take(telemetry_len)?;
-    // AESEM3 was introduced by this Phase 0 branch. Accept the short-lived
-    // three-block precursor as a zero-compensation snapshot, but never write
-    // it again. New snapshots persist the exact regional compensation that
-    // produced their telemetry, so dedup verification cannot read current u.
-    let compensation_by_region = if cursor.eof() {
-        [Fixed::ZERO; REGION_LAYOUT.len()]
-    } else {
-        let compensation_len =
+    // The early three-block precursor has the same all-zero reserved value.
+    // Current writes always carry the fourth AESEM3 block; a non-zero legacy
+    // value cannot be replayed safely because it may already have affected the
+    // sealed field, so it fails closed rather than being ignored.
+    if !cursor.eof() {
+        let reserved_len =
             usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
-        if compensation_len != REGION_LAYOUT.len() * 8 {
+        if reserved_len != REGION_LAYOUT.len() * 8 {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let compensation_bytes = cursor.take(compensation_len)?;
+        let reserved_bytes = cursor.take(reserved_len)?;
         if !cursor.eof() {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let mut values = [Fixed::ZERO; REGION_LAYOUT.len()];
-        for (index, chunk) in compensation_bytes.chunks_exact(8).enumerate() {
+        for chunk in reserved_bytes.chunks_exact(8) {
             let mut raw = [0u8; 8];
             raw.copy_from_slice(chunk);
-            values[index] = Fixed::decode(raw);
-            if !(Fixed::from_raw(-Fixed::ONE.raw())..=Fixed::ONE).contains(&values[index]) {
+            if Fixed::decode(raw) != Fixed::ZERO {
                 return Err(RuntimeError::InvalidNeuralState);
             }
         }
-        values
-    };
+    }
     let telemetry = wire::decode_native_telemetry_receipt_v1(telemetry_bytes)
         .map_err(|_| RuntimeError::InvalidNeuralState)?;
     if wire::encode_native_telemetry_receipt_v1(&telemetry) != telemetry_bytes
         || telemetry.formula_digest != *expected_formula_digest
         || telemetry.state_after != *expected_state_digest
         || telemetry.graph_after != *expected_graph_digest
-        || telemetry.compensation_digest
-            != crate::semantic_telemetry_v1::compensation_vector_digest(&compensation_by_region)
+        || telemetry.compensation_digest != ae_contracts::legacy_reserved_zero_digest_v1()
         || !semantic_v3_matches_legacy_receipt(&telemetry, legacy_receipt)
         || state_digest(&field, expected_formula_digest) != *expected_state_digest
         || graph_digest(&graph) != *expected_graph_digest
     {
         return Err(RuntimeError::InvalidNeuralState);
     }
-    Ok((field, graph, telemetry, compensation_by_region))
+    Ok((field, graph, telemetry))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ae_contracts::{
+        CapacityTelemetryV1, EnergyTelemetryV1, InvariantResiduals, NativeTelemetryFormulaV1,
+        NativeTelemetryPhaseV1, NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1,
+    };
+
+    #[test]
+    fn aesem3_reserved_zero_replays_and_nonzero_history_fails_closed() {
+        let formula_digest = [0x31; 32];
+        let field = NeuralField::zeroed();
+        let graph = SparseGraph::empty();
+        let state_after = state_digest(&field, &formula_digest);
+        let graph_after = graph_digest(&graph);
+        let residuals = InvariantResiduals {
+            authority: Fixed::ZERO,
+            continuity: Fixed::ZERO,
+            energy: Fixed::from_raw(200_000),
+            renormalization: Fixed::from_raw(100_000),
+            capacity: Fixed::ZERO,
+        };
+        let telemetry = NativeTelemetryReceiptV1 {
+            schema: NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1.to_owned(),
+            formula: NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1,
+            formula_digest,
+            scope_digest: [0x32; 32],
+            event_digest: [0x33; 32],
+            source_digest: [0x34; 32],
+            base_revision: 0,
+            next_revision: 1,
+            phase: NativeTelemetryPhaseV1::Prepare,
+            state_before: [0x35; 32],
+            state_after,
+            graph_before: graph_after,
+            graph_after,
+            local_digest: [0x36; 32],
+            compensation_digest: ae_contracts::legacy_reserved_zero_digest_v1(),
+            effective_digest: [0x37; 32],
+            energy: EnergyTelemetryV1 {
+                reserve_before: Fixed::ONE,
+                reserve_after: Fixed::from_raw(500_000),
+                recovered: Fixed::from_raw(100_000),
+                spent: Fixed::from_raw(600_000),
+                headroom: Fixed::from_raw(500_000),
+                residual: Fixed::from_raw(200_000),
+            },
+            capacity: CapacityTelemetryV1 {
+                upper_saturated_nodes: 2,
+                node_limit: 4,
+                node_headroom: Fixed::from_raw(500_000),
+                edge_used: 1,
+                edge_limit: 2,
+                edge_headroom: Fixed::from_raw(500_000),
+                headroom: Fixed::from_raw(500_000),
+                residual: Fixed::ZERO,
+            },
+            residuals: residuals.clone(),
+            residual_health: Fixed::from_raw(800_000),
+            native_gate: Fixed::from_raw(500_000),
+            checkpoint_digest: [0; 32],
+            telemetry_digest: [0; 32],
+        }
+        .seal();
+        let legacy_receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest,
+            scope_digest: telemetry.scope_digest,
+            event_digest: telemetry.event_digest,
+            authority_digest: [0x38; 32],
+            base_revision: telemetry.base_revision,
+            next_revision: telemetry.next_revision,
+            state_before: telemetry.state_before,
+            state_after,
+            graph_after,
+            action_contract: None,
+            active_nodes: 0,
+            active_edges: 0,
+            residuals,
+            status: CommitStatus::Committed,
+        };
+
+        let snapshot = encode_semantic_snapshot_v3(&formula_digest, &field, &graph, &telemetry)
+            .expect("canonical reserved-zero snapshot encodes");
+        assert!(decode_semantic_snapshot_v3(
+            &snapshot,
+            &formula_digest,
+            &state_after,
+            &graph_after,
+            &legacy_receipt,
+        )
+        .is_ok());
+
+        let mut nonzero_history = snapshot;
+        *nonzero_history
+            .last_mut()
+            .expect("AESEM3 has a reserved fourth block") = 1;
+        assert!(matches!(
+            decode_semantic_snapshot_v3(
+                &nonzero_history,
+                &formula_digest,
+                &state_after,
+                &graph_after,
+                &legacy_receipt,
+            ),
+            Err(RuntimeError::InvalidNeuralState)
+        ));
+    }
 }

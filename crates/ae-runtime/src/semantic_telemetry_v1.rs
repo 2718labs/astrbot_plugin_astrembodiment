@@ -23,8 +23,6 @@ use crate::RuntimeError;
 pub const PHASE0_FORMULA_DIGEST_DOMAIN_V1: &[u8] =
     b"astr-embodiment/phase0-native-propagation-fxp6-v1";
 const LOCAL_VECTOR_DIGEST_DOMAIN_V1: &[u8] = b"astr-embodiment/phase0-local-vector-v1";
-const COMPENSATION_VECTOR_DIGEST_DOMAIN_V1: &[u8] =
-    b"astr-embodiment/phase0-compensation-vector-v1";
 const EFFECTIVE_VECTOR_DIGEST_DOMAIN_V1: &[u8] = b"astr-embodiment/phase0-effective-vector-v1";
 
 pub(crate) fn phase0_formula_digest_v1(
@@ -68,10 +66,6 @@ pub(crate) fn local_vector_digest(values: &[Fixed; REGION_LAYOUT.len()]) -> Dige
     regional_vector_digest(LOCAL_VECTOR_DIGEST_DOMAIN_V1, values)
 }
 
-pub(crate) fn compensation_vector_digest(values: &[Fixed; REGION_LAYOUT.len()]) -> Digest {
-    regional_vector_digest(COMPENSATION_VECTOR_DIGEST_DOMAIN_V1, values)
-}
-
 pub(crate) fn effective_vector_digest(values: &[Fixed; REGION_LAYOUT.len()]) -> Digest {
     regional_vector_digest(EFFECTIVE_VECTOR_DIGEST_DOMAIN_V1, values)
 }
@@ -105,7 +99,6 @@ pub(crate) fn prepare_native_telemetry_v1(
     graph_before: Digest,
     graph_after: Digest,
     local_by_region: &[Fixed; REGION_LAYOUT.len()],
-    compensation_by_region: &[Fixed; REGION_LAYOUT.len()],
     dynamics: &PreparedSemanticDynamicsV2,
     full_vector_load: &FullVectorLoad,
 ) -> Result<NativeTelemetryReceiptV1, RuntimeError> {
@@ -175,7 +168,9 @@ pub(crate) fn prepare_native_telemetry_v1(
         graph_before,
         graph_after,
         local_digest: local_vector_digest(local_by_region),
-        compensation_digest: compensation_vector_digest(compensation_by_region),
+        // Telemetry v1 keeps this named field for AESEM3 compatibility.  It is
+        // a fixed all-zero reserved commitment, never a second dynamics input.
+        compensation_digest: ae_contracts::legacy_reserved_zero_digest_v1(),
         effective_digest: effective_vector_digest(&dynamics.effective_by_region),
         energy: EnergyTelemetryV1 {
             reserve_before: dynamics.energy.reserve_before_min,

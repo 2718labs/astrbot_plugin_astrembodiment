@@ -6,17 +6,10 @@
 //! replay verification. Python cannot reach any of this state directly; the
 //! PyO3 surface exposes only coarse calls.
 
-mod learning_compensation_v1;
 mod semantic;
 pub mod semantic_dynamics_v2;
 mod semantic_telemetry_v1;
 
-pub use learning_compensation_v1::{
-    LearningCompensationApplyDecisionV1, LearningCompensationApplyStatusV1,
-    LearningCompensationClaimDecisionV1, LearningCompensationClaimStatusV1,
-    LearningCompensationEnqueueAvailabilityV1, LearningCompensationEnqueueDecisionV1,
-    LearningCompensationEnqueueStatusV1, LearningCompensationTerminalDecisionV1,
-};
 pub use semantic::{
     ExpressionProfileFxP6, ExpressionProjectionV1, NodeObservabilityComponentV1,
     NodeObservabilityCountsV1, NodeObservabilityProjectionV1, NodeObservabilityRegionV1,
@@ -84,12 +77,6 @@ pub enum RuntimeError {
     SemanticRevisionOverflow,
     #[error("legacy semantic snapshot has no v2 attestation")]
     LegacyUnattested,
-    #[error("native semantic PREPARE gate is unavailable")]
-    NativeGateUnavailable,
-    #[error("invalid closed learning-compensation request or receipt")]
-    InvalidLearningCompensation,
-    #[error("learning compensation is unavailable without a verified native cursor")]
-    LearningCompensationUnavailable,
     #[error("context receipt validation error: {0}")]
     ContextReceipt(#[from] ReceiptValidationError),
     #[error("context projection error: {0}")]
@@ -330,7 +317,7 @@ impl AstrRuntime {
         })?;
         let vault_root = storage_parent.join("continuity-vault");
         let lifecycle = VaultLifecycle::open(&vault_root)?;
-        let mut store = match lifecycle.vault_mode_v1()? {
+        let store = match lifecycle.vault_mode_v1()? {
             VaultMode::Unborn => Store::open(path)?,
             VaultMode::Ready => Store::open(&lifecycle.current_authority_database_path()?)?,
             VaultMode::Migrating
@@ -340,11 +327,6 @@ impl AstrRuntime {
                 return Err(RebirthLifecycleError::BootstrapConflict.into())
             }
         };
-        // The in-memory teacher queue cannot survive a runtime restart. Seal
-        // every persisted text-free PENDING/CLAIMED job before exposing this
-        // authority again; Store performs the batch atomically and never asks
-        // native to reconstruct raw input.
-        store.abandon_unavailable_learning_compensation_jobs_v1()?;
         Ok(Self {
             store,
             hot: None,
@@ -368,8 +350,7 @@ impl AstrRuntime {
     ) -> Result<(), RuntimeError> {
         self.store.flush()?;
         let database = lifecycle.current_authority_database_path()?;
-        let mut store = Store::open(&database)?;
-        store.abandon_unavailable_learning_compensation_jobs_v1()?;
+        let store = Store::open(&database)?;
         self.store = store;
         self.hot = None;
         self.bind_hot(scope.bot_token, scope.persona_token)
@@ -650,7 +631,7 @@ impl AstrRuntime {
                     {
                         return Err(RuntimeError::LegacyUnattested);
                     }
-                    let (field, graph, _, _) = semantic::decode_semantic_snapshot_v3(
+                    let (field, graph, _) = semantic::decode_semantic_snapshot_v3(
                         &snapshot.state_bytes,
                         &semantic_formula_digest,
                         &receipt.state_after,
@@ -1215,11 +1196,7 @@ impl AstrRuntime {
         (
             NeuralField,
             SparseGraph,
-            Option<(
-                TransitionReceipt,
-                NativeTelemetryReceiptV1,
-                [ae_fixed::Fixed; ae_neurofield::REGION_LAYOUT.len()],
-            )>,
+            Option<(TransitionReceipt, NativeTelemetryReceiptV1)>,
         ),
         RuntimeError,
     > {
@@ -1257,19 +1234,14 @@ impl AstrRuntime {
         if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
             return Err(RuntimeError::LegacyUnattested);
         }
-        let (field, graph, telemetry_receipt, compensation_by_region) =
-            semantic::decode_semantic_snapshot_v3(
-                &snapshot.state_bytes,
-                formula_digest,
-                &receipt.state_after,
-                &receipt.graph_after,
-                &receipt,
-            )?;
-        Ok((
-            field,
-            graph,
-            Some((receipt, telemetry_receipt, compensation_by_region)),
-        ))
+        let (field, graph, telemetry_receipt) = semantic::decode_semantic_snapshot_v3(
+            &snapshot.state_bytes,
+            formula_digest,
+            &receipt.state_after,
+            &receipt.graph_after,
+            &receipt,
+        )?;
+        Ok((field, graph, Some((receipt, telemetry_receipt))))
     }
 
     fn semantic_identity_conflict(
@@ -1359,8 +1331,8 @@ impl AstrRuntime {
             baseline_graph,
             row.revision,
         )?;
-        let (telemetry_receipt, historical_compensation_by_region) = telemetry_receipt
-            .map(|(_, receipt, compensation_by_region)| (receipt, compensation_by_region))
+        let telemetry_receipt = telemetry_receipt
+            .map(|(_, receipt)| receipt)
             .ok_or(RuntimeError::LegacyUnattested)?;
         let prepared = semantic::prepare_semantic_transition_v2(
             &before,
@@ -1369,7 +1341,6 @@ impl AstrRuntime {
             manifest_digest,
             development_seed_digest,
             proposal,
-            historical_compensation_by_region,
         )?;
         if state_digest(&prepared.next_field, formula_digest) != receipt.state_after
             || graph_digest(&prepared.next_graph) != receipt.graph_after
@@ -1392,13 +1363,10 @@ impl AstrRuntime {
             graph_digest(&before_graph),
             graph_digest(&after_graph),
             &prepared.local_by_region,
-            &prepared.compensation_by_region,
             &prepared.dynamics,
             &prepared.full_vector_load,
         )?;
-        if telemetry_receipt != expected_telemetry
-            || telemetry_receipt.native_gate == ae_fixed::Fixed::ZERO
-        {
+        if telemetry_receipt != expected_telemetry {
             return Err(RuntimeError::SemanticIdentityConflict);
         }
         let expected_semantic_receipt = semantic::semantic_vector_receipt_v2(
@@ -1531,10 +1499,6 @@ impl AstrRuntime {
             });
         }
 
-        let compensation_by_region = learning_compensation_v1::committed_compensation_by_region_v1(
-            &self.store,
-            &semantic_scope,
-        )?;
         let prepared = semantic::prepare_semantic_transition_v2(
             &field,
             &baseline_field,
@@ -1542,7 +1506,6 @@ impl AstrRuntime {
             &manifest_digest,
             &development_seed_digest,
             proposal,
-            compensation_by_region,
         )?;
         let next_revision = semantic_revision
             .checked_add(1)
@@ -1563,13 +1526,9 @@ impl AstrRuntime {
             graph_before,
             graph_after,
             &prepared.local_by_region,
-            &prepared.compensation_by_region,
             &prepared.dynamics,
             &prepared.full_vector_load,
         )?;
-        if telemetry_receipt.native_gate == ae_fixed::Fixed::ZERO {
-            return Err(RuntimeError::NativeGateUnavailable);
-        }
         let receipt = TransitionReceipt {
             schema_version: 1,
             formula_digest,
@@ -1608,7 +1567,6 @@ impl AstrRuntime {
             &prepared.next_field,
             &prepared.next_graph,
             &telemetry_receipt,
-            &prepared.compensation_by_region,
         )?;
         let _ = semantic::decode_semantic_snapshot_v3(
             &state_bytes,

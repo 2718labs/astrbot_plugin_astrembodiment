@@ -32,7 +32,6 @@ pub struct DynamicsInputV2<'a> {
     pub baseline: &'a NeuralField,
     pub graph: &'a SparseGraph,
     pub local_by_region: [Fixed; REGION_LAYOUT.len()],
-    pub compensation_by_region: [Fixed; REGION_LAYOUT.len()],
     pub local_confidence_by_region: [Fixed; REGION_LAYOUT.len()],
 }
 
@@ -70,14 +69,6 @@ fn abs_i128(value: i128) -> Result<i128, DynamicsError> {
 
 fn require_unit(value: Fixed) -> Result<(), DynamicsError> {
     if (Fixed::ZERO..=Fixed::ONE).contains(&value) {
-        Ok(())
-    } else {
-        Err(DynamicsError::InvalidInput)
-    }
-}
-
-fn require_signed_unit(value: Fixed) -> Result<(), DynamicsError> {
-    if (-i128::from(FXP6_SCALE)..=i128::from(FXP6_SCALE)).contains(&i128::from(value.raw())) {
         Ok(())
     } else {
         Err(DynamicsError::InvalidInput)
@@ -229,13 +220,8 @@ pub fn propagate_semantic_dynamics_v2(
     let mut maximum_clamp_loss = 0_i128;
     for region in 0..REGION_LAYOUT.len() {
         require_unit(input.local_by_region[region])?;
-        require_signed_unit(input.compensation_by_region[region])?;
         require_unit(input.local_confidence_by_region[region])?;
-        let local_plus_compensation = i128::from(input.local_by_region[region].raw())
-            .checked_add(i128::from(input.compensation_by_region[region].raw()))
-            .ok_or(DynamicsError::Arithmetic)?;
-        let (effective, clamp_loss) = clamp_unit(local_plus_compensation)?;
-        update_max_loss(&mut maximum_clamp_loss, clamp_loss);
+        let effective = input.local_by_region[region];
         effective_by_region[region] = effective;
         direct_by_region[region] = Fixed::from_raw(mul6_raw(
             effective.raw(),
