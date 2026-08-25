@@ -43,14 +43,7 @@
     "items": {
       "assistant_provider_id": {
         "description": "辅助模型 Provider",
-        "hint": "非空时强制使用该 Provider；留空时使用当前会话模型。",
-        "type": "string",
-        "_special": "select_provider",
-        "default": ""
-      },
-      "semantic_estimator_provider_id": {
-        "description": "V3 语义估计 Provider",
-        "hint": "留空时依次使用辅助模型 Provider、当前会话 Provider；仅用于当前请求的闭合 15 维估计。",
+        "hint": "统一用于辅助能力与当前请求的闭合 15 维语义估计；留空时使用当前会话 Provider。",
         "type": "string",
         "_special": "select_provider",
         "default": ""

@@ -239,6 +239,111 @@ def test_explicit_assistant_provider_is_used_without_fallback():
     assert context.generate_calls[0]["tools"] is None
 
 
+@pytest.mark.parametrize(
+    (
+        "assistant_provider_id",
+        "legacy_provider_id",
+        "configured_provider",
+        "expected_provider",
+        "expected_current_calls",
+    ),
+    [
+        ("assistant", "legacy", "assistant", "assistant", 0),
+        ("   ", "legacy", "legacy", "legacy", 0),
+        ("   ", "   ", "unused", "chat", 2),
+    ],
+)
+def test_unified_auxiliary_provider_selection_is_shared_by_compiler_and_v3(
+    assistant_provider_id: str,
+    legacy_provider_id: str,
+    configured_provider: str,
+    expected_provider: str,
+    expected_current_calls: int,
+):
+    async def run():
+        context = FakeContext(
+            configured_provider=configured_provider,
+            current_provider="chat",
+        )
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
+
+        context.llm_generate = generate
+        instance = plugin(
+            FakeConfig(
+                model_settings={
+                    "assistant_provider_id": assistant_provider_id,
+                    "semantic_estimator_provider_id": legacy_provider_id,
+                },
+                observatory_enabled=False,
+            ),
+            context,
+        )
+        await instance._llm_generate(
+            FakeEvent(), prompt="compile", system_prompt="compiler"
+        )
+        estimate = await instance._semantic_estimate_v3(
+            FakeEvent(),
+            {
+                "current_turn_text": "current turn",
+                "system_prompt": main_module.SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
+                "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
+                "input": {"context_summary": {}},
+            },
+        )
+        return context, estimate
+
+    context, estimate = asyncio.run(run())
+
+    assert estimate.as_json() == _v3_test_estimate()
+    assert [call["chat_provider_id"] for call in context.generate_calls] == [
+        expected_provider,
+        expected_provider,
+    ]
+    assert context.current_calls == expected_current_calls
+
+
+@pytest.mark.parametrize(
+    "model_settings",
+    [
+        {
+            "assistant_provider_id": "missing",
+            "semantic_estimator_provider_id": "legacy",
+        },
+        {
+            "assistant_provider_id": "   ",
+            "semantic_estimator_provider_id": "missing",
+        },
+    ],
+)
+def test_unified_auxiliary_provider_unavailable_is_fail_closed_for_both_consumers(
+    model_settings: dict[str, str],
+):
+    async def run():
+        context = FakeContext(configured_provider="legacy", current_provider="chat")
+        instance = plugin(FakeConfig(model_settings=model_settings), context)
+        request_mapping = {
+            "current_turn_text": "current turn",
+            "system_prompt": main_module.SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
+            "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
+            "input": {"context_summary": {}},
+        }
+        with pytest.raises(ValueError):
+            await instance._llm_generate(
+                FakeEvent(), prompt="compile", system_prompt="compiler"
+            )
+        with pytest.raises(ValueError):
+            await instance._semantic_estimate_v3(FakeEvent(), request_mapping)
+        return context
+
+    context = asyncio.run(run())
+
+    assert context.current_calls == 0
+    assert context.generate_calls == []
+
+
 def test_empty_assistant_provider_uses_current_chat_provider():
     async def run():
         context = FakeContext(configured_provider="helper", current_provider="chat")
@@ -1216,13 +1321,19 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
         sys.modules.pop(f"{module_name}._native", None)
 
 
-def test_schema_exposes_chinese_provider_and_seed_fields():
+def test_schema_exposes_one_unified_chinese_provider_selector_and_seed_fields():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
-    provider = schema["model_settings"]["items"]["assistant_provider_id"]
+    model_settings = schema["model_settings"]["items"]
+    provider = model_settings["assistant_provider_id"]
     seed = schema["seed_code"]
     assert provider["_special"] == "select_provider"
     assert provider["default"] == ""
+    assert (
+        provider["hint"]
+        == "统一用于辅助能力与当前请求的闭合 15 维语义估计；留空时使用当前会话 Provider。"
+    )
+    assert "semantic_estimator_provider_id" not in model_settings
     assert (
         provider["description"]
         != provider["description"].encode("ascii", "ignore").decode()
@@ -1560,7 +1671,7 @@ def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
         return (
             plugin(
                 FakeConfig(
-                    model_settings={"semantic_estimator_provider_id": "semantic"},
+                    model_settings={"assistant_provider_id": "semantic"},
                     observatory_enabled=False,
                 ),
                 context,
@@ -1655,7 +1766,7 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
         context.llm_generate = generate
         instance = plugin(
             FakeConfig(
-                model_settings={"semantic_estimator_provider_id": "semantic"},
+                model_settings={"assistant_provider_id": "semantic"},
                 observatory_enabled=False,
             ),
             context,
@@ -1734,7 +1845,7 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
         context.llm_generate = unavailable_generate
         instance = plugin(
             FakeConfig(
-                model_settings={"semantic_estimator_provider_id": "semantic"},
+                model_settings={"assistant_provider_id": "semantic"},
                 observatory_enabled=False,
             ),
             context,
@@ -1814,7 +1925,7 @@ def test_v3_dimension_value_provider_warn_includes_first_safe_diagnostic(
         context.llm_generate = generate
         instance = plugin(
             FakeConfig(
-                model_settings={"semantic_estimator_provider_id": "semantic"},
+                model_settings={"assistant_provider_id": "semantic"},
                 observatory_enabled=False,
             ),
             context,
@@ -1886,7 +1997,7 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
         context.llm_generate = generate
         instance = plugin(
             FakeConfig(
-                model_settings={"semantic_estimator_provider_id": "semantic"},
+                model_settings={"assistant_provider_id": "semantic"},
                 observatory_enabled=False,
             ),
             context,

@@ -269,6 +269,7 @@ class AstrEmbodimentPlugin(Star):
         # generated SeedCode to appear in the WebUI after reload.
         self.config = config if config is not None else AstrBotConfig()
         self._config_values = dict(config or {})
+        self._unified_provider_legacy_warning_emitted = False
         self._bridge = NativeBridge()
         self._coordinator = GenesisCoordinator(self._bridge)
         self._health = None
@@ -466,11 +467,53 @@ class AstrEmbodimentPlugin(Star):
         return str(self._config_value("assistant_provider_id", "") or "").strip()
 
     def _semantic_estimator_provider_id(self) -> str:
-        """Return only the explicit V3 estimator provider selection."""
+        """Read the hidden legacy V3 provider key for migration compatibility."""
 
         return str(
             self._config_value("semantic_estimator_provider_id", "") or ""
         ).strip()
+
+    def _configured_auxiliary_provider_id(self) -> tuple[str, str]:
+        """Select the unified configured Provider before any session fallback."""
+
+        provider_id = self._assistant_provider_id()
+        if provider_id:
+            return provider_id, "assistant"
+        provider_id = self._semantic_estimator_provider_id()
+        if provider_id:
+            return provider_id, "legacy_v3"
+        return "", "session"
+
+    async def _resolve_auxiliary_provider_id(
+        self,
+        event: Any,
+        *,
+        consumer: str,
+    ) -> str:
+        """Resolve one validated Provider for compiler and V3 estimator calls."""
+
+        provider_id, source = self._configured_auxiliary_provider_id()
+        if source != "session":
+            get_provider = getattr(self.context, "get_provider_by_id", None)
+            if not callable(get_provider) or get_provider(provider_id) is None:
+                logger.warning(
+                    f"UNIFIED_PROVIDER_UNAVAILABLE source={source} consumer={consumer}"
+                )
+                raise ValueError(f"辅助模型 Provider 不存在: {provider_id}")
+            if source == "legacy_v3" and not self._unified_provider_legacy_warning_emitted:
+                self._unified_provider_legacy_warning_emitted = True
+                logger.warning("UNIFIED_PROVIDER_LEGACY_FALLBACK")
+            return provider_id
+
+        get_current = getattr(self.context, "get_current_chat_provider_id", None)
+        if not callable(get_current):
+            raise TypeError("AstrBot 未提供当前会话模型接口")
+        provider_id = await self._maybe_await(
+            get_current(umo=getattr(event, "unified_msg_origin", None))
+        )
+        if type(provider_id) is not str or not provider_id.strip():
+            raise ValueError("辅助模型 Provider 不存在")
+        return provider_id.strip()
 
     def _semantic_estimator_timeout_seconds(self) -> float:
         """Keep the V3 provider timeout bounded even for malformed config."""
@@ -494,17 +537,11 @@ class AstrEmbodimentPlugin(Star):
         prompt: str,
         system_prompt: str,
     ) -> Any:
-        """Call the configured compiler provider with an explicit fallback rule."""
-        provider_id = self._assistant_provider_id()
-        if provider_id:
-            get_provider = getattr(self.context, "get_provider_by_id", None)
-            if callable(get_provider) and get_provider(provider_id) is None:
-                raise ValueError(f"辅助模型 Provider 不存在: {provider_id}")
-        else:
-            get_current = getattr(self.context, "get_current_chat_provider_id", None)
-            if not callable(get_current):
-                raise RuntimeError("AstrBot 未提供当前会话模型接口")
-            provider_id = await get_current(umo=event.unified_msg_origin)
+        """Call the unified auxiliary Provider without history or tool leakage."""
+        provider_id = await self._resolve_auxiliary_provider_id(
+            event,
+            consumer="assistant",
+        )
 
         generate = getattr(self.context, "llm_generate", None)
         if not callable(generate):
@@ -548,22 +585,10 @@ class AstrEmbodimentPlugin(Star):
         ):
             raise ValueError("invalid semantic estimate request")
 
-        provider_id = (
-            self._semantic_estimator_provider_id() or self._assistant_provider_id()
+        provider_id = await self._resolve_auxiliary_provider_id(
+            event,
+            consumer="semantic_v3",
         )
-        if provider_id:
-            get_provider = getattr(self.context, "get_provider_by_id", None)
-            if callable(get_provider) and get_provider(provider_id) is None:
-                raise ValueError("semantic estimator provider unavailable")
-        else:
-            get_current = getattr(self.context, "get_current_chat_provider_id", None)
-            if not callable(get_current):
-                raise RuntimeError("semantic estimator provider unavailable")
-            provider_id = await self._maybe_await(
-                get_current(umo=getattr(event, "unified_msg_origin", None))
-            )
-            if type(provider_id) is not str or not provider_id.strip():
-                raise ValueError("semantic estimator provider unavailable")
 
         generate = getattr(self.context, "llm_generate", None)
         if not callable(generate):
