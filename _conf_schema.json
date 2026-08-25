@@ -48,6 +48,14 @@
         "_special": "select_provider",
         "default": ""
       },
+      "semantic_estimator_provider_id": {
+        "description": "V3 语义估计 Provider",
+        "hint": "旧版兼容字段；统一 Provider 配置请使用辅助模型 Provider。",
+        "type": "string",
+        "_special": "select_provider",
+        "default": "",
+        "invisible": true
+      },
       "semantic_estimator_timeout_ms": {
         "description": "V3 语义估计超时（毫秒）",
         "hint": "超时后不提交语义、不回退固定零，并记录 EXPRESSION_NOT_ATTEMPTED 警告。",

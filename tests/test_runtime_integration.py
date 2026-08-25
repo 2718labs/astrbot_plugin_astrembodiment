@@ -306,42 +306,77 @@ def test_unified_auxiliary_provider_selection_is_shared_by_compiler_and_v3(
 
 
 @pytest.mark.parametrize(
-    "model_settings",
+    ("model_settings", "lookup_raises"),
     [
-        {
-            "assistant_provider_id": "missing",
-            "semantic_estimator_provider_id": "legacy",
-        },
-        {
-            "assistant_provider_id": "   ",
-            "semantic_estimator_provider_id": "missing",
-        },
+        (
+            {
+                "assistant_provider_id": "assistant-provider-private-id",
+                "semantic_estimator_provider_id": "legacy",
+            },
+            False,
+        ),
+        (
+            {
+                "assistant_provider_id": "   ",
+                "semantic_estimator_provider_id": "legacy-provider-private-id",
+            },
+            True,
+        ),
     ],
 )
 def test_unified_auxiliary_provider_unavailable_is_fail_closed_for_both_consumers(
     model_settings: dict[str, str],
+    lookup_raises: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    class RecordingLogger:
+        def __init__(self) -> None:
+            self.warning_messages: list[str] = []
+
+        def warning(self, template: str, *args: object) -> None:
+            self.warning_messages.append(template % args if args else template)
+
+    raw_provider_id = next(
+        value
+        for value in model_settings.values()
+        if value not in {"legacy", "   "}
+    )
+    recorder = RecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+
     async def run():
         context = FakeContext(configured_provider="legacy", current_provider="chat")
+        if lookup_raises:
+            def get_provider_by_id(provider_id: str):
+                context.provider_calls.append(provider_id)
+                raise RuntimeError(f"provider lookup failed: {provider_id}")
+
+            context.get_provider_by_id = get_provider_by_id
         instance = plugin(FakeConfig(model_settings=model_settings), context)
+        event = FakeEvent()
         request_mapping = {
             "current_turn_text": "current turn",
             "system_prompt": main_module.SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
             "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
             "input": {"context_summary": {}},
         }
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as compiler_error:
             await instance._llm_generate(
-                FakeEvent(), prompt="compile", system_prompt="compiler"
+                event, prompt="compile", system_prompt="compiler"
             )
-        with pytest.raises(ValueError):
-            await instance._semantic_estimate_v3(FakeEvent(), request_mapping)
-        return context
+        with pytest.raises(ValueError) as semantic_error:
+            await instance._semantic_estimate_v3(event, request_mapping)
+        await instance._stop_genesis_turn(event, str(compiler_error.value))
+        return context, event, compiler_error.value, semantic_error.value
 
-    context = asyncio.run(run())
+    context, event, compiler_error, semantic_error = asyncio.run(run())
 
     assert context.current_calls == 0
     assert context.generate_calls == []
+    assert str(compiler_error) == "辅助模型 Provider 不存在"
+    assert str(semantic_error) == "辅助模型 Provider 不存在"
+    assert raw_provider_id not in "\n".join(recorder.warning_messages)
+    assert raw_provider_id not in "\n".join(event.sent)
 
 
 def test_empty_assistant_provider_uses_current_chat_provider():
@@ -462,21 +497,23 @@ def test_empty_assistant_provider_uses_current_chat_provider_when_unconfigured()
     assert context.generate_calls[0]["chat_provider_id"] == "main"
 
 
-def test_invalid_explicit_assistant_provider_does_not_fallback():
+def test_invalid_explicit_assistant_provider_does_not_fallback_or_expose_raw_id():
     async def run():
         context = FakeContext(configured_provider="helper", current_provider="chat")
-        instance = plugin(FakeConfig(assistant_provider_id="missing"), context)
+        raw_provider_id = "missing-provider-id"
+        instance = plugin(FakeConfig(assistant_provider_id=raw_provider_id), context)
 
-        with pytest.raises(ValueError, match="missing"):
+        with pytest.raises(ValueError, match="辅助模型 Provider 不存在") as exc_info:
             await instance._llm_generate(
                 FakeEvent(), prompt="compile", system_prompt="compiler"
             )
-        return context
+        return context, raw_provider_id, exc_info.value
 
-    context = asyncio.run(run())
+    context, raw_provider_id, error = asyncio.run(run())
 
     assert context.current_calls == 0
     assert context.generate_calls == []
+    assert raw_provider_id not in str(error)
 
 
 def test_seed_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: Path):
@@ -1326,6 +1363,7 @@ def test_schema_exposes_one_unified_chinese_provider_selector_and_seed_fields():
 
     model_settings = schema["model_settings"]["items"]
     provider = model_settings["assistant_provider_id"]
+    legacy_provider = model_settings["semantic_estimator_provider_id"]
     seed = schema["seed_code"]
     assert provider["_special"] == "select_provider"
     assert provider["default"] == ""
@@ -1333,7 +1371,16 @@ def test_schema_exposes_one_unified_chinese_provider_selector_and_seed_fields():
         provider["hint"]
         == "统一用于辅助能力与当前请求的闭合 15 维语义估计；留空时使用当前会话 Provider。"
     )
-    assert "semantic_estimator_provider_id" not in model_settings
+    assert legacy_provider["type"] == "string"
+    assert legacy_provider["default"] == ""
+    assert legacy_provider["invisible"] is True
+    visible_provider_selectors = [
+        key
+        for key, metadata in model_settings.items()
+        if metadata.get("_special") == "select_provider"
+        and not metadata.get("invisible", False)
+    ]
+    assert visible_provider_selectors == ["assistant_provider_id"]
     assert (
         provider["description"]
         != provider["description"].encode("ascii", "ignore").decode()
