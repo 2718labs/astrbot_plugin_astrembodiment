@@ -2599,6 +2599,10 @@ mod tests {
         let event_digest = wire::event_digest(&event);
         let arbitrary_formula = [0xa5; 32];
         assert_ne!(arbitrary_formula, genesis.formula_digest);
+        assert_ne!(
+            arbitrary_formula,
+            phase0_canonical_formula_digest_v1(&genesis.formula_digest)
+        );
         let receipt = TransitionReceipt {
             schema_version: 1,
             formula_digest: arbitrary_formula,
@@ -2616,11 +2620,17 @@ mod tests {
             residuals: ae_contracts::InvariantResiduals::default(),
             status: CommitStatus::Committed,
         };
-        let delta_bytes = phase0_formula_transition_delta_v1(
-            &receipt,
-            genesis.graph_digest,
-            genesis.formula_digest,
-        );
+        let delta_bytes = Phase0FormulaTransitionV1 {
+            scope_digest: receipt.scope_digest,
+            event_digest: receipt.event_digest,
+            receipt_digest: wire::receipt_digest(&receipt),
+            base_revision: receipt.base_revision,
+            next_revision: receipt.next_revision,
+            base_graph_digest: genesis.graph_digest,
+            from_formula_digest: genesis.formula_digest,
+            to_formula_digest: arbitrary_formula,
+        }
+        .canonical_bytes();
         let context_bytes = vec![70, 71];
         let bundle = ContinuityCommitBundleV1 {
             envelope: CommitEnvelope {
@@ -2654,7 +2664,40 @@ mod tests {
             store.commit_continuity_bundle(&bundle),
             Err(StoreError::ContinuityFence("graph_current_formula"))
         ));
-        assert_eq!(store.count_journal().unwrap(), 0);
+        let conn = store.conn.as_ref().unwrap();
+        let persisted_counts = (
+            conn.query_row(
+                "SELECT COUNT(*) FROM journal WHERE scope_digest = ?1",
+                params![blob(scope_digest)],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM applied_events WHERE scope_digest = ?1",
+                params![blob(scope_digest)],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM snapshots WHERE scope_digest = ?1",
+                params![blob(scope_digest)],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM graph_commits WHERE scope_digest = ?1",
+                params![blob(scope_digest)],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM context_commits WHERE scope_digest = ?1",
+                params![blob(scope_digest)],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(persisted_counts, (0, 0, 0, 0, 0));
     }
 
     #[test]
