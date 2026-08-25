@@ -20,7 +20,10 @@ import astr_embodiment.bridge as bridge_module  # noqa: E402
 import main as main_module  # noqa: E402
 from astr_embodiment.contracts import ScopeTokens  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
-from astr_embodiment.semantic_estimator import SemanticEstimateError  # noqa: E402
+from astr_embodiment.semantic_estimator import (  # noqa: E402
+    SemanticEstimateError,
+    parse_estimator_output_v3,
+)
 from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
 
@@ -1347,6 +1350,24 @@ def _v3_test_estimate() -> dict:
         "confidence_fxp6": 900_000,
     }
     return {"schema": "astr-embodiment.semantic-estimate.v3", "dimensions": dimensions}
+
+
+def test_v3_estimator_accepts_only_one_exact_json_fence():
+    expected = _v3_test_estimate()
+    bare_completion = json.dumps(expected)
+    fenced_completion = f"\t\r\n```json\r\n{bare_completion}\r\n```\n \t"
+
+    assert parse_estimator_output_v3(bare_completion).as_json() == expected
+    assert parse_estimator_output_v3(fenced_completion).as_json() == expected
+
+    for rejected_completion in (
+        f"{bare_completion}\n{bare_completion}",
+        f"explanation:\n{bare_completion}",
+    ):
+        with pytest.raises(SemanticEstimateError) as exc_info:
+            parse_estimator_output_v3(rejected_completion)
+        assert exc_info.value.code == "ESTIMATOR_MALFORMED"
+        assert exc_info.value.subcode == "JSON_DECODE"
 
 
 def _v3_test_native_closure() -> dict:

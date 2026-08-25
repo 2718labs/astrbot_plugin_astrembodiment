@@ -75,6 +75,7 @@ _DIMENSION_VALUE_CLASSIFICATIONS = frozenset(
 _DIMENSION_VALUE_JSON_TYPES = frozenset(
     {"number", "string", "boolean", "null", "object", "array", "other"}
 )
+_JSON_WHITESPACE = " \t\n\r"
 _NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-binding-v1"
 _SCOPE_FIELDS = frozenset(
     {"bot_token", "persona_token", "relation_token", "session_token"}
@@ -239,11 +240,38 @@ def _pairs_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _exact_json_fence_candidate(value: str) -> str:
+    """Return a bare JSON candidate or retain a non-exact envelope unchanged."""
+
+    candidate = value.strip(_JSON_WHITESPACE)
+    opening = "```json"
+    if not candidate.startswith(opening):
+        return candidate
+
+    opening_end = len(opening)
+    if candidate[opening_end : opening_end + 2] == "\r\n":
+        body_start = opening_end + 2
+    elif candidate[opening_end : opening_end + 1] == "\n":
+        body_start = opening_end + 1
+    else:
+        return candidate
+
+    if candidate.endswith("\r\n```"):
+        body_end = len(candidate) - 5
+    elif candidate.endswith("\n```"):
+        body_end = len(candidate) - 4
+    else:
+        return candidate
+    if body_end < body_start:
+        return candidate
+    return candidate[body_start:body_end]
+
+
 def _decode_json_object(value: Any) -> dict[str, Any]:
     if type(value) is str:
         try:
             payload = json.loads(
-                value,
+                _exact_json_fence_candidate(value),
                 parse_constant=_reject_json_constant,
                 object_pairs_hook=_pairs_without_duplicates,
             )
