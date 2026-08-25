@@ -20,6 +20,8 @@ from .bridge import (
     GenesisUnavailable,
     NativeBridge,
     RetryWait,
+    SEMANTIC_NATIVE_ERROR_CODES,
+    SEMANTIC_NATIVE_FAILURE_STAGES,
     validate_context_summary_payload,
 )
 from .contracts import (
@@ -66,7 +68,7 @@ _SEMANTIC_FAILURE_CODES = frozenset(
         "NATIVE_ERROR",
         "EXPRESSION_PROJECTION_UNAVAILABLE",
     }
-)
+) | SEMANTIC_NATIVE_ERROR_CODES
 
 
 class GenesisCoordinator:
@@ -279,13 +281,21 @@ class GenesisCoordinator:
         code: str,
         *,
         cause_code: str | None = None,
+        native_stage: str | None = None,
     ) -> dict[str, str]:
         """Return one non-echoing V3 preview failure."""
 
         if code not in _SEMANTIC_FAILURE_CODES:
             code = "NATIVE_ERROR"
         result = {"status": "DEGRADED", "code": code}
-        if code == "ESTIMATOR_MALFORMED" and cause_code in ESTIMATOR_MALFORMED_SUBCODES:
+        if code in SEMANTIC_NATIVE_ERROR_CODES:
+            result["cause_code"] = code
+            if native_stage in SEMANTIC_NATIVE_FAILURE_STAGES:
+                result["native_stage"] = native_stage
+        elif (
+            code == "ESTIMATOR_MALFORMED"
+            and cause_code in ESTIMATOR_MALFORMED_SUBCODES
+        ):
             result["cause_code"] = cause_code
         return result
 
@@ -390,7 +400,9 @@ class GenesisCoordinator:
         if type(cursor) is not dict:
             return self._semantic_failure("NATIVE_MALFORMED")
         if cursor.get("status") == "DEGRADED":
-            return self._semantic_failure(str(cursor.get("code", "NATIVE_ERROR")))
+            return self._semantic_failure(
+                str(cursor.get("code", "NATIVE_ERROR")), native_stage="CURSOR"
+            )
         if set(cursor) != {"schema", "revision"}:
             return self._semantic_failure("NATIVE_MALFORMED")
         cursor_revision = cursor.get("revision")
@@ -449,7 +461,10 @@ class GenesisCoordinator:
         if type(closure) is not dict:
             return self._semantic_failure("NATIVE_MALFORMED")
         if closure.get("status") == "DEGRADED":
-            return self._semantic_failure(str(closure.get("code", "NATIVE_ERROR")))
+            return self._semantic_failure(
+                str(closure.get("code", "NATIVE_ERROR")),
+                native_stage="NATIVE_APPLY",
+            )
         if closure.get("schema") not in {
             "astrembodiment.semantic-perception-closure.v1",
             "astrembodiment.semantic-perception-closure.v2",

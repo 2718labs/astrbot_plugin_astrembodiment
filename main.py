@@ -61,6 +61,10 @@ except ImportError:  # Static checks outside AstrBot.
 
 try:
     from .astr_embodiment import NativeBridge, NativeCoreUnavailable
+    from .astr_embodiment.bridge import (
+        SEMANTIC_NATIVE_ERROR_CODES,
+        SEMANTIC_NATIVE_FAILURE_STAGES,
+    )
     from .astr_embodiment.contracts import (
         FrozenTurn,
         ScopeTokens,
@@ -89,6 +93,10 @@ try:
     )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment import NativeBridge, NativeCoreUnavailable
+    from astr_embodiment.bridge import (
+        SEMANTIC_NATIVE_ERROR_CODES,
+        SEMANTIC_NATIVE_FAILURE_STAGES,
+    )
     from astr_embodiment.contracts import (
         FrozenTurn,
         ScopeTokens,
@@ -257,6 +265,7 @@ _SEMANTIC_NOT_ATTEMPTED_CAUSES = (
         }
     )
     | ESTIMATOR_MALFORMED_SUBCODES
+    | SEMANTIC_NATIVE_ERROR_CODES
 )
 
 
@@ -1414,6 +1423,19 @@ class AstrEmbodimentPlugin(Star):
             expression_profile=expression_profile,
             cause_code=cause_code,
         )
+        native_code = outcome.get("cause_code")
+        native_stage = outcome.get("native_stage")
+        if (
+            type(native_code) is str
+            and native_code in SEMANTIC_NATIVE_ERROR_CODES
+            and type(native_stage) is str
+            and native_stage in SEMANTIC_NATIVE_FAILURE_STAGES
+        ):
+            logger.warning(
+                "AstrEmbodiment semantic native failure: code=%s stage=%s",
+                native_code,
+                native_stage,
+            )
         try:
             message = _OBSERVATORY_PREFIX + json.dumps(
                 record,

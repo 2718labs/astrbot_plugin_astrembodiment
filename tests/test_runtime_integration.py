@@ -1932,6 +1932,112 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
     assert recorder.info_messages == []
 
 
+@pytest.mark.parametrize(
+    ("native_code", "expected_stage"),
+    (
+        ("LEGACY_UNATTESTED", "NATIVE_APPLY"),
+        ("INVALID_NEURAL_STATE", "NATIVE_APPLY"),
+        ("STORAGE", "NATIVE_APPLY"),
+    ),
+)
+def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    native_code: str,
+    expected_stage: str,
+):
+    """PyO3 codes survive the Python preview path without exposing detail."""
+
+    native_detail = "private native detail must never appear in host logs"
+
+    class NativeAbi:
+        def semantic_revision_v1(self, _scope_json: str) -> str:
+            return json.dumps(
+                {"schema": "astrembodiment.semantic-revision.v1", "revision": 2}
+            )
+
+        def apply_perception_proposal_v1(
+            self, _scope_json: str, _proposal_json: str
+        ) -> str:
+            raise RuntimeError(f"{native_code}::{native_detail}")
+
+    async def run() -> tuple[dict[str, object], FakeRequest]:
+        context = FakeContext(configured_provider="semantic")
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
+
+        context.llm_generate = generate
+        instance = plugin(
+            FakeConfig(
+                model_settings={"assistant_provider_id": "semantic"},
+                observatory_enabled=False,
+            ),
+            context,
+        )
+        bridge = bridge_module.NativeBridge()
+        bridge._native = NativeAbi()
+        instance._bridge = bridge
+        instance._coordinator = GenesisCoordinator(bridge)
+        scope = _v3_test_scope()
+
+        async def run_genesis(*_args, **_kwargs):
+            return _v3_test_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        observed_outcome: dict[str, object] = {}
+        original_preflight = instance._coordinator.preflight_semantic_v3
+
+        async def capture_preflight(**kwargs):
+            result = await original_preflight(**kwargs)
+            observed_outcome.update(result)
+            return result
+
+        instance._coordinator.preflight_semantic_v3 = capture_preflight
+        request = FakeRequest()
+        request.prompt = "请停止并保持边界。"
+        await instance.on_llm_request(FakeEvent(), request)
+        return observed_outcome, request
+
+    recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    observed_outcome, request = asyncio.run(run())
+
+    assert observed_outcome == {
+        "status": "DEGRADED",
+        "code": native_code,
+        "cause_code": native_code,
+        "native_stage": expected_stage,
+    }
+    semantic_record = getattr(
+        request, "_astrembodiment_semantic_observatory_record_v1", {}
+    )
+    assert {
+        key: semantic_record.get(key)
+        for key in (
+            "expression_state",
+            "code",
+            "reason",
+            "cause_code",
+            "dimensions_fxp6",
+            "revision",
+        )
+    } == {
+        "expression_state": "NOT_ATTEMPTED",
+        "code": "EXPRESSION_NOT_ATTEMPTED",
+        "reason": "EXPRESSION_NOT_ATTEMPTED",
+        "cause_code": native_code,
+        "dimensions_fxp6": None,
+        "revision": None,
+    }
+    assert recorder.warning_messages[0] == (
+        "AstrEmbodiment semantic native failure: "
+        f"code={native_code} stage={expected_stage}"
+    )
+    assert len(recorder.warning_messages) == 2
+    assert native_detail not in "\n".join(recorder.warning_messages)
+
+
 def test_v3_dimension_value_provider_warn_includes_first_safe_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ):
