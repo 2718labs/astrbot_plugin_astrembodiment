@@ -55,6 +55,7 @@ const LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1: u8 = 1;
 const LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1: &[u8] =
     b"astr-embodiment/legacy-semantic-formula-upgrade-v1";
 const AESEM2_SNAPSHOT_MAGIC: &[u8] = b"AESEM2\0";
+const REVISION_RANGE_FENCE: &str = "revision_range";
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -661,6 +662,7 @@ pub fn phase0_formula_transition_delta_v1(
 }
 
 type StoredJournalColumns = (i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+type StoredJournalListColumns = (i64, i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 type StoredGraphColumns = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 type StoredContextColumns = (Vec<u8>, Vec<u8>, i64, Vec<u8>, Vec<u8>);
 type StoredContextDuplicateColumns = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
@@ -689,6 +691,26 @@ fn token_from_blob(bytes: &[u8], fence: &'static str) -> Result<[u8; 16], StoreE
     let mut token = [0u8; 16];
     token.copy_from_slice(bytes);
     Ok(token)
+}
+
+fn revision_from_sqlite(value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::ContinuityFence(REVISION_RANGE_FENCE))
+}
+
+fn revision_to_sqlite(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::ContinuityFence(REVISION_RANGE_FENCE))
+}
+
+fn next_sqlite_revision(current: u64) -> Result<(u64, i64), StoreError> {
+    let next = current
+        .checked_add(1)
+        .ok_or(StoreError::ContinuityFence(REVISION_RANGE_FENCE))?;
+    Ok((next, revision_to_sqlite(next)?))
+}
+
+fn is_formula_transition_delta(bytes: &[u8]) -> bool {
+    bytes.starts_with(PHASE0_FORMULA_TRANSITION_MAGIC_V1)
+        || bytes.starts_with(LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1)
 }
 
 fn scope_from_event(event: &CanonicalEvent) -> &ScopeRef {
@@ -1442,24 +1464,22 @@ impl Store {
         persona_token: &[u8; 16],
     ) -> Result<Option<BindingRow>, StoreError> {
         let conn = self.connection()?;
-        let row = conn
+        let row: Option<(Vec<u8>, i64)> = conn
             .query_row(
                 "SELECT incarnation_id, revision FROM active_bindings WHERE bot_token = ?1 AND persona_token = ?2",
                 params![blob(*bot_token), blob(*persona_token)],
-                |row| {
-                    let bytes: Vec<u8> = row.get(0)?;
-                    let mut incarnation = [0u8; 32];
-                    incarnation.copy_from_slice(&bytes);
-                    Ok(BindingRow {
-                        bot_token: *bot_token,
-                        persona_token: *persona_token,
-                        incarnation_id: incarnation,
-                        revision: row.get::<_, i64>(1)? as u64,
-                    })
-                },
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        Ok(row)
+        let Some((incarnation_id, revision)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(BindingRow {
+            bot_token: *bot_token,
+            persona_token: *persona_token,
+            incarnation_id: digest_from_blob(&incarnation_id, "binding_incarnation")?,
+            revision: revision_from_sqlite(revision)?,
+        }))
     }
 
     /// Resolve the committed genesis for a persona binding by
@@ -1565,7 +1585,7 @@ impl Store {
             params![blob(*scope_digest)],
             |row| row.get(0),
         )?;
-        Ok(revision as u64)
+        revision_from_sqlite(revision)
     }
 
     pub fn last_chain_digest(&self, scope_digest: &Digest) -> Result<Option<Digest>, StoreError> {
@@ -1600,7 +1620,7 @@ impl Store {
         let Some(revision) = revision else {
             return Ok(None);
         };
-        self.read_journal_row(scope_digest, revision as u64)
+        self.read_journal_row(scope_digest, revision_from_sqlite(revision)?)
     }
 
     fn read_journal_row(
@@ -1609,30 +1629,44 @@ impl Store {
         revision: u64,
     ) -> Result<Option<JournalRow>, StoreError> {
         let conn = self.connection()?;
-        conn.query_row(
-            "SELECT base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest FROM journal WHERE scope_digest = ?1 AND logical_revision = ?2",
-            params![blob(*scope_digest), revision as i64],
-            |row| {
-                let mut event_digest = [0u8; 32];
-                let bytes: Vec<u8> = row.get(3)?;
-                event_digest.copy_from_slice(&bytes);
-                let mut chain = [0u8; 32];
-                let bytes: Vec<u8> = row.get(5)?;
-                chain.copy_from_slice(&bytes);
-                Ok(JournalRow {
-                    revision,
-                    scope_digest: *scope_digest,
-                    base_revision: row.get::<_, i64>(0)? as u64,
-                    event_kind: row.get(1)?,
-                    event_bytes: row.get(2)?,
-                    event_digest,
-                    receipt_bytes: row.get(4)?,
-                    chain_digest: chain,
-                })
-            },
-        )
-        .optional()
-        .map_err(StoreError::from)
+        let revision_sql = revision_to_sqlite(revision)?;
+        let stored: Option<StoredJournalColumns> = conn
+            .query_row(
+                "SELECT base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest FROM journal WHERE scope_digest = ?1 AND logical_revision = ?2",
+                params![blob(*scope_digest), revision_sql],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            base_revision,
+            event_kind,
+            event_bytes,
+            event_digest,
+            receipt_bytes,
+            chain_digest,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        Ok(Some(JournalRow {
+            revision,
+            scope_digest: *scope_digest,
+            base_revision: revision_from_sqlite(base_revision)?,
+            event_kind,
+            event_bytes,
+            event_digest: digest_from_blob(&event_digest, "stored_event_digest")?,
+            receipt_bytes,
+            chain_digest: digest_from_blob(&chain_digest, "stored_chain_digest")?,
+        }))
     }
 
     pub fn read_journal(&self, scope_digest: &Digest) -> Result<Vec<JournalRow>, StoreError> {
@@ -1640,27 +1674,44 @@ impl Store {
         let mut statement = conn.prepare(
             "SELECT logical_revision, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest FROM journal WHERE scope_digest = ?1 ORDER BY logical_revision ASC",
         )?;
-        let rows = statement
+        let stored = statement
             .query_map(params![blob(*scope_digest)], |row| {
-                let mut event_digest = [0u8; 32];
-                let bytes: Vec<u8> = row.get(4)?;
-                event_digest.copy_from_slice(&bytes);
-                let mut chain = [0u8; 32];
-                let bytes: Vec<u8> = row.get(6)?;
-                chain.copy_from_slice(&bytes);
-                Ok(JournalRow {
-                    revision: row.get::<_, i64>(0)? as u64,
-                    scope_digest: *scope_digest,
-                    base_revision: row.get::<_, i64>(1)? as u64,
-                    event_kind: row.get(2)?,
-                    event_bytes: row.get(3)?,
-                    event_digest,
-                    receipt_bytes: row.get(5)?,
-                    chain_digest: chain,
-                })
+                Ok::<StoredJournalListColumns, rusqlite::Error>((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        stored
+            .into_iter()
+            .map(
+                |(
+                    revision,
+                    base_revision,
+                    event_kind,
+                    event_bytes,
+                    event_digest,
+                    receipt_bytes,
+                    chain_digest,
+                )| {
+                    Ok(JournalRow {
+                        revision: revision_from_sqlite(revision)?,
+                        scope_digest: *scope_digest,
+                        base_revision: revision_from_sqlite(base_revision)?,
+                        event_kind,
+                        event_bytes,
+                        event_digest: digest_from_blob(&event_digest, "stored_event_digest")?,
+                        receipt_bytes,
+                        chain_digest: digest_from_blob(&chain_digest, "stored_chain_digest")?,
+                    })
+                },
+            )
+            .collect()
     }
 
     fn validate_continuity_payloads(
@@ -1730,10 +1781,11 @@ impl Store {
         scope_digest: &Digest,
         revision: u64,
     ) -> Result<Option<JournalRow>, StoreError> {
+        let revision_sql = revision_to_sqlite(revision)?;
         let stored: Option<StoredJournalColumns> = tx
             .query_row(
                 "SELECT base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest FROM journal WHERE scope_digest = ?1 AND logical_revision = ?2",
-                params![blob(*scope_digest), revision as i64],
+                params![blob(*scope_digest), revision_sql],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -1760,7 +1812,7 @@ impl Store {
         Ok(Some(JournalRow {
             revision,
             scope_digest: *scope_digest,
-            base_revision: base_revision as u64,
+            base_revision: revision_from_sqlite(base_revision)?,
             event_kind,
             event_bytes,
             event_digest: digest_from_blob(&event_digest, "stored_event_digest")?,
@@ -1937,10 +1989,11 @@ impl Store {
         {
             return Ok(None);
         }
+        let current_revision_sql = revision_to_sqlite(current_revision)?;
         let source_receipt_bytes: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT receipt_bytes FROM journal WHERE scope_digest = ?1 AND logical_revision = ?2",
-                params![blob(receipt.scope_digest), current_revision as i64],
+                params![blob(receipt.scope_digest), current_revision_sql],
                 |row| row.get(0),
             )
             .optional()?;
@@ -2020,6 +2073,7 @@ impl Store {
         row: &JournalRow,
     ) -> Result<bool, StoreError> {
         let receipt_bytes = wire::encode_transition_receipt(&bundle.envelope.receipt);
+        let row_revision_sql = revision_to_sqlite(row.revision)?;
         let expected_chain = ae_continuum::chain_link(
             &bundle.envelope.chain_seed,
             &bundle.envelope.event_bytes,
@@ -2039,7 +2093,7 @@ impl Store {
         let snapshot: Option<(Vec<u8>, Vec<u8>)> = tx
             .query_row(
                 "SELECT state_digest, state_bytes FROM snapshots WHERE scope_digest = ?1 AND revision = ?2",
-                params![blob(bundle.envelope.receipt.scope_digest), row.revision as i64],
+                params![blob(bundle.envelope.receipt.scope_digest), row_revision_sql],
                 |stored| Ok((stored.get(0)?, stored.get(1)?)),
             )
             .optional()?;
@@ -2055,7 +2109,7 @@ impl Store {
         let graph: Option<StoredGraphColumns> = tx
             .query_row(
                 "SELECT base_graph_digest, graph_digest, formula_digest, delta_bytes, replay_state_bytes FROM graph_commits WHERE scope_digest = ?1 AND revision = ?2",
-                params![blob(bundle.envelope.receipt.scope_digest), row.revision as i64],
+                params![blob(bundle.envelope.receipt.scope_digest), row_revision_sql],
                 |stored| {
                     Ok((
                         stored.get(0)?,
@@ -2108,7 +2162,7 @@ impl Store {
                 params![
                     blob(bundle.envelope.receipt.scope_digest),
                     blob(bundle.context.relation_scope_token),
-                    row.revision as i64,
+                    row_revision_sql,
                 ],
                 |stored| Ok((stored.get(0)?, stored.get(1)?, stored.get(2)?, stored.get(3)?)),
             )
@@ -2154,7 +2208,7 @@ impl Store {
             )
             .optional()?;
         if let Some(revision) = duplicate {
-            let revision = revision as u64;
+            let revision = revision_from_sqlite(revision)?;
             let row = Self::read_journal_row_tx(&tx, &scope_digest, revision)?
                 .ok_or(StoreError::ContinuityIncomplete)?;
             if !Self::duplicate_bundle_is_identical_tx(&tx, bundle, &row)? {
@@ -2164,26 +2218,26 @@ impl Store {
             return Ok((revision, row));
         }
 
-        let current = tx.query_row(
+        let current_sql: i64 = tx.query_row(
             "SELECT COALESCE(MAX(logical_revision), 0) FROM journal WHERE scope_digest = ?1",
             params![blob(scope_digest)],
             |row| row.get::<_, i64>(0),
-        )? as u64;
+        )?;
+        let current = revision_from_sqlite(current_sql)?;
         if bundle.envelope.receipt.base_revision != current {
             return Err(StoreError::StaleRevision {
                 expected: bundle.envelope.receipt.base_revision,
                 actual: current,
             });
         }
-        let expected_next = current
-            .checked_add(1)
-            .ok_or(StoreError::ContinuityFence("revision_overflow"))?;
+        let (expected_next, expected_next_sql) = next_sqlite_revision(current)?;
         if bundle.envelope.receipt.next_revision != expected_next {
             return Err(StoreError::StaleRevision {
                 expected: bundle.envelope.receipt.next_revision,
                 actual: expected_next,
             });
         }
+        let base_revision_sql = revision_to_sqlite(bundle.envelope.receipt.base_revision)?;
 
         let current_snapshot = Self::current_snapshot_tx(&tx, &scope_digest)?;
         if current_snapshot.is_none() && current != 0 {
@@ -2207,6 +2261,9 @@ impl Store {
                     return Err(StoreError::ContinuityFence("graph_base"));
                 }
                 if bundle.graph.formula_digest == current_formula {
+                    if is_formula_transition_delta(&bundle.envelope.delta_bytes) {
+                        return Err(StoreError::ContinuityFence("formula_transition_unexpected"));
+                    }
                     None
                 } else if bundle
                     .envelope
@@ -2266,12 +2323,25 @@ impl Store {
                     return Err(StoreError::ContinuityFence("graph_current_formula"));
                 }
             }
-            None => None,
+            None => {
+                if is_formula_transition_delta(&bundle.envelope.delta_bytes) {
+                    return Err(StoreError::ContinuityFence("formula_transition_unexpected"));
+                }
+                None
+            }
         };
         let legacy_upgrade = match transition_admission {
             Some(FormulaTransitionAdmission::LegacySemantic(upgrade)) => Some(upgrade),
             Some(FormulaTransitionAdmission::Phase0) | None => None,
         };
+        let legacy_upgrade_revisions = legacy_upgrade
+            .map(|upgrade| {
+                Ok::<(i64, i64), StoreError>((
+                    revision_to_sqlite(upgrade.base_revision)?,
+                    revision_to_sqlite(upgrade.next_revision)?,
+                ))
+            })
+            .transpose()?;
         if let Some((current_state_digest, _)) = current_snapshot {
             if bundle.envelope.receipt.state_before != current_state_digest
                 && legacy_upgrade.is_none()
@@ -2283,9 +2353,9 @@ impl Store {
         tx.execute(
             "INSERT INTO journal (logical_revision, scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                expected_next as i64,
+                expected_next_sql,
                 blob(scope_digest),
-                bundle.envelope.receipt.base_revision as i64,
+                base_revision_sql,
                 bundle.envelope.event_kind.clone(),
                 bundle.envelope.event_bytes.clone(),
                 blob(bundle.envelope.receipt.event_digest),
@@ -2299,13 +2369,13 @@ impl Store {
             params![
                 blob(scope_digest),
                 blob(bundle.envelope.receipt.event_digest),
-                expected_next as i64,
+                expected_next_sql,
             ],
         )?;
         tx.execute(
             "INSERT INTO snapshots (revision, scope_digest, state_digest, state_bytes) VALUES (?1, ?2, ?3, ?4)",
             params![
-                expected_next as i64,
+                expected_next_sql,
                 blob(scope_digest),
                 blob(bundle.snapshot.state_digest),
                 bundle.snapshot.state_bytes.clone(),
@@ -2315,7 +2385,7 @@ impl Store {
             "INSERT INTO graph_commits (scope_digest, revision, base_graph_digest, graph_digest, formula_digest, delta_bytes, replay_state_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 blob(scope_digest),
-                expected_next as i64,
+                expected_next_sql,
                 blob(bundle.graph.base_graph_digest),
                 blob(bundle.graph.graph_digest),
                 blob(bundle.graph.formula_digest),
@@ -2329,20 +2399,22 @@ impl Store {
                 blob(scope_digest),
                 blob(bundle.context.relation_scope_token),
                 blob(bundle.context.relation_hmac),
-                expected_next as i64,
+                expected_next_sql,
                 blob(bundle.context.context_digest),
                 bundle.context.canonical_state_bytes.clone(),
             ],
         )?;
-        if let Some(upgrade) = legacy_upgrade {
+        if let Some((upgrade, (upgrade_base_revision_sql, upgrade_next_revision_sql))) =
+            legacy_upgrade.zip(legacy_upgrade_revisions)
+        {
             tx.execute(
                 "INSERT INTO legacy_semantic_formula_upgrades (scope_digest, from_formula_digest, to_formula_digest, base_revision, next_revision, event_digest, receipt_digest, source_state_digest, target_state_before, source_graph_digest, prior_chain_digest, migration_id, upgrade_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     blob(upgrade.scope_digest),
                     blob(upgrade.from_formula_digest),
                     blob(upgrade.to_formula_digest),
-                    upgrade.base_revision as i64,
-                    upgrade.next_revision as i64,
+                    upgrade_base_revision_sql,
+                    upgrade_next_revision_sql,
                     blob(upgrade.event_digest),
                     blob(upgrade.receipt_digest),
                     blob(upgrade.source_state_digest),
@@ -2398,7 +2470,7 @@ impl Store {
             scope_digest: *scope_digest,
             relation_scope_token: token_from_blob(&stored_token, "stored_relation_scope_token")?,
             relation_hmac: digest_from_blob(&relation_hmac, "stored_relation_hmac")?,
-            revision: revision as u64,
+            revision: revision_from_sqlite(revision)?,
             context_digest,
             canonical_state_bytes,
         }))
@@ -2450,23 +2522,26 @@ impl Store {
         let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let current = tx.query_row(
+        let current_sql: i64 = tx.query_row(
             "SELECT COALESCE(MAX(logical_revision), 0) FROM journal WHERE scope_digest = ?1",
             params![blob(envelope.receipt.scope_digest)],
             |row| row.get::<_, i64>(0),
-        )? as u64;
+        )?;
+        let current = revision_from_sqlite(current_sql)?;
         if envelope.receipt.base_revision != current {
             return Err(StoreError::StaleRevision {
                 expected: envelope.receipt.base_revision,
                 actual: current,
             });
         }
-        if envelope.receipt.next_revision != current + 1 {
+        let (revision, revision_sql) = next_sqlite_revision(current)?;
+        if envelope.receipt.next_revision != revision {
             return Err(StoreError::StaleRevision {
                 expected: envelope.receipt.next_revision,
-                actual: current + 1,
+                actual: revision,
             });
         }
+        let base_revision_sql = revision_to_sqlite(envelope.receipt.base_revision)?;
 
         let event = wire::decode_event(&envelope.event_bytes)
             .map_err(|error| StoreError::Sqlite(format!("event decode failed: {error}")))?;
@@ -2486,7 +2561,7 @@ impl Store {
             )
             .optional()?;
         if let Some(revision) = duplicate {
-            return Err(StoreError::DuplicateEvent(revision as u64));
+            return Err(StoreError::DuplicateEvent(revision_from_sqlite(revision)?));
         }
 
         let last_chain: Option<Vec<u8>> = tx
@@ -2511,9 +2586,9 @@ impl Store {
         tx.execute(
             "INSERT INTO journal (logical_revision, scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                (current + 1) as i64,
+                revision_sql,
                 blob(envelope.receipt.scope_digest),
-                envelope.receipt.base_revision as i64,
+                base_revision_sql,
                 envelope.event_kind.clone(),
                 envelope.event_bytes.clone(),
                 blob(event_digest),
@@ -2522,13 +2597,12 @@ impl Store {
                 now_ms() as i64,
             ],
         )?;
-        let revision = current + 1;
         tx.execute(
             "INSERT INTO applied_events (scope_digest, event_digest, revision) VALUES (?1, ?2, ?3)",
             params![
                 blob(envelope.receipt.scope_digest),
                 blob(event_digest),
-                revision as i64,
+                revision_sql,
             ],
         )?;
         tx.commit()?;
@@ -2555,10 +2629,11 @@ impl Store {
         state_bytes: &[u8],
     ) -> Result<(), StoreError> {
         let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
+        let revision_sql = revision_to_sqlite(revision)?;
         conn.execute(
             "INSERT OR REPLACE INTO snapshots (revision, scope_digest, state_digest, state_bytes) VALUES (?1, ?2, ?3, ?4)",
             params![
-                revision as i64,
+                revision_sql,
                 blob(*scope_digest),
                 blob(*state_digest),
                 state_bytes.to_vec(),
@@ -2573,9 +2648,10 @@ impl Store {
         revision: u64,
     ) -> Result<Option<SnapshotRow>, StoreError> {
         let conn = self.connection()?;
+        let revision_sql = revision_to_sqlite(revision)?;
         conn.query_row(
             "SELECT state_digest, state_bytes FROM snapshots WHERE scope_digest = ?1 AND revision = ?2",
-            params![blob(*scope_digest), revision as i64],
+            params![blob(*scope_digest), revision_sql],
             |row| {
                 let bytes: Vec<u8> = row.get(0)?;
                 let mut state_digest = [0u8; 32];
@@ -2731,6 +2807,96 @@ mod tests {
             graph_digest: [14; 32],
             manifest,
         }
+    }
+
+    fn continuity_bundle_for_test(
+        scope: &ScopeRef,
+        formula_digest: Digest,
+        revision: u64,
+        marker: u8,
+        state_before: Digest,
+        base_graph_digest: Digest,
+        chain_seed: Digest,
+        delta_bytes: Vec<u8>,
+    ) -> ContinuityCommitBundleV1 {
+        let event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
+            event_id: [marker; 16],
+            scope: scope.clone(),
+            elapsed_ms: u64::from(marker),
+        });
+        let event_bytes = wire::encode_event(&event);
+        let event_digest = wire::event_digest(&event);
+        let state_after = [marker.wrapping_add(1); 32];
+        let graph_after = [marker.wrapping_add(2); 32];
+        let canonical_context_state = vec![0xc0, marker, 0x01];
+        let relation_scope_token = scope.relation_token.unwrap_or(scope.session_token);
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest,
+            scope_digest: wire::persona_scope_digest(
+                &scope.bot_token,
+                &scope.persona_token,
+                scope.relation_token.as_ref(),
+            ),
+            event_digest,
+            authority_digest: [marker.wrapping_add(3); 32],
+            base_revision: revision.checked_sub(1).expect("test revision is nonzero"),
+            next_revision: revision,
+            state_before,
+            state_after,
+            graph_after,
+            action_contract: None,
+            active_nodes: 1,
+            active_edges: 0,
+            residuals: ae_contracts::InvariantResiduals::default(),
+            status: CommitStatus::Committed,
+        };
+        ContinuityCommitBundleV1 {
+            envelope: CommitEnvelope {
+                event_kind: wire::event_kind_name(&event).to_owned(),
+                event_bytes,
+                receipt: receipt.clone(),
+                chain_seed,
+                delta_bytes: delta_bytes.clone(),
+            },
+            snapshot: SnapshotCommitV1 {
+                state_digest: state_after,
+                state_bytes: vec![0xb0, marker],
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest,
+                graph_digest: graph_after,
+                formula_digest,
+                delta_bytes,
+                replay_state_bytes: vec![0xe0, marker],
+            },
+            context: ContextCommitV1 {
+                relation_scope_token,
+                relation_hmac: [marker.wrapping_add(4); 32],
+                source_continuum_revision: receipt.next_revision,
+                context_digest: continuity_context_digest(&canonical_context_state),
+                canonical_state_bytes: canonical_context_state,
+            },
+        }
+    }
+
+    fn continuity_row_counts(store: &Store, scope_digest: Digest) -> [i64; 6] {
+        let conn = store.conn.as_ref().expect("test store remains open");
+        let queries = [
+            "SELECT COUNT(*) FROM journal WHERE scope_digest = ?1",
+            "SELECT COUNT(*) FROM applied_events WHERE scope_digest = ?1",
+            "SELECT COUNT(*) FROM snapshots WHERE scope_digest = ?1",
+            "SELECT COUNT(*) FROM graph_commits WHERE scope_digest = ?1",
+            "SELECT COUNT(*) FROM context_commits WHERE scope_digest = ?1",
+            "SELECT COUNT(*) FROM legacy_semantic_formula_upgrades WHERE scope_digest = ?1",
+        ];
+        let mut counts = [0_i64; 6];
+        for (index, query) in queries.iter().enumerate() {
+            counts[index] = conn
+                .query_row(*query, params![blob(scope_digest)], |row| row.get(0))
+                .expect("count succeeds");
+        }
+        counts
     }
 
     fn create_legacy_revision_tables(conn: &Connection) {
@@ -3210,6 +3376,188 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(persisted_counts, (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn same_formula_legacy_upgrade_delta_is_rejected_without_registry_or_write() {
+        let mut store = Store::open_in_memory().unwrap();
+        let scope = ScopeRef {
+            bot_token: [81; 16],
+            persona_token: [82; 16],
+            relation_token: Some([83; 16]),
+            session_token: [84; 16],
+        };
+        let formula = [85; 32];
+        let first =
+            continuity_bundle_for_test(&scope, formula, 1, 86, [0; 32], [0; 32], [87; 32], vec![]);
+        let (_, first_row) = store.commit_continuity_bundle(&first).unwrap();
+        let mut tagged = continuity_bundle_for_test(
+            &scope,
+            formula,
+            2,
+            88,
+            first.snapshot.state_digest,
+            first.graph.graph_digest,
+            first_row.chain_digest,
+            vec![],
+        );
+        let tagged_delta = LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
+            &tagged.envelope.receipt,
+            first.snapshot.state_digest,
+            first.graph.graph_digest,
+            formula,
+            first_row.chain_digest,
+        )
+        .canonical_bytes();
+        tagged.envelope.delta_bytes = tagged_delta.clone();
+        tagged.graph.delta_bytes = tagged_delta;
+
+        for _ in 0..2 {
+            assert!(matches!(
+                store.commit_continuity_bundle(&tagged),
+                Err(StoreError::ContinuityFence("formula_transition_unexpected"))
+            ));
+        }
+
+        let scope_digest = tagged.envelope.receipt.scope_digest;
+        assert_eq!(store.current_revision(&scope_digest).unwrap(), 1);
+        assert_eq!(
+            continuity_row_counts(&store, scope_digest),
+            [1, 1, 1, 1, 1, 0]
+        );
+        let stored_delta: Vec<u8> = store
+            .conn
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT delta_bytes FROM graph_commits WHERE scope_digest = ?1 AND revision = 1",
+                params![blob(scope_digest)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored_delta.is_empty());
+        assert!(store
+            .read_legacy_semantic_formula_upgrade_v1(&scope_digest, &formula, &formula)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn sqlite_revision_limit_fails_before_continuity_bundle_writes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let scope = ScopeRef {
+            bot_token: [91; 16],
+            persona_token: [92; 16],
+            relation_token: Some([93; 16]),
+            session_token: [94; 16],
+        };
+        let formula = [95; 32];
+        let revision = u64::try_from(i64::MAX).unwrap();
+        let predecessor = continuity_bundle_for_test(
+            &scope,
+            formula,
+            revision,
+            96,
+            [97; 32],
+            [98; 32],
+            [99; 32],
+            vec![],
+        );
+        let predecessor_chain = [100; 32];
+        let scope_digest = predecessor.envelope.receipt.scope_digest;
+        let revision_sql = i64::try_from(revision).unwrap();
+        {
+            let conn = store.conn.as_mut().unwrap();
+            conn.execute(
+                "INSERT INTO journal (logical_revision, scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+                params![
+                    revision_sql,
+                    blob(scope_digest),
+                    i64::try_from(predecessor.envelope.receipt.base_revision).unwrap(),
+                    predecessor.envelope.event_kind.clone(),
+                    predecessor.envelope.event_bytes.clone(),
+                    blob(predecessor.envelope.receipt.event_digest),
+                    wire::encode_transition_receipt(&predecessor.envelope.receipt),
+                    blob(predecessor_chain),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO applied_events (scope_digest, event_digest, revision) VALUES (?1, ?2, ?3)",
+                params![
+                    blob(scope_digest),
+                    blob(predecessor.envelope.receipt.event_digest),
+                    revision_sql,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO snapshots (revision, scope_digest, state_digest, state_bytes) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    revision_sql,
+                    blob(scope_digest),
+                    blob(predecessor.snapshot.state_digest),
+                    predecessor.snapshot.state_bytes.clone(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO graph_commits (scope_digest, revision, base_graph_digest, graph_digest, formula_digest, delta_bytes, replay_state_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    blob(scope_digest),
+                    revision_sql,
+                    blob(predecessor.graph.base_graph_digest),
+                    blob(predecessor.graph.graph_digest),
+                    blob(predecessor.graph.formula_digest),
+                    predecessor.graph.delta_bytes.clone(),
+                    predecessor.graph.replay_state_bytes.clone(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO context_commits (scope_digest, relation_scope_token, relation_hmac, revision, context_digest, canonical_state_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    blob(scope_digest),
+                    blob(predecessor.context.relation_scope_token),
+                    blob(predecessor.context.relation_hmac),
+                    revision_sql,
+                    blob(predecessor.context.context_digest),
+                    predecessor.context.canonical_state_bytes.clone(),
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.current_revision(&scope_digest).unwrap(), revision);
+        let successor_revision = revision.checked_add(1).unwrap();
+        let successor = continuity_bundle_for_test(
+            &scope,
+            formula,
+            successor_revision,
+            101,
+            predecessor.snapshot.state_digest,
+            predecessor.graph.graph_digest,
+            predecessor_chain,
+            vec![],
+        );
+        let before = continuity_row_counts(&store, scope_digest);
+
+        assert!(matches!(
+            store.commit_continuity_bundle(&successor),
+            Err(StoreError::ContinuityFence("revision_range"))
+        ));
+        assert_eq!(continuity_row_counts(&store, scope_digest), before);
+        assert_eq!(store.current_revision(&scope_digest).unwrap(), revision);
+        let negative_revisions: i64 = store
+            .conn
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM journal WHERE scope_digest = ?1 AND logical_revision < 0",
+                params![blob(scope_digest)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(negative_revisions, 0);
     }
 
     #[test]
