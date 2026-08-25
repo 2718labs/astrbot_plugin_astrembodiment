@@ -6,8 +6,17 @@
 //! replay verification. Python cannot reach any of this state directly; the
 //! PyO3 surface exposes only coarse calls.
 
+mod learning_compensation_v1;
 mod semantic;
+pub mod semantic_dynamics_v2;
+mod semantic_telemetry_v1;
 
+pub use learning_compensation_v1::{
+    LearningCompensationApplyDecisionV1, LearningCompensationApplyStatusV1,
+    LearningCompensationClaimDecisionV1, LearningCompensationClaimStatusV1,
+    LearningCompensationEnqueueAvailabilityV1, LearningCompensationEnqueueDecisionV1,
+    LearningCompensationEnqueueStatusV1, LearningCompensationTerminalDecisionV1,
+};
 pub use semantic::{
     ExpressionProfileFxP6, ExpressionProjectionV1, NodeObservabilityComponentV1,
     NodeObservabilityCountsV1, NodeObservabilityProjectionV1, NodeObservabilityRegionV1,
@@ -25,8 +34,9 @@ use ae_continuum::{CommitEnvelope, ReplayReport};
 use ae_contracts::{
     hex, perception_dimension_values, wire, ActionContract, CanonicalEvent, CausalRef,
     CommitStatus, Digest, GenesisManifestProposal, GenesisReceipt, GenesisStatus, Id128,
-    InvariantResiduals, PerceptionProposalV1, PersonaGenesisRequest, PersonalityVector, ScopeRef,
-    SemanticEstimate, TransitionReceipt, TransitionReceiptV2, UserStimulus,
+    InvariantResiduals, NativeTelemetryReceiptV1, PerceptionProposalV1, PersonaGenesisRequest,
+    PersonalityVector, ScopeRef, SemanticEstimate, TransitionReceipt, TransitionReceiptV2,
+    UserStimulus,
 };
 use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
@@ -74,6 +84,12 @@ pub enum RuntimeError {
     SemanticRevisionOverflow,
     #[error("legacy semantic snapshot has no v2 attestation")]
     LegacyUnattested,
+    #[error("native semantic PREPARE gate is unavailable")]
+    NativeGateUnavailable,
+    #[error("invalid closed learning-compensation request or receipt")]
+    InvalidLearningCompensation,
+    #[error("learning compensation is unavailable without a verified native cursor")]
+    LearningCompensationUnavailable,
     #[error("context receipt validation error: {0}")]
     ContextReceipt(#[from] ReceiptValidationError),
     #[error("context projection error: {0}")]
@@ -99,10 +115,18 @@ pub struct ApplyDecision {
 pub struct PerceptionProposalDecisionV1 {
     pub receipt: TransitionReceipt,
     pub semantic_vector_receipt: Option<TransitionReceiptV2>,
+    pub semantic_telemetry_receipt: Option<NativeTelemetryReceiptV1>,
     pub node_observability: Option<NodeObservabilityProjectionV1>,
     pub revision: u64,
     pub deduplicated: bool,
     pub expression_projection: ExpressionProjectionV1,
+    pub availability: SemanticClosureAvailabilityV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticClosureAvailabilityV1 {
+    Available,
+    UnavailableLegacy,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +159,7 @@ struct HotBrain {
     semantic_field: NeuralField,
     semantic_graph: SparseGraph,
     semantic_revision: u64,
+    semantic_legacy_unavailable: bool,
 }
 
 pub struct AstrRuntime {
@@ -142,10 +167,6 @@ pub struct AstrRuntime {
     hot: Option<HotBrain>,
     legacy_authority_database: PathBuf,
     vault_root: PathBuf,
-}
-
-fn fixed_zero_vector() -> InvariantResiduals {
-    InvariantResiduals::default()
 }
 
 fn continuity_scope(scope: &ScopeRef) -> Digest {
@@ -309,7 +330,7 @@ impl AstrRuntime {
         })?;
         let vault_root = storage_parent.join("continuity-vault");
         let lifecycle = VaultLifecycle::open(&vault_root)?;
-        let store = match lifecycle.vault_mode_v1()? {
+        let mut store = match lifecycle.vault_mode_v1()? {
             VaultMode::Unborn => Store::open(path)?,
             VaultMode::Ready => Store::open(&lifecycle.current_authority_database_path()?)?,
             VaultMode::Migrating
@@ -319,6 +340,11 @@ impl AstrRuntime {
                 return Err(RebirthLifecycleError::BootstrapConflict.into())
             }
         };
+        // The in-memory teacher queue cannot survive a runtime restart. Seal
+        // every persisted text-free PENDING/CLAIMED job before exposing this
+        // authority again; Store performs the batch atomically and never asks
+        // native to reconstruct raw input.
+        store.abandon_unavailable_learning_compensation_jobs_v1()?;
         Ok(Self {
             store,
             hot: None,
@@ -342,7 +368,9 @@ impl AstrRuntime {
     ) -> Result<(), RuntimeError> {
         self.store.flush()?;
         let database = lifecycle.current_authority_database_path()?;
-        self.store = Store::open(&database)?;
+        let mut store = Store::open(&database)?;
+        store.abandon_unavailable_learning_compensation_jobs_v1()?;
+        self.store = store;
         self.hot = None;
         self.bind_hot(scope.bot_token, scope.persona_token)
     }
@@ -497,6 +525,7 @@ impl AstrRuntime {
                             semantic_field,
                             semantic_graph,
                             semantic_revision: 0,
+                            semantic_legacy_unavailable: false,
                         });
                         self.select_rebirth_authority(&persona_scope_ref(
                             request.source.scope.bot_token,
@@ -580,40 +609,57 @@ impl AstrRuntime {
         );
         let semantic_scope = continuity_scope(&semantic_storage_scope);
         let semantic_revision = self.store.current_revision(&semantic_scope)?;
-        let (semantic_field, semantic_graph) = if semantic_revision == 0 {
-            (field.clone(), graph.clone())
-        } else {
-            let row = self
-                .store
-                .read_journal(&semantic_scope)?
-                .into_iter()
-                .find(|row| row.revision == semantic_revision)
-                .ok_or(RuntimeError::LegacyUnattested)?;
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.schema_version != 1
-                || receipt.status != CommitStatus::Committed
-                || receipt.action_contract.is_some()
-                || receipt.scope_digest != semantic_scope
-                || receipt.formula_digest != committed.receipt.formula_digest
-                || receipt.next_revision != semantic_revision
-            {
-                return Err(RuntimeError::LegacyUnattested);
-            }
-            let snapshot = self
-                .store
-                .read_snapshot(&semantic_scope, semantic_revision)?
-                .ok_or(RuntimeError::LegacyUnattested)?;
-            let (field, graph, _) = semantic::decode_semantic_snapshot_v2(
-                &snapshot.state_bytes,
-                &committed.receipt.formula_digest,
-                &receipt.state_after,
-                &receipt.graph_after,
-                &receipt,
-            )?;
-            (field, graph)
-        };
+        let semantic_formula_digest =
+            semantic::phase0_semantic_formula_digest_v1(&committed.receipt.formula_digest)?;
+        let (semantic_field, semantic_graph, semantic_legacy_unavailable) =
+            if semantic_revision == 0 {
+                (field.clone(), graph.clone(), false)
+            } else {
+                let row = self
+                    .store
+                    .read_journal(&semantic_scope)?
+                    .into_iter()
+                    .find(|row| row.revision == semantic_revision)
+                    .ok_or(RuntimeError::LegacyUnattested)?;
+                let receipt = row
+                    .decode_receipt()
+                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+                let snapshot = self
+                    .store
+                    .read_snapshot(&semantic_scope, semantic_revision)?
+                    .ok_or(RuntimeError::LegacyUnattested)?;
+                if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
+                    // AESEM2 remains readable through its historical decoder, but
+                    // it has no native telemetry closure and must never be
+                    // rewritten or treated as healthy Phase 0 state.
+                    let _ = semantic::decode_semantic_snapshot_v2(
+                        &snapshot.state_bytes,
+                        &receipt.formula_digest,
+                        &receipt.state_after,
+                        &receipt.graph_after,
+                        &receipt,
+                    )?;
+                    (field.clone(), graph.clone(), true)
+                } else {
+                    if receipt.schema_version != 1
+                        || receipt.status != CommitStatus::Committed
+                        || receipt.action_contract.is_some()
+                        || receipt.scope_digest != semantic_scope
+                        || receipt.formula_digest != semantic_formula_digest
+                        || receipt.next_revision != semantic_revision
+                    {
+                        return Err(RuntimeError::LegacyUnattested);
+                    }
+                    let (field, graph, _, _) = semantic::decode_semantic_snapshot_v3(
+                        &snapshot.state_bytes,
+                        &semantic_formula_digest,
+                        &receipt.state_after,
+                        &receipt.graph_after,
+                        &receipt,
+                    )?;
+                    (field, graph, false)
+                }
+            };
         self.hot = Some(HotBrain {
             bot_token,
             persona_token,
@@ -629,6 +675,7 @@ impl AstrRuntime {
             semantic_field,
             semantic_graph,
             semantic_revision,
+            semantic_legacy_unavailable,
         });
         Ok(())
     }
@@ -1057,7 +1104,7 @@ impl AstrRuntime {
             action_contract: Some(contract_digest),
             active_nodes,
             active_edges,
-            residuals: fixed_zero_vector(),
+            residuals: InvariantResiduals::default(),
             status: CommitStatus::Committed,
         };
 
@@ -1168,7 +1215,11 @@ impl AstrRuntime {
         (
             NeuralField,
             SparseGraph,
-            Option<(TransitionReceipt, TransitionReceiptV2)>,
+            Option<(
+                TransitionReceipt,
+                NativeTelemetryReceiptV1,
+                [ae_fixed::Fixed; ae_neurofield::REGION_LAYOUT.len()],
+            )>,
         ),
         RuntimeError,
     > {
@@ -1203,14 +1254,22 @@ impl AstrRuntime {
         if snapshot.state_digest != receipt.state_after {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let (field, graph, semantic_receipt) = semantic::decode_semantic_snapshot_v2(
-            &snapshot.state_bytes,
-            formula_digest,
-            &receipt.state_after,
-            &receipt.graph_after,
-            &receipt,
-        )?;
-        Ok((field, graph, Some((receipt, semantic_receipt))))
+        if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        let (field, graph, telemetry_receipt, compensation_by_region) =
+            semantic::decode_semantic_snapshot_v3(
+                &snapshot.state_bytes,
+                formula_digest,
+                &receipt.state_after,
+                &receipt.graph_after,
+                &receipt,
+            )?;
+        Ok((
+            field,
+            graph,
+            Some((receipt, telemetry_receipt, compensation_by_region)),
+        ))
     }
 
     fn semantic_identity_conflict(
@@ -1237,7 +1296,10 @@ impl AstrRuntime {
         formula_digest: &Digest,
         baseline_field: &NeuralField,
         baseline_graph: &SparseGraph,
+        manifest_digest: &Digest,
+        development_seed_digest: &Digest,
         event_digest: &Digest,
+        source_digest: Digest,
         proposal: &PerceptionProposalV1,
         deduplicated: bool,
     ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
@@ -1248,6 +1310,32 @@ impl AstrRuntime {
         let receipt = row
             .decode_receipt()
             .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+        let snapshot = self
+            .store
+            .read_snapshot(semantic_scope, row.revision)?
+            .ok_or(RuntimeError::LegacyUnattested)?;
+        if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
+            let (legacy_field, _, _) = semantic::decode_semantic_snapshot_v2(
+                &snapshot.state_bytes,
+                &receipt.formula_digest,
+                &receipt.state_after,
+                &receipt.graph_after,
+                &receipt,
+            )?;
+            return Ok(PerceptionProposalDecisionV1 {
+                expression_projection: semantic::expression_projection_from_field_v1(
+                    &legacy_field,
+                    row.revision,
+                )?,
+                receipt,
+                semantic_vector_receipt: None,
+                semantic_telemetry_receipt: None,
+                node_observability: None,
+                revision: row.revision,
+                deduplicated,
+                availability: SemanticClosureAvailabilityV1::UnavailableLegacy,
+            });
+        }
         if receipt.event_digest != *event_digest
             || receipt.scope_digest != *semantic_scope
             || receipt.formula_digest != *formula_digest
@@ -1257,27 +1345,59 @@ impl AstrRuntime {
         {
             return Err(RuntimeError::SemanticIdentityConflict);
         }
-        let (before, _, _) = self.semantic_snapshot_at(
+        let (before, before_graph, _) = self.semantic_snapshot_at(
             semantic_scope,
             formula_digest,
             baseline_field,
             baseline_graph,
             receipt.base_revision,
         )?;
-        let (after, _, semantic_receipt) = self.semantic_snapshot_at(
+        let (after, after_graph, telemetry_receipt) = self.semantic_snapshot_at(
             semantic_scope,
             formula_digest,
             baseline_field,
             baseline_graph,
             row.revision,
         )?;
-        let semantic_receipt = semantic_receipt
-            .map(|(_, receipt)| receipt)
+        let (telemetry_receipt, historical_compensation_by_region) = telemetry_receipt
+            .map(|(_, receipt, compensation_by_region)| (receipt, compensation_by_region))
             .ok_or(RuntimeError::LegacyUnattested)?;
-        let prepared = semantic::prepare_semantic_transition_v1(&before, baseline_field, proposal)?;
+        let prepared = semantic::prepare_semantic_transition_v2(
+            &before,
+            baseline_field,
+            &before_graph,
+            manifest_digest,
+            development_seed_digest,
+            proposal,
+            historical_compensation_by_region,
+        )?;
         if state_digest(&prepared.next_field, formula_digest) != receipt.state_after
-            || graph_digest(baseline_graph) != receipt.graph_after
+            || graph_digest(&prepared.next_graph) != receipt.graph_after
             || prepared.active_nodes != receipt.active_nodes
+            || state_digest(&after, formula_digest)
+                != state_digest(&prepared.next_field, formula_digest)
+            || graph_digest(&after_graph) != graph_digest(&prepared.next_graph)
+        {
+            return Err(RuntimeError::SemanticIdentityConflict);
+        }
+        let expected_telemetry = semantic_telemetry_v1::prepare_native_telemetry_v1(
+            *formula_digest,
+            *semantic_scope,
+            *event_digest,
+            source_digest,
+            receipt.base_revision,
+            receipt.next_revision,
+            state_digest(&before, formula_digest),
+            state_digest(&after, formula_digest),
+            graph_digest(&before_graph),
+            graph_digest(&after_graph),
+            &prepared.local_by_region,
+            &prepared.compensation_by_region,
+            &prepared.dynamics,
+            &prepared.full_vector_load,
+        )?;
+        if telemetry_receipt != expected_telemetry
+            || telemetry_receipt.native_gate == ae_fixed::Fixed::ZERO
         {
             return Err(RuntimeError::SemanticIdentityConflict);
         }
@@ -1287,20 +1407,10 @@ impl AstrRuntime {
             prepared.full_vector_load.injected_dimension_count,
             perception_nonzero_dimension_count(proposal),
         )?;
-        if semantic_receipt != expected_semantic_receipt {
-            return Err(RuntimeError::SemanticIdentityConflict);
-        }
-        let node_observability = semantic::node_observability_projection_v1(
-            &before,
-            &after,
-            baseline_field,
-            &prepared.full_vector_load,
-            proposal.estimator_confidence,
-            row.revision,
-            receipt.active_nodes,
-        )?;
+        let node_observability =
+            semantic::node_observability_projection_v2(&before, &after, row.revision)?;
         if (node_observability.counts.changed_node_count > 0)
-            != semantic_receipt.semantic_vector.state_changed
+            != expected_semantic_receipt.semantic_vector.state_changed
         {
             return Err(RuntimeError::InvalidNeuralState);
         }
@@ -1308,11 +1418,13 @@ impl AstrRuntime {
             semantic::expression_projection_from_field_v1(&after, row.revision)?;
         Ok(PerceptionProposalDecisionV1 {
             receipt,
-            semantic_vector_receipt: Some(semantic_receipt),
+            semantic_vector_receipt: Some(expected_semantic_receipt),
+            semantic_telemetry_receipt: Some(telemetry_receipt),
             node_observability: Some(node_observability),
             revision: row.revision,
             deduplicated,
             expression_projection,
+            availability: SemanticClosureAvailabilityV1::Available,
         })
     }
 
@@ -1344,12 +1456,14 @@ impl AstrRuntime {
             semantic_scope,
             semantic_storage_scope,
             semantic_revision,
-            formula_digest,
+            genesis_formula_digest,
             initial_snapshot_digest,
             manifest,
+            manifest_digest,
             development_seed_digest,
             field,
             graph,
+            semantic_legacy_unavailable,
         ) = {
             let hot = self.hot_for(scope)?;
             (
@@ -1361,19 +1475,25 @@ impl AstrRuntime {
                 hot.formula_digest,
                 hot.initial_snapshot_digest,
                 hot.identity.manifest.clone(),
+                hot.identity.manifest_digest,
                 hot.identity.development_seed_digest,
                 hot.semantic_field.clone(),
                 hot.semantic_graph.clone(),
+                hot.semantic_legacy_unavailable,
             )
         };
         if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
             return Err(RuntimeError::GenesisManifestMismatch);
         }
-        let (baseline_field, baseline_graph) =
-            initial_state_from_manifest(&manifest, &formula_digest, &development_seed_digest);
+        let (baseline_field, baseline_graph) = initial_state_from_manifest(
+            &manifest,
+            &genesis_formula_digest,
+            &development_seed_digest,
+        );
         if !baseline_field.validate() || !baseline_graph.validate() {
             return Err(RuntimeError::InvalidNeuralState);
         }
+        let formula_digest = semantic::phase0_semantic_formula_digest_v1(&genesis_formula_digest)?;
         let estimator_digest = proposal.estimator_digest_v1(scope);
         let event = semantic_event(&semantic_storage_scope, proposal, estimator_digest);
         let event_digest = wire::event_digest(&event);
@@ -1388,10 +1508,18 @@ impl AstrRuntime {
                 &formula_digest,
                 &baseline_field,
                 &baseline_graph,
+                &manifest_digest,
+                &development_seed_digest,
                 &event_digest,
+                estimator_digest,
                 proposal,
                 true,
             );
+        }
+        // AESEM2 remains readable only for a matching deduplicated event.
+        // A fresh write against an unattested historical state is forbidden.
+        if semantic_legacy_unavailable {
+            return Err(RuntimeError::LegacyUnattested);
         }
         if self.semantic_identity_conflict(&semantic_scope, &proposal.event_id, &event_digest)? {
             return Err(RuntimeError::SemanticIdentityConflict);
@@ -1403,13 +1531,45 @@ impl AstrRuntime {
             });
         }
 
-        let prepared = semantic::prepare_semantic_transition_v1(&field, &baseline_field, proposal)?;
+        let compensation_by_region = learning_compensation_v1::committed_compensation_by_region_v1(
+            &self.store,
+            &semantic_scope,
+        )?;
+        let prepared = semantic::prepare_semantic_transition_v2(
+            &field,
+            &baseline_field,
+            &graph,
+            &manifest_digest,
+            &development_seed_digest,
+            proposal,
+            compensation_by_region,
+        )?;
         let next_revision = semantic_revision
             .checked_add(1)
             .ok_or(RuntimeError::SemanticRevisionOverflow)?;
         let state_before = state_digest(&field, &formula_digest);
         let state_after = state_digest(&prepared.next_field, &formula_digest);
-        let graph_after = graph_digest(&graph);
+        let graph_before = graph_digest(&graph);
+        let graph_after = graph_digest(&prepared.next_graph);
+        let telemetry_receipt = semantic_telemetry_v1::prepare_native_telemetry_v1(
+            formula_digest,
+            semantic_scope,
+            event_digest,
+            estimator_digest,
+            semantic_revision,
+            next_revision,
+            state_before,
+            state_after,
+            graph_before,
+            graph_after,
+            &prepared.local_by_region,
+            &prepared.compensation_by_region,
+            &prepared.dynamics,
+            &prepared.full_vector_load,
+        )?;
+        if telemetry_receipt.native_gate == ae_fixed::Fixed::ZERO {
+            return Err(RuntimeError::NativeGateUnavailable);
+        }
         let receipt = TransitionReceipt {
             schema_version: 1,
             formula_digest,
@@ -1423,8 +1583,8 @@ impl AstrRuntime {
             graph_after,
             action_contract: None,
             active_nodes: prepared.active_nodes,
-            active_edges: graph.edges.len() as u32,
-            residuals: fixed_zero_vector(),
+            active_edges: prepared.dynamics.propagated_edge_count,
+            residuals: telemetry_receipt.residuals.clone(),
             status: CommitStatus::Committed,
         };
         let semantic_vector_receipt = semantic::semantic_vector_receipt_v2(
@@ -1433,27 +1593,24 @@ impl AstrRuntime {
             prepared.full_vector_load.injected_dimension_count,
             nonzero_evidence_dimension_count,
         )?;
-        let node_observability = semantic::node_observability_projection_v1(
+        let node_observability = semantic::node_observability_projection_v2(
             &field,
             &prepared.next_field,
-            &baseline_field,
-            &prepared.full_vector_load,
-            proposal.estimator_confidence,
             next_revision,
-            prepared.active_nodes,
         )?;
         if (node_observability.counts.changed_node_count > 0)
             != semantic_vector_receipt.semantic_vector.state_changed
         {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        let state_bytes = semantic::encode_semantic_snapshot_v2(
+        let state_bytes = semantic::encode_semantic_snapshot_v3(
             &formula_digest,
             &prepared.next_field,
-            &graph,
-            &semantic_vector_receipt,
+            &prepared.next_graph,
+            &telemetry_receipt,
+            &prepared.compensation_by_region,
         )?;
-        let _ = semantic::decode_semantic_snapshot_v2(
+        let _ = semantic::decode_semantic_snapshot_v3(
             &state_bytes,
             &formula_digest,
             &state_after,
@@ -1507,11 +1664,11 @@ impl AstrRuntime {
                 state_bytes,
             },
             graph: GraphCommitV1 {
-                base_graph_digest: graph_after,
+                base_graph_digest: graph_before,
                 graph_digest: graph_after,
                 formula_digest,
                 delta_bytes: vec![],
-                replay_state_bytes: graph.canonical_bytes(),
+                replay_state_bytes: prepared.next_graph.canonical_bytes(),
             },
             context,
         };
@@ -1523,17 +1680,19 @@ impl AstrRuntime {
                 if let Some(hot) = self.hot.as_mut() {
                     if hot.semantic_scope == semantic_scope {
                         hot.semantic_field = prepared.next_field;
-                        hot.semantic_graph = graph;
+                        hot.semantic_graph = prepared.next_graph;
                         hot.semantic_revision = revision;
                     }
                 }
                 Ok(PerceptionProposalDecisionV1 {
                     receipt,
                     semantic_vector_receipt: Some(semantic_vector_receipt),
+                    semantic_telemetry_receipt: Some(telemetry_receipt),
                     node_observability: Some(node_observability),
                     revision,
                     deduplicated: false,
                     expression_projection,
+                    availability: SemanticClosureAvailabilityV1::Available,
                 })
             }
             Ok((_revision, _)) => {
@@ -1543,7 +1702,10 @@ impl AstrRuntime {
                     &formula_digest,
                     &baseline_field,
                     &baseline_graph,
+                    &manifest_digest,
+                    &development_seed_digest,
                     &event_digest,
+                    estimator_digest,
                     proposal,
                     true,
                 )
@@ -1562,7 +1724,10 @@ impl AstrRuntime {
                     &formula_digest,
                     &baseline_field,
                     &baseline_graph,
+                    &manifest_digest,
+                    &development_seed_digest,
                     &event_digest,
+                    estimator_digest,
                     proposal,
                     true,
                 )

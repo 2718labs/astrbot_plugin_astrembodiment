@@ -3,18 +3,25 @@
 use crate::RuntimeError;
 use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
 use ae_contracts::{
-    wire, CommitStatus, EvidenceVector, PerceptionProposalV1, SemanticVectorFormulaV2,
+    evidence_vector_from_values, perception_dimension_values, wire, CommitStatus, EvidenceVector,
+    NativeTelemetryReceiptV1, PerceptionProposalV1, SemanticVectorFormulaV2,
     SemanticVectorReceiptV2, TransitionReceipt, TransitionReceiptV2,
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
-    graph_digest, state_digest, NeuralField, SparseGraph, Synapse, EDGE_CAPACITY, NEURON_SLOTS,
-    REGION_LAYOUT,
+    develop_graph, graph_digest, state_digest, GraphFormula, NeuralField, SparseGraph, Synapse,
+    EDGE_CAPACITY, NEURON_SLOTS, REGION_LAYOUT,
+};
+
+use crate::semantic_dynamics_v2::{
+    propagate_semantic_dynamics_v2, DynamicsInputV2, PreparedSemanticDynamicsV2,
 };
 
 pub(crate) const NEUTRAL_RELAXATION_MAX_RATE: Fixed = Fixed::from_raw(125_000);
 const SNAPSHOT_MAGIC_V2: &[u8] = b"AESEM2\0";
 const SNAPSHOT_SCHEMA_V2: u16 = 2;
+const SNAPSHOT_MAGIC_V3: &[u8] = b"AESEM3\0";
+const SNAPSHOT_SCHEMA_V3: u16 = 3;
 const EXPRESSION_FXP6_MAX: u32 = 1_000_000;
 const REGION_NAMES: [&str; 9] = [
     "interoception_allostasis",
@@ -33,6 +40,18 @@ pub(crate) struct PreparedSemanticTransitionV1 {
     pub next_field: NeuralField,
     pub active_nodes: u32,
     pub full_vector_load: FullVectorLoad,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedSemanticTransitionV2 {
+    pub next_field: NeuralField,
+    pub next_graph: SparseGraph,
+    pub active_nodes: u32,
+    pub full_vector_load: FullVectorLoad,
+    pub local_by_region: [Fixed; REGION_LAYOUT.len()],
+    pub compensation_by_region: [Fixed; REGION_LAYOUT.len()],
+    pub local_confidence_by_region: [Fixed; REGION_LAYOUT.len()],
+    pub dynamics: PreparedSemanticDynamicsV2,
 }
 
 #[derive(Clone, Debug)]
@@ -202,6 +221,128 @@ pub(crate) fn prepare_semantic_transition_v1(
         &proposal.dimensions,
         proposal.estimator_confidence,
     )
+}
+
+/// Phase 0 preparation materializes the deterministic graph exactly once and
+/// then runs the immutable-before sparse-edge dynamics.  The old v1 function
+/// above remains only for AESEM2 replay; new writes must use this function.
+pub(crate) fn prepare_semantic_transition_v2(
+    field: &NeuralField,
+    baseline: &NeuralField,
+    graph: &SparseGraph,
+    manifest_digest: &[u8; 32],
+    development_seed_digest: &[u8; 32],
+    proposal: &PerceptionProposalV1,
+    compensation_by_region: [Fixed; REGION_LAYOUT.len()],
+) -> Result<PreparedSemanticTransitionV2, RuntimeError> {
+    proposal
+        .validate_v1()
+        .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
+    let full_vector_load = assemble_full_vector_load(&proposal.dimensions)
+        .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
+    if full_vector_load.evaluated_dimension_count != 15
+        || full_vector_load.injected_dimension_count != 15
+    {
+        return Err(RuntimeError::InvalidPerceptionProposal);
+    }
+    let next_graph = if graph.edges.is_empty() {
+        develop_graph(manifest_digest, development_seed_digest, GraphFormula::V1)
+            .map_err(|_| RuntimeError::InvalidNeuralState)?
+    } else {
+        graph.clone()
+    };
+    if !next_graph.validate() {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let local_by_region = full_vector_load.evidence_means;
+    // Perception proposal v1 carries an explicit scalar estimator confidence.
+    // It is used only for this direct perception projection; learning jobs
+    // require a separately supplied real 15D local-confidence vector.
+    let local_confidence_by_region = [proposal.estimator_confidence; REGION_LAYOUT.len()];
+    let dynamics = propagate_semantic_dynamics_v2(DynamicsInputV2 {
+        field,
+        baseline,
+        graph: &next_graph,
+        local_by_region,
+        compensation_by_region,
+        local_confidence_by_region,
+    })
+    .map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let active_nodes = u32::try_from(
+        (0..NEURON_SLOTS)
+            .filter(|node| {
+                field.potential[*node] != dynamics.next_field.potential[*node]
+                    || field.excitation[*node] != dynamics.next_field.excitation[*node]
+                    || field.inhibition[*node] != dynamics.next_field.inhibition[*node]
+                    || field.adaptation[*node] != dynamics.next_field.adaptation[*node]
+                    || field.precision[*node] != dynamics.next_field.precision[*node]
+                    || field.prediction_error[*node] != dynamics.next_field.prediction_error[*node]
+                    || field.eligibility[*node] != dynamics.next_field.eligibility[*node]
+                    || field.metabolic_reserve[*node]
+                        != dynamics.next_field.metabolic_reserve[*node]
+            })
+            .count(),
+    )
+    .map_err(|_| RuntimeError::InvalidNeuralState)?;
+    Ok(PreparedSemanticTransitionV2 {
+        next_field: dynamics.next_field.clone(),
+        next_graph,
+        active_nodes,
+        full_vector_load,
+        local_by_region,
+        compensation_by_region,
+        local_confidence_by_region,
+        dynamics,
+    })
+}
+
+/// Project the committed signed 15D compensation through the same frozen R7
+/// route used by local evidence. Positive and negative components are routed
+/// separately, then differenced, so compensation stays signed without ever
+/// abusing an unsigned evidence slot.
+pub(crate) fn compensation_by_region_from_vector_v1(
+    compensation: &EvidenceVector,
+) -> Result<[Fixed; REGION_LAYOUT.len()], RuntimeError> {
+    let values = perception_dimension_values(compensation);
+    if values
+        .into_iter()
+        .any(|value| !(-250_000..=250_000).contains(&value.raw()))
+    {
+        return Err(RuntimeError::InvalidLearningCompensation);
+    }
+    let positive = evidence_vector_from_values(std::array::from_fn(|index| {
+        Fixed::from_raw(values[index].raw().max(0))
+    }));
+    let negative = evidence_vector_from_values(std::array::from_fn(|index| {
+        Fixed::from_raw(values[index].raw().saturating_neg().max(0))
+    }));
+    let positive_load = assemble_full_vector_load(&positive)
+        .map_err(|_| RuntimeError::InvalidLearningCompensation)?;
+    let negative_load = assemble_full_vector_load(&negative)
+        .map_err(|_| RuntimeError::InvalidLearningCompensation)?;
+    let mut regions = [Fixed::ZERO; REGION_LAYOUT.len()];
+    for region in 0..REGION_LAYOUT.len() {
+        regions[region] = Fixed::from_raw(
+            positive_load.evidence_means[region]
+                .raw()
+                .checked_sub(negative_load.evidence_means[region].raw())
+                .ok_or(RuntimeError::InvalidLearningCompensation)?,
+        );
+    }
+    Ok(regions)
+}
+
+/// The route is fixed, so a neutral vector is sufficient to obtain the
+/// route-digest portion of the Phase 0 formula commitment.
+pub(crate) fn phase0_semantic_formula_digest_v1(
+    genesis_formula_digest: &[u8; 32],
+) -> Result<[u8; 32], RuntimeError> {
+    let load = assemble_full_vector_load(&EvidenceVector::default())
+        .map_err(|_| RuntimeError::InvalidNeuralState)?;
+    Ok(crate::semantic_telemetry_v1::phase0_formula_digest_v1(
+        genesis_formula_digest,
+        &load.route_digest,
+    ))
 }
 
 pub(crate) fn semantic_vector_receipt_v2(
@@ -457,6 +598,168 @@ pub(crate) fn node_observability_projection_v1(
         || activated_total > selected_total
         || regions.len() != REGION_LAYOUT.len()
     {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    Ok(NodeObservabilityProjectionV1 {
+        revision,
+        field_node_capacity: u32::try_from(NEURON_SLOTS)
+            .map_err(|_| RuntimeError::InvalidNeuralState)?,
+        counts: NodeObservabilityCountsV1 {
+            selected_node_count: selected_total,
+            activated_node_count: activated_total,
+            changed_node_count: changed_total,
+            potential_nonzero_after_count: potential_nonzero_after_total,
+            excitation_nonzero_after_count: excitation_nonzero_after_total,
+            signal_nonzero_after_count: signal_nonzero_after_total,
+        },
+        residuals: NodeObservabilityResidualsV1 {
+            state: NodeObservabilityResidualStateV1::NotComputed,
+            formula: None,
+            values_fxp6: None,
+        },
+        regions,
+    })
+}
+
+/// Observability for the Phase 0 sparse dynamics.  It reports what was
+/// actually changed, rather than re-deriving the retired direct-only v1 rule.
+pub(crate) fn node_observability_projection_v2(
+    before: &NeuralField,
+    after: &NeuralField,
+    revision: u64,
+) -> Result<NodeObservabilityProjectionV1, RuntimeError> {
+    if !before.validate() || !after.validate() {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let mut regions = Vec::with_capacity(REGION_LAYOUT.len());
+    let mut selected_total = 0_u32;
+    let mut activated_total = 0_u32;
+    let mut changed_total = 0_u32;
+    let mut potential_nonzero_after_total = 0_u32;
+    let mut excitation_nonzero_after_total = 0_u32;
+    let mut signal_nonzero_after_total = 0_u32;
+    let mut expected_start = 0_usize;
+
+    for (region, &(start, count)) in REGION_LAYOUT.iter().enumerate() {
+        let end = start
+            .checked_add(count)
+            .filter(|end| *end <= NEURON_SLOTS && start == expected_start)
+            .ok_or(RuntimeError::InvalidNeuralState)?;
+        expected_start = end;
+        let mut selected = 0_u32;
+        let mut activated = 0_u32;
+        let mut changed = 0_u32;
+        let mut potential_before_sum = 0_i128;
+        let mut potential_after_sum = 0_i128;
+        let mut potential_delta_sum = 0_i128;
+        let mut potential_changed = 0_u32;
+        let mut potential_nonzero_after = 0_u32;
+        let mut excitation_before_sum = 0_i128;
+        let mut excitation_after_sum = 0_i128;
+        let mut excitation_delta_sum = 0_i128;
+        let mut excitation_changed = 0_u32;
+        let mut excitation_nonzero_after = 0_u32;
+
+        for node in start..end {
+            let changes = [
+                before.potential[node] != after.potential[node],
+                before.excitation[node] != after.excitation[node],
+                before.inhibition[node] != after.inhibition[node],
+                before.adaptation[node] != after.adaptation[node],
+                before.precision[node] != after.precision[node],
+                before.prediction_error[node] != after.prediction_error[node],
+                before.eligibility[node] != after.eligibility[node],
+                before.metabolic_reserve[node] != after.metabolic_reserve[node],
+            ];
+            if changes.into_iter().any(|changed| changed) {
+                selected = selected
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                changed = changed
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                selected_total = selected_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                changed_total = changed_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if changes[0] || changes[1] || changes[2] {
+                activated = activated
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                activated_total = activated_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if changes[0] {
+                potential_changed = potential_changed
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if changes[1] {
+                excitation_changed = excitation_changed
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if after.potential[node] != Fixed::ZERO {
+                potential_nonzero_after = potential_nonzero_after
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                potential_nonzero_after_total = potential_nonzero_after_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if after.excitation[node] != Fixed::ZERO {
+                excitation_nonzero_after = excitation_nonzero_after
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                excitation_nonzero_after_total = excitation_nonzero_after_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            if after.potential[node] != Fixed::ZERO
+                || after.excitation[node] != Fixed::ZERO
+                || after.inhibition[node] != Fixed::ZERO
+            {
+                signal_nonzero_after_total = signal_nonzero_after_total
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidNeuralState)?;
+            }
+            potential_before_sum += i128::from(before.potential[node].raw());
+            potential_after_sum += i128::from(after.potential[node].raw());
+            potential_delta_sum +=
+                i128::from(after.potential[node].raw()) - i128::from(before.potential[node].raw());
+            excitation_before_sum += i128::from(before.excitation[node].raw());
+            excitation_after_sum += i128::from(after.excitation[node].raw());
+            excitation_delta_sum += i128::from(after.excitation[node].raw())
+                - i128::from(before.excitation[node].raw());
+        }
+        regions.push(NodeObservabilityRegionV1 {
+            region_id: u8::try_from(region).map_err(|_| RuntimeError::InvalidNeuralState)?,
+            region_name: REGION_NAMES[region],
+            node_capacity: u32::try_from(count).map_err(|_| RuntimeError::InvalidNeuralState)?,
+            selected_node_count: selected,
+            activated_node_count: activated,
+            changed_node_count: changed,
+            potential: NodeObservabilityComponentV1 {
+                before_mean_fxp6: mean_fxp6(potential_before_sum, count)?,
+                after_mean_fxp6: mean_fxp6(potential_after_sum, count)?,
+                delta_mean_fxp6: mean_fxp6(potential_delta_sum, count)?,
+                changed_node_count: potential_changed,
+                nonzero_after_count: potential_nonzero_after,
+            },
+            excitation: NodeObservabilityComponentV1 {
+                before_mean_fxp6: mean_fxp6(excitation_before_sum, count)?,
+                after_mean_fxp6: mean_fxp6(excitation_after_sum, count)?,
+                delta_mean_fxp6: mean_fxp6(excitation_delta_sum, count)?,
+                changed_node_count: excitation_changed,
+                nonzero_after_count: excitation_nonzero_after,
+            },
+        });
+    }
+    if expected_start != NEURON_SLOTS || regions.len() != REGION_LAYOUT.len() {
         return Err(RuntimeError::InvalidNeuralState);
     }
     Ok(NodeObservabilityProjectionV1 {
@@ -795,4 +1098,151 @@ pub(crate) fn decode_semantic_snapshot_v2(
         return Err(RuntimeError::InvalidNeuralState);
     }
     Ok((field, graph, receipt))
+}
+
+pub(crate) fn snapshot_is_aesem2(bytes: &[u8]) -> bool {
+    bytes.starts_with(SNAPSHOT_MAGIC_V2)
+}
+
+pub(crate) fn semantic_v3_matches_legacy_receipt(
+    telemetry: &NativeTelemetryReceiptV1,
+    legacy_receipt: &TransitionReceipt,
+) -> bool {
+    legacy_receipt.schema_version == 1
+        && legacy_receipt.status == CommitStatus::Committed
+        && legacy_receipt.action_contract.is_none()
+        && telemetry.validate()
+        && telemetry.formula_digest == legacy_receipt.formula_digest
+        && telemetry.scope_digest == legacy_receipt.scope_digest
+        && telemetry.event_digest == legacy_receipt.event_digest
+        && telemetry.base_revision == legacy_receipt.base_revision
+        && telemetry.next_revision == legacy_receipt.next_revision
+        && telemetry.state_before == legacy_receipt.state_before
+        && telemetry.state_after == legacy_receipt.state_after
+        && telemetry.graph_after == legacy_receipt.graph_after
+        && telemetry.residuals == legacy_receipt.residuals
+}
+
+pub(crate) fn encode_semantic_snapshot_v3(
+    formula_digest: &[u8; 32],
+    field: &NeuralField,
+    graph: &SparseGraph,
+    telemetry: &NativeTelemetryReceiptV1,
+    compensation_by_region: &[Fixed; REGION_LAYOUT.len()],
+) -> Result<Vec<u8>, RuntimeError> {
+    if !telemetry.validate()
+        || telemetry.formula_digest != *formula_digest
+        || telemetry.state_after != state_digest(field, formula_digest)
+        || telemetry.graph_after != graph_digest(graph)
+        || telemetry.compensation_digest
+            != crate::semantic_telemetry_v1::compensation_vector_digest(compensation_by_region)
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let field_bytes = encode_field(field)?;
+    let graph_bytes = encode_graph(graph)?;
+    let telemetry_bytes = wire::encode_native_telemetry_receipt_v1(telemetry);
+    let mut compensation_bytes = Vec::with_capacity(compensation_by_region.len() * 8);
+    for value in compensation_by_region {
+        compensation_bytes.extend_from_slice(&value.encode());
+    }
+    let mut out = Vec::with_capacity(
+        SNAPSHOT_MAGIC_V3.len()
+            + 2
+            + 4
+            + field_bytes.len()
+            + 4
+            + graph_bytes.len()
+            + 4
+            + telemetry_bytes.len()
+            + 4
+            + compensation_bytes.len(),
+    );
+    out.extend_from_slice(SNAPSHOT_MAGIC_V3);
+    out.extend_from_slice(&SNAPSHOT_SCHEMA_V3.to_le_bytes());
+    for bytes in [
+        &field_bytes,
+        &graph_bytes,
+        &telemetry_bytes,
+        &compensation_bytes,
+    ] {
+        out.extend_from_slice(
+            &(u32::try_from(bytes.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
+
+pub(crate) fn decode_semantic_snapshot_v3(
+    bytes: &[u8],
+    expected_formula_digest: &[u8; 32],
+    expected_state_digest: &[u8; 32],
+    expected_graph_digest: &[u8; 32],
+    legacy_receipt: &TransitionReceipt,
+) -> Result<
+    (
+        NeuralField,
+        SparseGraph,
+        NativeTelemetryReceiptV1,
+        [Fixed; REGION_LAYOUT.len()],
+    ),
+    RuntimeError,
+> {
+    let mut cursor = Cursor::new(bytes);
+    if cursor.take(SNAPSHOT_MAGIC_V3.len())? != SNAPSHOT_MAGIC_V3
+        || cursor.u16()? != SNAPSHOT_SCHEMA_V3
+    {
+        return Err(RuntimeError::LegacyUnattested);
+    }
+    let field_len = usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let field = decode_field(cursor.take(field_len)?)?;
+    let graph_len = usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let graph = decode_graph(cursor.take(graph_len)?)?;
+    let telemetry_len =
+        usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let telemetry_bytes = cursor.take(telemetry_len)?;
+    // AESEM3 was introduced by this Phase 0 branch. Accept the short-lived
+    // three-block precursor as a zero-compensation snapshot, but never write
+    // it again. New snapshots persist the exact regional compensation that
+    // produced their telemetry, so dedup verification cannot read current u.
+    let compensation_by_region = if cursor.eof() {
+        [Fixed::ZERO; REGION_LAYOUT.len()]
+    } else {
+        let compensation_len =
+            usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+        if compensation_len != REGION_LAYOUT.len() * 8 {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let compensation_bytes = cursor.take(compensation_len)?;
+        if !cursor.eof() {
+            return Err(RuntimeError::InvalidNeuralState);
+        }
+        let mut values = [Fixed::ZERO; REGION_LAYOUT.len()];
+        for (index, chunk) in compensation_bytes.chunks_exact(8).enumerate() {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(chunk);
+            values[index] = Fixed::decode(raw);
+            if !(Fixed::from_raw(-Fixed::ONE.raw())..=Fixed::ONE).contains(&values[index]) {
+                return Err(RuntimeError::InvalidNeuralState);
+            }
+        }
+        values
+    };
+    let telemetry = wire::decode_native_telemetry_receipt_v1(telemetry_bytes)
+        .map_err(|_| RuntimeError::InvalidNeuralState)?;
+    if wire::encode_native_telemetry_receipt_v1(&telemetry) != telemetry_bytes
+        || telemetry.formula_digest != *expected_formula_digest
+        || telemetry.state_after != *expected_state_digest
+        || telemetry.graph_after != *expected_graph_digest
+        || telemetry.compensation_digest
+            != crate::semantic_telemetry_v1::compensation_vector_digest(&compensation_by_region)
+        || !semantic_v3_matches_legacy_receipt(&telemetry, legacy_receipt)
+        || state_digest(&field, expected_formula_digest) != *expected_state_digest
+        || graph_digest(&graph) != *expected_graph_digest
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    Ok((field, graph, telemetry, compensation_by_region))
 }

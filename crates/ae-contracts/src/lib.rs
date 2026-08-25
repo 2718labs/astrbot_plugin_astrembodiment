@@ -566,6 +566,28 @@ pub fn perception_dimension_values(evidence: &EvidenceVector) -> [Fixed; 15] {
     ]
 }
 
+/// Reconstruct the fixed, named fifteen-dimensional JSON layout without
+/// allowing a caller to choose a positional interpretation.
+pub fn evidence_vector_from_values(values: [Fixed; 15]) -> EvidenceVector {
+    EvidenceVector {
+        positive: values[0],
+        affiliation: values[1],
+        harm: values[2],
+        boundary: values[3],
+        repair: values[4],
+        repetition: values[5],
+        new_information: values[6],
+        constraint_instability: values[7],
+        epistemic_conflict: values[8],
+        self_responsibility: values[9],
+        other_responsibility: values[10],
+        hostility: values[11],
+        publicness: values[12],
+        engagement: values[13],
+        rejection: values[14],
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticEstimate {
@@ -998,6 +1020,1207 @@ impl TransitionReceiptV2 {
             && self.base_revision.checked_add(1) == Some(self.next_revision)
             && self.semantic_vector.validate()
             && self.semantic_vector.state_changed == (self.state_before != self.state_after)
+    }
+}
+
+/// Phase 0 intentionally keeps the historical v1 journal receipt and AESEM2
+/// attestation readable.  New causal telemetry is a separate sealed object so
+/// adding it can never reinterpret legacy zero residuals as healthy data.
+pub const NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1: &str = "native-telemetry-receipt.v1";
+pub const NATIVE_TELEMETRY_RECEIPT_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/native-telemetry-receipt-v1";
+pub const LEARNING_CHECKPOINT_DOMAIN_V1: &[u8] = b"astr-embodiment/phase0-learning-checkpoint-v1";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeTelemetryFormulaV1 {
+    #[serde(rename = "phase0-native-propagation-fxp6-v1")]
+    Phase0NativePropagationFxp6V1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeTelemetryPhaseV1 {
+    #[serde(rename = "PREPARE")]
+    Prepare,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnergyTelemetryV1 {
+    pub reserve_before: Fixed,
+    pub reserve_after: Fixed,
+    pub recovered: Fixed,
+    pub spent: Fixed,
+    pub headroom: Fixed,
+    pub residual: Fixed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityTelemetryV1 {
+    pub upper_saturated_nodes: u32,
+    pub node_limit: u32,
+    pub node_headroom: Fixed,
+    pub edge_used: u32,
+    pub edge_limit: u32,
+    pub edge_headroom: Fixed,
+    pub headroom: Fixed,
+    pub residual: Fixed,
+}
+
+/// Canonically sealed PREPARE telemetry. `telemetry_digest` is derived over
+/// every field except itself; `checkpoint_digest` is derived over the same
+/// complete canonical body under a dedicated learning-checkpoint domain.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTelemetryReceiptV1 {
+    pub schema: String,
+    pub formula: NativeTelemetryFormulaV1,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub scope_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_digest: Digest,
+    pub base_revision: u64,
+    pub next_revision: u64,
+    pub phase: NativeTelemetryPhaseV1,
+    #[serde(with = "crate::hex::d32")]
+    pub state_before: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub state_after: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub graph_before: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub graph_after: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub local_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub compensation_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub effective_digest: Digest,
+    pub energy: EnergyTelemetryV1,
+    pub capacity: CapacityTelemetryV1,
+    pub residuals: InvariantResiduals,
+    pub residual_health: Fixed,
+    pub native_gate: Fixed,
+    #[serde(with = "crate::hex::d32")]
+    pub checkpoint_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub telemetry_digest: Digest,
+}
+
+impl NativeTelemetryReceiptV1 {
+    pub fn canonical_bytes_without_digests(&self) -> Vec<u8> {
+        fn push_fixed(out: &mut Vec<u8>, value: Fixed) {
+            out.extend_from_slice(&value.encode());
+        }
+        fn push_digest(out: &mut Vec<u8>, value: &Digest) {
+            out.extend_from_slice(value);
+        }
+        let mut out = Vec::with_capacity(32 * 12 + 8 * 20 + 32);
+        out.push(match self.formula {
+            NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1 => 1,
+        });
+        out.push(match self.phase {
+            NativeTelemetryPhaseV1::Prepare => 1,
+        });
+        for digest in [
+            &self.formula_digest,
+            &self.scope_digest,
+            &self.event_digest,
+            &self.source_digest,
+        ] {
+            push_digest(&mut out, digest);
+        }
+        out.extend_from_slice(&self.base_revision.to_le_bytes());
+        out.extend_from_slice(&self.next_revision.to_le_bytes());
+        for digest in [
+            &self.state_before,
+            &self.state_after,
+            &self.graph_before,
+            &self.graph_after,
+            &self.local_digest,
+            &self.compensation_digest,
+            &self.effective_digest,
+        ] {
+            push_digest(&mut out, digest);
+        }
+        for value in [
+            self.energy.reserve_before,
+            self.energy.reserve_after,
+            self.energy.recovered,
+            self.energy.spent,
+            self.energy.headroom,
+            self.energy.residual,
+        ] {
+            push_fixed(&mut out, value);
+        }
+        out.extend_from_slice(&self.capacity.upper_saturated_nodes.to_le_bytes());
+        out.extend_from_slice(&self.capacity.node_limit.to_le_bytes());
+        push_fixed(&mut out, self.capacity.node_headroom);
+        out.extend_from_slice(&self.capacity.edge_used.to_le_bytes());
+        out.extend_from_slice(&self.capacity.edge_limit.to_le_bytes());
+        for value in [
+            self.capacity.edge_headroom,
+            self.capacity.headroom,
+            self.capacity.residual,
+            self.residuals.authority,
+            self.residuals.continuity,
+            self.residuals.energy,
+            self.residuals.renormalization,
+            self.residuals.capacity,
+            self.residual_health,
+            self.native_gate,
+        ] {
+            push_fixed(&mut out, value);
+        }
+        out
+    }
+
+    pub fn telemetry_digest_for_body(&self) -> Digest {
+        wire::domain_hash(
+            NATIVE_TELEMETRY_RECEIPT_DOMAIN_V1,
+            &[&self.canonical_bytes_without_digests()],
+        )
+    }
+
+    pub fn checkpoint_digest_for_body(&self) -> Digest {
+        wire::domain_hash(
+            LEARNING_CHECKPOINT_DOMAIN_V1,
+            &[&self.canonical_bytes_without_digests()],
+        )
+    }
+
+    pub fn seal(mut self) -> Self {
+        self.checkpoint_digest = self.checkpoint_digest_for_body();
+        self.telemetry_digest = self.telemetry_digest_for_body();
+        self
+    }
+
+    pub fn validate(&self) -> bool {
+        let unit = |value: Fixed| (Fixed::ZERO..=Fixed::ONE).contains(&value);
+        let nonzero = |digest: &Digest| digest.iter().any(|byte| *byte != 0);
+        if self.schema != NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1
+            || self.formula != NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1
+            || self.phase != NativeTelemetryPhaseV1::Prepare
+            || self.base_revision.checked_add(1) != Some(self.next_revision)
+            || self.capacity.node_limit == 0
+            || self.capacity.edge_limit == 0
+            || self.capacity.upper_saturated_nodes > self.capacity.node_limit
+            || self.capacity.edge_used > self.capacity.edge_limit
+            || ![
+                &self.formula_digest,
+                &self.scope_digest,
+                &self.event_digest,
+                &self.source_digest,
+                &self.state_before,
+                &self.state_after,
+                &self.graph_before,
+                &self.graph_after,
+                &self.local_digest,
+                &self.compensation_digest,
+                &self.effective_digest,
+            ]
+            .into_iter()
+            .all(|digest| nonzero(digest))
+        {
+            return false;
+        }
+        let values = [
+            self.energy.reserve_before,
+            self.energy.reserve_after,
+            self.energy.recovered,
+            self.energy.spent,
+            self.energy.headroom,
+            self.energy.residual,
+            self.capacity.node_headroom,
+            self.capacity.edge_headroom,
+            self.capacity.headroom,
+            self.capacity.residual,
+            self.residuals.authority,
+            self.residuals.continuity,
+            self.residuals.energy,
+            self.residuals.renormalization,
+            self.residuals.capacity,
+            self.residual_health,
+            self.native_gate,
+        ];
+        if !values.into_iter().all(unit)
+            || self.energy.headroom != self.energy.reserve_after
+            || self.capacity.headroom
+                != self.capacity.node_headroom.min(self.capacity.edge_headroom)
+        {
+            return false;
+        }
+        let worst_residual = [
+            self.residuals.authority,
+            self.residuals.continuity,
+            self.residuals.energy,
+            self.residuals.renormalization,
+            self.residuals.capacity,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(Fixed::ONE);
+        self.residual_health == Fixed::ONE.saturating_sub(worst_residual)
+            && self.native_gate
+                == self
+                    .energy
+                    .headroom
+                    .min(self.capacity.headroom)
+                    .min(self.residual_health)
+            && self.checkpoint_digest == self.checkpoint_digest_for_body()
+            && self.telemetry_digest == self.telemetry_digest_for_body()
+    }
+}
+
+// ---------------------------------------------------------------- learning compensation
+
+/// Opaque, text-free native learning-compensation contracts.  The named
+/// `EvidenceVector` layout is retained so the FFI cannot silently reorder the
+/// fifteen dimensions.
+pub const LEARNING_COMPENSATION_ENQUEUE_SCHEMA_V1: &str =
+    "astrembodiment.learning-compensation-enqueue.v1";
+pub const LEARNING_COMPENSATION_APPLY_SCHEMA_V1: &str =
+    "astrembodiment.learning-compensation-apply.v1";
+pub const LEARNING_COMPENSATION_CLAIM_SCHEMA_V1: &str =
+    "astrembodiment.learning-compensation-claim.v1";
+/// Durable acknowledgement that native accepted a frozen, text-free enqueue
+/// descriptor. It is deliberately separate from a later apply/no-change or
+/// terminal receipt: accepting a job is not completing it.
+pub const LEARNING_COMPENSATION_ENQUEUE_RECEIPT_SCHEMA_V1: &str =
+    "astrembodiment.learning-compensation-enqueue-receipt.v1";
+pub const LEARNING_COMPENSATION_RECEIPT_SCHEMA_V1: &str =
+    "astrembodiment.learning-compensation-receipt.v1";
+pub const LEARNING_COMPENSATION_TERMINAL_SCHEMA_V1: &str =
+    "astrembodiment.learning-compensation-terminal.v1";
+pub const LEARNING_COMPENSATION_REQUEST_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-request-v1";
+pub const LEARNING_COMPENSATION_JOB_DOMAIN_V1: &[u8] = b"astr-embodiment/phase0-learning-job-v1";
+pub const LEARNING_COMPENSATION_ENQUEUE_RECEIPT_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-enqueue-receipt-v1";
+pub const LEARNING_COMPENSATION_RECEIPT_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-receipt-v1";
+pub const LEARNING_COMPENSATION_TEACHER_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-teacher-v1";
+/// Formula identity for the native compensation law.  The source semantic
+/// telemetry formula and the literal local-estimator rule set remain separate
+/// attestations; this digest binds them to the one native Candidate-B law.
+pub const LEARNING_COMPENSATION_FORMULA_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-formula-v1";
+/// SHA-256 prefix for the one permitted all-ONE Candidate-B policy artifact.
+/// The canonical JSON bytes are intentionally frozen here so both FFI clients
+/// and durable native recovery can verify the exact policy body and constants.
+pub const LEARNING_COMPENSATION_POLICY_SHA256_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-policy-v1\0";
+pub const LEARNING_COMPENSATION_CANONICAL_ONE_POLICY_BODY_V1: &[u8] = br#"{"consistency_fxp6":{"affiliation":1000000,"boundary":1000000,"constraint_instability":1000000,"engagement":1000000,"epistemic_conflict":1000000,"harm":1000000,"hostility":1000000,"new_information":1000000,"other_responsibility":1000000,"positive":1000000,"publicness":1000000,"rejection":1000000,"repair":1000000,"repetition":1000000,"self_responsibility":1000000},"enter_fxp6":200000,"exit_fxp6":100000,"fall_max_fxp6":100000,"rise_max_fxp6":50000,"schema":"astrembodiment.learning-compensation-policy.v1","teacher_confidence_min_fxp6":900000,"u_max_fxp6":250000}"#;
+pub const LEARNING_COMPENSATION_CANONICAL_ONE_POLICY_DIGEST_V1: Digest = [
+    0x2d, 0x87, 0xc7, 0x1d, 0x52, 0x50, 0xba, 0xaf, 0x3b, 0xb0, 0x66, 0x1e, 0x24, 0x84, 0xda, 0x93,
+    0x99, 0x19, 0x89, 0xa2, 0xf8, 0x1e, 0xcc, 0xf9, 0x17, 0x71, 0x33, 0xe8, 0xd2, 0x05, 0x36, 0xb4,
+];
+pub const LEARNING_COMPENSATION_NO_CHANGE_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-no-change-v1";
+pub const LEARNING_COMPENSATION_TERMINAL_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-learning-terminal-v1";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticLearningCompensationEnqueueV1 {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub source_event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_text_digest: Digest,
+    /// Revision of the local perception event that caused this text-free
+    /// request. It is immutable job provenance, never the claim-time cursor.
+    pub source_revision: u64,
+    pub local_vector: EvidenceVector,
+    /// Required at the JSON boundary, nullable only when the local estimator
+    /// genuinely did not produce per-dimension confidence.  Native must not
+    /// expand an aggregate confidence into this vector.
+    pub local_confidence_vector: Option<EvidenceVector>,
+    #[serde(with = "crate::hex::d32")]
+    pub policy_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub provider_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub model_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub prompt_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub schema_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    /// Exact frozen digest of the literal local estimator rule set that
+    /// produced `local_vector` / `local_confidence_vector`.  It is deliberately
+    /// distinct from the semantic telemetry formula above.
+    #[serde(with = "crate::hex::d32")]
+    pub local_estimator_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_telemetry_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_checkpoint_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticLearningCompensationClaimV1 {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub job_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub expected_request_digest: Digest,
+    /// Null on the initial claim. A retry proves ownership of the old lease
+    /// before native replaces it with a new cursor-bound lease.
+    #[serde(default, with = "crate::hex::d32_opt")]
+    pub previous_lease_token: Option<Digest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticLearningCompensationApplyV1 {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub job_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub lease_token: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub expected_request_digest: Digest,
+    pub expected_base_revision: u64,
+    #[serde(with = "crate::hex::d32")]
+    pub expected_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub expected_telemetry_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub expected_checkpoint_digest: Digest,
+    pub teacher_vector: EvidenceVector,
+    pub teacher_confidence_vector: EvidenceVector,
+    #[serde(with = "crate::hex::d32")]
+    pub provider_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub model_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub prompt_digest: Digest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticLearningCompensationTerminalV1 {
+    pub schema_version: u16,
+    #[serde(with = "crate::hex::d32")]
+    pub job_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub lease_token: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub expected_request_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub reason_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub checkpoint_digest: Digest,
+}
+
+/// A sealed acknowledgement that the native store durably accepted a
+/// text-free job. It carries only frozen provenance and identity artifacts;
+/// it contains neither a lease nor an outcome and therefore cannot be
+/// confused with a terminal or Candidate-B receipt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearningCompensationEnqueueReceiptV1 {
+    pub schema: String,
+    #[serde(with = "crate::hex::d32")]
+    pub job_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_text_digest: Digest,
+    pub source_revision: u64,
+    #[serde(with = "crate::hex::d32")]
+    pub request_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub local_estimator_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub learning_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_telemetry_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_checkpoint_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub policy_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub provider_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub model_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub prompt_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub schema_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub receipt_digest: Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LearningCompensationCommitStatusV1 {
+    Committed,
+    NoChange,
+    Replayed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearningCompensationReceiptV1 {
+    pub schema: String,
+    #[serde(with = "crate::hex::d32")]
+    pub job_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_text_digest: Digest,
+    /// Immutable semantic revision that caused the queued text-free job.
+    pub source_revision: u64,
+    /// Semantic cursor atomically read at the successful apply attempt.
+    pub base_revision: u64,
+    /// Monotonic append-only compensation checkpoint cursor.
+    pub next_checkpoint_revision: u64,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub local_estimator_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub learning_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub telemetry_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub checkpoint_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub compensation_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub policy_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub schema_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub teacher_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub provider_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub model_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub prompt_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub request_digest: Digest,
+    pub eligible_dimension_count: u8,
+    pub changed_dimension_count: u8,
+    /// Native checkpoint state; surfaced by the closed receipt without any
+    /// raw text or model completion.
+    pub u_next: EvidenceVector,
+    pub status: LearningCompensationCommitStatusV1,
+    #[serde(with = "crate::hex::d32")]
+    pub receipt_digest: Digest,
+}
+
+/// A sealed terminal result for a valid job whose Candidate B leaves the
+/// append-only compensation state unchanged. It intentionally has no
+/// `u_next`, compensation digest, or checkpoint increment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearningCompensationNoChangeReceiptV1 {
+    pub schema: String,
+    #[serde(with = "crate::hex::d32")]
+    pub job_id: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_text_digest: Digest,
+    pub source_revision: u64,
+    pub base_revision: u64,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub local_estimator_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub learning_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub telemetry_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub checkpoint_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub policy_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub provider_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub model_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub prompt_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub schema_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub teacher_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub request_digest: Digest,
+    pub eligible_dimension_count: u8,
+    pub changed_dimension_count: u8,
+    #[serde(with = "crate::hex::d32")]
+    pub receipt_digest: Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LearningCompensationTerminalStatusV1 {
+    AbandonedInputUnavailable,
+    Rejected,
+    Expired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearningCompensationTerminalReceiptV1 {
+    pub schema: String,
+    #[serde(with = "crate::hex::d32")]
+    pub job_id: Digest,
+    pub status: LearningCompensationTerminalStatusV1,
+    #[serde(with = "crate::hex::d32")]
+    pub source_event_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub source_text_digest: Digest,
+    pub source_revision: u64,
+    #[serde(with = "crate::hex::d32")]
+    pub request_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub local_estimator_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub learning_formula_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub policy_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub provider_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub model_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub prompt_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub schema_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub reason_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub checkpoint_digest: Digest,
+    #[serde(with = "crate::hex::d32")]
+    pub receipt_digest: Digest,
+}
+
+fn nonzero_digest(value: &Digest) -> bool {
+    value.iter().any(|byte| *byte != 0)
+}
+
+fn unit_vector(vector: &EvidenceVector) -> bool {
+    perception_dimension_values(vector)
+        .into_iter()
+        .all(|value| (Fixed::ZERO..=Fixed::ONE).contains(&value))
+}
+
+fn signed_compensation_vector(vector: &EvidenceVector) -> bool {
+    perception_dimension_values(vector)
+        .into_iter()
+        .all(|value| (-250_000..=250_000).contains(&value.raw()))
+}
+
+fn append_vector(out: &mut Vec<u8>, vector: &EvidenceVector) {
+    for value in perception_dimension_values(vector) {
+        out.extend_from_slice(&value.encode());
+    }
+}
+
+/// The one native Candidate-B formula binds the semantic propagation law, the
+/// frozen literal-estimator rule set, and the only admissible policy artifact.
+/// Callers must not fold the first two inputs into one host-supplied digest.
+pub fn learning_compensation_formula_digest_v1(
+    formula_digest: &Digest,
+    local_estimator_formula_digest: &Digest,
+    policy_digest: &Digest,
+) -> Digest {
+    wire::domain_hash(
+        LEARNING_COMPENSATION_FORMULA_DOMAIN_V1,
+        &[
+            formula_digest,
+            local_estimator_formula_digest,
+            policy_digest,
+        ],
+    )
+}
+
+/// The only policy digest native will accept for Phase 0 Candidate B.  It is
+/// SHA-256, rather than a host-configured opaque identifier, so Python can
+/// independently compute the same commitment over the exact canonical body.
+pub fn canonical_one_learning_compensation_policy_digest_v1() -> Digest {
+    LEARNING_COMPENSATION_CANONICAL_ONE_POLICY_DIGEST_V1
+}
+
+impl SemanticLearningCompensationEnqueueV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    pub fn has_local_confidence(&self) -> bool {
+        self.local_confidence_vector.is_some()
+    }
+
+    pub fn validate_common(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && self.source_revision > 0
+            && unit_vector(&self.local_vector)
+            && [
+                &self.source_event_digest,
+                &self.source_text_digest,
+                &self.policy_digest,
+                &self.provider_digest,
+                &self.model_digest,
+                &self.prompt_digest,
+                &self.schema_digest,
+                &self.formula_digest,
+                &self.local_estimator_formula_digest,
+                &self.source_telemetry_digest,
+                &self.source_checkpoint_digest,
+            ]
+            .into_iter()
+            .all(nonzero_digest)
+    }
+
+    pub fn validate_available(&self) -> bool {
+        self.validate_common()
+            && self
+                .local_confidence_vector
+                .as_ref()
+                .is_some_and(unit_vector)
+    }
+
+    pub fn validate_unavailable_local_confidence(&self) -> bool {
+        self.validate_common() && self.local_confidence_vector.is_none()
+    }
+
+    /// Exact fixed-width persistence/identity body.  Raw user text is not an
+    /// input and therefore cannot enter durable native storage.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + 32 * 11 + 8 + 15 * 8 * 2 + 1);
+        out.extend_from_slice(&self.schema_version.to_le_bytes());
+        out.extend_from_slice(&self.source_event_digest);
+        out.extend_from_slice(&self.source_text_digest);
+        out.extend_from_slice(&self.source_revision.to_le_bytes());
+        append_vector(&mut out, &self.local_vector);
+        match &self.local_confidence_vector {
+            Some(vector) => {
+                out.push(1);
+                append_vector(&mut out, vector);
+            }
+            None => out.push(0),
+        }
+        for digest in [
+            &self.policy_digest,
+            &self.provider_digest,
+            &self.model_digest,
+            &self.prompt_digest,
+            &self.schema_digest,
+            &self.formula_digest,
+            &self.local_estimator_formula_digest,
+            &self.source_telemetry_digest,
+            &self.source_checkpoint_digest,
+        ] {
+            out.extend_from_slice(digest);
+        }
+        out
+    }
+
+    pub fn request_digest(&self, scope_digest: &Digest) -> Digest {
+        wire::domain_hash(
+            LEARNING_COMPENSATION_REQUEST_DOMAIN_V1,
+            &[scope_digest, &self.canonical_bytes()],
+        )
+    }
+
+    /// Decode only the exact fixed-width persistence form.  This supports
+    /// receipt-backed restart recovery without retaining or reconstructing raw
+    /// user text.
+    pub fn decode_canonical_bytes(bytes: &[u8]) -> Option<Self> {
+        fn vector(reader: &mut wire::Reader<'_>) -> Option<EvidenceVector> {
+            let mut values = [Fixed::ZERO; 15];
+            for value in &mut values {
+                *value = reader.fixed().ok()?;
+            }
+            Some(evidence_vector_from_values(values))
+        }
+
+        let mut reader = wire::Reader::new(bytes);
+        let schema_version = reader.u16().ok()?;
+        let source_event_digest = reader.digest().ok()?;
+        let source_text_digest = reader.digest().ok()?;
+        let source_revision = reader.u64().ok()?;
+        let local_vector = vector(&mut reader)?;
+        let local_confidence_vector = match reader.u8().ok()? {
+            0 => None,
+            1 => Some(vector(&mut reader)?),
+            _ => return None,
+        };
+        let request = Self {
+            schema_version,
+            source_event_digest,
+            source_text_digest,
+            source_revision,
+            local_vector,
+            local_confidence_vector,
+            policy_digest: reader.digest().ok()?,
+            provider_digest: reader.digest().ok()?,
+            model_digest: reader.digest().ok()?,
+            prompt_digest: reader.digest().ok()?,
+            schema_digest: reader.digest().ok()?,
+            formula_digest: reader.digest().ok()?,
+            local_estimator_formula_digest: reader.digest().ok()?,
+            source_telemetry_digest: reader.digest().ok()?,
+            source_checkpoint_digest: reader.digest().ok()?,
+        };
+        reader.finish().ok()?;
+        if (!request.validate_available() && !request.validate_unavailable_local_confidence())
+            || request.canonical_bytes() != bytes
+        {
+            return None;
+        }
+        Some(request)
+    }
+}
+
+impl SemanticLearningCompensationClaimV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    pub fn validate(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && nonzero_digest(&self.job_id)
+            && nonzero_digest(&self.expected_request_digest)
+            && self
+                .previous_lease_token
+                .as_ref()
+                .map_or(true, nonzero_digest)
+    }
+}
+
+impl SemanticLearningCompensationApplyV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    pub fn validate(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && self.expected_base_revision > 0
+            && unit_vector(&self.teacher_vector)
+            && unit_vector(&self.teacher_confidence_vector)
+            && [
+                &self.job_id,
+                &self.lease_token,
+                &self.expected_request_digest,
+                &self.expected_formula_digest,
+                &self.expected_telemetry_digest,
+                &self.expected_checkpoint_digest,
+                &self.provider_digest,
+                &self.model_digest,
+                &self.prompt_digest,
+            ]
+            .into_iter()
+            .all(nonzero_digest)
+    }
+
+    pub fn teacher_digest(
+        &self,
+        local_estimator_formula_digest: &Digest,
+        learning_formula_digest: &Digest,
+    ) -> Digest {
+        let mut body = Vec::with_capacity(15 * 8 * 2 + 32 * 5);
+        append_vector(&mut body, &self.teacher_vector);
+        append_vector(&mut body, &self.teacher_confidence_vector);
+        body.extend_from_slice(&self.provider_digest);
+        body.extend_from_slice(&self.model_digest);
+        body.extend_from_slice(&self.prompt_digest);
+        body.extend_from_slice(local_estimator_formula_digest);
+        body.extend_from_slice(learning_formula_digest);
+        wire::domain_hash(LEARNING_COMPENSATION_TEACHER_DOMAIN_V1, &[&body])
+    }
+}
+
+impl SemanticLearningCompensationTerminalV1 {
+    pub const SCHEMA_VERSION: u16 = 1;
+
+    pub fn validate(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && [
+                &self.job_id,
+                &self.lease_token,
+                &self.expected_request_digest,
+                &self.reason_digest,
+                &self.checkpoint_digest,
+            ]
+            .into_iter()
+            .all(nonzero_digest)
+    }
+}
+
+impl LearningCompensationEnqueueReceiptV1 {
+    pub fn canonical_bytes_without_receipt_digest(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * 15 + 8);
+        for digest in [
+            &self.job_id,
+            &self.source_event_digest,
+            &self.source_text_digest,
+            &self.request_digest,
+            &self.formula_digest,
+            &self.local_estimator_formula_digest,
+            &self.learning_formula_digest,
+            &self.source_telemetry_digest,
+            &self.source_checkpoint_digest,
+            &self.policy_digest,
+            &self.provider_digest,
+            &self.model_digest,
+            &self.prompt_digest,
+            &self.schema_digest,
+        ] {
+            out.extend_from_slice(digest);
+        }
+        out.extend_from_slice(&self.source_revision.to_le_bytes());
+        out
+    }
+
+    pub fn receipt_digest_for_body(&self) -> Digest {
+        wire::domain_hash(
+            LEARNING_COMPENSATION_ENQUEUE_RECEIPT_DOMAIN_V1,
+            &[&self.canonical_bytes_without_receipt_digest()],
+        )
+    }
+
+    pub fn seal(mut self) -> Self {
+        self.receipt_digest = self.receipt_digest_for_body();
+        self
+    }
+
+    pub fn validate(&self) -> bool {
+        self.schema == LEARNING_COMPENSATION_ENQUEUE_RECEIPT_SCHEMA_V1
+            && self.source_revision > 0
+            && [
+                &self.job_id,
+                &self.source_event_digest,
+                &self.source_text_digest,
+                &self.request_digest,
+                &self.formula_digest,
+                &self.local_estimator_formula_digest,
+                &self.learning_formula_digest,
+                &self.source_telemetry_digest,
+                &self.source_checkpoint_digest,
+                &self.policy_digest,
+                &self.provider_digest,
+                &self.model_digest,
+                &self.prompt_digest,
+                &self.schema_digest,
+                &self.receipt_digest,
+            ]
+            .into_iter()
+            .all(nonzero_digest)
+            && self.learning_formula_digest
+                == learning_compensation_formula_digest_v1(
+                    &self.formula_digest,
+                    &self.local_estimator_formula_digest,
+                    &self.policy_digest,
+                )
+            && self.receipt_digest == self.receipt_digest_for_body()
+    }
+
+    /// Decode only the fixed-width durable form used by the native store. This
+    /// is intentionally text-free and lets recovery verify an enqueue receipt
+    /// before it derives a later terminal receipt.
+    pub fn decode_canonical_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut reader = wire::Reader::new(bytes);
+        let job_id = reader.digest().ok()?;
+        let source_event_digest = reader.digest().ok()?;
+        let source_text_digest = reader.digest().ok()?;
+        let request_digest = reader.digest().ok()?;
+        let formula_digest = reader.digest().ok()?;
+        let local_estimator_formula_digest = reader.digest().ok()?;
+        let learning_formula_digest = reader.digest().ok()?;
+        let source_telemetry_digest = reader.digest().ok()?;
+        let source_checkpoint_digest = reader.digest().ok()?;
+        let policy_digest = reader.digest().ok()?;
+        let provider_digest = reader.digest().ok()?;
+        let model_digest = reader.digest().ok()?;
+        let prompt_digest = reader.digest().ok()?;
+        let schema_digest = reader.digest().ok()?;
+        let source_revision = reader.u64().ok()?;
+        let receipt = Self {
+            schema: LEARNING_COMPENSATION_ENQUEUE_RECEIPT_SCHEMA_V1.to_owned(),
+            job_id,
+            source_event_digest,
+            source_text_digest,
+            source_revision,
+            request_digest,
+            formula_digest,
+            local_estimator_formula_digest,
+            learning_formula_digest,
+            source_telemetry_digest,
+            source_checkpoint_digest,
+            policy_digest,
+            provider_digest,
+            model_digest,
+            prompt_digest,
+            schema_digest,
+            receipt_digest: reader.digest().ok()?,
+        };
+        reader.finish().ok()?;
+        if !receipt.validate()
+            || receipt.canonical_bytes_without_receipt_digest().len() + 32 != bytes.len()
+        {
+            return None;
+        }
+        let mut canonical = receipt.canonical_bytes_without_receipt_digest();
+        canonical.extend_from_slice(&receipt.receipt_digest);
+        (canonical == bytes).then_some(receipt)
+    }
+}
+
+impl LearningCompensationReceiptV1 {
+    pub fn canonical_bytes_without_receipt_digest(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * 16 + 8 * 3 + 2 + 15 * 8 + 1);
+        for digest in [
+            &self.job_id,
+            &self.source_event_digest,
+            &self.source_text_digest,
+            &self.formula_digest,
+            &self.local_estimator_formula_digest,
+            &self.learning_formula_digest,
+            &self.telemetry_digest,
+            &self.checkpoint_digest,
+            &self.compensation_digest,
+            &self.policy_digest,
+            &self.schema_digest,
+            &self.teacher_digest,
+            &self.provider_digest,
+            &self.model_digest,
+            &self.prompt_digest,
+            &self.request_digest,
+        ] {
+            out.extend_from_slice(digest);
+        }
+        out.extend_from_slice(&self.source_revision.to_le_bytes());
+        out.extend_from_slice(&self.base_revision.to_le_bytes());
+        out.extend_from_slice(&self.next_checkpoint_revision.to_le_bytes());
+        out.push(self.eligible_dimension_count);
+        out.push(self.changed_dimension_count);
+        append_vector(&mut out, &self.u_next);
+        out.push(match self.status {
+            LearningCompensationCommitStatusV1::Committed => 1,
+            LearningCompensationCommitStatusV1::NoChange => 2,
+            LearningCompensationCommitStatusV1::Replayed => 3,
+        });
+        out
+    }
+
+    pub fn receipt_digest_for_body(&self) -> Digest {
+        wire::domain_hash(
+            LEARNING_COMPENSATION_RECEIPT_DOMAIN_V1,
+            &[&self.canonical_bytes_without_receipt_digest()],
+        )
+    }
+
+    pub fn seal(mut self) -> Self {
+        self.receipt_digest = self.receipt_digest_for_body();
+        self
+    }
+
+    pub fn validate(&self) -> bool {
+        self.schema == LEARNING_COMPENSATION_RECEIPT_SCHEMA_V1
+            && self.source_revision > 0
+            && self.base_revision > 0
+            && self.next_checkpoint_revision > 0
+            && self.eligible_dimension_count > 0
+            && self.eligible_dimension_count <= 15
+            && self.changed_dimension_count <= self.eligible_dimension_count
+            && signed_compensation_vector(&self.u_next)
+            && [
+                &self.job_id,
+                &self.source_event_digest,
+                &self.source_text_digest,
+                &self.formula_digest,
+                &self.local_estimator_formula_digest,
+                &self.learning_formula_digest,
+                &self.telemetry_digest,
+                &self.checkpoint_digest,
+                &self.compensation_digest,
+                &self.policy_digest,
+                &self.schema_digest,
+                &self.teacher_digest,
+                &self.provider_digest,
+                &self.model_digest,
+                &self.prompt_digest,
+                &self.request_digest,
+                &self.receipt_digest,
+            ]
+            .into_iter()
+            .all(nonzero_digest)
+            && self.learning_formula_digest
+                == learning_compensation_formula_digest_v1(
+                    &self.formula_digest,
+                    &self.local_estimator_formula_digest,
+                    &self.policy_digest,
+                )
+            && match self.status {
+                LearningCompensationCommitStatusV1::Committed => self.changed_dimension_count > 0,
+                LearningCompensationCommitStatusV1::NoChange => self.changed_dimension_count == 0,
+                LearningCompensationCommitStatusV1::Replayed => true,
+            }
+            && self.receipt_digest == self.receipt_digest_for_body()
+    }
+}
+
+impl LearningCompensationNoChangeReceiptV1 {
+    pub fn canonical_bytes_without_receipt_digest(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * 15 + 8 * 2 + 2);
+        for digest in [
+            &self.job_id,
+            &self.source_event_digest,
+            &self.source_text_digest,
+            &self.formula_digest,
+            &self.local_estimator_formula_digest,
+            &self.learning_formula_digest,
+            &self.telemetry_digest,
+            &self.checkpoint_digest,
+            &self.policy_digest,
+            &self.provider_digest,
+            &self.model_digest,
+            &self.prompt_digest,
+            &self.schema_digest,
+            &self.teacher_digest,
+            &self.request_digest,
+        ] {
+            out.extend_from_slice(digest);
+        }
+        out.extend_from_slice(&self.source_revision.to_le_bytes());
+        out.extend_from_slice(&self.base_revision.to_le_bytes());
+        out.push(self.eligible_dimension_count);
+        out.push(self.changed_dimension_count);
+        out
+    }
+
+    pub fn receipt_digest_for_body(&self) -> Digest {
+        wire::domain_hash(
+            LEARNING_COMPENSATION_NO_CHANGE_DOMAIN_V1,
+            &[&self.canonical_bytes_without_receipt_digest()],
+        )
+    }
+
+    pub fn seal(mut self) -> Self {
+        self.receipt_digest = self.receipt_digest_for_body();
+        self
+    }
+
+    pub fn validate(&self) -> bool {
+        self.schema == LEARNING_COMPENSATION_RECEIPT_SCHEMA_V1
+            && self.source_revision > 0
+            && self.base_revision > 0
+            && self.eligible_dimension_count <= 15
+            && self.changed_dimension_count == 0
+            && [
+                &self.job_id,
+                &self.source_event_digest,
+                &self.source_text_digest,
+                &self.formula_digest,
+                &self.local_estimator_formula_digest,
+                &self.learning_formula_digest,
+                &self.telemetry_digest,
+                &self.checkpoint_digest,
+                &self.policy_digest,
+                &self.provider_digest,
+                &self.model_digest,
+                &self.prompt_digest,
+                &self.schema_digest,
+                &self.teacher_digest,
+                &self.request_digest,
+                &self.receipt_digest,
+            ]
+            .into_iter()
+            .all(nonzero_digest)
+            && self.learning_formula_digest
+                == learning_compensation_formula_digest_v1(
+                    &self.formula_digest,
+                    &self.local_estimator_formula_digest,
+                    &self.policy_digest,
+                )
+            && self.receipt_digest == self.receipt_digest_for_body()
+    }
+}
+
+impl LearningCompensationTerminalReceiptV1 {
+    pub fn canonical_bytes_without_receipt_digest(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * 14 + 8 + 1);
+        for digest in [
+            &self.job_id,
+            &self.source_event_digest,
+            &self.source_text_digest,
+            &self.request_digest,
+            &self.formula_digest,
+            &self.local_estimator_formula_digest,
+            &self.learning_formula_digest,
+            &self.policy_digest,
+            &self.provider_digest,
+            &self.model_digest,
+            &self.prompt_digest,
+            &self.schema_digest,
+            &self.reason_digest,
+            &self.checkpoint_digest,
+        ] {
+            out.extend_from_slice(digest);
+        }
+        out.extend_from_slice(&self.source_revision.to_le_bytes());
+        out.push(match self.status {
+            LearningCompensationTerminalStatusV1::AbandonedInputUnavailable => 1,
+            LearningCompensationTerminalStatusV1::Rejected => 2,
+            LearningCompensationTerminalStatusV1::Expired => 3,
+        });
+        out
+    }
+
+    pub fn receipt_digest_for_body(&self) -> Digest {
+        wire::domain_hash(
+            LEARNING_COMPENSATION_TERMINAL_DOMAIN_V1,
+            &[&self.canonical_bytes_without_receipt_digest()],
+        )
+    }
+
+    pub fn seal(mut self) -> Self {
+        self.receipt_digest = self.receipt_digest_for_body();
+        self
+    }
+
+    pub fn validate(&self) -> bool {
+        self.schema == LEARNING_COMPENSATION_TERMINAL_SCHEMA_V1
+            && self.source_revision > 0
+            && [
+                &self.job_id,
+                &self.source_event_digest,
+                &self.source_text_digest,
+                &self.request_digest,
+                &self.formula_digest,
+                &self.local_estimator_formula_digest,
+                &self.learning_formula_digest,
+                &self.policy_digest,
+                &self.provider_digest,
+                &self.model_digest,
+                &self.prompt_digest,
+                &self.schema_digest,
+                &self.reason_digest,
+                &self.checkpoint_digest,
+                &self.receipt_digest,
+            ]
+            .into_iter()
+            .all(nonzero_digest)
+            && self.learning_formula_digest
+                == learning_compensation_formula_digest_v1(
+                    &self.formula_digest,
+                    &self.local_estimator_formula_digest,
+                    &self.policy_digest,
+                )
+            && self.receipt_digest == self.receipt_digest_for_body()
     }
 }
 
@@ -2115,6 +3338,157 @@ pub mod wire {
             TRANSITION_RECEIPT_V2_DOMAIN,
             &[&encode_transition_receipt_v2(receipt)],
         )
+    }
+
+    // ------------------------------------------------ native telemetry receipt v1
+
+    fn native_telemetry_formula_code(formula: NativeTelemetryFormulaV1) -> u8 {
+        match formula {
+            NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1 => 1,
+        }
+    }
+
+    fn native_telemetry_formula_from_code(code: u8) -> Option<NativeTelemetryFormulaV1> {
+        Some(match code {
+            1 => NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1,
+            _ => return None,
+        })
+    }
+
+    fn native_telemetry_phase_code(phase: NativeTelemetryPhaseV1) -> u8 {
+        match phase {
+            NativeTelemetryPhaseV1::Prepare => 1,
+        }
+    }
+
+    fn native_telemetry_phase_from_code(code: u8) -> Option<NativeTelemetryPhaseV1> {
+        Some(match code {
+            1 => NativeTelemetryPhaseV1::Prepare,
+            _ => return None,
+        })
+    }
+
+    pub fn encode_native_telemetry_receipt_v1(receipt: &NativeTelemetryReceiptV1) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 * 13 + 8 * 20 + 32);
+        push_u16(&mut out, 1);
+        out.push(native_telemetry_formula_code(receipt.formula));
+        out.push(native_telemetry_phase_code(receipt.phase));
+        for digest in [
+            &receipt.formula_digest,
+            &receipt.scope_digest,
+            &receipt.event_digest,
+            &receipt.source_digest,
+        ] {
+            push_digest(&mut out, digest);
+        }
+        push_u64(&mut out, receipt.base_revision);
+        push_u64(&mut out, receipt.next_revision);
+        for digest in [
+            &receipt.state_before,
+            &receipt.state_after,
+            &receipt.graph_before,
+            &receipt.graph_after,
+            &receipt.local_digest,
+            &receipt.compensation_digest,
+            &receipt.effective_digest,
+        ] {
+            push_digest(&mut out, digest);
+        }
+        for value in [
+            receipt.energy.reserve_before,
+            receipt.energy.reserve_after,
+            receipt.energy.recovered,
+            receipt.energy.spent,
+            receipt.energy.headroom,
+            receipt.energy.residual,
+        ] {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+        push_u32(&mut out, receipt.capacity.upper_saturated_nodes);
+        push_u32(&mut out, receipt.capacity.node_limit);
+        out.extend_from_slice(&encode_fixed(receipt.capacity.node_headroom));
+        push_u32(&mut out, receipt.capacity.edge_used);
+        push_u32(&mut out, receipt.capacity.edge_limit);
+        for value in [
+            receipt.capacity.edge_headroom,
+            receipt.capacity.headroom,
+            receipt.capacity.residual,
+            receipt.residuals.authority,
+            receipt.residuals.continuity,
+            receipt.residuals.energy,
+            receipt.residuals.renormalization,
+            receipt.residuals.capacity,
+            receipt.residual_health,
+            receipt.native_gate,
+        ] {
+            out.extend_from_slice(&encode_fixed(value));
+        }
+        push_digest(&mut out, &receipt.checkpoint_digest);
+        push_digest(&mut out, &receipt.telemetry_digest);
+        out
+    }
+
+    pub fn decode_native_telemetry_receipt_v1(
+        bytes: &[u8],
+    ) -> Result<NativeTelemetryReceiptV1, WireError> {
+        let mut reader = Reader::new(bytes);
+        if reader.u16()? != 1 {
+            return Err(WireError::SchemaVersion(0));
+        }
+        let receipt = NativeTelemetryReceiptV1 {
+            schema: NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1.to_owned(),
+            formula: native_telemetry_formula_from_code(reader.u8()?)
+                .ok_or(WireError::InvalidEnum("native telemetry formula"))?,
+            phase: native_telemetry_phase_from_code(reader.u8()?)
+                .ok_or(WireError::InvalidEnum("native telemetry phase"))?,
+            formula_digest: reader.digest()?,
+            scope_digest: reader.digest()?,
+            event_digest: reader.digest()?,
+            source_digest: reader.digest()?,
+            base_revision: reader.u64()?,
+            next_revision: reader.u64()?,
+            state_before: reader.digest()?,
+            state_after: reader.digest()?,
+            graph_before: reader.digest()?,
+            graph_after: reader.digest()?,
+            local_digest: reader.digest()?,
+            compensation_digest: reader.digest()?,
+            effective_digest: reader.digest()?,
+            energy: EnergyTelemetryV1 {
+                reserve_before: reader.fixed()?,
+                reserve_after: reader.fixed()?,
+                recovered: reader.fixed()?,
+                spent: reader.fixed()?,
+                headroom: reader.fixed()?,
+                residual: reader.fixed()?,
+            },
+            capacity: CapacityTelemetryV1 {
+                upper_saturated_nodes: reader.u32()?,
+                node_limit: reader.u32()?,
+                node_headroom: reader.fixed()?,
+                edge_used: reader.u32()?,
+                edge_limit: reader.u32()?,
+                edge_headroom: reader.fixed()?,
+                headroom: reader.fixed()?,
+                residual: reader.fixed()?,
+            },
+            residuals: InvariantResiduals {
+                authority: reader.fixed()?,
+                continuity: reader.fixed()?,
+                energy: reader.fixed()?,
+                renormalization: reader.fixed()?,
+                capacity: reader.fixed()?,
+            },
+            residual_health: reader.fixed()?,
+            native_gate: reader.fixed()?,
+            checkpoint_digest: reader.digest()?,
+            telemetry_digest: reader.digest()?,
+        };
+        reader.finish()?;
+        if !receipt.validate() || encode_native_telemetry_receipt_v1(&receipt) != bytes {
+            return Err(WireError::InvalidEnum("native telemetry receipt v1"));
+        }
+        Ok(receipt)
     }
 
     // ---------------------------------------------------------------- genesis receipt
