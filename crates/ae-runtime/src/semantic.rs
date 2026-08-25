@@ -794,7 +794,7 @@ pub(crate) fn decode_semantic_snapshot_v3(
         if !cursor.eof() {
             return Err(RuntimeError::InvalidNeuralState);
         }
-        for chunk in reserved_bytes.chunks_exact(8) {
+        for chunk in reserved_bytes.as_chunks::<8>().0 {
             let mut raw = [0u8; 8];
             raw.copy_from_slice(chunk);
             if Fixed::decode(raw) != Fixed::ZERO {
