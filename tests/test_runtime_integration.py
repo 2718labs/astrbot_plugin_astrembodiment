@@ -20,6 +20,7 @@ import astr_embodiment.bridge as bridge_module  # noqa: E402
 import main as main_module  # noqa: E402
 from astr_embodiment.contracts import ScopeTokens  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
+from astr_embodiment.semantic_estimator import SemanticEstimateError  # noqa: E402
 from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
 
@@ -1442,6 +1443,105 @@ def _v3_test_native_closure() -> dict:
             },
         },
     }
+
+
+def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class HostResponse:
+        def __init__(self, completion_text: str) -> None:
+            self.completion_text = completion_text
+
+    current_turn_text = "private current turn must remain the sole user prompt"
+    canonical_completion = json.dumps(_v3_test_estimate())
+    malformed_estimate = _v3_test_estimate()
+    malformed_estimate["dimensions"]["unexpected_dimension"] = {
+        "private_completion_secret": "must not be logged"
+    }
+    malformed_completion = json.dumps(malformed_estimate)
+
+    def request_mapping() -> dict:
+        return {
+            "current_turn_text": current_turn_text,
+            "system_prompt": main_module.SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
+            "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
+            "input": {"context_summary": {}},
+        }
+
+    def instance_for(completion_text: str):
+        context = FakeContext(configured_provider="semantic")
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return HostResponse(completion_text)
+
+        context.llm_generate = generate
+        return (
+            plugin(
+                FakeConfig(
+                    model_settings={"semantic_estimator_provider_id": "semantic"},
+                    observatory_enabled=False,
+                ),
+                context,
+            ),
+            context,
+        )
+
+    instance, context = instance_for(canonical_completion)
+    canonical_result = asyncio.run(
+        instance._semantic_estimate_v3(FakeEvent(), request_mapping())
+    )
+
+    assert len(context.generate_calls) == 1
+    provider_call = context.generate_calls[0]
+    canonical_schema = json.dumps(
+        main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    assert provider_call["prompt"] == current_turn_text
+    assert set(provider_call) == {
+        "chat_provider_id",
+        "prompt",
+        "system_prompt",
+        "contexts",
+        "tools",
+        "temperature",
+    }
+    assert provider_call["contexts"] is None
+    assert provider_call["tools"] is None
+    assert provider_call["temperature"] == 0
+    assert current_turn_text not in provider_call["system_prompt"]
+    assert canonical_schema in provider_call["system_prompt"]
+    assert all(
+        dimension_name in provider_call["system_prompt"]
+        for dimension_name in _V3_TEST_DIMENSIONS
+    )
+    assert canonical_result.as_json() == _v3_test_estimate()
+
+    recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    malformed_instance, malformed_context = instance_for(malformed_completion)
+    with pytest.raises(SemanticEstimateError) as exc_info:
+        asyncio.run(
+            malformed_instance._semantic_estimate_v3(FakeEvent(), request_mapping())
+        )
+
+    assert exc_info.value.code == "ESTIMATOR_MALFORMED"
+    assert exc_info.value.subcode == "DIMENSION_KEYS"
+    assert len(malformed_context.generate_calls) == 1
+    assert len(recorder.warning_messages) == 1
+    warning_payload = json.loads(recorder.warning_messages[0])
+    assert warning_payload == {
+        "return_type": f"{HostResponse.__module__}.{HostResponse.__qualname__}",
+        "extraction_path": "completion_text",
+        "character_length": len(malformed_completion),
+        "sha256": hashlib.sha256(malformed_completion.encode("utf-8")).hexdigest(),
+        "subcode": "DIMENSION_KEYS",
+    }
+    assert current_turn_text not in recorder.warning_messages[0]
+    assert malformed_completion not in recorder.warning_messages[0]
 
 
 def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expression(

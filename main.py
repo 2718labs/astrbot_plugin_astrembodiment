@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import tempfile
@@ -82,6 +83,8 @@ try:
     from .astr_embodiment.semantic_estimator import (
         SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
         SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
+        SemanticEstimateError,
+        parse_estimator_output_v3,
     )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment import NativeBridge, NativeCoreUnavailable
@@ -107,6 +110,8 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment.semantic_estimator import (
         SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
         SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
+        SemanticEstimateError,
+        parse_estimator_output_v3,
     )
 
 _G0_FORMULA_DIGEST = "00" * 32
@@ -551,10 +556,25 @@ class AstrEmbodimentPlugin(Star):
         generate = getattr(self.context, "llm_generate", None)
         if not callable(generate):
             raise TypeError("semantic estimator provider unavailable")
+        try:
+            canonical_schema = json.dumps(
+                structured_schema,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            raise ValueError("invalid semantic estimate request") from None
+        provider_system_prompt = (
+            f"{system_prompt}\n\n"
+            "Closed output schema (canonical JSON):\n"
+            f"{canonical_schema}\n"
+            "Return exactly one JSON object matching this closed schema."
+        )
         generated = generate(
             chat_provider_id=provider_id,
             prompt=current_turn_text,
-            system_prompt=system_prompt,
+            system_prompt=provider_system_prompt,
             contexts=None,
             tools=None,
             temperature=0,
@@ -567,9 +587,48 @@ class AstrEmbodimentPlugin(Star):
         else:
             result = generated
         if type(result) is str:
-            return result
-        completion_text = getattr(result, "completion_text", None)
-        return completion_text if type(completion_text) is str else result
+            extraction_path = "direct_str"
+            completion_text = result
+        else:
+            extraction_path = "completion_text"
+            try:
+                completion_text = getattr(result, "completion_text", None)
+            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:
+                completion_text = None
+
+        if type(completion_text) is str:
+            try:
+                return parse_estimator_output_v3(completion_text)
+            except SemanticEstimateError as exc:
+                malformed = exc
+        else:
+            malformed = SemanticEstimateError("ESTIMATOR_MALFORMED", "JSON_DECODE")
+
+        logger.warning(
+            json.dumps(
+                {
+                    "return_type": (
+                        f"{type(result).__module__}.{type(result).__qualname__}"
+                    ),
+                    "extraction_path": extraction_path,
+                    "character_length": (
+                        len(completion_text) if type(completion_text) is str else None
+                    ),
+                    "sha256": (
+                        hashlib.sha256(completion_text.encode("utf-8")).hexdigest()
+                        if type(completion_text) is str
+                        else None
+                    ),
+                    "subcode": malformed.subcode or "JSON_DECODE",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+        raise malformed
 
     async def _persist_seed(self, seed_code: str) -> None:
         """Persist the latest native SeedCode through AstrBotConfig."""

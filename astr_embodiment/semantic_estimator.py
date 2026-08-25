@@ -45,6 +45,16 @@ PROPOSAL_FIELDS = (
 _ESTIMATE_V3_FIELDS = frozenset({"schema", "dimensions"})
 _DIMENSION_V3_FIELDS = frozenset({"state", "intensity_fxp6", "confidence_fxp6"})
 _DIMENSION_V3_STATES = frozenset({"PRESENT", "ABSENT", "UNAVAILABLE"})
+_ESTIMATOR_MALFORMED_SUBCODES = frozenset(
+    {
+        "JSON_DECODE",
+        "ROOT_SHAPE",
+        "SCHEMA_VERSION",
+        "DIMENSION_KEYS",
+        "DIMENSION_SLOT_SHAPE",
+        "DIMENSION_VALUE",
+    }
+)
 _NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-binding-v1"
 _SCOPE_FIELDS = frozenset(
     {"bot_token", "persona_token", "relation_token", "session_token"}
@@ -93,9 +103,16 @@ SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA = {
 class SemanticEstimateError(ValueError):
     """Fixed, non-echoing V3 parse/provider failure."""
 
-    def __init__(self, code: str = "ESTIMATOR_MALFORMED") -> None:
+    def __init__(
+        self,
+        code: str = "ESTIMATOR_MALFORMED",
+        subcode: str | None = None,
+    ) -> None:
+        if subcode is not None and subcode not in _ESTIMATOR_MALFORMED_SUBCODES:
+            raise ValueError("invalid estimator malformed subcode")
         super().__init__(code)
         self.code = code
+        self.subcode = subcode
 
 
 class SemanticProposalError(ValueError):
@@ -106,8 +123,8 @@ class SemanticProposalError(ValueError):
         self.code = code
 
 
-def _invalid_estimate() -> SemanticEstimateError:
-    return SemanticEstimateError()
+def _invalid_estimate(subcode: str) -> SemanticEstimateError:
+    return SemanticEstimateError("ESTIMATOR_MALFORMED", subcode)
 
 
 def _invalid_proposal() -> SemanticProposalError:
@@ -136,11 +153,11 @@ def _decode_json_object(value: Any) -> dict[str, Any]:
                 object_pairs_hook=_pairs_without_duplicates,
             )
         except (TypeError, ValueError, json.JSONDecodeError):
-            raise _invalid_estimate() from None
+            raise _invalid_estimate("JSON_DECODE") from None
     else:
         payload = value
     if type(payload) is not dict or any(type(key) is not str for key in payload):
-        raise _invalid_estimate()
+        raise _invalid_estimate("ROOT_SHAPE")
     return payload
 
 
@@ -150,7 +167,7 @@ def _is_raw_integer(value: Any) -> bool:
 
 def _validate_v3_confidence(value: Any) -> int:
     if not _is_raw_integer(value) or not 0 <= value <= FXP6_SCALE:
-        raise _invalid_estimate()
+        raise _invalid_estimate("DIMENSION_VALUE")
     return value
 
 
@@ -164,15 +181,15 @@ class DimensionEstimateV3:
 
     def __post_init__(self) -> None:
         if type(self.state) is not str or self.state not in _DIMENSION_V3_STATES:
-            raise _invalid_estimate()
+            raise _invalid_estimate("DIMENSION_VALUE")
         if self.state == "PRESENT":
             if type(self.intensity_fxp6) is not int or not 1 <= self.intensity_fxp6 <= FXP6_SCALE:
-                raise _invalid_estimate()
+                raise _invalid_estimate("DIMENSION_VALUE")
         elif self.state == "ABSENT":
             if type(self.intensity_fxp6) is not int or self.intensity_fxp6 != 0:
-                raise _invalid_estimate()
+                raise _invalid_estimate("DIMENSION_VALUE")
         elif self.intensity_fxp6 is not None:
-            raise _invalid_estimate()
+            raise _invalid_estimate("DIMENSION_VALUE")
         _validate_v3_confidence(self.confidence_fxp6)
 
     def as_json(self) -> dict[str, int | str | None]:
@@ -192,14 +209,14 @@ class SemanticEstimateV3:
 
     def __post_init__(self) -> None:
         if self.schema != SEMANTIC_ESTIMATE_V3_SCHEMA:
-            raise _invalid_estimate()
+            raise _invalid_estimate("SCHEMA_VERSION")
         if type(self.dimensions) is not dict or set(self.dimensions) != set(DIMENSION_NAMES):
-            raise _invalid_estimate()
+            raise _invalid_estimate("DIMENSION_KEYS")
         canonical: dict[str, DimensionEstimateV3] = {}
         for name in DIMENSION_NAMES:
             dimension = self.dimensions[name]
             if type(dimension) is not DimensionEstimateV3:
-                raise _invalid_estimate()
+                raise _invalid_estimate("DIMENSION_VALUE")
             canonical[name] = dimension
         object.__setattr__(self, "dimensions", MappingProxyType(canonical))
 
@@ -214,12 +231,12 @@ class SemanticEstimateV3:
 
 def _validate_dimension_slots_v3(value: Any) -> dict[str, DimensionEstimateV3]:
     if type(value) is not dict or set(value) != set(DIMENSION_NAMES):
-        raise _invalid_estimate()
+        raise _invalid_estimate("DIMENSION_KEYS")
     dimensions: dict[str, DimensionEstimateV3] = {}
     for name in DIMENSION_NAMES:
         slot = value[name]
         if type(slot) is not dict or set(slot) != _DIMENSION_V3_FIELDS:
-            raise _invalid_estimate()
+            raise _invalid_estimate("DIMENSION_SLOT_SHAPE")
         dimensions[name] = DimensionEstimateV3(
             state=slot["state"],
             intensity_fxp6=slot["intensity_fxp6"],
@@ -236,14 +253,14 @@ def parse_estimator_output_v3(value: Any) -> SemanticEstimateV3:
             value = value.as_json()
         payload = _decode_json_object(value)
         if set(payload) != _ESTIMATE_V3_FIELDS:
-            raise _invalid_estimate()
+            raise _invalid_estimate("ROOT_SHAPE")
         if payload["schema"] != SEMANTIC_ESTIMATE_V3_SCHEMA:
-            raise _invalid_estimate()
+            raise _invalid_estimate("SCHEMA_VERSION")
         return SemanticEstimateV3(dimensions=_validate_dimension_slots_v3(payload["dimensions"]))
     except SemanticEstimateError:
         raise
     except BaseException:
-        raise _invalid_estimate() from None
+        raise _invalid_estimate("DIMENSION_VALUE") from None
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
