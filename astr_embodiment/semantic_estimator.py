@@ -19,14 +19,28 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from .context_binding import (
-    DIMENSION_NAMES,
-    ContextBindingV1,
-    validate_context_summary,
-)
+from .context_binding import ContextBindingV1, validate_context_summary
 from .contracts import FrozenTurn, ScopeTokens
+from .semantic_contract import (
+    ABSENT,
+    DIMENSION_NAMES,
+    DIMENSION_STATES,
+    FXP6_SCALE,
+    INTENSITY_BOOLEAN,
+    INTENSITY_INTEGER_RANGE,
+    INTENSITY_NON_INTEGRAL_NUMBER,
+    INTENSITY_NULL_DISALLOWED,
+    INTENSITY_STATE_CONSTRAINT,
+    INTENSITY_STRING,
+    PRESENT,
+    STATE_INVALID,
+    UNAVAILABLE,
+    VALUE_OTHER_TYPE,
+    build_dimension_slot_schema,
+    state_intensity_prompt_rules,
+    validate_state_intensity,
+)
 
-FXP6_SCALE = 1_000_000
 SEMANTIC_ESTIMATE_V3_SCHEMA = "astr-embodiment.semantic-estimate.v3"
 ESTIMATOR_FORMULA_DIGEST = hashlib.sha256(
     b"astr-embodiment/semantic-estimate-v3-context-binding-v1"
@@ -45,8 +59,7 @@ PROPOSAL_FIELDS = (
 )
 _ESTIMATE_V3_FIELDS = frozenset({"schema", "dimensions"})
 _DIMENSION_V3_FIELDS = frozenset({"state", "intensity_fxp6", "confidence_fxp6"})
-_DIMENSION_V3_STATES = frozenset({"PRESENT", "ABSENT", "UNAVAILABLE"})
-_ESTIMATOR_MALFORMED_SUBCODES = frozenset(
+ESTIMATOR_MALFORMED_SUBCODES = frozenset(
     {
         "JSON_DECODE",
         "ROOT_SHAPE",
@@ -58,18 +71,18 @@ _ESTIMATOR_MALFORMED_SUBCODES = frozenset(
 )
 _DIMENSION_VALUE_CLASSIFICATIONS = frozenset(
     {
-        "INTENSITY_NON_INTEGRAL_NUMBER",
+        INTENSITY_NON_INTEGRAL_NUMBER,
         "CONFIDENCE_NON_INTEGRAL_NUMBER",
-        "INTENSITY_STRING",
+        INTENSITY_STRING,
         "CONFIDENCE_STRING",
-        "INTENSITY_BOOLEAN",
+        INTENSITY_BOOLEAN,
         "CONFIDENCE_BOOLEAN",
-        "INTENSITY_NULL_DISALLOWED",
+        INTENSITY_NULL_DISALLOWED,
         "CONFIDENCE_NULL",
-        "INTENSITY_INTEGER_RANGE",
+        INTENSITY_INTEGER_RANGE,
         "CONFIDENCE_INTEGER_RANGE",
-        "INTENSITY_STATE_CONSTRAINT",
-        "VALUE_OTHER_TYPE",
+        INTENSITY_STATE_CONSTRAINT,
+        VALUE_OTHER_TYPE,
     }
 )
 _DIMENSION_VALUE_JSON_TYPES = frozenset(
@@ -84,24 +97,13 @@ _SCOPE_FIELDS = frozenset(
 SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT = (
     "Evaluate only current_turn_text. The context summary is closed historical "
     "metadata and must never establish current-turn presence. For every ordered "
-    "dimension, decide state before intensity. Return only a strict JSON object "
+    "dimension, decide state before intensity.\n"
+    f"{state_intensity_prompt_rules()}\n"
+    "Return only a strict JSON object "
     "matching the supplied schema; do not add prose, explanations, or fields."
 )
 
-_V3_DIMENSION_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["state", "intensity_fxp6", "confidence_fxp6"],
-    "properties": {
-        "state": {"type": "string", "enum": ["PRESENT", "ABSENT", "UNAVAILABLE"]},
-        "intensity_fxp6": {
-            "type": ["integer", "null"],
-            "minimum": 0,
-            "maximum": FXP6_SCALE,
-        },
-        "confidence_fxp6": {"type": "integer", "minimum": 0, "maximum": FXP6_SCALE},
-    },
-}
+_V3_DIMENSION_SCHEMA = build_dimension_slot_schema()
 SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -190,7 +192,7 @@ class SemanticEstimateError(ValueError):
         subcode: str | None = None,
         diagnostic: DimensionValueDiagnostic | None = None,
     ) -> None:
-        if subcode is not None and subcode not in _ESTIMATOR_MALFORMED_SUBCODES:
+        if subcode is not None and subcode not in ESTIMATOR_MALFORMED_SUBCODES:
             raise ValueError("invalid estimator malformed subcode")
         if diagnostic is not None and (
             subcode != "DIMENSION_VALUE"
@@ -332,26 +334,6 @@ def _dimension_value_diagnostic(
     )
 
 
-def _dimension_intensity_failure_v3(value: Any, state: str) -> str | None:
-    if type(value) is bool:
-        return "INTENSITY_BOOLEAN"
-    if value is None:
-        return None if state == "UNAVAILABLE" else "INTENSITY_NULL_DISALLOWED"
-    if type(value) is str:
-        return "INTENSITY_STRING"
-    if type(value) is float:
-        return "INTENSITY_NON_INTEGRAL_NUMBER"
-    if type(value) is not int:
-        return "VALUE_OTHER_TYPE"
-    if not 0 <= value <= FXP6_SCALE:
-        return "INTENSITY_INTEGER_RANGE"
-    if state == "PRESENT":
-        return None if value >= 1 else "INTENSITY_STATE_CONSTRAINT"
-    if state == "ABSENT":
-        return None if value == 0 else "INTENSITY_STATE_CONSTRAINT"
-    return "INTENSITY_STATE_CONSTRAINT"
-
-
 def _dimension_confidence_failure_v3(value: Any) -> str | None:
     if type(value) is bool:
         return "CONFIDENCE_BOOLEAN"
@@ -373,14 +355,14 @@ def _diagnose_dimension_value_v3(
     slot: Mapping[str, Any],
 ) -> DimensionValueDiagnostic:
     state = slot["state"]
-    if type(state) is not str or state not in _DIMENSION_V3_STATES:
+    intensity = slot["intensity_fxp6"]
+    intensity_failure = validate_state_intensity(state, intensity)
+    if intensity_failure == STATE_INVALID:
         return _dimension_value_diagnostic(
             dimension_name,
-            "VALUE_OTHER_TYPE",
+            VALUE_OTHER_TYPE,
             state,
         )
-    intensity = slot["intensity_fxp6"]
-    intensity_failure = _dimension_intensity_failure_v3(intensity, state)
     if intensity_failure is not None:
         return _dimension_value_diagnostic(
             dimension_name,
@@ -417,15 +399,7 @@ class DimensionEstimateV3:
     confidence_fxp6: int
 
     def __post_init__(self) -> None:
-        if type(self.state) is not str or self.state not in _DIMENSION_V3_STATES:
-            raise _invalid_estimate("DIMENSION_VALUE")
-        if self.state == "PRESENT":
-            if type(self.intensity_fxp6) is not int or not 1 <= self.intensity_fxp6 <= FXP6_SCALE:
-                raise _invalid_estimate("DIMENSION_VALUE")
-        elif self.state == "ABSENT":
-            if type(self.intensity_fxp6) is not int or self.intensity_fxp6 != 0:
-                raise _invalid_estimate("DIMENSION_VALUE")
-        elif self.intensity_fxp6 is not None:
+        if validate_state_intensity(self.state, self.intensity_fxp6) is not None:
             raise _invalid_estimate("DIMENSION_VALUE")
         _validate_v3_confidence(self.confidence_fxp6)
 
@@ -732,9 +706,9 @@ def build_perception_proposal_v3(
         confidences: list[int] = []
         for name in DIMENSION_NAMES:
             slot = canonical_estimate.dimensions[name]
-            if slot.state == "UNAVAILABLE":
+            if slot.state == UNAVAILABLE:
                 raise SemanticProposalError("SEMANTIC_VECTOR_UNAVAILABLE")
-            dimensions[name] = slot.intensity_fxp6 if slot.state == "PRESENT" else 0
+            dimensions[name] = slot.intensity_fxp6 if slot.state == PRESENT else 0
             confidences.append(slot.confidence_fxp6)
         confidence = min(confidences)
         if confidence == 0:
@@ -813,6 +787,8 @@ async def estimate_context_bound(
         if inspect.isawaitable(result):
             result = await result
     except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        raise
+    except SemanticEstimateError:
         raise
     except BaseException:
         raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE") from None

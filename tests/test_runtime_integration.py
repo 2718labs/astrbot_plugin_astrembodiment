@@ -1785,3 +1785,223 @@ def test_v3_dimension_value_provider_warn_includes_first_safe_diagnostic(
     assert provider_warning.get("subcode") == "DIMENSION_VALUE"
     assert provider_warning.get("dimension_diagnostic") == expected_diagnostic
     assert malformed_completion not in "\n".join(recorder.warning_messages)
+
+
+def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Keep schema, prompt, parser, proposal admission, and observatory aligned."""
+
+    class NativeAbi:
+        def __init__(self, *, closure: dict | None) -> None:
+            self.closure = closure
+            self.cursor_calls = 0
+            self.proposal_calls = 0
+
+        def semantic_revision_v1(self, _scope_json: str) -> str:
+            self.cursor_calls += 1
+            return json.dumps(
+                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+            )
+
+        def apply_perception_proposal_v1(
+            self, _scope_json: str, _proposal_json: str
+        ) -> str:
+            self.proposal_calls += 1
+            if self.closure is None:
+                raise AssertionError("this estimate must not reach native proposal apply")
+            return json.dumps(self.closure)
+
+    async def run(completion_text: str, native: NativeAbi):
+        context = FakeContext(configured_provider="semantic")
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(completion_text=completion_text)
+
+        context.llm_generate = generate
+        instance = plugin(
+            FakeConfig(
+                model_settings={"semantic_estimator_provider_id": "semantic"},
+                observatory_enabled=False,
+            ),
+            context,
+        )
+        bridge = bridge_module.NativeBridge()
+        bridge._native = native
+        instance._bridge = bridge
+        instance._coordinator = GenesisCoordinator(bridge)
+        scope = _v3_test_scope()
+
+        async def run_genesis(*_args, **_kwargs):
+            return _v3_test_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        request = FakeRequest()
+        request.prompt = "请停止并保持边界。"
+        await instance.on_llm_request(FakeEvent(), request)
+        return context, request
+
+    expected_dimension_schema = {
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["state", "intensity_fxp6", "confidence_fxp6"],
+                "properties": {
+                    "state": {"const": "PRESENT"},
+                    "intensity_fxp6": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1_000_000,
+                    },
+                    "confidence_fxp6": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1_000_000,
+                    },
+                },
+            },
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["state", "intensity_fxp6", "confidence_fxp6"],
+                "properties": {
+                    "state": {"const": "ABSENT"},
+                    "intensity_fxp6": {"const": 0},
+                    "confidence_fxp6": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1_000_000,
+                    },
+                },
+            },
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["state", "intensity_fxp6", "confidence_fxp6"],
+                "properties": {
+                    "state": {"const": "UNAVAILABLE"},
+                    "intensity_fxp6": {"type": "null"},
+                    "confidence_fxp6": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1_000_000,
+                    },
+                },
+            },
+        ]
+    }
+    expected_prompt_fragments = (
+        "State × intensity algebra (mutually exclusive):",
+        "PRESENT: intensity_fxp6 must be an integer from 1 through 1000000.",
+        "ABSENT: intensity_fxp6 must be the integer 0.",
+        "UNAVAILABLE: intensity_fxp6 must be JSON null.",
+        "JSON null is allowed only with UNAVAILABLE.",
+        "If reliable current-turn presence cannot be determined, select UNAVAILABLE with JSON null.",
+        "If current-turn evaluation finds no evidence, select ABSENT with integer 0.",
+    )
+    contract_failures: list[str] = []
+    structured_schema = main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA
+    dimensions_schema = structured_schema["properties"]["dimensions"]
+    if dimensions_schema["$ref"] if "$ref" in dimensions_schema else False:
+        contract_failures.append("dimensions schema must be inline and closed")
+    if dimensions_schema["required"] != list(_V3_TEST_DIMENSIONS):
+        contract_failures.append("schema must retain the canonical ordered 15D set")
+    if structured_schema["$defs"]["dimension"] != expected_dimension_schema:
+        contract_failures.append("schema must expose the three mutually exclusive state branches")
+
+    malformed_estimate = _v3_test_estimate()
+    malformed_estimate["dimensions"]["positive"] = {
+        "state": "PRESENT",
+        "intensity_fxp6": None,
+        "confidence_fxp6": 900_000,
+    }
+    malformed_completion = json.dumps(malformed_estimate)
+    with pytest.raises(SemanticEstimateError) as exc_info:
+        parse_estimator_output_v3(malformed_completion)
+    assert exc_info.value.code == "ESTIMATOR_MALFORMED"
+    assert exc_info.value.subcode == "DIMENSION_VALUE"
+    assert exc_info.value.diagnostic_json() == {
+        "dimension_name": "positive",
+        "value_classification": "INTENSITY_NULL_DISALLOWED",
+        "json_type": "null",
+    }
+
+    valid_recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", valid_recorder)
+    valid_native = NativeAbi(closure=_v3_test_native_closure())
+    valid_context, _valid_request = asyncio.run(
+        run(json.dumps(_v3_test_estimate()), valid_native)
+    )
+    assert len(valid_context.generate_calls) == 1
+    assert valid_native.cursor_calls == 1
+    assert valid_native.proposal_calls == 1
+
+    unavailable_estimate = _v3_test_estimate()
+    unavailable_estimate["dimensions"]["positive"] = {
+        "state": "UNAVAILABLE",
+        "intensity_fxp6": None,
+        "confidence_fxp6": 900_000,
+    }
+    unavailable_recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", unavailable_recorder)
+    unavailable_native = NativeAbi(closure=None)
+    unavailable_context, unavailable_request = asyncio.run(
+        run(json.dumps(unavailable_estimate), unavailable_native)
+    )
+    assert len(unavailable_context.generate_calls) == 1
+    assert unavailable_native.cursor_calls == 1
+    assert unavailable_native.proposal_calls == 0
+    unavailable_record = getattr(
+        unavailable_request, "_astrembodiment_semantic_observatory_record_v1", {}
+    )
+    assert unavailable_record.get("cause_code") == "SEMANTIC_VECTOR_UNAVAILABLE"
+
+    malformed_recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", malformed_recorder)
+    malformed_native = NativeAbi(closure=None)
+    malformed_context, malformed_request = asyncio.run(
+        run(malformed_completion, malformed_native)
+    )
+    assert len(malformed_context.generate_calls) == 1
+    assert malformed_native.cursor_calls == 1
+    assert malformed_native.proposal_calls == 0
+    provider_call = malformed_context.generate_calls[0]
+    canonical_schema = json.dumps(
+        structured_schema,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    if canonical_schema not in provider_call["system_prompt"]:
+        contract_failures.append("provider prompt must carry the canonical structured schema")
+    for fragment in expected_prompt_fragments:
+        if fragment not in provider_call["system_prompt"]:
+            contract_failures.append(f"provider prompt missing canonical rule: {fragment}")
+    malformed_record = getattr(
+        malformed_request, "_astrembodiment_semantic_observatory_record_v1", {}
+    )
+    expected_record = {
+        "status": "DEGRADED",
+        "code": "EXPRESSION_NOT_ATTEMPTED",
+        "reason": "EXPRESSION_NOT_ATTEMPTED",
+        "cause_code": "DIMENSION_VALUE",
+        "expression_state": "NOT_ATTEMPTED",
+        "dimensions_fxp6": None,
+    }
+    observed_record = {key: malformed_record.get(key) for key in expected_record}
+    if observed_record != expected_record:
+        contract_failures.append(
+            f"observatory must preserve DIMENSION_VALUE, got {observed_record!r}"
+        )
+    assert len(malformed_recorder.warning_messages) == 2
+    provider_warning = json.loads(malformed_recorder.warning_messages[0])
+    assert provider_warning.get("subcode") == "DIMENSION_VALUE"
+    assert provider_warning.get("dimension_diagnostic") == {
+        "dimension_name": "positive",
+        "value_classification": "INTENSITY_NULL_DISALLOWED",
+        "json_type": "null",
+    }
+    assert malformed_completion not in "\n".join(malformed_recorder.warning_messages)
+    assert not contract_failures, "\n".join(contract_failures)

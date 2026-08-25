@@ -81,6 +81,7 @@ try:
         turn_id,
     )
     from .astr_embodiment.semantic_estimator import (
+        ESTIMATOR_MALFORMED_SUBCODES,
         SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
         SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
         SemanticEstimateError,
@@ -108,6 +109,7 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
         turn_id,
     )
     from astr_embodiment.semantic_estimator import (
+        ESTIMATOR_MALFORMED_SUBCODES,
         SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
         SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
         SemanticEstimateError,
@@ -245,7 +247,7 @@ _SEMANTIC_NOT_ATTEMPTED_CAUSES = frozenset(
         "NATIVE_ERROR",
         "EXPRESSION_PROJECTION_UNAVAILABLE",
     }
-)
+) | ESTIMATOR_MALFORMED_SUBCODES
 
 
 class AstrEmbodimentPlugin(Star):
@@ -1348,8 +1350,11 @@ class AstrEmbodimentPlugin(Star):
                     "expression_profile_fxp6": profile,
                 }
         if cause_code is None and isinstance(outcome, Mapping):
-            candidate = outcome.get("code")
+            candidate = outcome.get("cause_code")
             cause_code = candidate if type(candidate) is str else None
+            if cause_code is None:
+                candidate = outcome.get("code")
+                cause_code = candidate if type(candidate) is str else None
         if cause_code not in _SEMANTIC_NOT_ATTEMPTED_CAUSES:
             cause_code = "NATIVE_ERROR"
         empty_record["cause_code"] = cause_code

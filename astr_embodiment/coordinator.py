@@ -37,6 +37,7 @@ from .persona_genesis import (
 )
 from .semantic_estimator import (
     ESTIMATOR_FORMULA_DIGEST,
+    ESTIMATOR_MALFORMED_SUBCODES,
     SemanticEstimateError,
     SemanticProposalError,
     build_perception_proposal_v3,
@@ -274,12 +275,19 @@ class GenesisCoordinator:
         return await self._apply_once(scope, event_id, event)
 
     @staticmethod
-    def _semantic_failure(code: str) -> dict[str, str]:
+    def _semantic_failure(
+        code: str,
+        *,
+        cause_code: str | None = None,
+    ) -> dict[str, str]:
         """Return one non-echoing V3 preview failure."""
 
         if code not in _SEMANTIC_FAILURE_CODES:
             code = "NATIVE_ERROR"
-        return {"status": "DEGRADED", "code": code}
+        result = {"status": "DEGRADED", "code": code}
+        if code == "ESTIMATOR_MALFORMED" and cause_code in ESTIMATOR_MALFORMED_SUBCODES:
+            result["cause_code"] = cause_code
+        return result
 
     @staticmethod
     def _semantic_key(scope: ScopeTokens, frozen_turn: FrozenTurn) -> str:
@@ -416,7 +424,7 @@ class GenesisCoordinator:
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
             raise
         except SemanticEstimateError as exc:
-            return self._semantic_failure(exc.code)
+            return self._semantic_failure(exc.code, cause_code=exc.subcode)
         except BaseException:
             return self._semantic_failure("ESTIMATOR_UNAVAILABLE")
 

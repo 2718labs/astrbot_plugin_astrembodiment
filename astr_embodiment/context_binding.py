@@ -15,25 +15,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from .contracts import ScopeTokens
-
-FXP6_SCALE = 1_000_000
-DIMENSION_NAMES = (
-    "positive",
-    "affiliation",
-    "harm",
-    "boundary",
-    "repair",
-    "repetition",
-    "new_information",
-    "constraint_instability",
-    "epistemic_conflict",
-    "self_responsibility",
-    "other_responsibility",
-    "hostility",
-    "publicness",
-    "engagement",
-    "rejection",
+from .semantic_contract import (
+    ABSENT,
+    DIMENSION_NAMES,
+    FXP6_SCALE,
+    PRESENT,
+    validate_state_intensity,
 )
+
 CONTEXT_SUMMARY_V1_SCHEMA = "astr-embodiment.context-summary.v1"
 
 _BINDING_FIELDS = frozenset(
@@ -48,7 +37,6 @@ _BINDING_FIELDS = frozenset(
 )
 _SUMMARY_FIELDS = frozenset({"schema", "binding", "dimensions"})
 _SUMMARY_DIMENSION_FIELDS = frozenset({"state", "intensity_fxp6"})
-_SUMMARY_STATES = frozenset({"PRESENT", "ABSENT", "UNAVAILABLE"})
 
 
 class ContextBindingError(ValueError):
@@ -165,15 +153,7 @@ def _canonical_summary_dimensions(value: Any) -> dict[str, dict[str, int | str |
             raise _invalid_binding()
         state = slot["state"]
         intensity = slot["intensity_fxp6"]
-        if type(state) is not str or state not in _SUMMARY_STATES:
-            raise _invalid_binding()
-        if state == "PRESENT":
-            if type(intensity) is not int or not 1 <= intensity <= FXP6_SCALE:
-                raise _invalid_binding()
-        elif state == "ABSENT":
-            if type(intensity) is not int or intensity != 0:
-                raise _invalid_binding()
-        elif intensity is not None:
+        if validate_state_intensity(state, intensity) is not None:
             raise _invalid_binding()
         dimensions[name] = {"state": state, "intensity_fxp6": intensity}
     return dimensions
@@ -287,9 +267,9 @@ def adapt_native_context_summary_v1(
             raise _invalid_binding()
         dimensions = {
             name: (
-                {"state": "PRESENT", "intensity_fxp6": value}
+                {"state": PRESENT, "intensity_fxp6": value}
                 if type(value) is int and value > 0
-                else {"state": "ABSENT", "intensity_fxp6": 0}
+                else {"state": ABSENT, "intensity_fxp6": 0}
             )
             for name, value in zip(DIMENSION_NAMES, values, strict=True)
         }
