@@ -687,6 +687,47 @@ pub(crate) fn decode_semantic_snapshot_v2(
     Ok((field, graph, receipt))
 }
 
+/// Frozen predecessor wire writer used only to construct an authenticated
+/// AESEM2 persistence fixture.  The production runtime never emits AESEM2.
+#[cfg(test)]
+pub(crate) fn encode_semantic_snapshot_v2_for_test(
+    formula_digest: &[u8; 32],
+    field: &NeuralField,
+    graph: &SparseGraph,
+    receipt: &TransitionReceiptV2,
+) -> Result<Vec<u8>, RuntimeError> {
+    if !receipt.validate()
+        || receipt.formula_digest != *formula_digest
+        || receipt.state_after != state_digest(field, formula_digest)
+        || receipt.graph_after != graph_digest(graph)
+    {
+        return Err(RuntimeError::InvalidNeuralState);
+    }
+    let field_bytes = encode_field(field)?;
+    let graph_bytes = encode_graph(graph)?;
+    let receipt_bytes = wire::encode_transition_receipt_v2(receipt);
+    let mut out = Vec::with_capacity(
+        SNAPSHOT_MAGIC_V2.len()
+            + 2
+            + 4
+            + field_bytes.len()
+            + 4
+            + graph_bytes.len()
+            + 4
+            + receipt_bytes.len(),
+    );
+    out.extend_from_slice(SNAPSHOT_MAGIC_V2);
+    out.extend_from_slice(&SNAPSHOT_SCHEMA_V2.to_le_bytes());
+    for bytes in [&field_bytes, &graph_bytes, &receipt_bytes] {
+        out.extend_from_slice(
+            &(u32::try_from(bytes.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
+
 pub(crate) fn snapshot_is_aesem2(bytes: &[u8]) -> bool {
     bytes.starts_with(SNAPSHOT_MAGIC_V2)
 }

@@ -49,6 +49,12 @@ pub const SEMANTIC_LANE_NAMESPACE_DOMAIN_V1: &[u8] = b"astr-embodiment/semantic-
 const PHASE0_FORMULA_TRANSITION_MAGIC_V1: &[u8] = b"AE-P0FT1\0";
 const PHASE0_FORMULA_TRANSITION_SCHEMA_V1: u16 = 1;
 const PHASE0_FORMULA_TRANSITION_KIND_V1: u8 = 1;
+const LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1: &[u8] = b"AE-LSU1\0";
+const LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1: u16 = 1;
+const LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1: u8 = 1;
+const LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/legacy-semantic-formula-upgrade-v1";
+const AESEM2_SNAPSHOT_MAGIC: &[u8] = b"AESEM2\0";
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -319,6 +325,47 @@ struct Phase0FormulaTransitionInput<'a> {
     incoming_formula: Digest,
 }
 
+/// Receipt for the only permitted non-empty semantic-lane formula change:
+/// an authenticated AESEM2 state under the active incarnation's original
+/// formula becomes the `state_before` of one current Phase-0 transition.
+///
+/// The receipt is stored both as the graph/journal delta and in the dedicated
+/// unique upgrade registry inside the same SQLite transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegacySemanticFormulaUpgradeReceiptV1 {
+    pub scope_digest: Digest,
+    pub event_digest: Digest,
+    pub receipt_digest: Digest,
+    pub base_revision: u64,
+    pub next_revision: u64,
+    pub source_state_digest: Digest,
+    pub target_state_before: Digest,
+    pub source_graph_digest: Digest,
+    pub prior_chain_digest: Digest,
+    pub from_formula_digest: Digest,
+    pub to_formula_digest: Digest,
+    pub migration_id: Digest,
+}
+
+struct LegacySemanticFormulaUpgradeInput<'a> {
+    delta_bytes: &'a [u8],
+    event: &'a CanonicalEvent,
+    event_scope: &'a ScopeRef,
+    receipt: &'a TransitionReceipt,
+    current_revision: u64,
+    current_state_digest: Digest,
+    current_state_bytes: &'a [u8],
+    current_graph_digest: Digest,
+    current_formula_digest: Digest,
+    incoming_formula_digest: Digest,
+    prior_chain_digest: Digest,
+}
+
+enum FormulaTransitionAdmission {
+    Phase0,
+    LegacySemantic(LegacySemanticFormulaUpgradeReceiptV1),
+}
+
 impl Phase0FormulaTransitionV1 {
     fn canonical_bytes(self) -> Vec<u8> {
         let mut out = Vec::with_capacity(
@@ -397,6 +444,198 @@ impl Phase0FormulaTransitionV1 {
             base_graph_digest,
             from_formula_digest,
             to_formula_digest,
+        })
+    }
+}
+
+impl LegacySemanticFormulaUpgradeReceiptV1 {
+    fn migration_id(
+        scope_digest: Digest,
+        event_digest: Digest,
+        receipt_digest: Digest,
+        base_revision: u64,
+        next_revision: u64,
+        source_state_digest: Digest,
+        target_state_before: Digest,
+        source_graph_digest: Digest,
+        prior_chain_digest: Digest,
+        from_formula_digest: Digest,
+        to_formula_digest: Digest,
+    ) -> Digest {
+        wire::domain_hash(
+            LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1,
+            &[
+                &scope_digest,
+                &event_digest,
+                &receipt_digest,
+                &base_revision.to_le_bytes(),
+                &next_revision.to_le_bytes(),
+                &source_state_digest,
+                &target_state_before,
+                &source_graph_digest,
+                &prior_chain_digest,
+                &from_formula_digest,
+                &to_formula_digest,
+            ],
+        )
+    }
+
+    /// Construct the canonical receipt tied to the regular transition receipt
+    /// that advances the semantic lane by exactly one logical revision.
+    pub fn from_transition_receipt(
+        receipt: &TransitionReceipt,
+        source_state_digest: Digest,
+        source_graph_digest: Digest,
+        from_formula_digest: Digest,
+        prior_chain_digest: Digest,
+    ) -> Self {
+        let receipt_digest = wire::receipt_digest(receipt);
+        let to_formula_digest = receipt.formula_digest;
+        let migration_id = Self::migration_id(
+            receipt.scope_digest,
+            receipt.event_digest,
+            receipt_digest,
+            receipt.base_revision,
+            receipt.next_revision,
+            source_state_digest,
+            receipt.state_before,
+            source_graph_digest,
+            prior_chain_digest,
+            from_formula_digest,
+            to_formula_digest,
+        );
+        Self {
+            scope_digest: receipt.scope_digest,
+            event_digest: receipt.event_digest,
+            receipt_digest,
+            base_revision: receipt.base_revision,
+            next_revision: receipt.next_revision,
+            source_state_digest,
+            target_state_before: receipt.state_before,
+            source_graph_digest,
+            prior_chain_digest,
+            from_formula_digest,
+            to_formula_digest,
+            migration_id,
+        }
+    }
+
+    /// Canonical opaque bytes persisted with the transition and the upgrade
+    /// registry.  No unbound JSON or caller-supplied formula is accepted.
+    pub fn canonical_bytes(self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1.len() + 2 + 1 + (32 * 10) + (8 * 2),
+        );
+        out.extend_from_slice(LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1);
+        out.extend_from_slice(&LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1.to_le_bytes());
+        out.push(LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1);
+        for digest in [self.scope_digest, self.event_digest, self.receipt_digest] {
+            out.extend_from_slice(&digest);
+        }
+        out.extend_from_slice(&self.base_revision.to_le_bytes());
+        out.extend_from_slice(&self.next_revision.to_le_bytes());
+        for digest in [
+            self.source_state_digest,
+            self.target_state_before,
+            self.source_graph_digest,
+            self.prior_chain_digest,
+            self.from_formula_digest,
+            self.to_formula_digest,
+            self.migration_id,
+        ] {
+            out.extend_from_slice(&digest);
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, StoreError> {
+        if bytes.len() < LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1.len()
+            || &bytes[..LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1.len()]
+                != LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1
+        {
+            return Err(StoreError::ContinuityFence("legacy_upgrade_magic"));
+        }
+        let mut reader =
+            wire::Reader::new(&bytes[LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1.len()..]);
+        let schema_version = reader
+            .u16()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let kind = reader
+            .u8()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        if schema_version != LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1
+            || kind != LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1
+        {
+            return Err(StoreError::ContinuityFence("legacy_upgrade_schema"));
+        }
+        let scope_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let event_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let receipt_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let base_revision = reader
+            .u64()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let next_revision = reader
+            .u64()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let source_state_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let target_state_before = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let source_graph_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let prior_chain_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let from_formula_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let to_formula_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let migration_id = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        reader
+            .finish()
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let expected_migration_id = Self::migration_id(
+            scope_digest,
+            event_digest,
+            receipt_digest,
+            base_revision,
+            next_revision,
+            source_state_digest,
+            target_state_before,
+            source_graph_digest,
+            prior_chain_digest,
+            from_formula_digest,
+            to_formula_digest,
+        );
+        if migration_id != expected_migration_id {
+            return Err(StoreError::ContinuityFence("legacy_upgrade_id"));
+        }
+        Ok(Self {
+            scope_digest,
+            event_digest,
+            receipt_digest,
+            base_revision,
+            next_revision,
+            source_state_digest,
+            target_state_before,
+            source_graph_digest,
+            prior_chain_digest,
+            from_formula_digest,
+            to_formula_digest,
+            migration_id,
         })
     }
 }
@@ -587,6 +826,24 @@ impl Store {
                 context_digest BLOB NOT NULL CHECK (length(context_digest) = 32),
                 canonical_state_bytes BLOB NOT NULL,
                 PRIMARY KEY (scope_digest, relation_scope_token, revision)
+            );
+            CREATE TABLE IF NOT EXISTS legacy_semantic_formula_upgrades (
+                scope_digest BLOB NOT NULL CHECK (length(scope_digest) = 32),
+                from_formula_digest BLOB NOT NULL CHECK (length(from_formula_digest) = 32),
+                to_formula_digest BLOB NOT NULL CHECK (length(to_formula_digest) = 32),
+                base_revision INTEGER NOT NULL,
+                next_revision INTEGER NOT NULL,
+                event_digest BLOB NOT NULL CHECK (length(event_digest) = 32),
+                receipt_digest BLOB NOT NULL CHECK (length(receipt_digest) = 32),
+                source_state_digest BLOB NOT NULL CHECK (length(source_state_digest) = 32),
+                target_state_before BLOB NOT NULL CHECK (length(target_state_before) = 32),
+                source_graph_digest BLOB NOT NULL CHECK (length(source_graph_digest) = 32),
+                prior_chain_digest BLOB NOT NULL CHECK (length(prior_chain_digest) = 32),
+                migration_id BLOB NOT NULL CHECK (length(migration_id) = 32),
+                upgrade_bytes BLOB NOT NULL,
+                PRIMARY KEY (scope_digest, from_formula_digest, to_formula_digest),
+                UNIQUE (scope_digest, next_revision),
+                UNIQUE (migration_id)
             );
             "#,
         )?;
@@ -1512,19 +1769,24 @@ impl Store {
         }))
     }
 
-    fn current_snapshot_digest_tx(
+    fn current_snapshot_tx(
         tx: &Transaction<'_>,
         scope_digest: &Digest,
-    ) -> Result<Option<Digest>, StoreError> {
-        let bytes: Option<Vec<u8>> = tx
+    ) -> Result<Option<(Digest, Vec<u8>)>, StoreError> {
+        let snapshot: Option<(Vec<u8>, Vec<u8>)> = tx
             .query_row(
-                "SELECT state_digest FROM snapshots WHERE scope_digest = ?1 ORDER BY revision DESC LIMIT 1",
+                "SELECT state_digest, state_bytes FROM snapshots WHERE scope_digest = ?1 ORDER BY revision DESC LIMIT 1",
                 params![blob(*scope_digest)],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        bytes
-            .map(|value| digest_from_blob(&value, "stored_snapshot_digest"))
+        snapshot
+            .map(|(state_digest, state_bytes)| {
+                Ok((
+                    digest_from_blob(&state_digest, "stored_snapshot_digest")?,
+                    state_bytes,
+                ))
+            })
             .transpose()
     }
 
@@ -1647,6 +1909,95 @@ impl Store {
             && transition.to_formula_digest != transition.from_formula_digest)
     }
 
+    fn legacy_semantic_formula_upgrade_is_allowed_tx(
+        tx: &Transaction<'_>,
+        input: LegacySemanticFormulaUpgradeInput<'_>,
+    ) -> Result<Option<LegacySemanticFormulaUpgradeReceiptV1>, StoreError> {
+        let LegacySemanticFormulaUpgradeInput {
+            delta_bytes,
+            event,
+            event_scope,
+            receipt,
+            current_revision,
+            current_state_digest,
+            current_state_bytes,
+            current_graph_digest,
+            current_formula_digest,
+            incoming_formula_digest,
+            prior_chain_digest,
+        } = input;
+        if current_revision == 0
+            || !matches!(event, CanonicalEvent::UserStimulus(_))
+            || !current_state_bytes.starts_with(AESEM2_SNAPSHOT_MAGIC)
+        {
+            return Ok(None);
+        }
+        let upgrade = LegacySemanticFormulaUpgradeReceiptV1::decode(delta_bytes)?;
+        if !Self::active_semantic_storage_scope_matches_tx(tx, event_scope, current_formula_digest)?
+        {
+            return Ok(None);
+        }
+        let source_receipt_bytes: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT receipt_bytes FROM journal WHERE scope_digest = ?1 AND logical_revision = ?2",
+                params![blob(receipt.scope_digest), current_revision as i64],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(source_receipt_bytes) = source_receipt_bytes else {
+            return Ok(None);
+        };
+        let source_receipt = wire::decode_transition_receipt(&source_receipt_bytes)
+            .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_source_receipt"))?;
+        if wire::encode_transition_receipt(&source_receipt) != source_receipt_bytes {
+            return Err(StoreError::ContinuityFence("legacy_upgrade_source_receipt"));
+        }
+        let existing_upgrade: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM legacy_semantic_formula_upgrades WHERE scope_digest = ?1 AND from_formula_digest = ?2 AND to_formula_digest = ?3",
+                params![
+                    blob(receipt.scope_digest),
+                    blob(current_formula_digest),
+                    blob(incoming_formula_digest),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_upgrade.is_some() {
+            return Ok(None);
+        }
+
+        let expected_next_revision = current_revision
+            .checked_add(1)
+            .ok_or(StoreError::ContinuityFence("revision_overflow"))?;
+        let expected_upgrade = LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
+            receipt,
+            current_state_digest,
+            current_graph_digest,
+            current_formula_digest,
+            prior_chain_digest,
+        );
+        let source_receipt_is_attested_aesem2 = source_receipt.schema_version == 1
+            && source_receipt.status == CommitStatus::Committed
+            && source_receipt.action_contract.is_none()
+            && source_receipt.scope_digest == receipt.scope_digest
+            && source_receipt.formula_digest == current_formula_digest
+            && source_receipt.next_revision == current_revision
+            && source_receipt.base_revision.checked_add(1) == Some(current_revision)
+            && source_receipt.state_after == current_state_digest
+            && source_receipt.graph_after == current_graph_digest;
+        if !source_receipt_is_attested_aesem2
+            || upgrade != expected_upgrade
+            || upgrade.next_revision != expected_next_revision
+            || upgrade.from_formula_digest == upgrade.to_formula_digest
+            || upgrade.to_formula_digest
+                != phase0_canonical_formula_digest_v1(&upgrade.from_formula_digest)
+        {
+            return Ok(None);
+        }
+        Ok(Some(upgrade))
+    }
+
     fn last_chain_digest_tx(
         tx: &Transaction<'_>,
         scope_digest: &Digest,
@@ -1726,6 +2077,29 @@ impl Store {
             ))
         {
             return Ok(false);
+        }
+
+        if bundle
+            .envelope
+            .delta_bytes
+            .starts_with(LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1)
+        {
+            let upgrade =
+                LegacySemanticFormulaUpgradeReceiptV1::decode(&bundle.envelope.delta_bytes)?;
+            let stored_upgrade: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT upgrade_bytes FROM legacy_semantic_formula_upgrades WHERE scope_digest = ?1 AND from_formula_digest = ?2 AND to_formula_digest = ?3",
+                    params![
+                        blob(upgrade.scope_digest),
+                        blob(upgrade.from_formula_digest),
+                        blob(upgrade.to_formula_digest),
+                    ],
+                    |stored| stored.get(0),
+                )
+                .optional()?;
+            if stored_upgrade != Some(bundle.envelope.delta_bytes.clone()) {
+                return Ok(false);
+            }
         }
 
         let context: Option<StoredContextDuplicateColumns> = tx
@@ -1811,22 +2185,35 @@ impl Store {
             });
         }
 
-        match Self::current_snapshot_digest_tx(&tx, &scope_digest)? {
-            Some(current_state) => {
-                if bundle.envelope.receipt.state_before != current_state {
-                    return Err(StoreError::ContinuityFence("state_before"));
-                }
-            }
-            None if current != 0 => return Err(StoreError::ContinuityFence("missing_snapshot")),
-            None => {}
+        let current_snapshot = Self::current_snapshot_tx(&tx, &scope_digest)?;
+        if current_snapshot.is_none() && current != 0 {
+            return Err(StoreError::ContinuityFence("missing_snapshot"));
         }
-        match Self::current_graph_authority_tx(&tx, &scope_digest, event_scope)? {
+        let current_graph_authority =
+            Self::current_graph_authority_tx(&tx, &scope_digest, event_scope)?;
+        if current_graph_authority.is_none() && current != 0 {
+            return Err(StoreError::ContinuityFence("missing_graph"));
+        }
+        let last_chain = Self::last_chain_digest_tx(&tx, &scope_digest)?;
+        if let Some(last_chain) = last_chain {
+            if bundle.envelope.chain_seed != last_chain {
+                return Err(StoreError::ContinuityFence("chain_seed"));
+            }
+        }
+
+        let transition_admission = match current_graph_authority {
             Some((current_graph, current_formula)) => {
                 if bundle.graph.base_graph_digest != current_graph {
                     return Err(StoreError::ContinuityFence("graph_base"));
                 }
-                if bundle.graph.formula_digest != current_formula
-                    && !Self::phase0_formula_transition_is_allowed_tx(
+                if bundle.graph.formula_digest == current_formula {
+                    None
+                } else if bundle
+                    .envelope
+                    .delta_bytes
+                    .starts_with(PHASE0_FORMULA_TRANSITION_MAGIC_V1)
+                {
+                    if !Self::phase0_formula_transition_is_allowed_tx(
                         &tx,
                         Phase0FormulaTransitionInput {
                             delta_bytes: &bundle.envelope.delta_bytes,
@@ -1838,17 +2225,58 @@ impl Store {
                             current_formula,
                             incoming_formula: bundle.graph.formula_digest,
                         },
-                    )?
+                    )? {
+                        return Err(StoreError::ContinuityFence("graph_current_formula"));
+                    }
+                    Some(FormulaTransitionAdmission::Phase0)
+                } else if bundle
+                    .envelope
+                    .delta_bytes
+                    .starts_with(LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1)
                 {
+                    let Some((current_state_digest, current_state_bytes)) =
+                        current_snapshot.as_ref()
+                    else {
+                        return Err(StoreError::ContinuityFence("state_before"));
+                    };
+                    let Some(prior_chain_digest) = last_chain else {
+                        return Err(StoreError::ContinuityFence("legacy_upgrade_chain"));
+                    };
+                    let Some(upgrade) = Self::legacy_semantic_formula_upgrade_is_allowed_tx(
+                        &tx,
+                        LegacySemanticFormulaUpgradeInput {
+                            delta_bytes: &bundle.envelope.delta_bytes,
+                            event: &event,
+                            event_scope,
+                            receipt: &bundle.envelope.receipt,
+                            current_revision: current,
+                            current_state_digest: *current_state_digest,
+                            current_state_bytes,
+                            current_graph_digest: current_graph,
+                            current_formula_digest: current_formula,
+                            incoming_formula_digest: bundle.graph.formula_digest,
+                            prior_chain_digest,
+                        },
+                    )?
+                    else {
+                        return Err(StoreError::ContinuityFence("graph_current_formula"));
+                    };
+                    Some(FormulaTransitionAdmission::LegacySemantic(upgrade))
+                } else {
                     return Err(StoreError::ContinuityFence("graph_current_formula"));
                 }
             }
-            None if current != 0 => return Err(StoreError::ContinuityFence("missing_graph")),
-            None => {}
-        }
-        if let Some(last_chain) = Self::last_chain_digest_tx(&tx, &scope_digest)? {
-            if bundle.envelope.chain_seed != last_chain {
-                return Err(StoreError::ContinuityFence("chain_seed"));
+            None => None,
+        };
+        let legacy_upgrade = match transition_admission {
+            Some(FormulaTransitionAdmission::LegacySemantic(upgrade)) => Some(upgrade),
+            Some(FormulaTransitionAdmission::Phase0) | None => None,
+        };
+        if let Some((current_state_digest, _)) = current_snapshot {
+            if bundle.envelope.receipt.state_before != current_state_digest
+                && legacy_upgrade.is_none()
+            {
+                return Err(StoreError::ContinuityFence("state_before"));
             }
         }
 
@@ -1906,6 +2334,26 @@ impl Store {
                 bundle.context.canonical_state_bytes.clone(),
             ],
         )?;
+        if let Some(upgrade) = legacy_upgrade {
+            tx.execute(
+                "INSERT INTO legacy_semantic_formula_upgrades (scope_digest, from_formula_digest, to_formula_digest, base_revision, next_revision, event_digest, receipt_digest, source_state_digest, target_state_before, source_graph_digest, prior_chain_digest, migration_id, upgrade_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    blob(upgrade.scope_digest),
+                    blob(upgrade.from_formula_digest),
+                    blob(upgrade.to_formula_digest),
+                    upgrade.base_revision as i64,
+                    upgrade.next_revision as i64,
+                    blob(upgrade.event_digest),
+                    blob(upgrade.receipt_digest),
+                    blob(upgrade.source_state_digest),
+                    blob(upgrade.target_state_before),
+                    blob(upgrade.source_graph_digest),
+                    blob(upgrade.prior_chain_digest),
+                    blob(upgrade.migration_id),
+                    upgrade.canonical_bytes(),
+                ],
+            )?;
+        }
         tx.commit()?;
 
         let row = JournalRow {
@@ -1954,6 +2402,41 @@ impl Store {
             context_digest,
             canonical_state_bytes,
         }))
+    }
+
+    /// Read the one immutable receipt that records an AESEM2-to-Phase-0
+    /// semantic transition.  The stored primary key and canonical bytes are
+    /// rechecked before the receipt is returned to an internal auditor.
+    pub fn read_legacy_semantic_formula_upgrade_v1(
+        &self,
+        scope_digest: &Digest,
+        from_formula_digest: &Digest,
+        to_formula_digest: &Digest,
+    ) -> Result<Option<LegacySemanticFormulaUpgradeReceiptV1>, StoreError> {
+        let conn = self.connection()?;
+        let bytes: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT upgrade_bytes FROM legacy_semantic_formula_upgrades WHERE scope_digest = ?1 AND from_formula_digest = ?2 AND to_formula_digest = ?3",
+                params![
+                    blob(*scope_digest),
+                    blob(*from_formula_digest),
+                    blob(*to_formula_digest),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let receipt = LegacySemanticFormulaUpgradeReceiptV1::decode(&bytes)?;
+        if receipt.scope_digest != *scope_digest
+            || receipt.from_formula_digest != *from_formula_digest
+            || receipt.to_formula_digest != *to_formula_digest
+            || receipt.canonical_bytes() != bytes
+        {
+            return Err(StoreError::ContinuityFence("legacy_upgrade_stored_receipt"));
+        }
+        Ok(Some(receipt))
     }
 
     /// CAS commit of one journal entry. The caller supplies the chain seed
