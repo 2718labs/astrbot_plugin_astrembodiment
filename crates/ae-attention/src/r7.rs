@@ -2,7 +2,11 @@
 
 //! Closed fifteen-slot routing for the semantic preview lane.
 
-use ae_contracts::{perception_dimension_values, wire, EvidenceVector};
+use ae_contracts::{
+    perception_dimension_values, phase0_semantic_route_digest_v1, EvidenceVector,
+    PHASE0_SEMANTIC_ROUTE_PRIMARY_COEFFICIENT_FXP6, PHASE0_SEMANTIC_ROUTE_RULES_V1,
+    PHASE0_SEMANTIC_ROUTE_SECONDARY_COEFFICIENT_FXP6,
+};
 use ae_fixed::Fixed;
 use ae_neurofield::REGION_LAYOUT;
 use serde::{Deserialize, Serialize};
@@ -21,99 +25,14 @@ pub enum FullVectorLoadError {
     InvalidDimension,
 }
 
-const PRIMARY_COEFFICIENT: Fixed = Fixed::ONE;
-const SECONDARY_COEFFICIENT: Fixed = Fixed::from_raw(500_000);
-
-#[derive(Clone, Copy)]
-struct RouteRule {
-    primary: usize,
-    secondary: Option<usize>,
-}
-
-const ROUTES: [RouteRule; 15] = [
-    RouteRule {
-        primary: 1,
-        secondary: Some(8),
-    },
-    RouteRule {
-        primary: 1,
-        secondary: Some(8),
-    },
-    RouteRule {
-        primary: 0,
-        secondary: Some(5),
-    },
-    RouteRule {
-        primary: 4,
-        secondary: Some(5),
-    },
-    RouteRule {
-        primary: 3,
-        secondary: Some(8),
-    },
-    RouteRule {
-        primary: 2,
-        secondary: Some(7),
-    },
-    RouteRule {
-        primary: 6,
-        secondary: Some(2),
-    },
-    RouteRule {
-        primary: 2,
-        secondary: Some(3),
-    },
-    RouteRule {
-        primary: 3,
-        secondary: Some(7),
-    },
-    RouteRule {
-        primary: 3,
-        secondary: Some(7),
-    },
-    RouteRule {
-        primary: 4,
-        secondary: Some(7),
-    },
-    RouteRule {
-        primary: 5,
-        secondary: Some(4),
-    },
-    RouteRule {
-        primary: 4,
-        secondary: Some(7),
-    },
-    RouteRule {
-        primary: 8,
-        secondary: Some(7),
-    },
-    RouteRule {
-        primary: 0,
-        secondary: Some(4),
-    },
-];
-
 pub(crate) fn evidence_values(evidence: &EvidenceVector) -> [Fixed; 15] {
     perception_dimension_values(evidence)
 }
 
+/// Frozen route commitment shared by Phase-0 formula derivation and Store
+/// continuity validation.
 pub(crate) fn full_vector_route_digest() -> [u8; 32] {
-    let mut route_bytes = Vec::with_capacity(ROUTES.len() * 18);
-    for route in ROUTES {
-        route_bytes.push(route.primary as u8);
-        route_bytes.push(
-            route
-                .secondary
-                .map(|region| region as u8)
-                .unwrap_or(u8::MAX),
-        );
-        route_bytes.extend_from_slice(&PRIMARY_COEFFICIENT.raw().to_be_bytes());
-        route_bytes.extend_from_slice(&SECONDARY_COEFFICIENT.raw().to_be_bytes());
-    }
-    wire::domain_hash(
-        b"astr-embodiment/semantic-evidence-route-neutral-v1",
-        &[&route_bytes],
-    )
+    phase0_semantic_route_digest_v1()
 }
 
 /// Consume every fixed proposal slot. Literal zero values remain inputs through
@@ -126,17 +45,24 @@ pub fn assemble_full_vector_load(
     let mut neutral_sums = [Fixed::ZERO; REGION_LAYOUT.len()];
     let mut weight_sums = [Fixed::ZERO; REGION_LAYOUT.len()];
 
-    for (value, route) in evidence_values(evidence).into_iter().zip(ROUTES) {
+    for (value, route) in evidence_values(evidence)
+        .into_iter()
+        .zip(PHASE0_SEMANTIC_ROUTE_RULES_V1)
+    {
         if !(Fixed::ZERO..=Fixed::ONE).contains(&value) {
             return Err(FullVectorLoadError::InvalidDimension);
         }
         let neutral = Fixed::ONE.saturating_sub(value);
-        for (region, coefficient) in std::iter::once((route.primary, PRIMARY_COEFFICIENT)).chain(
-            route
-                .secondary
-                .into_iter()
-                .map(|region| (region, SECONDARY_COEFFICIENT)),
-        ) {
+        for (region, coefficient) in std::iter::once((
+            usize::from(route.primary),
+            PHASE0_SEMANTIC_ROUTE_PRIMARY_COEFFICIENT_FXP6,
+        ))
+        .chain(route.secondary.into_iter().map(|region| {
+            (
+                usize::from(region),
+                PHASE0_SEMANTIC_ROUTE_SECONDARY_COEFFICIENT_FXP6,
+            )
+        })) {
             let evidence_contribution = value
                 .checked_mul(coefficient)
                 .ok_or(FullVectorLoadError::InvalidDimension)?;
@@ -163,8 +89,8 @@ pub fn assemble_full_vector_load(
     Ok(FullVectorLoad {
         evidence_means,
         neutral_means,
-        evaluated_dimension_count: ROUTES.len() as u8,
-        injected_dimension_count: ROUTES.len() as u8,
+        evaluated_dimension_count: PHASE0_SEMANTIC_ROUTE_RULES_V1.len() as u8,
+        injected_dimension_count: PHASE0_SEMANTIC_ROUTE_RULES_V1.len() as u8,
         route_digest: full_vector_route_digest(),
     })
 }

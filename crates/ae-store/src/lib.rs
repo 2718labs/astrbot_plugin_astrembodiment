@@ -31,8 +31,8 @@ pub use legacy_discovery::{
 
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
-    wire, CanonicalEvent, CommitStatus, Digest, GenesisManifest, GenesisReceipt, GenesisStatus,
-    PersonaSourceRef, ScopeRef, TransitionReceipt,
+    phase0_canonical_formula_digest_v1, wire, CanonicalEvent, CommitStatus, Digest,
+    GenesisManifest, GenesisReceipt, GenesisStatus, PersonaSourceRef, ScopeRef, TransitionReceipt,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::Path;
@@ -392,7 +392,7 @@ pub fn phase0_formula_transition_delta_v1(
         next_revision: receipt.next_revision,
         base_graph_digest,
         from_formula_digest: genesis_formula_digest,
-        to_formula_digest: receipt.formula_digest,
+        to_formula_digest: phase0_canonical_formula_digest_v1(&genesis_formula_digest),
     }
     .canonical_bytes()
 }
@@ -1616,6 +1616,7 @@ impl Store {
             && transition.from_formula_digest == current_formula
             && transition.to_formula_digest == incoming_formula
             && transition.to_formula_digest == receipt.formula_digest
+            && transition.to_formula_digest == phase0_canonical_formula_digest_v1(&current_formula)
             && transition.to_formula_digest != transition.from_formula_digest)
     }
 
@@ -2534,6 +2535,126 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(binding.incarnation_id, commit.incarnation_id);
+    }
+
+    #[test]
+    fn phase0_transition_rejects_receipt_bound_arbitrary_formula_without_writes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut genesis = commit(61, 0, [62; 32]);
+        let ClaimOutcome::Claimed { lease_epoch, .. } = store
+            .claim_lease(&genesis.scope_key, Some(genesis.nonce_digest))
+            .unwrap()
+        else {
+            panic!("expected genesis lease");
+        };
+        genesis.lease_epoch = lease_epoch;
+        store.commit_genesis(&genesis).unwrap();
+
+        let root_scope = wire::persona_scope_digest(
+            &genesis.source.scope.bot_token,
+            &genesis.source.scope.persona_token,
+            None,
+        );
+        let lane_binding = wire::domain_hash(
+            SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
+            &[
+                &root_scope,
+                &genesis.incarnation_id,
+                &genesis.formula_digest,
+            ],
+        );
+        let mut relation_token = [0u8; 16];
+        relation_token.copy_from_slice(&lane_binding[..16]);
+        let mut session_token = [0u8; 16];
+        session_token.copy_from_slice(&lane_binding[16..]);
+        let semantic_scope = ScopeRef {
+            bot_token: genesis.source.scope.bot_token,
+            persona_token: genesis.source.scope.persona_token,
+            relation_token: Some(relation_token),
+            session_token,
+        };
+        let event = CanonicalEvent::UserStimulus(ae_contracts::UserStimulus {
+            event_id: [63; 16],
+            scope: semantic_scope.clone(),
+            causal: ae_contracts::CausalRef {
+                turn_id: [64; 16],
+                action_id: None,
+                delivery_id: None,
+                claim_id: None,
+                base_revision: 0,
+            },
+            observed_at_ms: 1_700_000_000_300,
+            evidence: ae_contracts::SemanticEstimate {
+                schema_version: 1,
+                dimensions: ae_contracts::EvidenceVector::default(),
+                estimator_confidence: Fixed::ONE,
+                estimator_digest: [65; 32],
+            },
+        });
+        let scope_digest = wire::persona_scope_digest(
+            &semantic_scope.bot_token,
+            &semantic_scope.persona_token,
+            semantic_scope.relation_token.as_ref(),
+        );
+        let event_digest = wire::event_digest(&event);
+        let arbitrary_formula = [0xa5; 32];
+        assert_ne!(arbitrary_formula, genesis.formula_digest);
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: arbitrary_formula,
+            scope_digest,
+            event_digest,
+            authority_digest: [66; 32],
+            base_revision: 0,
+            next_revision: 1,
+            state_before: [67; 32],
+            state_after: [68; 32],
+            graph_after: [69; 32],
+            action_contract: None,
+            active_nodes: 1,
+            active_edges: 0,
+            residuals: ae_contracts::InvariantResiduals::default(),
+            status: CommitStatus::Committed,
+        };
+        let delta_bytes = phase0_formula_transition_delta_v1(
+            &receipt,
+            genesis.graph_digest,
+            genesis.formula_digest,
+        );
+        let context_bytes = vec![70, 71];
+        let bundle = ContinuityCommitBundleV1 {
+            envelope: CommitEnvelope {
+                event_kind: wire::event_kind_name(&event).to_owned(),
+                event_bytes: wire::encode_event(&event),
+                receipt: receipt.clone(),
+                chain_seed: genesis.initial_snapshot_digest,
+                delta_bytes: delta_bytes.clone(),
+            },
+            snapshot: SnapshotCommitV1 {
+                state_digest: receipt.state_after,
+                state_bytes: vec![72, 73],
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest: genesis.graph_digest,
+                graph_digest: receipt.graph_after,
+                formula_digest: receipt.formula_digest,
+                delta_bytes,
+                replay_state_bytes: vec![74, 75],
+            },
+            context: ContextCommitV1 {
+                relation_scope_token: relation_token,
+                relation_hmac: [76; 32],
+                source_continuum_revision: 1,
+                context_digest: continuity_context_digest(&context_bytes),
+                canonical_state_bytes: context_bytes,
+            },
+        };
+
+        assert!(matches!(
+            store.commit_continuity_bundle(&bundle),
+            Err(StoreError::ContinuityFence("graph_current_formula"))
+        ));
+        assert_eq!(store.count_journal().unwrap(), 0);
     }
 
     #[test]

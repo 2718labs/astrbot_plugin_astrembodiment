@@ -10,12 +10,13 @@ use ae_fixed::Fixed;
 use ae_neurofield::{NeuralField, SparseGraph, EDGE_CAPACITY, NEURON_SLOTS, REGION_LAYOUT};
 
 pub const FXP6_SCALE: i64 = 1_000_000;
-pub const PROPAGATION_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
-pub const NEUTRAL_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
-pub const ADAPTATION_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
-pub const RESERVE_RECOVERY_RATE_FXP6: Fixed = Fixed::from_raw(25_000);
-pub const ENERGY_COST_RATE_FXP6: Fixed = Fixed::from_raw(100_000);
-pub const DYNAMICS_FORMULA_V2: &str = "phase0-native-propagation-fxp6-v1";
+pub const PROPAGATION_RATE_FXP6: Fixed = ae_contracts::PHASE0_NATIVE_PROPAGATION_RATE_FXP6;
+pub const NEUTRAL_RATE_FXP6: Fixed = ae_contracts::PHASE0_NATIVE_NEUTRAL_RATE_FXP6;
+pub const ADAPTATION_RATE_FXP6: Fixed = ae_contracts::PHASE0_NATIVE_ADAPTATION_RATE_FXP6;
+pub const RESERVE_RECOVERY_RATE_FXP6: Fixed =
+    ae_contracts::PHASE0_NATIVE_RESERVE_RECOVERY_RATE_FXP6;
+pub const ENERGY_COST_RATE_FXP6: Fixed = ae_contracts::PHASE0_NATIVE_ENERGY_COST_RATE_FXP6;
+pub const DYNAMICS_FORMULA_V2: &str = ae_contracts::PHASE0_NATIVE_DYNAMICS_FORMULA_V1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DynamicsError {

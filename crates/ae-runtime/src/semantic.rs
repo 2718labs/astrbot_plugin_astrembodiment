@@ -3,8 +3,9 @@
 use crate::RuntimeError;
 use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
 use ae_contracts::{
-    wire, CommitStatus, EvidenceVector, NativeTelemetryReceiptV1, PerceptionProposalV1,
-    SemanticVectorFormulaV2, SemanticVectorReceiptV2, TransitionReceipt, TransitionReceiptV2,
+    phase0_canonical_formula_digest_v1, wire, CommitStatus, EvidenceVector,
+    NativeTelemetryReceiptV1, PerceptionProposalV1, SemanticVectorFormulaV2,
+    SemanticVectorReceiptV2, TransitionReceipt, TransitionReceiptV2,
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
@@ -290,17 +291,12 @@ pub(crate) fn prepare_semantic_transition_v2(
     })
 }
 
-/// The route is fixed, so a neutral vector is sufficient to obtain the
-/// route-digest portion of the Phase 0 formula commitment.
+/// Formula identity is fixed by the shared route/dynamics contract rather than
+/// by a receipt or caller-provided digest.
 pub(crate) fn phase0_semantic_formula_digest_v1(
     genesis_formula_digest: &[u8; 32],
 ) -> Result<[u8; 32], RuntimeError> {
-    let load = assemble_full_vector_load(&EvidenceVector::default())
-        .map_err(|_| RuntimeError::InvalidNeuralState)?;
-    Ok(crate::semantic_telemetry_v1::phase0_formula_digest_v1(
-        genesis_formula_digest,
-        &load.route_digest,
-    ))
+    Ok(phase0_canonical_formula_digest_v1(genesis_formula_digest))
 }
 
 pub(crate) fn semantic_vector_receipt_v2(

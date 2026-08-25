@@ -14,42 +14,11 @@ use ae_contracts::{
 use ae_fixed::Fixed;
 use ae_neurofield::{EDGE_CAPACITY, NEURON_SLOTS, REGION_LAYOUT};
 
-use crate::semantic_dynamics_v2::{
-    ratio6_raw, PreparedSemanticDynamicsV2, ADAPTATION_RATE_FXP6, DYNAMICS_FORMULA_V2,
-    ENERGY_COST_RATE_FXP6, NEUTRAL_RATE_FXP6, PROPAGATION_RATE_FXP6, RESERVE_RECOVERY_RATE_FXP6,
-};
+use crate::semantic_dynamics_v2::{ratio6_raw, PreparedSemanticDynamicsV2};
 use crate::RuntimeError;
 
-pub const PHASE0_FORMULA_DIGEST_DOMAIN_V1: &[u8] =
-    b"astr-embodiment/phase0-native-propagation-fxp6-v1";
 const LOCAL_VECTOR_DIGEST_DOMAIN_V1: &[u8] = b"astr-embodiment/phase0-local-vector-v1";
 const EFFECTIVE_VECTOR_DIGEST_DOMAIN_V1: &[u8] = b"astr-embodiment/phase0-effective-vector-v1";
-
-pub(crate) fn phase0_formula_digest_v1(
-    genesis_formula_digest: &Digest,
-    route_digest: &Digest,
-) -> Digest {
-    let mut constants = Vec::with_capacity(8 * 5 + 32);
-    constants.extend_from_slice(b"graph-formula-v1");
-    for value in [
-        PROPAGATION_RATE_FXP6,
-        NEUTRAL_RATE_FXP6,
-        ADAPTATION_RATE_FXP6,
-        RESERVE_RECOVERY_RATE_FXP6,
-        ENERGY_COST_RATE_FXP6,
-    ] {
-        constants.extend_from_slice(&value.raw().to_le_bytes());
-    }
-    wire::domain_hash(
-        PHASE0_FORMULA_DIGEST_DOMAIN_V1,
-        &[
-            genesis_formula_digest,
-            route_digest,
-            DYNAMICS_FORMULA_V2.as_bytes(),
-            &constants,
-        ],
-    )
-}
 
 pub(crate) fn regional_vector_digest(
     domain: &[u8],

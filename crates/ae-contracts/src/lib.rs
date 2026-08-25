@@ -14,6 +14,151 @@ use std::fmt;
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
+/// Frozen Phase-0 native dynamics identity.  The runtime and durable Store
+/// both derive formula digests here so a persisted transition cannot label an
+/// arbitrary digest as this formula.
+pub const PHASE0_NATIVE_FORMULA_DIGEST_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/phase0-native-propagation-fxp6-v1";
+pub const PHASE0_NATIVE_GRAPH_FORMULA_V1: &[u8] = b"graph-formula-v1";
+pub const PHASE0_NATIVE_DYNAMICS_FORMULA_V1: &str = "phase0-native-propagation-fxp6-v1";
+pub const PHASE0_NATIVE_PROPAGATION_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
+pub const PHASE0_NATIVE_NEUTRAL_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
+pub const PHASE0_NATIVE_ADAPTATION_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
+pub const PHASE0_NATIVE_RESERVE_RECOVERY_RATE_FXP6: Fixed = Fixed::from_raw(25_000);
+pub const PHASE0_NATIVE_ENERGY_COST_RATE_FXP6: Fixed = Fixed::from_raw(100_000);
+
+pub const PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/semantic-evidence-route-neutral-v1";
+pub const PHASE0_SEMANTIC_ROUTE_PRIMARY_COEFFICIENT_FXP6: Fixed = Fixed::ONE;
+pub const PHASE0_SEMANTIC_ROUTE_SECONDARY_COEFFICIENT_FXP6: Fixed = Fixed::from_raw(500_000);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Phase0SemanticRouteRuleV1 {
+    pub primary: u8,
+    pub secondary: Option<u8>,
+}
+
+/// Frozen fifteen-slot semantic route used by both native dynamics and the
+/// durable formula-authenticity fence.
+pub const PHASE0_SEMANTIC_ROUTE_RULES_V1: [Phase0SemanticRouteRuleV1; 15] = [
+    Phase0SemanticRouteRuleV1 {
+        primary: 1,
+        secondary: Some(8),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 1,
+        secondary: Some(8),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 0,
+        secondary: Some(5),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 4,
+        secondary: Some(5),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 3,
+        secondary: Some(8),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 2,
+        secondary: Some(7),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 6,
+        secondary: Some(2),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 2,
+        secondary: Some(3),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 3,
+        secondary: Some(7),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 3,
+        secondary: Some(7),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 4,
+        secondary: Some(7),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 5,
+        secondary: Some(4),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 4,
+        secondary: Some(7),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 8,
+        secondary: Some(7),
+    },
+    Phase0SemanticRouteRuleV1 {
+        primary: 0,
+        secondary: Some(4),
+    },
+];
+
+/// Derive the frozen fifteen-slot route commitment without accepting caller
+/// inputs. Formula validation must use this, not a receipt-provided route.
+pub fn phase0_semantic_route_digest_v1() -> Digest {
+    let mut route_bytes = Vec::with_capacity(PHASE0_SEMANTIC_ROUTE_RULES_V1.len() * 18);
+    for route in PHASE0_SEMANTIC_ROUTE_RULES_V1 {
+        route_bytes.push(route.primary);
+        route_bytes.push(route.secondary.unwrap_or(u8::MAX));
+        route_bytes.extend_from_slice(
+            &PHASE0_SEMANTIC_ROUTE_PRIMARY_COEFFICIENT_FXP6
+                .raw()
+                .to_be_bytes(),
+        );
+        route_bytes.extend_from_slice(
+            &PHASE0_SEMANTIC_ROUTE_SECONDARY_COEFFICIENT_FXP6
+                .raw()
+                .to_be_bytes(),
+        );
+    }
+    wire::domain_hash(PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1, &[&route_bytes])
+}
+
+/// Derive the sole Phase-0 formula digest from Genesis authority and the
+/// frozen fifteen-slot route commitment.
+fn phase0_native_formula_digest_v1(
+    genesis_formula_digest: &Digest,
+    route_digest: &Digest,
+) -> Digest {
+    let mut constants = Vec::with_capacity(8 * 5 + PHASE0_NATIVE_GRAPH_FORMULA_V1.len());
+    constants.extend_from_slice(PHASE0_NATIVE_GRAPH_FORMULA_V1);
+    for value in [
+        PHASE0_NATIVE_PROPAGATION_RATE_FXP6,
+        PHASE0_NATIVE_NEUTRAL_RATE_FXP6,
+        PHASE0_NATIVE_ADAPTATION_RATE_FXP6,
+        PHASE0_NATIVE_RESERVE_RECOVERY_RATE_FXP6,
+        PHASE0_NATIVE_ENERGY_COST_RATE_FXP6,
+    ] {
+        constants.extend_from_slice(&value.raw().to_le_bytes());
+    }
+    wire::domain_hash(
+        PHASE0_NATIVE_FORMULA_DIGEST_DOMAIN_V1,
+        &[
+            genesis_formula_digest,
+            route_digest,
+            PHASE0_NATIVE_DYNAMICS_FORMULA_V1.as_bytes(),
+            &constants,
+        ],
+    )
+}
+
+/// Derive the one canonical Phase-0 formula digest. No caller-provided route
+/// participates in this identity.
+pub fn phase0_canonical_formula_digest_v1(genesis_formula_digest: &Digest) -> Digest {
+    let route_digest = phase0_semantic_route_digest_v1();
+    phase0_native_formula_digest_v1(genesis_formula_digest, &route_digest)
+}
+
 pub mod hex {
     //! Serde helpers: digests and opaque tokens cross the FFI as lowercase hex
     //! strings. The canonical binary wire forms are unaffected.
