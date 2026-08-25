@@ -606,23 +606,25 @@ class AstrEmbodimentPlugin(Star):
         else:
             malformed = SemanticEstimateError("ESTIMATOR_MALFORMED", "JSON_DECODE")
 
+        warning_payload: dict[str, Any] = {
+            "return_type": f"{type(result).__module__}.{type(result).__qualname__}",
+            "extraction_path": extraction_path,
+            "character_length": (
+                len(completion_text) if type(completion_text) is str else None
+            ),
+            "sha256": (
+                hashlib.sha256(completion_text.encode("utf-8")).hexdigest()
+                if type(completion_text) is str
+                else None
+            ),
+            "subcode": malformed.subcode or "JSON_DECODE",
+        }
+        dimension_diagnostic = malformed.diagnostic_json()
+        if dimension_diagnostic is not None:
+            warning_payload["dimension_diagnostic"] = dimension_diagnostic
         logger.warning(
             json.dumps(
-                {
-                    "return_type": (
-                        f"{type(result).__module__}.{type(result).__qualname__}"
-                    ),
-                    "extraction_path": extraction_path,
-                    "character_length": (
-                        len(completion_text) if type(completion_text) is str else None
-                    ),
-                    "sha256": (
-                        hashlib.sha256(completion_text.encode("utf-8")).hexdigest()
-                        if type(completion_text) is str
-                        else None
-                    ),
-                    "subcode": malformed.subcode or "JSON_DECODE",
-                },
+                warning_payload,
                 sort_keys=True,
                 separators=(",", ":"),
                 allow_nan=False,

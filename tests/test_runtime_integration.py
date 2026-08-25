@@ -1689,3 +1689,78 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
     }
     assert len(recorder.warning_messages) == 1
     assert recorder.info_messages == []
+
+
+def test_v3_dimension_value_provider_warn_includes_first_safe_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class NativeAbi:
+        def __init__(self) -> None:
+            self.cursor_calls = 0
+            self.proposal_calls = 0
+
+        def semantic_revision_v1(self, _scope_json: str) -> str:
+            self.cursor_calls += 1
+            return json.dumps(
+                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+            )
+
+        def apply_perception_proposal_v1(
+            self, _scope_json: str, _proposal_json: str
+        ) -> str:
+            self.proposal_calls += 1
+            raise AssertionError("malformed estimate must not reach native")
+
+    malformed_estimate = _v3_test_estimate()
+    malformed_estimate["dimensions"]["rejection"]["confidence_fxp6"] = 0.75
+    malformed_completion = json.dumps(malformed_estimate)
+    expected_diagnostic = {
+        "dimension_name": "rejection",
+        "value_classification": "CONFIDENCE_NON_INTEGRAL_NUMBER",
+        "json_type": "number",
+        "numeric_scalar": 0.75,
+    }
+
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(completion_text=malformed_completion)
+
+        context.llm_generate = generate
+        instance = plugin(
+            FakeConfig(
+                model_settings={"semantic_estimator_provider_id": "semantic"},
+                observatory_enabled=False,
+            ),
+            context,
+        )
+        native = NativeAbi()
+        bridge = bridge_module.NativeBridge()
+        bridge._native = native
+        instance._bridge = bridge
+        instance._coordinator = GenesisCoordinator(bridge)
+        scope = _v3_test_scope()
+
+        async def run_genesis(*_args, **_kwargs):
+            return _v3_test_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        request = FakeRequest()
+        request.prompt = "只验证安全诊断传播。"
+        await instance.on_llm_request(FakeEvent(), request)
+        return context, native, request
+
+    recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    context, native, request = asyncio.run(run())
+
+    assert len(context.generate_calls) == 1
+    assert native.cursor_calls == 1
+    assert native.proposal_calls == 0
+    assert len(recorder.warning_messages) == 2
+    provider_warning = json.loads(recorder.warning_messages[0])
+    assert provider_warning.get("subcode") == "DIMENSION_VALUE"
+    assert provider_warning.get("dimension_diagnostic") == expected_diagnostic
+    assert malformed_completion not in "\n".join(recorder.warning_messages)

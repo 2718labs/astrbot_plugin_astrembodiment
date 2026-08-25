@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import inspect
 import json
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -54,6 +55,25 @@ _ESTIMATOR_MALFORMED_SUBCODES = frozenset(
         "DIMENSION_SLOT_SHAPE",
         "DIMENSION_VALUE",
     }
+)
+_DIMENSION_VALUE_CLASSIFICATIONS = frozenset(
+    {
+        "INTENSITY_NON_INTEGRAL_NUMBER",
+        "CONFIDENCE_NON_INTEGRAL_NUMBER",
+        "INTENSITY_STRING",
+        "CONFIDENCE_STRING",
+        "INTENSITY_BOOLEAN",
+        "CONFIDENCE_BOOLEAN",
+        "INTENSITY_NULL_DISALLOWED",
+        "CONFIDENCE_NULL",
+        "INTENSITY_INTEGER_RANGE",
+        "CONFIDENCE_INTEGER_RANGE",
+        "INTENSITY_STATE_CONSTRAINT",
+        "VALUE_OTHER_TYPE",
+    }
+)
+_DIMENSION_VALUE_JSON_TYPES = frozenset(
+    {"number", "string", "boolean", "null", "object", "array", "other"}
 )
 _NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-binding-v1"
 _SCOPE_FIELDS = frozenset(
@@ -100,6 +120,66 @@ SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class DimensionValueDiagnostic:
+    """Safe first-slot metadata for a rejected V3 dimension value."""
+
+    dimension_name: str
+    value_classification: str
+    json_type: str
+    numeric_scalar: int | float | None = None
+    string_length: int | None = None
+    string_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.dimension_name) is not str
+            or self.dimension_name not in DIMENSION_NAMES
+            or self.value_classification not in _DIMENSION_VALUE_CLASSIFICATIONS
+            or self.json_type not in _DIMENSION_VALUE_JSON_TYPES
+        ):
+            raise ValueError("invalid dimension value diagnostic")
+        has_numeric = self.numeric_scalar is not None
+        has_string = self.string_length is not None or self.string_sha256 is not None
+        if has_numeric and has_string:
+            raise ValueError("mixed dimension value diagnostic")
+        if has_numeric:
+            if self.json_type != "number" or not (
+                type(self.numeric_scalar) is int
+                or (
+                    type(self.numeric_scalar) is float
+                    and math.isfinite(self.numeric_scalar)
+                )
+            ):
+                raise ValueError("invalid numeric dimension value diagnostic")
+        elif self.json_type == "number" and has_string:
+            raise ValueError("invalid number dimension value diagnostic")
+        if has_string:
+            if (
+                self.json_type != "string"
+                or type(self.string_length) is not int
+                or self.string_length < 0
+                or type(self.string_sha256) is not str
+                or len(self.string_sha256) != 64
+            ):
+                raise ValueError("invalid string dimension value diagnostic")
+        elif self.json_type == "string":
+            raise ValueError("missing string dimension value diagnostic")
+
+    def as_json(self) -> dict[str, int | float | str]:
+        result: dict[str, int | float | str] = {
+            "dimension_name": self.dimension_name,
+            "value_classification": self.value_classification,
+            "json_type": self.json_type,
+        }
+        if self.numeric_scalar is not None:
+            result["numeric_scalar"] = self.numeric_scalar
+        elif self.string_length is not None and self.string_sha256 is not None:
+            result["string_length"] = self.string_length
+            result["string_sha256"] = self.string_sha256
+        return result
+
+
 class SemanticEstimateError(ValueError):
     """Fixed, non-echoing V3 parse/provider failure."""
 
@@ -107,12 +187,24 @@ class SemanticEstimateError(ValueError):
         self,
         code: str = "ESTIMATOR_MALFORMED",
         subcode: str | None = None,
+        diagnostic: DimensionValueDiagnostic | None = None,
     ) -> None:
         if subcode is not None and subcode not in _ESTIMATOR_MALFORMED_SUBCODES:
             raise ValueError("invalid estimator malformed subcode")
+        if diagnostic is not None and (
+            subcode != "DIMENSION_VALUE"
+            or type(diagnostic) is not DimensionValueDiagnostic
+        ):
+            raise ValueError("invalid estimator dimension value diagnostic")
         super().__init__(code)
         self.code = code
         self.subcode = subcode
+        self.diagnostic = diagnostic
+
+    def diagnostic_json(self) -> dict[str, int | float | str] | None:
+        if self.diagnostic is None:
+            return None
+        return self.diagnostic.as_json()
 
 
 class SemanticProposalError(ValueError):
@@ -123,8 +215,11 @@ class SemanticProposalError(ValueError):
         self.code = code
 
 
-def _invalid_estimate(subcode: str) -> SemanticEstimateError:
-    return SemanticEstimateError("ESTIMATOR_MALFORMED", subcode)
+def _invalid_estimate(
+    subcode: str,
+    diagnostic: DimensionValueDiagnostic | None = None,
+) -> SemanticEstimateError:
+    return SemanticEstimateError("ESTIMATOR_MALFORMED", subcode, diagnostic)
 
 
 def _invalid_proposal() -> SemanticProposalError:
@@ -163,6 +258,120 @@ def _decode_json_object(value: Any) -> dict[str, Any]:
 
 def _is_raw_integer(value: Any) -> bool:
     return type(value) is int
+
+
+def _json_value_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "boolean"
+    if type(value) is int or type(value) is float:
+        return "number"
+    if type(value) is str:
+        return "string"
+    if type(value) is dict:
+        return "object"
+    if type(value) is list:
+        return "array"
+    return "other"
+
+
+def _dimension_value_diagnostic(
+    dimension_name: str,
+    value_classification: str,
+    value: Any,
+) -> DimensionValueDiagnostic:
+    json_type = _json_value_type(value)
+    if type(value) is int or (type(value) is float and math.isfinite(value)):
+        return DimensionValueDiagnostic(
+            dimension_name=dimension_name,
+            value_classification=value_classification,
+            json_type=json_type,
+            numeric_scalar=value,
+        )
+    if type(value) is str:
+        return DimensionValueDiagnostic(
+            dimension_name=dimension_name,
+            value_classification=value_classification,
+            json_type=json_type,
+            string_length=len(value),
+            string_sha256=hashlib.sha256(value.encode("utf-8")).hexdigest(),
+        )
+    return DimensionValueDiagnostic(
+        dimension_name=dimension_name,
+        value_classification=value_classification,
+        json_type=json_type,
+    )
+
+
+def _dimension_intensity_failure_v3(value: Any, state: str) -> str | None:
+    if type(value) is bool:
+        return "INTENSITY_BOOLEAN"
+    if value is None:
+        return None if state == "UNAVAILABLE" else "INTENSITY_NULL_DISALLOWED"
+    if type(value) is str:
+        return "INTENSITY_STRING"
+    if type(value) is float:
+        return "INTENSITY_NON_INTEGRAL_NUMBER"
+    if type(value) is not int:
+        return "VALUE_OTHER_TYPE"
+    if not 0 <= value <= FXP6_SCALE:
+        return "INTENSITY_INTEGER_RANGE"
+    if state == "PRESENT":
+        return None if value >= 1 else "INTENSITY_STATE_CONSTRAINT"
+    if state == "ABSENT":
+        return None if value == 0 else "INTENSITY_STATE_CONSTRAINT"
+    return "INTENSITY_STATE_CONSTRAINT"
+
+
+def _dimension_confidence_failure_v3(value: Any) -> str | None:
+    if type(value) is bool:
+        return "CONFIDENCE_BOOLEAN"
+    if value is None:
+        return "CONFIDENCE_NULL"
+    if type(value) is str:
+        return "CONFIDENCE_STRING"
+    if type(value) is float:
+        return "CONFIDENCE_NON_INTEGRAL_NUMBER"
+    if type(value) is not int:
+        return "VALUE_OTHER_TYPE"
+    if not 0 <= value <= FXP6_SCALE:
+        return "CONFIDENCE_INTEGER_RANGE"
+    return None
+
+
+def _diagnose_dimension_value_v3(
+    dimension_name: str,
+    slot: Mapping[str, Any],
+) -> DimensionValueDiagnostic:
+    state = slot["state"]
+    if type(state) is not str or state not in _DIMENSION_V3_STATES:
+        return _dimension_value_diagnostic(
+            dimension_name,
+            "VALUE_OTHER_TYPE",
+            state,
+        )
+    intensity = slot["intensity_fxp6"]
+    intensity_failure = _dimension_intensity_failure_v3(intensity, state)
+    if intensity_failure is not None:
+        return _dimension_value_diagnostic(
+            dimension_name,
+            intensity_failure,
+            intensity,
+        )
+    confidence = slot["confidence_fxp6"]
+    confidence_failure = _dimension_confidence_failure_v3(confidence)
+    if confidence_failure is not None:
+        return _dimension_value_diagnostic(
+            dimension_name,
+            confidence_failure,
+            confidence,
+        )
+    return _dimension_value_diagnostic(
+        dimension_name,
+        "VALUE_OTHER_TYPE",
+        state,
+    )
 
 
 def _validate_v3_confidence(value: Any) -> int:
@@ -237,11 +446,19 @@ def _validate_dimension_slots_v3(value: Any) -> dict[str, DimensionEstimateV3]:
         slot = value[name]
         if type(slot) is not dict or set(slot) != _DIMENSION_V3_FIELDS:
             raise _invalid_estimate("DIMENSION_SLOT_SHAPE")
-        dimensions[name] = DimensionEstimateV3(
-            state=slot["state"],
-            intensity_fxp6=slot["intensity_fxp6"],
-            confidence_fxp6=slot["confidence_fxp6"],
-        )
+        try:
+            dimensions[name] = DimensionEstimateV3(
+                state=slot["state"],
+                intensity_fxp6=slot["intensity_fxp6"],
+                confidence_fxp6=slot["confidence_fxp6"],
+            )
+        except SemanticEstimateError as exc:
+            if exc.subcode != "DIMENSION_VALUE":
+                raise
+            raise _invalid_estimate(
+                "DIMENSION_VALUE",
+                _diagnose_dimension_value_v3(name, slot),
+            ) from None
     return dimensions
 
 
