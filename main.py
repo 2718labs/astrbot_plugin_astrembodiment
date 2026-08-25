@@ -134,6 +134,7 @@ def _is_inspect_display_incarnation_id(value: object) -> bool:
         for group in groups
     )
 
+
 _OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v3"
 _OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
 _OBSERVATORY_DIMENSIONS = (
@@ -240,19 +241,22 @@ _SEMANTIC_CLOSURE_SCHEMAS = frozenset(
     }
 )
 _SEMANTIC_CALIBRATION_UNVERIFIED = "UNVERIFIED_HUMAN_GOLD"
-_SEMANTIC_NOT_ATTEMPTED_CAUSES = frozenset(
-    {
-        "EMPTY_REQUEST",
-        "ESTIMATOR_UNAVAILABLE",
-        "ESTIMATOR_MALFORMED",
-        "SEMANTIC_VECTOR_UNAVAILABLE",
-        "ESTIMATOR_UNCERTAIN",
-        "NATIVE_SYMBOL_UNAVAILABLE",
-        "NATIVE_MALFORMED",
-        "NATIVE_ERROR",
-        "EXPRESSION_PROJECTION_UNAVAILABLE",
-    }
-) | ESTIMATOR_MALFORMED_SUBCODES
+_SEMANTIC_NOT_ATTEMPTED_CAUSES = (
+    frozenset(
+        {
+            "EMPTY_REQUEST",
+            "ESTIMATOR_UNAVAILABLE",
+            "ESTIMATOR_MALFORMED",
+            "SEMANTIC_VECTOR_UNAVAILABLE",
+            "ESTIMATOR_UNCERTAIN",
+            "NATIVE_SYMBOL_UNAVAILABLE",
+            "NATIVE_MALFORMED",
+            "NATIVE_ERROR",
+            "EXPRESSION_PROJECTION_UNAVAILABLE",
+        }
+    )
+    | ESTIMATOR_MALFORMED_SUBCODES
+)
 
 
 class AstrEmbodimentPlugin(Star):
@@ -1190,8 +1194,7 @@ class AstrEmbodimentPlugin(Star):
             type(revision) is not int
             or revision < 0
             or not isinstance(projection, Mapping)
-            or projection.get("schema")
-            != "astr-embodiment.expression-projection.v1"
+            or projection.get("schema") != "astr-embodiment.expression-projection.v1"
             or projection.get("revision") != revision
         ):
             return None
@@ -1307,9 +1310,7 @@ class AstrEmbodimentPlugin(Star):
                 if not isinstance(vector, Mapping) or not isinstance(nodes, Mapping):
                     raise ValueError("semantic closure")
                 vector_counts = {
-                    name: cls._closed_int(
-                        vector.get(name), minimum=0, maximum=15
-                    )
+                    name: cls._closed_int(vector.get(name), minimum=0, maximum=15)
                     for name in (
                         "dimension_slot_count",
                         "evaluated_dimension_count",
@@ -1930,7 +1931,9 @@ class AstrEmbodimentPlugin(Star):
                     cause_code="EXPRESSION_PROJECTION_UNAVAILABLE",
                 )
                 try:
-                    setattr(request, self._request_semantic_record_attr, semantic_record)
+                    setattr(
+                        request, self._request_semantic_record_attr, semantic_record
+                    )
                 except (AttributeError, TypeError):
                     pass
             self._emit_observatory(
@@ -1947,7 +1950,9 @@ class AstrEmbodimentPlugin(Star):
                     cause_code="EXPRESSION_PROJECTION_UNAVAILABLE",
                 )
                 try:
-                    setattr(request, self._request_semantic_record_attr, semantic_record)
+                    setattr(
+                        request, self._request_semantic_record_attr, semantic_record
+                    )
                 except (AttributeError, TypeError):
                     pass
             self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))

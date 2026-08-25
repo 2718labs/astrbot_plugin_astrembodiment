@@ -153,8 +153,9 @@ def test_packager_writes_an_allowlisted_zip_sha256_sidecar(tmp_path: Path) -> No
         archive.writestr("astrembodiment_core/__init__.py", "# wheel initializer\n")
         archive.writestr(
             "astrembodiment_core/_native.pyd",
-            b"version health open ensure_genesis apply_event inspect verify_replay "
-            b"flush_and_close NativeCoreError",
+            b"version health open ensure_genesis prepare_rebirth_v1 confirm_rebirth_v1 "
+            b"semantic_revision_v1 apply_perception_proposal_v1 apply_event inspect "
+            b"verify_replay flush_and_close NativeCoreError",
         )
 
     output = tmp_path / "astrbot_plugin_astrembodiment-v1.0.0.zip"

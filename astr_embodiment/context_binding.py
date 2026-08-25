@@ -18,7 +18,6 @@ from .contracts import ScopeTokens
 from .semantic_contract import (
     ABSENT,
     DIMENSION_NAMES,
-    FXP6_SCALE,
     PRESENT,
     validate_state_intensity,
 )
@@ -95,7 +94,9 @@ class ContextBindingV1:
             "base_continuum_revision",
             _canonical_revision(self.base_continuum_revision),
         )
-        object.__setattr__(self, "summary_revision", _canonical_revision(self.summary_revision))
+        object.__setattr__(
+            self, "summary_revision", _canonical_revision(self.summary_revision)
+        )
         object.__setattr__(
             self,
             "summary_digest",
@@ -187,7 +188,9 @@ def _bindings_match(left: ContextBindingV1, right: ContextBindingV1) -> bool:
         and left.base_continuum_revision == right.base_continuum_revision
         and left.summary_revision == right.summary_revision
         and hmac.compare_digest(left.summary_digest, right.summary_digest)
-        and hmac.compare_digest(left.estimator_formula_digest, right.estimator_formula_digest)
+        and hmac.compare_digest(
+            left.estimator_formula_digest, right.estimator_formula_digest
+        )
         and hmac.compare_digest(left.request_nonce_digest, right.request_nonce_digest)
     )
 
@@ -229,7 +232,9 @@ def validate_context_summary(
         dimensions = _canonical_summary_dimensions(value["dimensions"])
         if not _bindings_match(candidate, expected):
             raise _binding_mismatch()
-        if not hmac.compare_digest(candidate.summary_digest, context_summary_digest(dimensions)):
+        if not hmac.compare_digest(
+            candidate.summary_digest, context_summary_digest(dimensions)
+        ):
             raise _binding_mismatch()
         return {
             "schema": CONTEXT_SUMMARY_V1_SCHEMA,

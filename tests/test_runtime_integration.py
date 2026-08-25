@@ -1673,7 +1673,9 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
     assert native.cursor_calls == 1
     assert len(native.proposals) == 1
     assert native.proposals[0]["dimensions"]["rejection"] == 900_000
-    assert native.proposals[0]["dimensions"] != {name: 0 for name in _V3_TEST_DIMENSIONS}
+    assert native.proposals[0]["dimensions"] != {
+        name: 0 for name in _V3_TEST_DIMENSIONS
+    }
     assert native.proposals[0]["estimator_confidence"] == 900_000
     assert len(context.generate_calls) == 1
     provider_call = context.generate_calls[0]
@@ -1857,7 +1859,9 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
         ) -> str:
             self.proposal_calls += 1
             if self.closure is None:
-                raise AssertionError("this estimate must not reach native proposal apply")
+                raise AssertionError(
+                    "this estimate must not reach native proposal apply"
+                )
             return json.dumps(self.closure)
 
     async def run(completion_text: str, native: NativeAbi):
@@ -1957,7 +1961,9 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
     if dimensions_schema["required"] != list(_V3_TEST_DIMENSIONS):
         contract_failures.append("schema must retain the canonical ordered 15D set")
     if structured_schema["$defs"]["dimension"] != expected_dimension_schema:
-        contract_failures.append("schema must expose the three mutually exclusive state branches")
+        contract_failures.append(
+            "schema must expose the three mutually exclusive state branches"
+        )
 
     malformed_estimate = _v3_test_estimate()
     malformed_estimate["dimensions"]["positive"] = {
@@ -2023,10 +2029,14 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
         allow_nan=False,
     )
     if canonical_schema not in provider_call["system_prompt"]:
-        contract_failures.append("provider prompt must carry the canonical structured schema")
+        contract_failures.append(
+            "provider prompt must carry the canonical structured schema"
+        )
     for fragment in expected_prompt_fragments:
         if fragment not in provider_call["system_prompt"]:
-            contract_failures.append(f"provider prompt missing canonical rule: {fragment}")
+            contract_failures.append(
+                f"provider prompt missing canonical rule: {fragment}"
+            )
     malformed_record = getattr(
         malformed_request, "_astrembodiment_semantic_observatory_record_v1", {}
     )

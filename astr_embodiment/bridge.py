@@ -560,7 +560,9 @@ def _semantic_pairs_without_duplicates(
 
 def _semantic_json(value: Any) -> dict[str, Any]:
     if type(value) is str:
-        payload = json.loads(value, object_pairs_hook=_semantic_pairs_without_duplicates)
+        payload = json.loads(
+            value, object_pairs_hook=_semantic_pairs_without_duplicates
+        )
     else:
         payload = value
     if type(payload) is not dict or any(type(key) is not str for key in payload):
@@ -578,11 +580,15 @@ def _semantic_closed_json(value: dict[str, Any]) -> str:
     )
 
 
-def _semantic_scope_payload(scope: ScopeTokens | str | dict[str, Any]) -> dict[str, Any]:
+def _semantic_scope_payload(
+    scope: ScopeTokens | str | dict[str, Any],
+) -> dict[str, Any]:
     if type(scope) is ScopeTokens:
         payload: Any = scope.scope_json()
     elif type(scope) is str:
-        payload = json.loads(scope, object_pairs_hook=_semantic_pairs_without_duplicates)
+        payload = json.loads(
+            scope, object_pairs_hook=_semantic_pairs_without_duplicates
+        )
     elif type(scope) is dict:
         payload = scope
     else:
@@ -612,7 +618,11 @@ def _validate_cursor_payload(value: Any) -> dict[str, Any]:
     if set(payload) != {"schema", "revision"}:
         raise ValueError("semantic cursor")
     revision = payload["revision"]
-    if payload["schema"] != _SEMANTIC_CURSOR_SCHEMA or type(revision) is not int or revision < 0:
+    if (
+        payload["schema"] != _SEMANTIC_CURSOR_SCHEMA
+        or type(revision) is not int
+        or revision < 0
+    ):
         raise ValueError("semantic cursor")
     return {"schema": _SEMANTIC_CURSOR_SCHEMA, "revision": revision}
 
@@ -660,7 +670,10 @@ def _validate_receipt(
         raise ValueError("semantic receipt")
     if value["next_revision"] != revision or value["base_revision"] + 1 != revision:
         raise ValueError("semantic receipt")
-    if expected_base_revision is not None and value["base_revision"] != expected_base_revision:
+    if (
+        expected_base_revision is not None
+        and value["base_revision"] != expected_base_revision
+    ):
         raise ValueError("semantic receipt")
     residuals = value["residuals"]
     if type(residuals) is not dict or set(residuals) != _RESIDUAL_FIELDS:
@@ -711,14 +724,19 @@ def _validate_semantic_vector_receipt(
         "neutral_baseline_dimension_count",
         "unavailable_dimension_count",
     )
-    if any(type(value[field]) is not int or not 0 <= value[field] <= 15 for field in count_fields):
+    if any(
+        type(value[field]) is not int or not 0 <= value[field] <= 15
+        for field in count_fields
+    ):
         raise ValueError("semantic vector receipt")
     if (
         value["dimension_slot_count"] != 15
         or value["evaluated_dimension_count"] != 15
         or value["injected_dimension_count"] != 15
         or value["unavailable_dimension_count"] != 0
-        or value["nonzero_evidence_dimension_count"] + value["neutral_baseline_dimension_count"] != 15
+        or value["nonzero_evidence_dimension_count"]
+        + value["neutral_baseline_dimension_count"]
+        != 15
         or type(value["state_changed"]) is not bool
         or value["state_changed"] is not expected_state_changed
     ):
@@ -788,16 +806,23 @@ def _validate_node_observability(
     }
     if type(counts) is not dict or set(counts) != count_fields:
         raise ValueError("node observability")
-    if any(type(counts[field]) is not int or not 0 <= counts[field] <= _NODE_CAPACITY for field in count_fields):
+    if any(
+        type(counts[field]) is not int or not 0 <= counts[field] <= _NODE_CAPACITY
+        for field in count_fields
+    ):
         raise ValueError("node observability")
     if (
         counts["selected_node_count"] != expected_selected_node_count
         or counts["changed_node_count"] > counts["activated_node_count"]
         or counts["activated_node_count"] > counts["selected_node_count"]
-        or counts["signal_nonzero_after_count"] < max(
-            counts["potential_nonzero_after_count"], counts["excitation_nonzero_after_count"]
+        or counts["signal_nonzero_after_count"]
+        < max(
+            counts["potential_nonzero_after_count"],
+            counts["excitation_nonzero_after_count"],
         )
-        or counts["signal_nonzero_after_count"] > counts["potential_nonzero_after_count"] + counts["excitation_nonzero_after_count"]
+        or counts["signal_nonzero_after_count"]
+        > counts["potential_nonzero_after_count"]
+        + counts["excitation_nonzero_after_count"]
         or (expected_state_changed and counts["changed_node_count"] == 0)
         or (not expected_state_changed and counts["changed_node_count"] != 0)
     ):
@@ -812,7 +837,13 @@ def _validate_node_observability(
     if type(regions) is not list or len(regions) != len(_NODE_REGION_LAYOUT):
         raise ValueError("node observability")
     canonical_regions: list[dict[str, Any]] = []
-    totals = {"selected": 0, "activated": 0, "changed": 0, "potential": 0, "excitation": 0}
+    totals = {
+        "selected": 0,
+        "activated": 0,
+        "changed": 0,
+        "potential": 0,
+        "excitation": 0,
+    }
     region_fields = {
         "region_id",
         "region_name",
@@ -833,16 +864,25 @@ def _validate_node_observability(
             or region["node_capacity"] != capacity
         ):
             raise ValueError("node observability")
-        for field in ("selected_node_count", "activated_node_count", "changed_node_count"):
+        for field in (
+            "selected_node_count",
+            "activated_node_count",
+            "changed_node_count",
+        ):
             if type(region[field]) is not int or not 0 <= region[field] <= capacity:
                 raise ValueError("node observability")
-        if region["changed_node_count"] > region["activated_node_count"] or region["activated_node_count"] > region["selected_node_count"]:
+        if (
+            region["changed_node_count"] > region["activated_node_count"]
+            or region["activated_node_count"] > region["selected_node_count"]
+        ):
             raise ValueError("node observability")
         potential = _validate_node_component(region["potential"], capacity=capacity)
         excitation = _validate_node_component(region["excitation"], capacity=capacity)
         if (
-            region["changed_node_count"] < max(potential["changed_node_count"], excitation["changed_node_count"])
-            or region["changed_node_count"] > potential["changed_node_count"] + excitation["changed_node_count"]
+            region["changed_node_count"]
+            < max(potential["changed_node_count"], excitation["changed_node_count"])
+            or region["changed_node_count"]
+            > potential["changed_node_count"] + excitation["changed_node_count"]
         ):
             raise ValueError("node observability")
         totals["selected"] += region["selected_node_count"]
@@ -882,15 +922,23 @@ def _validate_node_observability(
     }
 
 
-def _validate_expression_projection(value: Any, *, expected_revision: int) -> dict[str, Any]:
+def _validate_expression_projection(
+    value: Any, *, expected_revision: int
+) -> dict[str, Any]:
     if type(value) is not dict or set(value) != {"schema", "revision", "profile_fxp6"}:
         raise ValueError("expression projection")
-    if value["schema"] != _EXPRESSION_PROJECTION_SCHEMA or value["revision"] != expected_revision:
+    if (
+        value["schema"] != _EXPRESSION_PROJECTION_SCHEMA
+        or value["revision"] != expected_revision
+    ):
         raise ValueError("expression projection")
     profile = value["profile_fxp6"]
     if type(profile) is not dict or set(profile) != set(_EXPRESSION_PROFILE_FIELDS):
         raise ValueError("expression projection")
-    if any(type(profile[name]) is not int or not 0 <= profile[name] <= 1_000_000 for name in _EXPRESSION_PROFILE_FIELDS):
+    if any(
+        type(profile[name]) is not int or not 0 <= profile[name] <= 1_000_000
+        for name in _EXPRESSION_PROFILE_FIELDS
+    ):
         raise ValueError("expression projection")
     return {
         "schema": _EXPRESSION_PROJECTION_SCHEMA,
@@ -935,10 +983,7 @@ def _validate_native_telemetry_receipt(
     ):
         raise ValueError("native telemetry receipt")
     energy = value["energy"]
-    if (
-        type(energy) is not dict
-        or set(energy) != set(_NATIVE_TELEMETRY_ENERGY_FIELDS)
-    ):
+    if type(energy) is not dict or set(energy) != set(_NATIVE_TELEMETRY_ENERGY_FIELDS):
         raise ValueError("native telemetry receipt")
     if any(
         type(energy[field]) is not int or not 0 <= energy[field] <= _FXP6_ONE
@@ -946,9 +991,8 @@ def _validate_native_telemetry_receipt(
     ):
         raise ValueError("native telemetry receipt")
     capacity = value["capacity"]
-    if (
-        type(capacity) is not dict
-        or set(capacity) != set(_NATIVE_TELEMETRY_CAPACITY_FIELDS)
+    if type(capacity) is not dict or set(capacity) != set(
+        _NATIVE_TELEMETRY_CAPACITY_FIELDS
     ):
         raise ValueError("native telemetry receipt")
     if any(
@@ -991,8 +1035,7 @@ def _validate_native_telemetry_receipt(
     if type(residuals) is not dict or set(residuals) != _RESIDUAL_FIELDS:
         raise ValueError("native telemetry receipt")
     if any(
-        type(residuals[field]) is not int
-        or not 0 <= residuals[field] <= _FXP6_ONE
+        type(residuals[field]) is not int or not 0 <= residuals[field] <= _FXP6_ONE
         for field in _RESIDUAL_FIELDS
     ):
         raise ValueError("native telemetry receipt")
@@ -1019,9 +1062,7 @@ def _validate_native_telemetry_receipt(
         "base_revision": value["base_revision"],
         "next_revision": revision,
         "phase": "PREPARE",
-        "energy": {
-            field: energy[field] for field in _NATIVE_TELEMETRY_ENERGY_FIELDS
-        },
+        "energy": {field: energy[field] for field in _NATIVE_TELEMETRY_ENERGY_FIELDS},
         "capacity": {
             field: capacity[field] for field in _NATIVE_TELEMETRY_CAPACITY_FIELDS
         },
@@ -1098,7 +1139,10 @@ def _validate_semantic_result(
         expected_state_changed=state_changed,
     )
     expression = None
-    if "expression_projection" in payload and payload["expression_projection"] is not None:
+    if (
+        "expression_projection" in payload
+        and payload["expression_projection"] is not None
+    ):
         expression = _validate_expression_projection(
             payload["expression_projection"], expected_revision=revision
         )
@@ -1126,7 +1170,9 @@ def _validate_semantic_result(
 def validate_semantic_result(
     value: Any, *, expected_base_revision: int | None = None
 ) -> dict[str, Any]:
-    return _validate_semantic_result(value, expected_base_revision=expected_base_revision)
+    return _validate_semantic_result(
+        value, expected_base_revision=expected_base_revision
+    )
 
 
 @dataclass(frozen=True, slots=True)

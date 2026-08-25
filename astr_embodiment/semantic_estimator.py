@@ -22,9 +22,7 @@ from typing import Any
 from .context_binding import ContextBindingV1, validate_context_summary
 from .contracts import FrozenTurn, ScopeTokens
 from .semantic_contract import (
-    ABSENT,
     DIMENSION_NAMES,
-    DIMENSION_STATES,
     FXP6_SCALE,
     INTENSITY_BOOLEAN,
     INTENSITY_INTEGER_RANGE,
@@ -421,7 +419,9 @@ class SemanticEstimateV3:
     def __post_init__(self) -> None:
         if self.schema != SEMANTIC_ESTIMATE_V3_SCHEMA:
             raise _invalid_estimate("SCHEMA_VERSION")
-        if type(self.dimensions) is not dict or set(self.dimensions) != set(DIMENSION_NAMES):
+        if type(self.dimensions) is not dict or set(self.dimensions) != set(
+            DIMENSION_NAMES
+        ):
             raise _invalid_estimate("DIMENSION_KEYS")
         canonical: dict[str, DimensionEstimateV3] = {}
         for name in DIMENSION_NAMES:
@@ -475,7 +475,9 @@ def parse_estimator_output_v3(value: Any) -> SemanticEstimateV3:
             raise _invalid_estimate("ROOT_SHAPE")
         if payload["schema"] != SEMANTIC_ESTIMATE_V3_SCHEMA:
             raise _invalid_estimate("SCHEMA_VERSION")
-        return SemanticEstimateV3(dimensions=_validate_dimension_slots_v3(payload["dimensions"]))
+        return SemanticEstimateV3(
+            dimensions=_validate_dimension_slots_v3(payload["dimensions"])
+        )
     except SemanticEstimateError:
         raise
     except BaseException:
@@ -578,9 +580,13 @@ def make_request_nonce_digest(
         "base_revision": canonical_turn.base_revision,
         "observed_at_ms": canonical_turn.observed_at_ms,
     }
-    digest = hashlib.sha256(_NONCE_DOMAIN + b"\x00" + _canonical_json(binding)).hexdigest()
+    digest = hashlib.sha256(
+        _NONCE_DOMAIN + b"\x00" + _canonical_json(binding)
+    ).hexdigest()
     if digest == "00" * 32:
-        digest = hashlib.sha256(_NONCE_DOMAIN + b"\x01" + _canonical_json(binding)).hexdigest()
+        digest = hashlib.sha256(
+            _NONCE_DOMAIN + b"\x01" + _canonical_json(binding)
+        ).hexdigest()
     return digest
 
 
@@ -604,7 +610,9 @@ def _validate_proposal_nonce(scope: ScopeTokens, payload: Mapping[str, Any]) -> 
         base_revision=payload["base_revision"],
         observed_at_ms=payload["observed_at_ms"],
     )
-    if not hmac.compare_digest(payload["request_nonce_digest"], make_request_nonce_digest(scope, turn)):
+    if not hmac.compare_digest(
+        payload["request_nonce_digest"], make_request_nonce_digest(scope, turn)
+    ):
         raise _invalid_proposal()
 
 
@@ -630,7 +638,10 @@ def validate_perception_proposal(
             raise _invalid_proposal()
         if payload["schema_version"] != 1 or payload["protocol_version"] != 1:
             raise _invalid_proposal()
-        if type(payload["schema_version"]) is not int or type(payload["protocol_version"]) is not int:
+        if (
+            type(payload["schema_version"]) is not int
+            or type(payload["protocol_version"]) is not int
+        ):
             raise _invalid_proposal()
         event_id = _canonical_nonzero_hex(payload["event_id"], 16)
         turn_id = _canonical_nonzero_hex(payload["turn_id"], 16)
@@ -697,10 +708,15 @@ def build_perception_proposal_v3(
     try:
         canonical_scope = _canonical_scope(scope)
         canonical_turn = _canonical_turn(canonical_scope, turn)
-        if type(base_revision) is not int or base_revision != canonical_turn.base_revision:
+        if (
+            type(base_revision) is not int
+            or base_revision != canonical_turn.base_revision
+        ):
             raise _invalid_proposal()
         canonical_estimate = (
-            estimate if type(estimate) is SemanticEstimateV3 else parse_estimator_output_v3(estimate)
+            estimate
+            if type(estimate) is SemanticEstimateV3
+            else parse_estimator_output_v3(estimate)
         )
         dimensions: dict[str, int] = {}
         confidences: list[int] = []

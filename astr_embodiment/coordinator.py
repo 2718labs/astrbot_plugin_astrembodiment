@@ -310,7 +310,11 @@ class GenesisCoordinator:
 
         if type(scope) is not ScopeTokens or type(frozen_turn) is not FrozenTurn:
             return False
-        if frozen_turn.scope != scope or type(request_text) is not str or not request_text:
+        if (
+            frozen_turn.scope != scope
+            or type(request_text) is not str
+            or not request_text
+        ):
             return False
         try:
             # The nonce builder performs the exact closed scope/turn validation.
