@@ -84,7 +84,7 @@ fn prepare_request(
         ),
         expected_incarnation_id: incarnation_id,
         expected_revision: 0,
-        action: action.clone(),
+        action,
     }
 }
 
@@ -108,7 +108,7 @@ fn assert_commits_once_and_replays_after_restart(path: &Path, action: RebirthAct
         expected_incarnation_id: prepare.expected_incarnation_id,
         expected_revision: prepare.expected_revision,
         request_nonce: challenge.request_nonce,
-        action: prepare.action.clone(),
+        action: prepare.action,
         confirmed: true,
     };
     let mut reopened = AstrRuntime::open(path).unwrap();

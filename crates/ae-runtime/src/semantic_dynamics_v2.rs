@@ -242,7 +242,7 @@ pub fn propagate_semantic_dynamics_v2(
 
     let mut weighted = vec![0_i128; NEURON_SLOTS];
     let mut mass = vec![0_i128; NEURON_SLOTS];
-    for node in 0..NEURON_SLOTS {
+    for (node, source_value) in source.iter().copied().enumerate() {
         let start = usize::try_from(input.graph.row_offsets[node])
             .map_err(|_| DynamicsError::InvalidInput)?;
         let end = usize::try_from(input.graph.row_offsets[node + 1])
@@ -254,7 +254,7 @@ pub fn propagate_semantic_dynamics_v2(
                 .ok_or(DynamicsError::Arithmetic)?;
             weighted[target] = weighted[target]
                 .checked_add(
-                    i128::from(source[node])
+                    i128::from(source_value)
                         .checked_mul(weight)
                         .ok_or(DynamicsError::Arithmetic)?,
                 )

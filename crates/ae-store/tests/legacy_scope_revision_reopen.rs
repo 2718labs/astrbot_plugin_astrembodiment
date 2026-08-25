@@ -7,6 +7,8 @@ use ae_store::{Store, StoreError};
 use rusqlite::{params, Connection, Transaction};
 use std::path::Path;
 
+type LegacyJournalRawRow = (i64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 fn event(id: u8, bot: u8, persona: u8) -> CanonicalEvent {
     CanonicalEvent::TimeAdvance(TimeAdvance {
         event_id: [id; 16],
@@ -92,7 +94,7 @@ fn legacy_row(
     Ok(chain)
 }
 
-fn raw_rows(path: &Path) -> Vec<(i64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
+fn raw_rows(path: &Path) -> Vec<LegacyJournalRawRow> {
     let conn = Connection::open(path).unwrap();
     let mut stmt = conn.prepare("SELECT revision,event_bytes,event_digest,receipt_bytes,chain_digest FROM journal ORDER BY revision").unwrap();
     stmt.query_map([], |row| {

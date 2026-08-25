@@ -150,6 +150,25 @@ struct HotBrain {
     semantic_legacy_unavailable: bool,
 }
 
+type SemanticSnapshot = (
+    NeuralField,
+    SparseGraph,
+    Option<(TransitionReceipt, NativeTelemetryReceiptV1)>,
+);
+
+struct CommittedSemanticDecisionInput<'a> {
+    semantic_scope: &'a Digest,
+    formula_digest: &'a Digest,
+    baseline_field: &'a NeuralField,
+    baseline_graph: &'a SparseGraph,
+    manifest_digest: &'a Digest,
+    development_seed_digest: &'a Digest,
+    event_digest: &'a Digest,
+    source_digest: Digest,
+    proposal: &'a PerceptionProposalV1,
+    deduplicated: bool,
+}
+
 pub struct AstrRuntime {
     store: Store,
     hot: Option<HotBrain>,
@@ -1192,14 +1211,7 @@ impl AstrRuntime {
         baseline_field: &NeuralField,
         baseline_graph: &SparseGraph,
         revision: u64,
-    ) -> Result<
-        (
-            NeuralField,
-            SparseGraph,
-            Option<(TransitionReceipt, NativeTelemetryReceiptV1)>,
-        ),
-        RuntimeError,
-    > {
+    ) -> Result<SemanticSnapshot, RuntimeError> {
         if revision == 0 {
             return Ok((baseline_field.clone(), baseline_graph.clone(), None));
         }
@@ -1264,17 +1276,20 @@ impl AstrRuntime {
 
     fn committed_semantic_decision(
         &self,
-        semantic_scope: &Digest,
-        formula_digest: &Digest,
-        baseline_field: &NeuralField,
-        baseline_graph: &SparseGraph,
-        manifest_digest: &Digest,
-        development_seed_digest: &Digest,
-        event_digest: &Digest,
-        source_digest: Digest,
-        proposal: &PerceptionProposalV1,
-        deduplicated: bool,
+        input: CommittedSemanticDecisionInput<'_>,
     ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
+        let CommittedSemanticDecisionInput {
+            semantic_scope,
+            formula_digest,
+            baseline_field,
+            baseline_graph,
+            manifest_digest,
+            development_seed_digest,
+            event_digest,
+            source_digest,
+            proposal,
+            deduplicated,
+        } = input;
         let row = self
             .store
             .lookup_event(semantic_scope, event_digest)?
@@ -1471,18 +1486,18 @@ impl AstrRuntime {
             .lookup_event(&semantic_scope, &event_digest)?
             .is_some()
         {
-            return self.committed_semantic_decision(
-                &semantic_scope,
-                &formula_digest,
-                &baseline_field,
-                &baseline_graph,
-                &manifest_digest,
-                &development_seed_digest,
-                &event_digest,
-                estimator_digest,
+            return self.committed_semantic_decision(CommittedSemanticDecisionInput {
+                semantic_scope: &semantic_scope,
+                formula_digest: &formula_digest,
+                baseline_field: &baseline_field,
+                baseline_graph: &baseline_graph,
+                manifest_digest: &manifest_digest,
+                development_seed_digest: &development_seed_digest,
+                event_digest: &event_digest,
+                source_digest: estimator_digest,
                 proposal,
-                true,
-            );
+                deduplicated: true,
+            });
         }
         // AESEM2 remains readable only for a matching deduplicated event.
         // A fresh write against an unattested historical state is forbidden.
@@ -1661,18 +1676,18 @@ impl AstrRuntime {
             }
             Ok((_revision, _)) => {
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
-                self.committed_semantic_decision(
-                    &semantic_scope,
-                    &formula_digest,
-                    &baseline_field,
-                    &baseline_graph,
-                    &manifest_digest,
-                    &development_seed_digest,
-                    &event_digest,
-                    estimator_digest,
+                self.committed_semantic_decision(CommittedSemanticDecisionInput {
+                    semantic_scope: &semantic_scope,
+                    formula_digest: &formula_digest,
+                    baseline_field: &baseline_field,
+                    baseline_graph: &baseline_graph,
+                    manifest_digest: &manifest_digest,
+                    development_seed_digest: &development_seed_digest,
+                    event_digest: &event_digest,
+                    source_digest: estimator_digest,
                     proposal,
-                    true,
-                )
+                    deduplicated: true,
+                })
             }
             Err(stale @ StoreError::StaleRevision { .. }) => {
                 if self
@@ -1683,18 +1698,18 @@ impl AstrRuntime {
                     return Err(RuntimeError::Store(stale));
                 }
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
-                self.committed_semantic_decision(
-                    &semantic_scope,
-                    &formula_digest,
-                    &baseline_field,
-                    &baseline_graph,
-                    &manifest_digest,
-                    &development_seed_digest,
-                    &event_digest,
-                    estimator_digest,
+                self.committed_semantic_decision(CommittedSemanticDecisionInput {
+                    semantic_scope: &semantic_scope,
+                    formula_digest: &formula_digest,
+                    baseline_field: &baseline_field,
+                    baseline_graph: &baseline_graph,
+                    manifest_digest: &manifest_digest,
+                    development_seed_digest: &development_seed_digest,
+                    event_digest: &event_digest,
+                    source_digest: estimator_digest,
                     proposal,
-                    true,
-                )
+                    deduplicated: true,
+                })
             }
             Err(error) => Err(RuntimeError::Store(error)),
         }
@@ -1789,6 +1804,23 @@ impl AstrRuntime {
     pub fn current_revision(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
         self.hot_for(scope)?;
         Ok(self.store.current_revision(&continuity_scope(scope))?)
+    }
+}
+
+#[cfg(test)]
+trait PersonaScopeForRequest {
+    fn scope_persona_scope(&self) -> ScopeRef;
+}
+
+#[cfg(test)]
+impl PersonaScopeForRequest for ae_contracts::PersonaSourceRef {
+    fn scope_persona_scope(&self) -> ScopeRef {
+        ScopeRef {
+            bot_token: self.scope.bot_token,
+            persona_token: self.scope.persona_token,
+            relation_token: None,
+            session_token: [0; 16],
+        }
     }
 }
 
@@ -2337,22 +2369,5 @@ mod tests {
         ));
         assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(test)]
-trait PersonaScopeForRequest {
-    fn scope_persona_scope(&self) -> ScopeRef;
-}
-
-#[cfg(test)]
-impl PersonaScopeForRequest for ae_contracts::PersonaSourceRef {
-    fn scope_persona_scope(&self) -> ScopeRef {
-        ScopeRef {
-            bot_token: self.scope.bot_token,
-            persona_token: self.scope.persona_token,
-            relation_token: None,
-            session_token: [0; 16],
-        }
     }
 }
