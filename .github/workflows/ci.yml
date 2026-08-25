@@ -49,9 +49,18 @@ jobs:
       - name: Check Rust lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run Rust regressions
+        shell: pwsh
         env:
-          CODEX_TASK_TEMP: ${{ runner.temp }}
-        run: cargo test --workspace --locked
+          CI_TASK_ROOT_PARENT: ${{ runner.temp }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CI_TASK_ROOT_PARENT)) {
+            throw "runner.temp must be set for Rust regressions."
+          }
+          $taskTemp = Join-Path -Path $env:CI_TASK_ROOT_PARENT -ChildPath "ae-card-r-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          New-Item -ItemType Directory -LiteralPath $taskTemp -Force | Out-Null
+          $env:CODEX_TASK_TEMP = $taskTemp
+          $env:AE_CARD_R_TEMP_ROOT = $taskTemp
+          cargo test --workspace --locked
 
   release-contract:
     name: Production version and changelog contract
@@ -120,10 +129,33 @@ jobs:
         run: >-
           cargo fmt --all -- --check;
           cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Run Rust regressions
+      - name: Run Rust regressions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         env:
-          CODEX_TASK_TEMP: ${{ runner.temp }}
-        run: cargo test --workspace --locked
+          CI_TASK_ROOT_PARENT: ${{ runner.temp }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:CI_TASK_ROOT_PARENT)) {
+            throw "runner.temp must be set for Rust regressions."
+          }
+          $taskTemp = Join-Path -Path $env:CI_TASK_ROOT_PARENT -ChildPath "ae-card-r-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}"
+          New-Item -ItemType Directory -LiteralPath $taskTemp -Force | Out-Null
+          $env:CODEX_TASK_TEMP = $taskTemp
+          $env:AE_CARD_R_TEMP_ROOT = $taskTemp
+          cargo test --workspace --locked
+      - name: Run Rust regressions (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CI_TASK_ROOT_PARENT: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          : "${CI_TASK_ROOT_PARENT:?runner.temp must be set for Rust regressions}"
+          task_temp="${CI_TASK_ROOT_PARENT}/ae-card-r-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}"
+          mkdir -p -- "$task_temp"
+          export CODEX_TASK_TEMP="$task_temp"
+          export AE_CARD_R_TEMP_ROOT="$task_temp"
+          cargo test --workspace --locked
 
   assemble-allowlisted-zip:
     name: Assemble allowlisted ZIP and SHA256
