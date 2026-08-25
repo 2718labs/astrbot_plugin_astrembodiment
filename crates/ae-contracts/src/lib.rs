@@ -1397,7 +1397,7 @@ impl NativeTelemetryReceiptV1 {
                 &self.effective_digest,
             ]
             .into_iter()
-            .all(|digest| nonzero(digest))
+            .all(nonzero)
         {
             return false;
         }

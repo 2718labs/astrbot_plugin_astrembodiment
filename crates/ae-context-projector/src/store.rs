@@ -810,10 +810,11 @@ fn decode_dimensions(encoded: &[u8]) -> Result<[i64; DIMENSION_COUNT], StoreErro
     if encoded.len() != DIMENSION_COUNT * 8 {
         return Err(StoreError::CorruptPayload);
     }
+    let (chunks, remainder) = encoded.as_chunks::<8>();
+    debug_assert!(remainder.is_empty());
     let mut dimensions = [0; DIMENSION_COUNT];
-    for (dimension, bytes) in dimensions.iter_mut().zip(encoded.chunks_exact(8)) {
-        let bytes: [u8; 8] = bytes.try_into().map_err(|_| StoreError::CorruptPayload)?;
-        *dimension = i64::from_le_bytes(bytes);
+    for (dimension, bytes) in dimensions.iter_mut().zip(chunks) {
+        *dimension = i64::from_le_bytes(*bytes);
     }
     Ok(dimensions)
 }
