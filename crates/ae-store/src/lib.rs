@@ -130,17 +130,13 @@ impl LeaseStatus {
         }
     }
 
+    /// Parses a stored lease-status string.
+    ///
+    /// Kept for compatibility with the public store API; `FromStr` below
+    /// provides the standard parsing interface without removing this constructor.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
-        Some(match value {
-            "claimed" => LeaseStatus::Claimed,
-            "compiling" => LeaseStatus::Compiling,
-            "validating" => LeaseStatus::Validating,
-            "developing" => LeaseStatus::Developing,
-            "committed" => LeaseStatus::Committed,
-            "failed" => LeaseStatus::Failed,
-            "retry_wait" => LeaseStatus::RetryWait,
-            _ => return None,
-        })
+        <Self as std::str::FromStr>::from_str(value).ok()
     }
 
     pub fn is_in_flight(self) -> bool {
@@ -151,6 +147,23 @@ impl LeaseStatus {
                 | LeaseStatus::Validating
                 | LeaseStatus::Developing
         )
+    }
+}
+
+impl std::str::FromStr for LeaseStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "claimed" => Ok(Self::Claimed),
+            "compiling" => Ok(Self::Compiling),
+            "validating" => Ok(Self::Validating),
+            "developing" => Ok(Self::Developing),
+            "committed" => Ok(Self::Committed),
+            "failed" => Ok(Self::Failed),
+            "retry_wait" => Ok(Self::RetryWait),
+            _ => Err(()),
+        }
     }
 }
 
@@ -293,6 +306,17 @@ struct Phase0FormulaTransitionV1 {
     base_graph_digest: Digest,
     from_formula_digest: Digest,
     to_formula_digest: Digest,
+}
+
+struct Phase0FormulaTransitionInput<'a> {
+    delta_bytes: &'a [u8],
+    event: &'a CanonicalEvent,
+    event_scope: &'a ScopeRef,
+    receipt: &'a TransitionReceipt,
+    current_revision: u64,
+    current_graph: Digest,
+    current_formula: Digest,
+    incoming_formula: Digest,
 }
 
 impl Phase0FormulaTransitionV1 {
@@ -718,7 +742,7 @@ impl Store {
                         digest
                     });
                     let nonce = stored.or(offered_nonce).ok_or(StoreError::LeaseNotFound)?;
-                    let new_epoch = (epoch + 1) as i64;
+                    let new_epoch = epoch + 1;
                     tx.execute(
                         "UPDATE genesis_leases SET lease_epoch = ?2, status = 'claimed', nonce_digest = ?3, manifest_digest = NULL, incarnation_id = NULL, updated_at_ms = ?4 WHERE scope_key = ?1",
                         params![blob(*scope_key), new_epoch, blob(nonce), now as i64],
@@ -1580,15 +1604,18 @@ impl Store {
 
     fn phase0_formula_transition_is_allowed_tx(
         tx: &Transaction<'_>,
-        delta_bytes: &[u8],
-        event: &CanonicalEvent,
-        event_scope: &ScopeRef,
-        receipt: &TransitionReceipt,
-        current_revision: u64,
-        current_graph: Digest,
-        current_formula: Digest,
-        incoming_formula: Digest,
+        input: Phase0FormulaTransitionInput<'_>,
     ) -> Result<bool, StoreError> {
+        let Phase0FormulaTransitionInput {
+            delta_bytes,
+            event,
+            event_scope,
+            receipt,
+            current_revision,
+            current_graph,
+            current_formula,
+            incoming_formula,
+        } = input;
         if current_revision != 0 || !matches!(event, CanonicalEvent::UserStimulus(_)) {
             return Ok(false);
         }
@@ -1801,14 +1828,16 @@ impl Store {
                 if bundle.graph.formula_digest != current_formula
                     && !Self::phase0_formula_transition_is_allowed_tx(
                         &tx,
-                        &bundle.envelope.delta_bytes,
-                        &event,
-                        event_scope,
-                        &bundle.envelope.receipt,
-                        current,
-                        current_graph,
-                        current_formula,
-                        bundle.graph.formula_digest,
+                        Phase0FormulaTransitionInput {
+                            delta_bytes: &bundle.envelope.delta_bytes,
+                            event: &event,
+                            event_scope,
+                            receipt: &bundle.envelope.receipt,
+                            current_revision: current,
+                            current_graph,
+                            current_formula,
+                            incoming_formula: bundle.graph.formula_digest,
+                        },
                     )?
                 {
                     return Err(StoreError::ContinuityFence("graph_current_formula"));

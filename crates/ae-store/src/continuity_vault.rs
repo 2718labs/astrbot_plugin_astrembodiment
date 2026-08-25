@@ -1597,6 +1597,9 @@ fn ensure_ledger_current(
     }
 }
 
+type StoredChallengeRow = (Vec<u8>, Vec<u8>, Vec<u8>, i64, String, String, i64);
+type StoredReceiptRow = (Vec<u8>, String, Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, i64);
+
 #[derive(Clone, Debug)]
 struct StoredChallenge {
     challenge: RebirthChallengeV1,
@@ -1608,7 +1611,7 @@ fn load_stored_challenge(
     connection: &Connection,
     request_nonce_digest: Digest,
 ) -> Result<Option<StoredChallenge>, RebirthLifecycleError> {
-    let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>, i64, String, String, i64)> = connection
+    let row: Option<StoredChallengeRow> = connection
         .query_row(
             "SELECT binding_digest, scope_token, expected_incarnation_id, expected_revision,
                     action, status, stage_epoch
@@ -1659,7 +1662,7 @@ fn load_receipt(
     connection: &Connection,
     request_nonce_digest: Digest,
 ) -> Result<Option<RebirthAuditReceiptV1>, RebirthLifecycleError> {
-    let row: Option<(Vec<u8>, String, Vec<u8>, Vec<u8>, Vec<u8>, i64, i64, i64)> = connection
+    let row: Option<StoredReceiptRow> = connection
         .query_row(
             "SELECT receipt_id, action, scope_token, parent_incarnation_id,
                     child_incarnation_id, before_revision, after_revision, audit_time_ms
