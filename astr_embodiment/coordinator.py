@@ -446,7 +446,10 @@ class GenesisCoordinator:
             return self._semantic_failure("NATIVE_MALFORMED")
         if closure.get("status") == "DEGRADED":
             return self._semantic_failure(str(closure.get("code", "NATIVE_ERROR")))
-        if closure.get("schema") != "astrembodiment.semantic-perception-closure.v1":
+        if closure.get("schema") not in {
+            "astrembodiment.semantic-perception-closure.v1",
+            "astrembodiment.semantic-perception-closure.v2",
+        }:
             return self._semantic_failure("NATIVE_MALFORMED")
         vector = closure.get("semantic_vector_receipt")
         if (

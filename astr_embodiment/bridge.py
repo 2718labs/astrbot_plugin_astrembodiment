@@ -138,7 +138,8 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
 }
 
 _SEMANTIC_CURSOR_SCHEMA = "astrembodiment.semantic-revision.v1"
-_SEMANTIC_RESULT_SCHEMA = "astrembodiment.semantic-perception-closure.v1"
+_SEMANTIC_RESULT_SCHEMA_V1 = "astrembodiment.semantic-perception-closure.v1"
+_SEMANTIC_RESULT_SCHEMA_V2 = "astrembodiment.semantic-perception-closure.v2"
 _SEMANTIC_RESULT_BASE_FIELDS = frozenset(
     {
         "schema",
@@ -152,6 +153,20 @@ _SEMANTIC_RESULT_BASE_FIELDS = frozenset(
 _SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS = frozenset(
     {*_SEMANTIC_RESULT_BASE_FIELDS, "expression_projection"}
 )
+_SEMANTIC_RESULT_V2_FIELDS = frozenset(
+    {
+        "schema",
+        "availability",
+        "receipt",
+        "telemetry_receipt",
+        "semantic_vector_receipt",
+        "node_observability",
+        "revision",
+        "deduplicated",
+        "expression_projection",
+    }
+)
+_SEMANTIC_CLOSURE_AVAILABILITY = frozenset({"AVAILABLE", "UNAVAILABLE_LEGACY"})
 _EXPRESSION_PROJECTION_SCHEMA = "astr-embodiment.expression-projection.v1"
 _EXPRESSION_PROFILE_FIELDS = (
     "warmth",
@@ -177,9 +192,73 @@ _NODE_REGION_LAYOUT = (
     ("action_expression", 1_024),
 )
 _NODE_CAPACITY = 16_384
+_EDGE_CAPACITY = 524_288
 _RESIDUAL_FIELDS = frozenset(
     {"authority", "continuity", "energy", "renormalization", "capacity"}
 )
+_NATIVE_TELEMETRY_RECEIPT_SCHEMA = "native-telemetry-receipt.v1"
+_NATIVE_TELEMETRY_FORMULA = "phase0-native-propagation-fxp6-v1"
+_NATIVE_TELEMETRY_FIELDS = frozenset(
+    {
+        "schema",
+        "formula",
+        "formula_digest",
+        "scope_digest",
+        "event_digest",
+        "source_digest",
+        "base_revision",
+        "next_revision",
+        "phase",
+        "state_before",
+        "state_after",
+        "graph_before",
+        "graph_after",
+        "local_digest",
+        "compensation_digest",
+        "effective_digest",
+        "energy",
+        "capacity",
+        "residuals",
+        "residual_health",
+        "native_gate",
+        "checkpoint_digest",
+        "telemetry_digest",
+    }
+)
+_NATIVE_TELEMETRY_DIGEST_FIELDS = (
+    "formula_digest",
+    "scope_digest",
+    "event_digest",
+    "source_digest",
+    "state_before",
+    "state_after",
+    "graph_before",
+    "graph_after",
+    "local_digest",
+    "compensation_digest",
+    "effective_digest",
+    "checkpoint_digest",
+    "telemetry_digest",
+)
+_NATIVE_TELEMETRY_ENERGY_FIELDS = (
+    "reserve_before",
+    "reserve_after",
+    "recovered",
+    "spent",
+    "headroom",
+    "residual",
+)
+_NATIVE_TELEMETRY_CAPACITY_FIELDS = (
+    "upper_saturated_nodes",
+    "node_limit",
+    "node_headroom",
+    "edge_used",
+    "edge_limit",
+    "edge_headroom",
+    "headroom",
+    "residual",
+)
+_FXP6_ONE = 1_000_000
 _SEMANTIC_ERROR_CODES = frozenset(
     {
         "INVALID_PERCEPTION_PROPOSAL",
@@ -820,14 +899,163 @@ def _validate_expression_projection(value: Any, *, expected_revision: int) -> di
     }
 
 
+def _validate_native_telemetry_receipt(
+    value: Any, *, receipt: dict[str, Any], revision: int
+) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != _NATIVE_TELEMETRY_FIELDS:
+        raise ValueError("native telemetry receipt")
+    if (
+        value["schema"] != _NATIVE_TELEMETRY_RECEIPT_SCHEMA
+        or value["formula"] != _NATIVE_TELEMETRY_FORMULA
+        or value["phase"] != "PREPARE"
+    ):
+        raise ValueError("native telemetry receipt")
+    digests = {
+        field: _canonical_hex(value[field], 32)
+        for field in _NATIVE_TELEMETRY_DIGEST_FIELDS
+    }
+    for field in ("base_revision", "next_revision"):
+        if type(value[field]) is not int or value[field] < 0:
+            raise ValueError("native telemetry receipt")
+    if (
+        value["base_revision"] != receipt["base_revision"]
+        or value["next_revision"] != revision
+        or value["next_revision"] != receipt["next_revision"]
+        or any(
+            digests[field] != receipt[field]
+            for field in (
+                "formula_digest",
+                "scope_digest",
+                "event_digest",
+                "state_before",
+                "state_after",
+                "graph_after",
+            )
+        )
+    ):
+        raise ValueError("native telemetry receipt")
+    energy = value["energy"]
+    if (
+        type(energy) is not dict
+        or set(energy) != set(_NATIVE_TELEMETRY_ENERGY_FIELDS)
+    ):
+        raise ValueError("native telemetry receipt")
+    if any(
+        type(energy[field]) is not int or not 0 <= energy[field] <= _FXP6_ONE
+        for field in _NATIVE_TELEMETRY_ENERGY_FIELDS
+    ):
+        raise ValueError("native telemetry receipt")
+    capacity = value["capacity"]
+    if (
+        type(capacity) is not dict
+        or set(capacity) != set(_NATIVE_TELEMETRY_CAPACITY_FIELDS)
+    ):
+        raise ValueError("native telemetry receipt")
+    if any(
+        type(capacity[field]) is not int or capacity[field] < 0
+        for field in _NATIVE_TELEMETRY_CAPACITY_FIELDS
+    ):
+        raise ValueError("native telemetry receipt")
+    if (
+        capacity["node_limit"] != _NODE_CAPACITY
+        or capacity["edge_limit"] != _EDGE_CAPACITY
+        or capacity["upper_saturated_nodes"] > capacity["node_limit"]
+        or capacity["edge_used"] > capacity["edge_limit"]
+        or any(
+            capacity[field] > _FXP6_ONE
+            for field in (
+                "node_headroom",
+                "edge_headroom",
+                "headroom",
+                "residual",
+            )
+        )
+    ):
+        raise ValueError("native telemetry receipt")
+
+    def headroom(*, used: int, limit: int) -> int:
+        return _FXP6_ONE - ((used * _FXP6_ONE + limit // 2) // limit)
+
+    if (
+        capacity["node_headroom"]
+        != headroom(
+            used=capacity["upper_saturated_nodes"], limit=capacity["node_limit"]
+        )
+        or capacity["edge_headroom"]
+        != headroom(used=capacity["edge_used"], limit=capacity["edge_limit"])
+        or capacity["headroom"]
+        != min(capacity["node_headroom"], capacity["edge_headroom"])
+    ):
+        raise ValueError("native telemetry receipt")
+    residuals = value["residuals"]
+    if type(residuals) is not dict or set(residuals) != _RESIDUAL_FIELDS:
+        raise ValueError("native telemetry receipt")
+    if any(
+        type(residuals[field]) is not int
+        or not 0 <= residuals[field] <= _FXP6_ONE
+        for field in _RESIDUAL_FIELDS
+    ):
+        raise ValueError("native telemetry receipt")
+    if any(
+        type(value[field]) is not int or not 0 <= value[field] <= _FXP6_ONE
+        for field in ("residual_health", "native_gate")
+    ):
+        raise ValueError("native telemetry receipt")
+    if (
+        residuals != receipt["residuals"]
+        or energy["headroom"] != energy["reserve_after"]
+        or energy["residual"] != residuals["energy"]
+        or capacity["residual"] != residuals["capacity"]
+        or capacity["residual"] != 0
+        or value["residual_health"] != _FXP6_ONE - max(residuals.values())
+        or value["native_gate"]
+        != min(energy["headroom"], capacity["headroom"], value["residual_health"])
+    ):
+        raise ValueError("native telemetry receipt")
+    return {
+        "schema": _NATIVE_TELEMETRY_RECEIPT_SCHEMA,
+        "formula": _NATIVE_TELEMETRY_FORMULA,
+        **{field: digests[field] for field in _NATIVE_TELEMETRY_DIGEST_FIELDS},
+        "base_revision": value["base_revision"],
+        "next_revision": revision,
+        "phase": "PREPARE",
+        "energy": {
+            field: energy[field] for field in _NATIVE_TELEMETRY_ENERGY_FIELDS
+        },
+        "capacity": {
+            field: capacity[field] for field in _NATIVE_TELEMETRY_CAPACITY_FIELDS
+        },
+        "residuals": {field: residuals[field] for field in sorted(_RESIDUAL_FIELDS)},
+        "residual_health": value["residual_health"],
+        "native_gate": value["native_gate"],
+    }
+
+
 def _validate_semantic_result(
     value: Any, *, expected_base_revision: int | None = None
 ) -> dict[str, Any]:
     payload = _semantic_json(value)
-    if set(payload) not in {_SEMANTIC_RESULT_BASE_FIELDS, _SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS}:
+    schema = payload.get("schema")
+    availability: str | None = None
+    if schema == _SEMANTIC_RESULT_SCHEMA_V1:
+        if set(payload) not in {
+            _SEMANTIC_RESULT_BASE_FIELDS,
+            _SEMANTIC_RESULT_WITH_EXPRESSION_FIELDS,
+        }:
+            raise ValueError("semantic result")
+    elif schema == _SEMANTIC_RESULT_SCHEMA_V2:
+        if set(payload) != _SEMANTIC_RESULT_V2_FIELDS:
+            raise ValueError("semantic result")
+        availability = payload["availability"]
+        if (
+            type(availability) is not str
+            or availability not in _SEMANTIC_CLOSURE_AVAILABILITY
+        ):
+            raise ValueError("semantic result")
+    else:
         raise ValueError("semantic result")
     revision = payload["revision"]
-    if payload["schema"] != _SEMANTIC_RESULT_SCHEMA or type(revision) is not int or revision < 0:
+    if type(revision) is not int or revision < 0:
         raise ValueError("semantic result")
     if type(payload["deduplicated"]) is not bool:
         raise ValueError("semantic result")
@@ -836,6 +1064,30 @@ def _validate_semantic_result(
         revision=revision,
         expected_base_revision=expected_base_revision,
     )
+    if availability == "UNAVAILABLE_LEGACY":
+        if any(
+            payload[field] is not None
+            for field in (
+                "telemetry_receipt",
+                "semantic_vector_receipt",
+                "node_observability",
+                "expression_projection",
+            )
+        ):
+            raise ValueError("semantic result")
+        return {
+            "schema": _SEMANTIC_RESULT_SCHEMA_V2,
+            "availability": "UNAVAILABLE_LEGACY",
+            "receipt": receipt,
+            "telemetry_receipt": None,
+            "semantic_vector_receipt": None,
+            "node_observability": None,
+            "full_vector_state": "UNAVAILABLE_LEGACY",
+            "node_observability_state": "UNAVAILABLE_LEGACY",
+            "revision": revision,
+            "deduplicated": payload["deduplicated"],
+            "expression_projection": None,
+        }
     vector = _validate_semantic_vector_receipt(
         payload["semantic_vector_receipt"], expected_state_changed=state_changed
     )
@@ -850,8 +1102,10 @@ def _validate_semantic_result(
         expression = _validate_expression_projection(
             payload["expression_projection"], expected_revision=revision
         )
-    return {
-        "schema": _SEMANTIC_RESULT_SCHEMA,
+    if schema == _SEMANTIC_RESULT_SCHEMA_V2 and expression is None:
+        raise ValueError("semantic result")
+    result = {
+        "schema": schema,
         "receipt": receipt,
         "semantic_vector_receipt": vector,
         "node_observability": nodes,
@@ -861,6 +1115,12 @@ def _validate_semantic_result(
         "deduplicated": payload["deduplicated"],
         "expression_projection": expression,
     }
+    if schema == _SEMANTIC_RESULT_SCHEMA_V2:
+        result["availability"] = "AVAILABLE"
+        result["telemetry_receipt"] = _validate_native_telemetry_receipt(
+            payload["telemetry_receipt"], receipt=receipt, revision=revision
+        )
+    return result
 
 
 def validate_semantic_result(

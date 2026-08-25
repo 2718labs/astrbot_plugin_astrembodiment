@@ -1466,6 +1466,54 @@ def _v3_test_native_closure() -> dict:
     }
 
 
+def _v3_test_native_closure_v2() -> dict:
+    closure = _v3_test_native_closure()
+    closure["schema"] = "astrembodiment.semantic-perception-closure.v2"
+    closure["availability"] = "AVAILABLE"
+    closure["telemetry_receipt"] = {
+        "schema": "native-telemetry-receipt.v1",
+        "formula": "phase0-native-propagation-fxp6-v1",
+        "formula_digest": closure["receipt"]["formula_digest"],
+        "scope_digest": closure["receipt"]["scope_digest"],
+        "event_digest": closure["receipt"]["event_digest"],
+        "source_digest": "77" * 32,
+        "base_revision": closure["receipt"]["base_revision"],
+        "next_revision": closure["receipt"]["next_revision"],
+        "phase": "PREPARE",
+        "state_before": closure["receipt"]["state_before"],
+        "state_after": closure["receipt"]["state_after"],
+        "graph_before": "88" * 32,
+        "graph_after": closure["receipt"]["graph_after"],
+        "local_digest": "99" * 32,
+        "compensation_digest": "aa" * 32,
+        "effective_digest": "bb" * 32,
+        "energy": {
+            "reserve_before": 0,
+            "reserve_after": 0,
+            "recovered": 0,
+            "spent": 0,
+            "headroom": 0,
+            "residual": 0,
+        },
+        "capacity": {
+            "upper_saturated_nodes": 0,
+            "node_limit": 16_384,
+            "node_headroom": 1_000_000,
+            "edge_used": 0,
+            "edge_limit": 524_288,
+            "edge_headroom": 1_000_000,
+            "headroom": 1_000_000,
+            "residual": 0,
+        },
+        "residuals": closure["receipt"]["residuals"],
+        "residual_health": 1_000_000,
+        "native_gate": 0,
+        "checkpoint_digest": "cc" * 32,
+        "telemetry_digest": "dd" * 32,
+    }
+    return closure
+
+
 def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1583,7 +1631,7 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
             self, _scope_json: str, proposal_json: str
         ) -> str:
             self.proposals.append(json.loads(proposal_json))
-            return json.dumps(_v3_test_native_closure())
+            return json.dumps(_v3_test_native_closure_v2())
 
     async def run():
         context = FakeContext(configured_provider="semantic")

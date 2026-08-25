@@ -233,7 +233,12 @@ _OBSERVATORY_EXPRESSION_STATES = {
     "INJECTION_FAILED",
 }
 _SEMANTIC_OBSERVATORY_SCHEMA = "astr-embodiment.semantic-observatory.v1"
-_SEMANTIC_CLOSURE_SCHEMA = "astrembodiment.semantic-perception-closure.v1"
+_SEMANTIC_CLOSURE_SCHEMAS = frozenset(
+    {
+        "astrembodiment.semantic-perception-closure.v1",
+        "astrembodiment.semantic-perception-closure.v2",
+    }
+)
 _SEMANTIC_CALIBRATION_UNVERIFIED = "UNVERIFIED_HUMAN_GOLD"
 _SEMANTIC_NOT_ATTEMPTED_CAUSES = frozenset(
     {
@@ -1174,7 +1179,7 @@ class AstrEmbodimentPlugin(Star):
         if not isinstance(closure, Mapping):
             return None
         if (
-            closure.get("schema") != _SEMANTIC_CLOSURE_SCHEMA
+            closure.get("schema") not in _SEMANTIC_CLOSURE_SCHEMAS
             or closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
             or closure.get("node_observability_state") != "CONFIRMED"
         ):
