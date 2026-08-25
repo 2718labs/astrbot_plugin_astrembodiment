@@ -32,7 +32,7 @@ pub use legacy_discovery::{
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
     wire, CanonicalEvent, CommitStatus, Digest, GenesisManifest, GenesisReceipt, GenesisStatus,
-    PersonaSourceRef, ScopeRef,
+    PersonaSourceRef, ScopeRef, TransitionReceipt,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::Path;
@@ -40,6 +40,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub const LEASE_TTL_MS: u64 = 120_000;
+/// Namespace shared by the runtime and store for the per-incarnation semantic
+/// lane.  Keeping it at the durable boundary lets the store distinguish that
+/// lane from an arbitrary relation-scoped event before it accepts the one
+/// Phase-0 formula transition.
+pub const SEMANTIC_LANE_NAMESPACE_DOMAIN_V1: &[u8] = b"astr-embodiment/semantic-lane-namespace-v1";
+
+const PHASE0_FORMULA_TRANSITION_MAGIC_V1: &[u8] = b"AE-P0FT1\0";
+const PHASE0_FORMULA_TRANSITION_SCHEMA_V1: u16 = 1;
+const PHASE0_FORMULA_TRANSITION_KIND_V1: u8 = 1;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -268,6 +277,124 @@ pub struct ContinuityCommitBundleV1 {
     pub snapshot: SnapshotCommitV1,
     pub graph: GraphCommitV1,
     pub context: ContextCommitV1,
+}
+
+/// Canonical graph delta for the only allowed Genesis-to-Phase-0 formula
+/// change.  The receipt digest makes the delta explicitly bind to the receipt
+/// that is appended to the Continuum chain; the remaining fields bind it to
+/// the prior Genesis graph authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Phase0FormulaTransitionV1 {
+    scope_digest: Digest,
+    event_digest: Digest,
+    receipt_digest: Digest,
+    base_revision: u64,
+    next_revision: u64,
+    base_graph_digest: Digest,
+    from_formula_digest: Digest,
+    to_formula_digest: Digest,
+}
+
+impl Phase0FormulaTransitionV1 {
+    fn canonical_bytes(self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            PHASE0_FORMULA_TRANSITION_MAGIC_V1.len() + 2 + 1 + (32 * 6) + (8 * 2),
+        );
+        out.extend_from_slice(PHASE0_FORMULA_TRANSITION_MAGIC_V1);
+        out.extend_from_slice(&PHASE0_FORMULA_TRANSITION_SCHEMA_V1.to_le_bytes());
+        out.push(PHASE0_FORMULA_TRANSITION_KIND_V1);
+        for digest in [self.scope_digest, self.event_digest, self.receipt_digest] {
+            out.extend_from_slice(&digest);
+        }
+        out.extend_from_slice(&self.base_revision.to_le_bytes());
+        out.extend_from_slice(&self.next_revision.to_le_bytes());
+        for digest in [
+            self.base_graph_digest,
+            self.from_formula_digest,
+            self.to_formula_digest,
+        ] {
+            out.extend_from_slice(&digest);
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, StoreError> {
+        if bytes.len() < PHASE0_FORMULA_TRANSITION_MAGIC_V1.len()
+            || &bytes[..PHASE0_FORMULA_TRANSITION_MAGIC_V1.len()]
+                != PHASE0_FORMULA_TRANSITION_MAGIC_V1
+        {
+            return Err(StoreError::ContinuityFence("formula_transition_magic"));
+        }
+        let mut reader = wire::Reader::new(&bytes[PHASE0_FORMULA_TRANSITION_MAGIC_V1.len()..]);
+        let schema_version = reader
+            .u16()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let kind = reader
+            .u8()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        if schema_version != PHASE0_FORMULA_TRANSITION_SCHEMA_V1
+            || kind != PHASE0_FORMULA_TRANSITION_KIND_V1
+        {
+            return Err(StoreError::ContinuityFence("formula_transition_schema"));
+        }
+        let scope_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let event_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let receipt_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let base_revision = reader
+            .u64()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let next_revision = reader
+            .u64()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let base_graph_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let from_formula_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        let to_formula_digest = reader
+            .digest()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        reader
+            .finish()
+            .map_err(|_| StoreError::ContinuityFence("formula_transition_decode"))?;
+        Ok(Self {
+            scope_digest,
+            event_digest,
+            receipt_digest,
+            base_revision,
+            next_revision,
+            base_graph_digest,
+            from_formula_digest,
+            to_formula_digest,
+        })
+    }
+}
+
+/// Produce the receipt-bound delta that upgrades an empty semantic lane from
+/// its active Genesis formula to the Phase-0 native dynamics formula.
+pub fn phase0_formula_transition_delta_v1(
+    receipt: &TransitionReceipt,
+    base_graph_digest: Digest,
+    genesis_formula_digest: Digest,
+) -> Vec<u8> {
+    Phase0FormulaTransitionV1 {
+        scope_digest: receipt.scope_digest,
+        event_digest: receipt.event_digest,
+        receipt_digest: wire::receipt_digest(receipt),
+        base_revision: receipt.base_revision,
+        next_revision: receipt.next_revision,
+        base_graph_digest,
+        from_formula_digest: genesis_formula_digest,
+        to_formula_digest: receipt.formula_digest,
+    }
+    .canonical_bytes()
 }
 
 type StoredJournalColumns = (i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
@@ -1412,6 +1539,86 @@ impl Store {
             .transpose()
     }
 
+    fn active_semantic_storage_scope_matches_tx(
+        tx: &Transaction<'_>,
+        event_scope: &ScopeRef,
+        expected_genesis_formula: Digest,
+    ) -> Result<bool, StoreError> {
+        let active: Option<(Vec<u8>, Vec<u8>)> = tx
+            .query_row(
+                "SELECT i.incarnation_id, i.formula_digest FROM active_bindings AS b JOIN incarnations AS i ON i.incarnation_id = b.incarnation_id WHERE b.bot_token = ?1 AND b.persona_token = ?2",
+                params![
+                    blob(event_scope.bot_token),
+                    blob(event_scope.persona_token),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((incarnation_id, genesis_formula)) = active else {
+            return Ok(false);
+        };
+        let incarnation_id = digest_from_blob(&incarnation_id, "semantic_incarnation")?;
+        let genesis_formula = digest_from_blob(&genesis_formula, "semantic_formula")?;
+        if genesis_formula != expected_genesis_formula {
+            return Ok(false);
+        }
+        let root_scope =
+            wire::persona_scope_digest(&event_scope.bot_token, &event_scope.persona_token, None);
+        let binding = wire::domain_hash(
+            SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
+            &[&root_scope, &incarnation_id, &genesis_formula],
+        );
+        let mut expected_relation = [0u8; 16];
+        expected_relation.copy_from_slice(&binding[..16]);
+        let mut expected_session = [0u8; 16];
+        expected_session.copy_from_slice(&binding[16..]);
+        Ok(
+            event_scope.relation_token.as_ref() == Some(&expected_relation)
+                && event_scope.session_token == expected_session,
+        )
+    }
+
+    fn phase0_formula_transition_is_allowed_tx(
+        tx: &Transaction<'_>,
+        delta_bytes: &[u8],
+        event: &CanonicalEvent,
+        event_scope: &ScopeRef,
+        receipt: &TransitionReceipt,
+        current_revision: u64,
+        current_graph: Digest,
+        current_formula: Digest,
+        incoming_formula: Digest,
+    ) -> Result<bool, StoreError> {
+        if current_revision != 0 || !matches!(event, CanonicalEvent::UserStimulus(_)) {
+            return Ok(false);
+        }
+        let existing_graph_commit: Option<i64> = tx
+            .query_row(
+                "SELECT revision FROM graph_commits WHERE scope_digest = ?1 LIMIT 1",
+                params![blob(receipt.scope_digest)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_graph_commit.is_some()
+            || !Self::active_semantic_storage_scope_matches_tx(tx, event_scope, current_formula)?
+        {
+            return Ok(false);
+        }
+        let transition = Phase0FormulaTransitionV1::decode(delta_bytes)?;
+        Ok(transition.scope_digest == receipt.scope_digest
+            && transition.event_digest == receipt.event_digest
+            && transition.receipt_digest == wire::receipt_digest(receipt)
+            && transition.base_revision == receipt.base_revision
+            && transition.next_revision == receipt.next_revision
+            && transition.base_revision == 0
+            && transition.next_revision == 1
+            && transition.base_graph_digest == current_graph
+            && transition.from_formula_digest == current_formula
+            && transition.to_formula_digest == incoming_formula
+            && transition.to_formula_digest == receipt.formula_digest
+            && transition.to_formula_digest != transition.from_formula_digest)
+    }
+
     fn last_chain_digest_tx(
         tx: &Transaction<'_>,
         scope_digest: &Digest,
@@ -1590,7 +1797,19 @@ impl Store {
                 if bundle.graph.base_graph_digest != current_graph {
                     return Err(StoreError::ContinuityFence("graph_base"));
                 }
-                if bundle.graph.formula_digest != current_formula {
+                if bundle.graph.formula_digest != current_formula
+                    && !Self::phase0_formula_transition_is_allowed_tx(
+                        &tx,
+                        &bundle.envelope.delta_bytes,
+                        &event,
+                        event_scope,
+                        &bundle.envelope.receipt,
+                        current,
+                        current_graph,
+                        current_formula,
+                        bundle.graph.formula_digest,
+                    )?
+                {
                     return Err(StoreError::ContinuityFence("graph_current_formula"));
                 }
             }

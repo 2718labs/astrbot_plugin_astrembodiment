@@ -35,10 +35,11 @@ use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
 };
 use ae_store::{
-    ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1, GenesisCommit, GraphCommitV1,
-    RebirthChildStageRequestV1, RebirthCommitPermitV1, RebirthLifecycleError, RebirthPreflightV1,
-    RebirthPrepareRequestV1, RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, SnapshotCommitV1,
-    Store, StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
+    phase0_formula_transition_delta_v1, ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1,
+    GenesisCommit, GraphCommitV1, RebirthChildStageRequestV1, RebirthCommitPermitV1,
+    RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1, RebirthPrepareResponseV1,
+    RebirthResponseEnvelopeV1, SnapshotCommitV1, Store, StoreError, UserAuthorizedRebirthV1,
+    VaultLifecycle, VaultMode, SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -173,7 +174,6 @@ fn persona_scope_ref(bot_token: Id128, persona_token: Id128) -> ScopeRef {
     }
 }
 
-const SEMANTIC_NAMESPACE_DOMAIN_V1: &[u8] = b"astr-embodiment/semantic-lane-namespace-v1";
 const REQUEST_NONCE_BINDING_DOMAIN_V1: &[u8] = b"astr-embodiment/spc1-request-nonce-binding-v1";
 
 fn canonical_request_nonce_digest_v1(scope: &ScopeRef, proposal: &PerceptionProposalV1) -> Digest {
@@ -226,7 +226,7 @@ fn semantic_storage_scope(
 ) -> ScopeRef {
     let root_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
     let binding = wire::domain_hash(
-        SEMANTIC_NAMESPACE_DOMAIN_V1,
+        SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
         &[&root_scope, incarnation_id, formula_digest],
     );
     let mut relation_token = [0; 16];
@@ -1609,13 +1609,19 @@ impl AstrRuntime {
             .store
             .last_chain_digest(&semantic_scope)?
             .unwrap_or(initial_snapshot_digest);
+        let formula_transition_delta =
+            if semantic_revision == 0 && formula_digest != genesis_formula_digest {
+                phase0_formula_transition_delta_v1(&receipt, graph_before, genesis_formula_digest)
+            } else {
+                vec![]
+            };
         let bundle = ContinuityCommitBundleV1 {
             envelope: CommitEnvelope {
                 event_kind: wire::event_kind_name(&event).to_owned(),
                 event_bytes: wire::encode_event(&event),
                 receipt: receipt.clone(),
                 chain_seed,
-                delta_bytes: vec![],
+                delta_bytes: formula_transition_delta.clone(),
             },
             snapshot: SnapshotCommitV1 {
                 state_digest: state_after,
@@ -1625,7 +1631,7 @@ impl AstrRuntime {
                 base_graph_digest: graph_before,
                 graph_digest: graph_after,
                 formula_digest,
-                delta_bytes: vec![],
+                delta_bytes: formula_transition_delta,
                 replay_state_bytes: prepared.next_graph.canonical_bytes(),
             },
             context,
@@ -1868,6 +1874,22 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ae-runtime-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn semantic_proposal(scope: &ScopeRef, seed: u8, base_revision: u64) -> PerceptionProposalV1 {
+        let mut proposal = PerceptionProposalV1 {
+            schema_version: 1,
+            event_id: [seed; 16],
+            turn_id: [seed.wrapping_add(1); 16],
+            observed_at_ms: 1_700_000_000_200 + u64::from(seed),
+            base_revision,
+            dimensions: EvidenceVector::default(),
+            estimator_confidence: Fixed::ONE,
+            protocol_version: 1,
+            request_nonce_digest: [1; 32],
+        };
+        proposal.request_nonce_digest = canonical_request_nonce_digest_v1(scope, &proposal);
+        proposal
     }
 
     #[test]
@@ -2123,7 +2145,10 @@ mod tests {
 
         let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
         let request = request(41);
-        runtime.ensure_genesis(&request).unwrap();
+        let genesis = runtime.ensure_genesis(&request).unwrap();
+        let phase0_formula =
+            semantic::phase0_semantic_formula_digest_v1(&request.formula_digest).unwrap();
+        assert_ne!(genesis.formula_digest, phase0_formula);
         let scope = ScopeRef {
             bot_token: request.source.scope.bot_token,
             persona_token: request.source.scope.persona_token,
@@ -2151,6 +2176,7 @@ mod tests {
             .unwrap();
         assert!(!decision.deduplicated);
         assert_eq!(decision.revision, 1);
+        assert_eq!(decision.receipt.formula_digest, phase0_formula);
         assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 1);
         assert_eq!(decision.receipt.base_revision, 0);
         assert_eq!(decision.receipt.next_revision, 1);
@@ -2208,6 +2234,61 @@ mod tests {
         ] {
             assert!(value <= 1_000_000);
         }
+    }
+
+    #[test]
+    fn semantic_followup_keeps_formula_and_graph_continuity() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the continuity task directory");
+        let dir = root.join(format!(
+            "focused-semantic-continuity-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(51);
+        let genesis = runtime.ensure_genesis(&request).unwrap();
+        let phase0_formula =
+            semantic::phase0_semantic_formula_digest_v1(&request.formula_digest).unwrap();
+        assert_ne!(genesis.formula_digest, phase0_formula);
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
+            relation_token: None,
+            session_token: [52; 16],
+        };
+        let first = runtime
+            .apply_perception_proposal_v1(&scope, &semantic_proposal(&scope, 53, 0))
+            .unwrap();
+        let second = runtime
+            .apply_perception_proposal_v1(&scope, &semantic_proposal(&scope, 54, first.revision))
+            .unwrap();
+
+        assert_eq!(first.revision, 1);
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.receipt.base_revision, first.revision);
+        assert_eq!(second.receipt.next_revision, 2);
+        assert_eq!(first.receipt.formula_digest, phase0_formula);
+        assert_eq!(second.receipt.formula_digest, first.receipt.formula_digest);
+        assert_eq!(second.receipt.state_before, first.receipt.state_after);
+
+        let first_telemetry = first.semantic_telemetry_receipt.as_ref().unwrap();
+        let second_telemetry = second.semantic_telemetry_receipt.as_ref().unwrap();
+        assert_eq!(
+            second_telemetry.formula_digest,
+            first_telemetry.formula_digest
+        );
+        assert_eq!(second_telemetry.graph_before, first_telemetry.graph_after);
+
+        let journal = runtime
+            .store
+            .read_journal(&first.receipt.scope_digest)
+            .unwrap();
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal[1].decode_receipt().unwrap(), second.receipt);
+        assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 2);
     }
 
     #[test]
