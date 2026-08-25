@@ -28,6 +28,10 @@ from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
 
 
+def _unreachable_mandatory_native_abi(*_args: object, **_kwargs: object) -> str:
+    raise AssertionError("loader fixture must not invoke mandatory native ABI stubs")
+
+
 class FakeConfig(dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -993,6 +997,10 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
             native.health = lambda: "{}"
             native.inspect = lambda *_args: "{}"
             native.open = lambda *_args: None
+            native.prepare_rebirth_v1 = _unreachable_mandatory_native_abi
+            native.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
+            native.semantic_revision_v1 = _unreachable_mandatory_native_abi
+            native.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             native.verify_replay = lambda *_args: "{}"
             native.version = lambda: "compat"
 
@@ -1138,6 +1146,10 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
             module.open = lambda _data_dir: None
             module.ensure_genesis = lambda *_args: "{}"
             module.apply_event = lambda *_args: "{}"
+            module.prepare_rebirth_v1 = _unreachable_mandatory_native_abi
+            module.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
+            module.semantic_revision_v1 = _unreachable_mandatory_native_abi
+            module.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             module.inspect = lambda *_args: "{}"
             module.verify_replay = lambda *_args: "{}"
             module.flush_and_close = lambda: None

@@ -190,6 +190,7 @@ _OBSERVATORY_FIELDS = (
     "expression_profile_fxp6",
 )
 _OBSERVATORY_CODES = {
+    "SEMANTIC_COMMITTED",
     "EMPTY_REQUEST",
     "NATIVE_ERROR",
     "NATIVE_MALFORMED",

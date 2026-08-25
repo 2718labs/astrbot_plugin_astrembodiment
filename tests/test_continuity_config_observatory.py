@@ -183,7 +183,8 @@ def test_observatory_uses_closed_compact_detailed_and_unmasked_failure(
             return None
 
     class Request:
-        system_prompt = ""
+        prompt = "RAW_REQUEST_MUST_NOT_LEAK"
+        system_prompt = "RAW_SYSTEM_PROMPT_MUST_NOT_LEAK"
 
     scope = ScopeTokens(
         bot_token="10" * 16,
@@ -226,7 +227,13 @@ def test_observatory_uses_closed_compact_detailed_and_unmasked_failure(
             14,
         )
 
-    class MissingReceiptCoordinator:
+    class ProjectionUnavailableCoordinator:
+        async def preflight_semantic_v3(self, **_kwargs):
+            return {
+                "status": "DEGRADED",
+                "code": "EXPRESSION_PROJECTION_UNAVAILABLE",
+            }
+
         async def apply_delivery(self, **_kwargs):
             return {
                 "schema": "astrembodiment.decision.v1",
@@ -235,23 +242,46 @@ def test_observatory_uses_closed_compact_detailed_and_unmasked_failure(
             }
 
     plugin._run_genesis = missing_receipt_request
+    plugin._coordinator = ProjectionUnavailableCoordinator()
     event = Event()
     logs.entries.clear()
     asyncio.run(plugin.on_llm_request(event, Request()))
     assert len(logs.entries) == 1
     assert logs.entries[0][0] == "warning"
-    assert "失败码=NATIVE_MALFORMED｜阶段=RECEIPT" in logs.entries[0][1]
-    assert "positive=0" in logs.entries[0][1]
-    assert "base_revision=14" in logs.entries[0][1]
-    assert "revision=15" in logs.entries[0][1]
-    assert "active_nodes=不可用" in logs.entries[0][1]
+    structured = json.loads(
+        logs.entries[0][1].removeprefix("AstrEmbodiment SPC1 observatory: ")
+    )
+    assert {
+        key: structured[key]
+        for key in (
+            "schema",
+            "status",
+            "code",
+            "reason",
+            "cause_code",
+            "expression_state",
+        )
+    } == {
+        "schema": "astr-embodiment.semantic-observatory.v1",
+        "status": "DEGRADED",
+        "code": "EXPRESSION_NOT_ATTEMPTED",
+        "reason": "EXPRESSION_NOT_ATTEMPTED",
+        "cause_code": "EXPRESSION_PROJECTION_UNAVAILABLE",
+        "expression_state": "NOT_ATTEMPTED",
+    }
+    assert all(
+        sensitive not in logs.entries[0][1]
+        for sensitive in (
+            Request.prompt,
+            Request.system_prompt,
+            "AE-S1-0123456789ABCDEF",
+            "ab" * 32,
+            context_summary["summary_digest"],
+            "turn-15",
+        )
+    )
 
-    plugin._coordinator = MissingReceiptCoordinator()
     logs.entries.clear()
     asyncio.run(plugin.after_message_sent(event))
-    assert len(logs.entries) == 1
-    assert logs.entries[0][0] == "warning"
-    assert "失败码=NATIVE_MALFORMED｜阶段=RECEIPT" in logs.entries[0][1]
-    assert "base_revision=15" in logs.entries[0][1]
-    assert "revision=16" in logs.entries[0][1]
-    assert "active_edges=不可用" in logs.entries[0][1]
+    assert logs.entries == []
+    assert plugin._revisions[scope.persona_token] == 16
