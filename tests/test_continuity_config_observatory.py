@@ -52,6 +52,8 @@ def test_user_visible_semantic_config_uses_fifteen_dimension_wording() -> None:
         "十五维语义估计超时（毫秒）"
     )
     assert "闭合的十五维语义估计" in settings["assistant_provider_id"]["hint"]
+
+
 DETAILED_FIELDS = (
     "schema",
     "status",

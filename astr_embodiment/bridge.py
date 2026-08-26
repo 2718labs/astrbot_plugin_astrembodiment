@@ -335,20 +335,23 @@ SEMANTIC_NATIVE_ERROR_CODES = frozenset(
     }
 )
 SEMANTIC_NATIVE_FAILURE_STAGES = frozenset({"CURSOR", "NATIVE_APPLY"})
-_SEMANTIC_ERROR_CODES = frozenset(
-    {
-        "INVALID_PERCEPTION_PROPOSAL",
-        "INVALID_PERCEPTION_SCOPE",
-        "NATIVE_SYMBOL_UNAVAILABLE",
-        "SEMANTIC_IDENTITY_CONFLICT",
-        "SEMANTIC_REVISION_OVERFLOW",
-        "SEMANTIC_STATE_UNCHANGED",
-        "STALE_REVISION",
-        "STALE_CAUSAL_BASE",
-        "CLOSED_SCHEMA",
-        "GENESIS_REQUIRED",
-    }
-) | SEMANTIC_NATIVE_ERROR_CODES
+_SEMANTIC_ERROR_CODES = (
+    frozenset(
+        {
+            "INVALID_PERCEPTION_PROPOSAL",
+            "INVALID_PERCEPTION_SCOPE",
+            "NATIVE_SYMBOL_UNAVAILABLE",
+            "SEMANTIC_IDENTITY_CONFLICT",
+            "SEMANTIC_REVISION_OVERFLOW",
+            "SEMANTIC_STATE_UNCHANGED",
+            "STALE_REVISION",
+            "STALE_CAUSAL_BASE",
+            "CLOSED_SCHEMA",
+            "GENESIS_REQUIRED",
+        }
+    )
+    | SEMANTIC_NATIVE_ERROR_CODES
+)
 
 _CONTEXT_SUMMARY_SCHEMA = "astrembodiment.context-summary.v1"
 _CONTEXT_SUMMARY_KEYS = frozenset(
@@ -613,9 +616,7 @@ def _semantic_degraded(
 ) -> dict[str, str]:
     result = {"status": "DEGRADED", "code": code}
     if code == "INVALID_NEURAL_STATE" and state_subcode is not _STATE_SUBCODE_MISSING:
-        result["state_subcode"] = normalize_invalid_neural_state_subcode(
-            state_subcode
-        )
+        result["state_subcode"] = normalize_invalid_neural_state_subcode(state_subcode)
     return result
 
 

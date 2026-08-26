@@ -55,21 +55,24 @@ ContextBoundEstimatorProvider = Callable[[Mapping[str, Any]], Any]
 
 _RETRY_WAIT_ATTEMPTS = 40
 _RETRY_WAIT_DELAY_S = 0.05
-_SEMANTIC_FAILURE_CODES = frozenset(
-    {
-        "EMPTY_REQUEST",
-        "INVALID_TURN",
-        "ESTIMATOR_UNAVAILABLE",
-        "ESTIMATOR_MALFORMED",
-        "SEMANTIC_VECTOR_UNAVAILABLE",
-        "ESTIMATOR_UNCERTAIN",
-        "NATIVE_SYMBOL_UNAVAILABLE",
-        "NATIVE_MALFORMED",
-        "STALE_REVISION",
-        "NATIVE_ERROR",
-        "EXPRESSION_PROJECTION_UNAVAILABLE",
-    }
-) | SEMANTIC_NATIVE_ERROR_CODES
+_SEMANTIC_FAILURE_CODES = (
+    frozenset(
+        {
+            "EMPTY_REQUEST",
+            "INVALID_TURN",
+            "ESTIMATOR_UNAVAILABLE",
+            "ESTIMATOR_MALFORMED",
+            "SEMANTIC_VECTOR_UNAVAILABLE",
+            "ESTIMATOR_UNCERTAIN",
+            "NATIVE_SYMBOL_UNAVAILABLE",
+            "NATIVE_MALFORMED",
+            "STALE_REVISION",
+            "NATIVE_ERROR",
+            "EXPRESSION_PROJECTION_UNAVAILABLE",
+        }
+    )
+    | SEMANTIC_NATIVE_ERROR_CODES
+)
 
 
 class GenesisCoordinator:
@@ -299,8 +302,7 @@ class GenesisCoordinator:
                         state_subcode
                     )
         elif (
-            code == "ESTIMATOR_MALFORMED"
-            and cause_code in ESTIMATOR_MALFORMED_SUBCODES
+            code == "ESTIMATOR_MALFORMED" and cause_code in ESTIMATOR_MALFORMED_SUBCODES
         ):
             result["cause_code"] = cause_code
         return result

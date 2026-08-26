@@ -507,9 +507,7 @@ class AstrEmbodimentPlugin(Star):
         if source != "session":
             try:
                 get_provider = getattr(self.context, "get_provider_by_id", None)
-                provider = (
-                    get_provider(provider_id) if callable(get_provider) else None
-                )
+                provider = get_provider(provider_id) if callable(get_provider) else None
             except Exception:
                 provider = None
             if provider is None:
@@ -517,7 +515,10 @@ class AstrEmbodimentPlugin(Star):
                     f"UNIFIED_PROVIDER_UNAVAILABLE source={source} consumer={consumer}"
                 )
                 raise ValueError("辅助模型 Provider 不存在") from None
-            if source == "legacy_v3" and not self._unified_provider_legacy_warning_emitted:
+            if (
+                source == "legacy_v3"
+                and not self._unified_provider_legacy_warning_emitted
+            ):
                 self._unified_provider_legacy_warning_emitted = True
                 logger.warning("UNIFIED_PROVIDER_LEGACY_FALLBACK")
             return provider_id

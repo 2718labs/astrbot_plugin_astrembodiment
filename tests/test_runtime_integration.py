@@ -337,9 +337,7 @@ def test_unified_auxiliary_provider_unavailable_is_fail_closed_for_both_consumer
             self.warning_messages.append(template % args if args else template)
 
     raw_provider_id = next(
-        value
-        for value in model_settings.values()
-        if value not in {"legacy", "   "}
+        value for value in model_settings.values() if value not in {"legacy", "   "}
     )
     recorder = RecordingLogger()
     monkeypatch.setattr(main_module, "logger", recorder)
@@ -347,6 +345,7 @@ def test_unified_auxiliary_provider_unavailable_is_fail_closed_for_both_consumer
     async def run():
         context = FakeContext(configured_provider="legacy", current_provider="chat")
         if lookup_raises:
+
             def get_provider_by_id(provider_id: str):
                 context.provider_calls.append(provider_id)
                 raise RuntimeError(f"provider lookup failed: {provider_id}")
@@ -2086,9 +2085,12 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
         expected_warning += f" state_subcode={expected_state_subcode}"
     assert recorder.warning_messages[0] == expected_warning
     assert len(recorder.warning_messages) == 2
-    assert json.loads(
-        recorder.warning_messages[1].removeprefix(main_module._OBSERVATORY_PREFIX)
-    ) == semantic_record
+    assert (
+        json.loads(
+            recorder.warning_messages[1].removeprefix(main_module._OBSERVATORY_PREFIX)
+        )
+        == semantic_record
+    )
     assert native_detail not in "\n".join(recorder.warning_messages)
     assert "raw-native-detail" not in "\n".join(recorder.warning_messages)
     assert "private-provider-id" not in "\n".join(recorder.warning_messages)
