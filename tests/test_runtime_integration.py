@@ -1476,6 +1476,7 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
 
         def exec_module(self, module):
             module.version = lambda: Path(module.__spec__.origin).parent.name
+            module.contract_info = _v3_test_node_observability_contract_info
             module.health = lambda: "{}"
             module.open = lambda _data_dir: None
             module.ensure_genesis = lambda *_args: "{}"
