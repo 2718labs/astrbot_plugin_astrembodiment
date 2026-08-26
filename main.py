@@ -1743,7 +1743,7 @@ class AstrEmbodimentPlugin(Star):
         expression_profile: Mapping[str, Any] | None,
         cause_code: str | None = None,
     ) -> dict[str, Any]:
-        """Always warn for preview and expression omissions, independent of config."""
+        """Emit SUCCESS records at INFO level and failure records at WARN level."""
 
         record = self._semantic_observatory_record(
             outcome,
