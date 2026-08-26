@@ -36,7 +36,7 @@ use ae_neurofield::{
 };
 use ae_store::{
     phase0_formula_transition_delta_v1, ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1,
-    GenesisCommit, GraphCommitV1, LegacySemanticFieldDomainUpgradeV1,
+    ContinuityCommitOutcomeV1, GenesisCommit, GraphCommitV1, LegacySemanticFieldDomainUpgradeV1,
     LegacySemanticFormulaUpgradeReceiptV1, RebirthChildStageRequestV1, RebirthCommitPermitV1,
     RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1, RebirthPrepareResponseV1,
     RebirthResponseEnvelopeV1, SnapshotCommitV1, Store, StoreError, UserAuthorizedRebirthV1,
@@ -94,6 +94,54 @@ impl RuntimeError {
     pub const fn invalid_neural_state(subcode: StateSubcodeV1) -> Self {
         Self::InvalidNeuralState(subcode)
     }
+
+    /// Coarse, privacy-safe classification for the closed field migration
+    /// lane.  It supplements rather than replaces the established error code
+    /// and `state_subcode` surface.
+    pub fn migration_subcode_v1(&self) -> SemanticFieldMigrationSubcodeV1 {
+        match self {
+            Self::StaleCausalBase { .. } => SemanticFieldMigrationSubcodeV1::ConcurrentStale,
+            Self::LegacyUnattested => SemanticFieldMigrationSubcodeV1::RefusedStructure,
+            Self::InvalidNeuralState(StateSubcodeV1::FieldStateInvalid) => {
+                SemanticFieldMigrationSubcodeV1::RefusedRange
+            }
+            Self::Store(StoreError::Io { context, .. })
+                if context.starts_with("field migration backup")
+                    || context.starts_with("opening field migration backup")
+                    || context.starts_with("reading field migration backup")
+                    || context.starts_with("creating field migration backup")
+                    || context.starts_with("writing field migration backup")
+                    || context.starts_with("syncing field migration backup")
+                    || context.starts_with("finalizing field migration backup") =>
+            {
+                SemanticFieldMigrationSubcodeV1::BackupFailed
+            }
+            Self::Store(StoreError::ContinuityFence(reason))
+                if reason.starts_with("field_backup") =>
+            {
+                SemanticFieldMigrationSubcodeV1::BackupFailed
+            }
+            Self::Store(StoreError::ContinuityFence(
+                "semantic_history_range" | "field_pe_range" | "field_nonpe_range" | "field_shape",
+            )) => SemanticFieldMigrationSubcodeV1::RefusedRange,
+            Self::Store(StoreError::ContinuityFence(
+                "field_transform" | "field_upgrade_transform",
+            )) => SemanticFieldMigrationSubcodeV1::TransformInvalid,
+            Self::Store(StoreError::ContinuityFence("field_upgrade_not_needed")) => {
+                SemanticFieldMigrationSubcodeV1::RefusedSource
+            }
+            Self::Store(StoreError::ContinuityFence(reason))
+                if reason.starts_with("semantic_") || reason.starts_with("field_upgrade") =>
+            {
+                SemanticFieldMigrationSubcodeV1::RefusedStructure
+            }
+            Self::Store(StoreError::Sqlite(_) | StoreError::Io { .. }) => {
+                SemanticFieldMigrationSubcodeV1::StorageFailed
+            }
+            Self::Store(_) => SemanticFieldMigrationSubcodeV1::Unknown,
+            _ => SemanticFieldMigrationSubcodeV1::Unknown,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -117,16 +165,52 @@ pub struct PerceptionProposalDecisionV1 {
     pub deduplicated: bool,
     pub expression_projection: ExpressionProjectionV1,
     pub availability: SemanticClosureAvailabilityV1,
-    /// Internal, closed migration telemetry.  The Python bridge intentionally
-    /// keeps its established result schema while the native receipt remains
-    /// the durable audit authority.
+    /// Internal, closed migration telemetry; the bridge projects only the
+    /// fixed aggregate subcode while the native receipt remains durable
+    /// authority.
     pub field_migration: Option<SemanticFieldMigrationOutcomeV1>,
+    /// Closed migration telemetry.  It never includes a source text, node
+    /// vector/index, scope, SeedCode, path, digest, or other secret.
+    pub migration_subcode: Option<SemanticFieldMigrationSubcodeV1>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SemanticFieldMigrationOutcomeV1 {
     Applied,
     Replayed,
+}
+
+/// Fixed migration classification surface.  New values require a frozen
+/// contract revision; callers must treat unknown text as `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticFieldMigrationSubcodeV1 {
+    Applied,
+    Replayed,
+    RefusedSource,
+    RefusedStructure,
+    RefusedRange,
+    TransformInvalid,
+    ConcurrentStale,
+    BackupFailed,
+    StorageFailed,
+    Unknown,
+}
+
+impl SemanticFieldMigrationSubcodeV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "FIELD_MIGRATION_APPLIED",
+            Self::Replayed => "FIELD_MIGRATION_REPLAYED",
+            Self::RefusedSource => "FIELD_MIGRATION_REFUSED_SOURCE",
+            Self::RefusedStructure => "FIELD_MIGRATION_REFUSED_STRUCTURE",
+            Self::RefusedRange => "FIELD_MIGRATION_REFUSED_RANGE",
+            Self::TransformInvalid => "FIELD_MIGRATION_TRANSFORM_INVALID",
+            Self::ConcurrentStale => "FIELD_MIGRATION_CONCURRENT_STALE",
+            Self::BackupFailed => "FIELD_MIGRATION_BACKUP_FAILED",
+            Self::StorageFailed => "FIELD_MIGRATION_STORAGE_FAILED",
+            Self::Unknown => "FIELD_MIGRATION_UNKNOWN",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +257,7 @@ struct LegacySemanticUpgradeSource {
     source_formula_digest: Digest,
     source_state_digest: Digest,
     source_graph_digest: Digest,
+    prior_chain_digest: Digest,
 }
 
 type SemanticSnapshot = (
@@ -183,10 +268,12 @@ type SemanticSnapshot = (
 
 struct CommittedSemanticDecisionInput<'a> {
     semantic_scope: &'a Digest,
+    semantic_storage_scope: &'a ScopeRef,
     formula_digest: &'a Digest,
     legacy_formula_digest: &'a Digest,
     baseline_field: &'a NeuralField,
     baseline_graph: &'a SparseGraph,
+    initial_snapshot_digest: Digest,
     manifest_digest: &'a Digest,
     development_seed_digest: &'a Digest,
     event_digest: &'a Digest,
@@ -697,6 +784,7 @@ impl AstrRuntime {
                         source_formula_digest: receipt.formula_digest,
                         source_state_digest: snapshot.state_digest,
                         source_graph_digest: receipt.graph_after,
+                        prior_chain_digest: row.chain_digest,
                     }),
                 )
             } else {
@@ -1228,7 +1316,7 @@ impl AstrRuntime {
         };
 
         match self.store.commit_continuity_bundle(&bundle) {
-            Ok((revision, _row)) => {
+            Ok(ContinuityCommitOutcomeV1::Inserted { revision, .. }) => {
                 if let Some(hot) = self.hot.as_mut() {
                     if hot.persona_scope == continuity_scope {
                         hot.revision = revision;
@@ -1242,11 +1330,7 @@ impl AstrRuntime {
                     deduplicated: false,
                 })
             }
-            Err(StoreError::DuplicateEvent(revision)) => {
-                let row = self
-                    .store
-                    .lookup_event(&continuity_scope, &event_digest)?
-                    .ok_or(RuntimeError::RetryWait)?;
+            Ok(ContinuityCommitOutcomeV1::ExistingIdentical { revision, row }) => {
                 let receipt = row
                     .decode_receipt()
                     .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
@@ -1358,13 +1442,23 @@ impl AstrRuntime {
         {
             return Err(RuntimeError::LegacyUnattested);
         }
-        let rows = self.store.read_journal(input.semantic_scope)?;
+        let mut rows = self.store.read_journal(input.semantic_scope)?;
+        // A deduplicated request can arrive after the migration's own r+1
+        // commit (or after later Phase-0 history).  Only the immutable AESEM2
+        // source prefix r=1..source_revision is replayed here; the caller
+        // separately closes the replayed r+1 receipt below.
+        rows.retain(|row| row.revision <= input.semantic_revision);
         if u64::try_from(rows.len()).ok() != Some(input.semantic_revision) {
             return Err(RuntimeError::LegacyUnattested);
         }
         let mut replay_field = input.baseline_field.clone();
         let replay_graph = input.baseline_graph.clone();
         let mut chain_seed = input.initial_snapshot_digest;
+        let relation_scope_token = input
+            .semantic_storage_scope
+            .relation_token
+            .ok_or(RuntimeError::LegacyUnattested)?;
+        let mut replay_context_state: Option<Vec<u8>> = None;
         for (index, row) in rows.iter().enumerate() {
             let revision = u64::try_from(index)
                 .ok()
@@ -1424,6 +1518,45 @@ impl AstrRuntime {
                 &receipt.graph_after,
                 &receipt,
             )?;
+            let graph_commit = self
+                .store
+                .read_graph_commit_at_revision_v1(input.semantic_scope, revision)?
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            if graph_commit.base_graph_digest != graph_digest(&replay_graph)
+                || graph_commit.graph_digest != graph_digest(&snapshot_graph)
+                || graph_commit.formula_digest != *input.legacy_formula_digest
+                || !graph_commit.delta_bytes.is_empty()
+                || graph_commit.replay_state_bytes != snapshot_graph.canonical_bytes()
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let context = self
+                .store
+                .read_context_commit_at_revision_v1(
+                    input.semantic_scope,
+                    &relation_scope_token,
+                    revision,
+                )?
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            let expected_context_receipt = Self::committed_context_receipt(
+                &CanonicalEvent::UserStimulus(stimulus.clone()),
+                relation_scope_token,
+                revision,
+            )?;
+            let expected_context = project_committed_receipt(
+                replay_context_state.as_deref(),
+                &expected_context_receipt,
+            )?;
+            let expected_context_bytes = expected_context.canonical_state_bytes();
+            if context.relation_scope_token != relation_scope_token
+                || context.source_continuum_revision != revision
+                || context.relation_hmac != expected_context.relation_hmac()
+                || context.canonical_state_bytes != expected_context_bytes
+                || context.context_digest
+                    != ae_store::continuity_context_digest(&expected_context_bytes)
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
             let replay = semantic::replay_legacy_aesem2_transition_v1(
                 &replay_field,
                 input.baseline_field,
@@ -1458,17 +1591,14 @@ impl AstrRuntime {
             }
             replay_field = replay.next_field;
             chain_seed = row.chain_digest;
+            replay_context_state = Some(expected_context_bytes);
         }
         if state_digest(&replay_field, input.legacy_formula_digest)
             != state_digest(input.field, input.legacy_formula_digest)
             || graph_digest(&replay_graph) != graph_digest(input.graph)
             || state_digest(input.field, input.legacy_formula_digest) != source.source_state_digest
             || graph_digest(input.graph) != source.source_graph_digest
-            || chain_seed
-                != self
-                    .store
-                    .last_chain_digest(input.semantic_scope)?
-                    .ok_or(RuntimeError::LegacyUnattested)?
+            || chain_seed != source.prior_chain_digest
         {
             return Err(RuntimeError::LegacyUnattested);
         }
@@ -1519,10 +1649,12 @@ impl AstrRuntime {
     ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
         let CommittedSemanticDecisionInput {
             semantic_scope,
+            semantic_storage_scope,
             formula_digest,
             legacy_formula_digest,
             baseline_field,
             baseline_graph,
+            initial_snapshot_digest,
             manifest_digest,
             development_seed_digest,
             event_digest,
@@ -1562,6 +1694,7 @@ impl AstrRuntime {
                 deduplicated,
                 availability: SemanticClosureAvailabilityV1::UnavailableLegacy,
                 field_migration: None,
+                migration_subcode: None,
             });
         }
         if receipt.event_digest != *event_digest
@@ -1583,7 +1716,7 @@ impl AstrRuntime {
         let (before_for_phase0, field_migration) =
             match semantic::normalize_legacy_aesem2_field_domain_v1(&before)? {
                 None => (before.clone(), None),
-                Some((normalized, normalization)) => {
+                Some((_normalized, normalization)) => {
                     let upgrade = self
                         .store
                         .read_legacy_semantic_formula_upgrade_v1(
@@ -1602,6 +1735,32 @@ impl AstrRuntime {
                         || upgrade.field_domain
                             != Some(Self::legacy_field_domain_metadata(normalization))
                     {
+                        return Err(RuntimeError::LegacyUnattested);
+                    }
+                    // Deduplication is not permission to trust a former
+                    // migration receipt. Re-run the entire immutable AESEM2
+                    // history attestation, then recompute the exact field
+                    // transform from the historic preimage.
+                    let (normalized, reattested) = self.normalize_attested_legacy_aesem2_field(
+                        LegacyAesem2FieldMigrationInput {
+                            semantic_scope,
+                            semantic_storage_scope,
+                            legacy_formula_digest,
+                            baseline_field,
+                            baseline_graph,
+                            initial_snapshot_digest,
+                            semantic_revision: receipt.base_revision,
+                            source: Some(LegacySemanticUpgradeSource {
+                                source_formula_digest: upgrade.from_formula_digest,
+                                source_state_digest: upgrade.source_state_digest,
+                                source_graph_digest: upgrade.source_graph_digest,
+                                prior_chain_digest: upgrade.prior_chain_digest,
+                            }),
+                            field: &before,
+                            graph: &before_graph,
+                        },
+                    )?;
+                    if reattested != upgrade.field_domain {
                         return Err(RuntimeError::LegacyUnattested);
                     }
                     (normalized, Some(SemanticFieldMigrationOutcomeV1::Replayed))
@@ -1679,6 +1838,14 @@ impl AstrRuntime {
             expression_projection,
             availability: SemanticClosureAvailabilityV1::Available,
             field_migration,
+            migration_subcode: field_migration.map(|outcome| match outcome {
+                SemanticFieldMigrationOutcomeV1::Applied => {
+                    SemanticFieldMigrationSubcodeV1::Applied
+                }
+                SemanticFieldMigrationOutcomeV1::Replayed => {
+                    SemanticFieldMigrationSubcodeV1::Replayed
+                }
+            }),
         })
     }
 
@@ -1761,10 +1928,12 @@ impl AstrRuntime {
         {
             return self.committed_semantic_decision(CommittedSemanticDecisionInput {
                 semantic_scope: &semantic_scope,
+                semantic_storage_scope: &semantic_storage_scope,
                 formula_digest: &formula_digest,
                 legacy_formula_digest: &genesis_formula_digest,
                 baseline_field: &baseline_field,
                 baseline_graph: &baseline_graph,
+                initial_snapshot_digest,
                 manifest_digest: &manifest_digest,
                 development_seed_digest: &development_seed_digest,
                 event_digest: &event_digest,
@@ -1973,7 +2142,9 @@ impl AstrRuntime {
         };
 
         match self.store.commit_continuity_bundle(&bundle) {
-            Ok((revision, _)) if revision == next_revision => {
+            Ok(ContinuityCommitOutcomeV1::Inserted { revision, .. })
+                if revision == next_revision =>
+            {
                 let expression_projection =
                     semantic::expression_projection_from_field_v1(&prepared.next_field, revision)?;
                 if let Some(hot) = self.hot.as_mut() {
@@ -1995,16 +2166,20 @@ impl AstrRuntime {
                     availability: SemanticClosureAvailabilityV1::Available,
                     field_migration: field_domain_upgrade
                         .map(|_| SemanticFieldMigrationOutcomeV1::Applied),
+                    migration_subcode: field_domain_upgrade
+                        .map(|_| SemanticFieldMigrationSubcodeV1::Applied),
                 })
             }
-            Ok((_revision, _)) => {
+            Ok(ContinuityCommitOutcomeV1::ExistingIdentical { .. }) => {
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
                 self.committed_semantic_decision(CommittedSemanticDecisionInput {
                     semantic_scope: &semantic_scope,
+                    semantic_storage_scope: &semantic_storage_scope,
                     formula_digest: &formula_digest,
                     legacy_formula_digest: &genesis_formula_digest,
                     baseline_field: &baseline_field,
                     baseline_graph: &baseline_graph,
+                    initial_snapshot_digest,
                     manifest_digest: &manifest_digest,
                     development_seed_digest: &development_seed_digest,
                     event_digest: &event_digest,
@@ -2013,27 +2188,16 @@ impl AstrRuntime {
                     deduplicated: true,
                 })
             }
-            Err(stale @ StoreError::StaleRevision { .. }) => {
-                if self
-                    .store
-                    .lookup_event(&semantic_scope, &event_digest)?
-                    .is_none()
-                {
-                    return Err(RuntimeError::Store(stale));
-                }
-                self.bind_hot(scope.bot_token, scope.persona_token)?;
-                self.committed_semantic_decision(CommittedSemanticDecisionInput {
-                    semantic_scope: &semantic_scope,
-                    formula_digest: &formula_digest,
-                    legacy_formula_digest: &genesis_formula_digest,
-                    baseline_field: &baseline_field,
-                    baseline_graph: &baseline_graph,
-                    manifest_digest: &manifest_digest,
-                    development_seed_digest: &development_seed_digest,
-                    event_digest: &event_digest,
-                    source_digest: estimator_digest,
-                    proposal,
-                    deduplicated: true,
+            Ok(ContinuityCommitOutcomeV1::Inserted { revision, .. }) => {
+                Err(RuntimeError::StaleCausalBase {
+                    expected: next_revision,
+                    actual: revision,
+                })
+            }
+            Err(StoreError::StaleRevision { expected, actual }) => {
+                Err(RuntimeError::StaleCausalBase {
+                    expected: actual,
+                    actual: expected,
                 })
             }
             Err(error) => Err(RuntimeError::Store(error)),
@@ -2423,12 +2587,16 @@ mod tests {
                     canonical_state_bytes: canonical_context_state,
                 },
             };
-            let (committed_revision, row) = runtime
+            let committed = runtime
                 .store
                 .commit_continuity_bundle(&bundle)
                 .expect("frozen AESEM2 authority commits");
-            assert_eq!(committed_revision, next_revision);
-            latest_chain_digest = row.chain_digest;
+            assert!(matches!(
+                committed,
+                ContinuityCommitOutcomeV1::Inserted { .. }
+            ));
+            assert_eq!(committed.revision(), next_revision);
+            latest_chain_digest = committed.row().chain_digest;
             latest_state_digest = state_after;
             latest_graph_digest = graph_after;
             field = next_field;
@@ -2579,6 +2747,47 @@ mod tests {
                 canonical_state_bytes: canonical_context_state,
             },
         }
+    }
+
+    #[test]
+    fn store_refuses_caller_supplied_field_migration_metadata_without_overflow() {
+        let dir = temp_dir("field-domain-store-red");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(76);
+        let scope = request.source.scope_persona_scope();
+        runtime.ensure_genesis(&request).unwrap();
+        let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, false);
+        let proposal = semantic_proposal(&scope, 79, 2);
+        let mut bundle = legacy_upgrade_bundle_for_test(
+            &mut runtime,
+            &history,
+            &scope,
+            &proposal,
+            history.legacy_formula_digest,
+        );
+        let forged =
+            LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                &bundle.envelope.receipt,
+                history.latest_state_digest,
+                history.latest_graph_digest,
+                history.legacy_formula_digest,
+                history.latest_chain_digest,
+                LegacySemanticFieldDomainUpgradeV1 {
+                    algorithm: JOINT_MAX_LINEAR_FXP6_V1,
+                    fxp6_scale: LEGACY_FIELD_FXP6_SCALE,
+                    source_common_max: 1_000_001,
+                    out_of_range_count: 1,
+                    potential_out_of_range_count: 1,
+                    excitation_out_of_range_count: 0,
+                    signal_mass_before: 1,
+                    signal_mass_after: 1,
+                },
+            );
+        let forged_bytes = forged.canonical_bytes();
+        bundle.envelope.delta_bytes = forged_bytes.clone();
+        bundle.graph.delta_bytes = forged_bytes;
+
+        assert!(runtime.store.commit_continuity_bundle(&bundle).is_err());
     }
 
     #[test]
@@ -3181,6 +3390,10 @@ mod tests {
             Some(SemanticFieldMigrationOutcomeV1::Applied)
         );
         assert_eq!(
+            migrated.migration_subcode,
+            Some(SemanticFieldMigrationSubcodeV1::Applied)
+        );
+        assert_eq!(
             migrated.receipt.formula_digest,
             history.phase0_formula_digest
         );
@@ -3222,6 +3435,10 @@ mod tests {
         assert_eq!(
             deduplicated.field_migration,
             Some(SemanticFieldMigrationOutcomeV1::Replayed)
+        );
+        assert_eq!(
+            deduplicated.migration_subcode,
+            Some(SemanticFieldMigrationSubcodeV1::Replayed)
         );
         assert_eq!(
             wire::receipt_digest(&deduplicated.receipt),

@@ -130,7 +130,8 @@ fn seed_first_commit(name: &str) -> (PathBuf, Store, FirstCommit) {
     let first = bundle(1, [0; 32], [0; 32], [0x66; 32]);
     let state_digest = first.snapshot.state_digest;
     let graph_digest = first.graph.graph_digest;
-    let (_, row) = store.commit_continuity_bundle(&first).unwrap();
+    let committed = store.commit_continuity_bundle(&first).unwrap();
+    let row = committed.row().clone();
     assert_eq!(revision_counts(&path, 1), [1, 1, 1, 1, 1]);
     (
         path,
@@ -215,9 +216,9 @@ fn atomic_bundle_commits_journal_snapshot_graph_context_and_receipt_together() {
     assert_eq!(context.canonical_state_bytes, vec![0xC0, 1, 0x01]);
 
     let second = next_bundle(&first);
-    let (revision, row) = store.commit_continuity_bundle(&second).unwrap();
-    assert_eq!(revision, 2);
-    assert_eq!(row.revision, 2);
+    let committed = store.commit_continuity_bundle(&second).unwrap();
+    assert_eq!(committed.revision(), 2);
+    assert_eq!(committed.row().revision, 2);
     assert_eq!(revision_counts(&path, 2), [1, 1, 1, 1, 1]);
 
     drop(store);
@@ -247,9 +248,13 @@ fn duplicate_bundle_returns_the_original_receipt_without_a_second_write() {
     let (path, mut store, first) = seed_first_commit("dedup");
     let replay = bundle(1, [0; 32], [0; 32], [0x66; 32]);
 
-    let (revision, replayed) = store.commit_continuity_bundle(&replay).unwrap();
-    assert_eq!(revision, 1);
-    assert_eq!(replayed, first.row);
+    let replayed = store.commit_continuity_bundle(&replay).unwrap();
+    assert!(matches!(
+        replayed,
+        ae_store::ContinuityCommitOutcomeV1::ExistingIdentical { .. }
+    ));
+    assert_eq!(replayed.revision(), 1);
+    assert_eq!(replayed.row(), &first.row);
     assert_eq!(revision_counts(&path, 1), [1, 1, 1, 1, 1]);
 }
 
@@ -366,10 +371,14 @@ fn unknown_commit_result_is_resolved_by_reopen_and_idempotent_replay() {
     drop(store);
 
     let mut reopened = Store::open(&path).unwrap();
-    let (revision, replayed) = reopened.commit_continuity_bundle(&candidate).unwrap();
-    assert_eq!(revision, 2);
+    let replayed = reopened.commit_continuity_bundle(&candidate).unwrap();
+    assert!(matches!(
+        replayed,
+        ae_store::ContinuityCommitOutcomeV1::ExistingIdentical { .. }
+    ));
+    assert_eq!(replayed.revision(), 2);
     assert_eq!(
-        replayed.decode_receipt().unwrap(),
+        replayed.row().decode_receipt().unwrap(),
         candidate.envelope.receipt
     );
     assert_eq!(revision_counts(&path, 2), [1, 1, 1, 1, 1]);

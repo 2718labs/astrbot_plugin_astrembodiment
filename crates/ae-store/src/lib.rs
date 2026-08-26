@@ -28,14 +28,24 @@ pub use legacy_discovery::{
     discover_legacy, validate_legacy_candidate, verify_candidate, CandidateFences, Discovery,
     DiscoveryRejectCode, DiscoverySources, LegacyCandidate,
 };
+mod semantic_field_attestation;
 
+use ae_authority::authority_projection_digest;
+use ae_context_projector::ContextProjectionStateV1;
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
     phase0_canonical_formula_digest_v1, wire, CanonicalEvent, CommitStatus, Digest,
-    GenesisManifest, GenesisReceipt, GenesisStatus, PersonaSourceRef, ScopeRef, TransitionReceipt,
+    GenesisManifest, GenesisReceipt, GenesisStatus, PerceptionProposalV1, PersonaSourceRef,
+    ScopeRef, TransitionReceipt,
+};
+use ae_neurofield::{
+    graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use std::path::Path;
+use sha2::{Digest as Sha2Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -305,6 +315,29 @@ pub struct ContinuityCommitBundleV1 {
     pub context: ContextCommitV1,
 }
 
+/// The Store is the cross-process authority, so an identical applied event is
+/// materially different from a newly inserted transition even though both
+/// return the same sealed journal row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContinuityCommitOutcomeV1 {
+    Inserted { revision: u64, row: JournalRow },
+    ExistingIdentical { revision: u64, row: JournalRow },
+}
+
+impl ContinuityCommitOutcomeV1 {
+    pub fn revision(&self) -> u64 {
+        match self {
+            Self::Inserted { revision, .. } | Self::ExistingIdentical { revision, .. } => *revision,
+        }
+    }
+
+    pub fn row(&self) -> &JournalRow {
+        match self {
+            Self::Inserted { row, .. } | Self::ExistingIdentical { row, .. } => row,
+        }
+    }
+}
+
 /// Canonical graph delta for the only allowed Genesis-to-Phase-0 formula
 /// change.  The receipt digest makes the delta explicitly bind to the receipt
 /// that is appended to the Continuum chain; the remaining fields bind it to
@@ -373,6 +406,7 @@ pub struct LegacySemanticFieldDomainUpgradeV1 {
 }
 
 struct LegacySemanticFormulaUpgradeInput<'a> {
+    bundle: &'a ContinuityCommitBundleV1,
     delta_bytes: &'a [u8],
     event: &'a CanonicalEvent,
     event_scope: &'a ScopeRef,
@@ -388,7 +422,41 @@ struct LegacySemanticFormulaUpgradeInput<'a> {
 
 enum FormulaTransitionAdmission {
     Phase0,
-    LegacySemantic(Box<LegacySemanticFormulaUpgradeReceiptV1>),
+    LegacySemantic(Box<LegacySemanticAdmissionV1>),
+}
+
+#[derive(Clone)]
+struct ActiveSemanticIdentityV1 {
+    incarnation_id: Digest,
+    manifest_digest: Digest,
+    formula_digest: Digest,
+    initial_snapshot_digest: Digest,
+    baseline_field: NeuralField,
+    baseline_graph: SparseGraph,
+}
+
+struct AttestedFieldDomainUpgradeV1 {
+    upgrade: LegacySemanticFormulaUpgradeReceiptV1,
+    identity: ActiveSemanticIdentityV1,
+}
+
+enum LegacySemanticAdmissionV1 {
+    FormulaOnly(Box<LegacySemanticFormulaUpgradeReceiptV1>),
+    FieldDomain(Box<AttestedFieldDomainUpgradeV1>),
+}
+
+#[derive(Clone)]
+struct FieldMigrationPreimageBackupV1 {
+    migration_id: Digest,
+    scope_digest: Digest,
+    source_revision: u64,
+    source_state_digest: Digest,
+    source_formula_digest: Digest,
+    source_graph_digest: Digest,
+    incarnation_id: Digest,
+    manifest_digest: Digest,
+    byte_len: u64,
+    sha256: Digest,
 }
 
 impl Phase0FormulaTransitionV1 {
@@ -802,9 +870,31 @@ type StoredJournalListColumns = (i64, i64, String, Vec<u8>, Vec<u8>, Vec<u8>, Ve
 type StoredGraphColumns = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 type StoredContextColumns = (Vec<u8>, Vec<u8>, i64, Vec<u8>, Vec<u8>);
 type StoredContextDuplicateColumns = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+type StoredActiveSemanticIdentityColumns = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+);
+type StoredFieldMigrationBackupColumns = (
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+);
 
 pub struct Store {
     conn: Option<Connection>,
+    database_path: Option<PathBuf>,
 }
 
 fn blob<const N: usize>(value: [u8; N]) -> Vec<u8> {
@@ -877,14 +967,20 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::migrate(&mut conn)?;
-        Ok(Self { conn: Some(conn) })
+        Ok(Self {
+            conn: Some(conn),
+            database_path: Some(path.to_path_buf()),
+        })
     }
 
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let mut conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Self::migrate(&mut conn)?;
-        Ok(Self { conn: Some(conn) })
+        Ok(Self {
+            conn: Some(conn),
+            database_path: None,
+        })
     }
 
     fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
@@ -1002,6 +1098,19 @@ impl Store {
                 PRIMARY KEY (scope_digest, from_formula_digest, to_formula_digest),
                 UNIQUE (scope_digest, next_revision),
                 UNIQUE (migration_id)
+            );
+            CREATE TABLE IF NOT EXISTS field_migration_preimage_backups (
+                migration_id BLOB PRIMARY KEY CHECK (length(migration_id) = 32),
+                scope_digest BLOB NOT NULL CHECK (length(scope_digest) = 32),
+                source_revision INTEGER NOT NULL,
+                source_state_digest BLOB NOT NULL CHECK (length(source_state_digest) = 32),
+                source_formula_digest BLOB NOT NULL CHECK (length(source_formula_digest) = 32),
+                source_graph_digest BLOB NOT NULL CHECK (length(source_graph_digest) = 32),
+                incarnation_id BLOB NOT NULL CHECK (length(incarnation_id) = 32),
+                manifest_digest BLOB NOT NULL CHECK (length(manifest_digest) = 32),
+                byte_len INTEGER NOT NULL,
+                sha256 BLOB NOT NULL CHECK (length(sha256) = 32),
+                manifest_bytes BLOB NOT NULL
             );
             "#,
         )?;
@@ -2052,6 +2161,698 @@ impl Store {
         )
     }
 
+    fn active_semantic_identity_tx(
+        tx: &Transaction<'_>,
+        event_scope: &ScopeRef,
+    ) -> Result<Option<ActiveSemanticIdentityV1>, StoreError> {
+        let stored: Option<StoredActiveSemanticIdentityColumns> = tx
+            .query_row(
+                "SELECT i.incarnation_id, i.formula_digest, i.initial_snapshot_digest, i.graph_digest, i.development_seed_digest, i.manifest_digest, m.canonical_bytes FROM active_bindings AS b JOIN incarnations AS i ON i.incarnation_id = b.incarnation_id JOIN genesis_manifests AS m ON m.manifest_digest = i.manifest_digest WHERE b.bot_token = ?1 AND b.persona_token = ?2",
+                params![blob(event_scope.bot_token), blob(event_scope.persona_token)],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            incarnation_id,
+            formula_digest,
+            initial_snapshot_digest,
+            graph_digest_value,
+            development_seed_digest,
+            manifest_digest,
+            manifest_bytes,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        let incarnation_id = digest_from_blob(&incarnation_id, "semantic_incarnation")?;
+        let formula_digest = digest_from_blob(&formula_digest, "semantic_formula")?;
+        let initial_snapshot_digest =
+            digest_from_blob(&initial_snapshot_digest, "semantic_initial_snapshot")?;
+        let graph_digest_value = digest_from_blob(&graph_digest_value, "semantic_initial_graph")?;
+        let development_seed_digest =
+            digest_from_blob(&development_seed_digest, "semantic_development_seed")?;
+        let manifest_digest = digest_from_blob(&manifest_digest, "semantic_manifest")?;
+        let manifest = wire::decode_manifest_body(&manifest_bytes)
+            .map_err(|_| StoreError::ContinuityFence("semantic_manifest_wire"))?;
+        if wire::encode_manifest_body(&manifest) != manifest_bytes
+            || wire::manifest_body_digest(&manifest) != manifest_digest
+        {
+            return Err(StoreError::ContinuityFence("semantic_manifest_closure"));
+        }
+        let (baseline_field, baseline_graph) =
+            initial_state_from_manifest(&manifest, &formula_digest, &development_seed_digest);
+        if !baseline_field.validate()
+            || !baseline_graph.validate()
+            || state_digest(&baseline_field, &formula_digest) != initial_snapshot_digest
+            || graph_digest(&baseline_graph) != graph_digest_value
+        {
+            return Err(StoreError::ContinuityFence("semantic_genesis_closure"));
+        }
+        Ok(Some(ActiveSemanticIdentityV1 {
+            incarnation_id,
+            manifest_digest,
+            formula_digest,
+            initial_snapshot_digest,
+            baseline_field,
+            baseline_graph,
+        }))
+    }
+
+    fn snapshot_at_tx(
+        tx: &Transaction<'_>,
+        scope_digest: &Digest,
+        revision: u64,
+    ) -> Result<Option<(Digest, Vec<u8>)>, StoreError> {
+        let revision_sql = revision_to_sqlite(revision)?;
+        let stored: Option<(Vec<u8>, Vec<u8>)> = tx
+            .query_row(
+                "SELECT state_digest, state_bytes FROM snapshots WHERE scope_digest = ?1 AND revision = ?2",
+                params![blob(*scope_digest), revision_sql],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        stored
+            .map(|(digest, bytes)| {
+                Ok((
+                    digest_from_blob(&digest, "semantic_snapshot_digest")?,
+                    bytes,
+                ))
+            })
+            .transpose()
+    }
+
+    fn graph_at_tx(
+        tx: &Transaction<'_>,
+        scope_digest: &Digest,
+        revision: u64,
+    ) -> Result<Option<GraphCommitV1>, StoreError> {
+        let revision_sql = revision_to_sqlite(revision)?;
+        let stored: Option<StoredGraphColumns> = tx
+            .query_row(
+                "SELECT base_graph_digest, graph_digest, formula_digest, delta_bytes, replay_state_bytes FROM graph_commits WHERE scope_digest = ?1 AND revision = ?2",
+                params![blob(*scope_digest), revision_sql],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        stored
+            .map(
+                |(
+                    base_graph_digest,
+                    graph_digest_value,
+                    formula_digest,
+                    delta_bytes,
+                    replay_state_bytes,
+                )| {
+                    Ok(GraphCommitV1 {
+                        base_graph_digest: digest_from_blob(
+                            &base_graph_digest,
+                            "semantic_graph_base_digest",
+                        )?,
+                        graph_digest: digest_from_blob(
+                            &graph_digest_value,
+                            "semantic_graph_digest",
+                        )?,
+                        formula_digest: digest_from_blob(
+                            &formula_digest,
+                            "semantic_graph_formula",
+                        )?,
+                        delta_bytes,
+                        replay_state_bytes,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    fn context_at_tx(
+        tx: &Transaction<'_>,
+        scope_digest: &Digest,
+        relation_scope_token: &[u8; 16],
+        revision: u64,
+    ) -> Result<Option<ContextCommitV1>, StoreError> {
+        let revision_sql = revision_to_sqlite(revision)?;
+        let stored: Option<StoredContextDuplicateColumns> = tx
+            .query_row(
+                "SELECT relation_hmac, context_digest, canonical_state_bytes, relation_scope_token FROM context_commits WHERE scope_digest = ?1 AND relation_scope_token = ?2 AND revision = ?3",
+                params![blob(*scope_digest), blob(*relation_scope_token), revision_sql],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        stored
+            .map(
+                |(relation_hmac, context_digest, canonical_state_bytes, stored_relation_token)| {
+                    Ok(ContextCommitV1 {
+                        relation_scope_token: token_from_blob(
+                            &stored_relation_token,
+                            "semantic_context_relation",
+                        )?,
+                        relation_hmac: digest_from_blob(&relation_hmac, "semantic_context_hmac")?,
+                        source_continuum_revision: revision,
+                        context_digest: digest_from_blob(
+                            &context_digest,
+                            "semantic_context_digest",
+                        )?,
+                        canonical_state_bytes,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    fn context_closes(context: &ContextCommitV1) -> Result<(), StoreError> {
+        if continuity_context_digest(&context.canonical_state_bytes) != context.context_digest {
+            return Err(StoreError::ContinuityFence("semantic_context_digest"));
+        }
+        let decoded = ContextProjectionStateV1::try_from_canonical_state_bytes(
+            &context.canonical_state_bytes,
+        )
+        .map_err(|_| StoreError::ContinuityFence("semantic_context_wire"))?;
+        if decoded.canonical_state_bytes() != context.canonical_state_bytes
+            || decoded.relation_hmac() != context.relation_hmac
+        {
+            return Err(StoreError::ContinuityFence("semantic_context_canonical"));
+        }
+        Ok(())
+    }
+
+    fn attest_field_domain_upgrade_tx(
+        tx: &Transaction<'_>,
+        input: &LegacySemanticFormulaUpgradeInput<'_>,
+        upgrade: LegacySemanticFormulaUpgradeReceiptV1,
+    ) -> Result<AttestedFieldDomainUpgradeV1, StoreError> {
+        let Some(field_domain) = upgrade.field_domain else {
+            return Err(StoreError::ContinuityFence("field_upgrade_metadata"));
+        };
+        let identity = Self::active_semantic_identity_tx(tx, input.event_scope)?
+            .ok_or(StoreError::ContinuityFence("semantic_identity"))?;
+        if identity.formula_digest != input.current_formula_digest
+            || !Self::active_semantic_storage_scope_matches_tx(
+                tx,
+                input.event_scope,
+                identity.formula_digest,
+            )?
+        {
+            return Err(StoreError::ContinuityFence("semantic_identity"));
+        }
+        let relation_scope_token = input
+            .event_scope
+            .relation_token
+            .ok_or(StoreError::ContinuityFence("semantic_relation"))?;
+        let mut replay_field = identity.baseline_field.clone();
+        let replay_graph = identity.baseline_graph.clone();
+        let mut chain_seed = identity.initial_snapshot_digest;
+        let mut latest_snapshot: Option<semantic_field_attestation::DecodedSemanticSnapshotV2> =
+            None;
+        for revision in 1..=input.current_revision {
+            let row = Self::read_journal_row_tx(tx, &input.receipt.scope_digest, revision)?
+                .ok_or(StoreError::ContinuityFence("semantic_history_journal"))?;
+            if row.revision != revision
+                || row.base_revision.checked_add(1) != Some(revision)
+                || row.base_revision != revision - 1
+            {
+                return Err(StoreError::ContinuityFence("semantic_history_revision"));
+            }
+            let event = wire::decode_event(&row.event_bytes)
+                .map_err(|_| StoreError::ContinuityFence("semantic_history_event"))?;
+            if wire::encode_event(&event) != row.event_bytes
+                || wire::event_digest(&event) != row.event_digest
+                || row.event_kind != wire::event_kind_name(&event)
+            {
+                return Err(StoreError::ContinuityFence("semantic_history_event"));
+            }
+            let ae_contracts::CanonicalEvent::UserStimulus(stimulus) = event else {
+                return Err(StoreError::ContinuityFence("semantic_history_event"));
+            };
+            if stimulus.scope != *input.event_scope
+                || stimulus.causal.base_revision != row.base_revision
+                || stimulus.evidence.schema_version != PerceptionProposalV1::SCHEMA_VERSION
+            {
+                return Err(StoreError::ContinuityFence("semantic_history_event"));
+            }
+            let source_receipt = wire::decode_transition_receipt(&row.receipt_bytes)
+                .map_err(|_| StoreError::ContinuityFence("semantic_history_receipt"))?;
+            if wire::encode_transition_receipt(&source_receipt) != row.receipt_bytes
+                || source_receipt.schema_version != 1
+                || source_receipt.status != CommitStatus::Committed
+                || source_receipt.action_contract.is_some()
+                || source_receipt.scope_digest != input.receipt.scope_digest
+                || source_receipt.event_digest != row.event_digest
+                || source_receipt.formula_digest != identity.formula_digest
+                || source_receipt.base_revision != row.base_revision
+                || source_receipt.next_revision != revision
+                || source_receipt.authority_digest
+                    != authority_projection_digest(&ae_contracts::CanonicalEvent::UserStimulus(
+                        stimulus.clone(),
+                    ))
+                || row.chain_digest
+                    != ae_continuum::chain_link(&chain_seed, &row.event_bytes, &row.receipt_bytes)
+            {
+                return Err(StoreError::ContinuityFence("semantic_history_receipt"));
+            }
+            let (snapshot_digest, snapshot_bytes) =
+                Self::snapshot_at_tx(tx, &input.receipt.scope_digest, revision)?
+                    .ok_or(StoreError::ContinuityFence("semantic_history_snapshot"))?;
+            let snapshot = semantic_field_attestation::decode_semantic_snapshot_v2(
+                &snapshot_bytes,
+                &identity.formula_digest,
+                &snapshot_digest,
+                &source_receipt.graph_after,
+                &source_receipt,
+            )?;
+            if !semantic_field_attestation::p_and_e_within_legacy_revision_bound(
+                &snapshot.field,
+                revision,
+            ) {
+                return Err(StoreError::ContinuityFence("semantic_history_range"));
+            }
+            let graph = Self::graph_at_tx(tx, &input.receipt.scope_digest, revision)?
+                .ok_or(StoreError::ContinuityFence("semantic_history_graph"))?;
+            if graph.base_graph_digest != graph_digest(&replay_graph)
+                || graph.graph_digest != graph_digest(&snapshot.graph)
+                || graph.formula_digest != identity.formula_digest
+                || !graph.delta_bytes.is_empty()
+                || graph.replay_state_bytes != snapshot.graph.canonical_bytes()
+            {
+                return Err(StoreError::ContinuityFence("semantic_history_graph"));
+            }
+            let context = Self::context_at_tx(
+                tx,
+                &input.receipt.scope_digest,
+                &relation_scope_token,
+                revision,
+            )?
+            .ok_or(StoreError::ContinuityFence("semantic_history_context"))?;
+            if context.relation_scope_token != relation_scope_token
+                || context.source_continuum_revision != revision
+            {
+                return Err(StoreError::ContinuityFence("semantic_history_context"));
+            }
+            Self::context_closes(&context)?;
+            let replay = semantic_field_attestation::replay_legacy_aesem2_transition_v1(
+                &replay_field,
+                &identity.baseline_field,
+                &stimulus.evidence.dimensions,
+                stimulus.evidence.estimator_confidence,
+            )?;
+            if state_digest(&replay_field, &identity.formula_digest) != source_receipt.state_before
+                || state_digest(&replay.next_field, &identity.formula_digest)
+                    != source_receipt.state_after
+                || state_digest(&snapshot.field, &identity.formula_digest)
+                    != source_receipt.state_after
+                || graph_digest(&snapshot.graph) != graph_digest(&replay_graph)
+                || source_receipt.graph_after != graph_digest(&replay_graph)
+                || source_receipt.active_nodes != replay.active_nodes
+                || source_receipt.active_edges != 0
+                || source_receipt.residuals != ae_contracts::InvariantResiduals::default()
+            {
+                return Err(StoreError::ContinuityFence("semantic_history_replay"));
+            }
+            replay_field = replay.next_field;
+            chain_seed = row.chain_digest;
+            latest_snapshot = Some(snapshot);
+        }
+        let latest_snapshot =
+            latest_snapshot.ok_or(StoreError::ContinuityFence("semantic_history_snapshot"))?;
+        if state_digest(&replay_field, &identity.formula_digest) != input.current_state_digest
+            || state_digest(&latest_snapshot.field, &identity.formula_digest)
+                != input.current_state_digest
+            || graph_digest(&latest_snapshot.graph) != input.current_graph_digest
+            || graph_digest(&replay_graph) != input.current_graph_digest
+            || chain_seed != input.prior_chain_digest
+            || identity.formula_digest != input.current_formula_digest
+        {
+            return Err(StoreError::ContinuityFence("semantic_history_source"));
+        }
+        let Some((normalized, recomputed_field_domain)) =
+            semantic_field_attestation::normalize_legacy_aesem2_field_domain_v1(
+                &latest_snapshot.field,
+            )?
+        else {
+            return Err(StoreError::ContinuityFence("field_upgrade_not_needed"));
+        };
+        if recomputed_field_domain != field_domain
+            || state_digest(&normalized, &input.incoming_formula_digest)
+                != input.receipt.state_before
+        {
+            return Err(StoreError::ContinuityFence("field_upgrade_transform"));
+        }
+        let expected_upgrade =
+            LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                input.receipt,
+                input.current_state_digest,
+                input.current_graph_digest,
+                input.current_formula_digest,
+                input.prior_chain_digest,
+                recomputed_field_domain,
+            );
+        if upgrade != expected_upgrade
+            || input.incoming_formula_digest
+                != phase0_canonical_formula_digest_v1(&input.current_formula_digest)
+            || input.bundle.graph.replay_state_bytes.is_empty()
+        {
+            return Err(StoreError::ContinuityFence("field_upgrade_receipt"));
+        }
+        let incoming_graph = semantic_field_attestation::verify_semantic_snapshot_v3(
+            &input.bundle.snapshot.state_bytes,
+            &input.incoming_formula_digest,
+            &input.bundle.snapshot.state_digest,
+            &input.bundle.graph.graph_digest,
+            input.receipt,
+        )?;
+        if incoming_graph != input.bundle.graph.replay_state_bytes {
+            return Err(StoreError::ContinuityFence("field_upgrade_graph"));
+        }
+        if input.bundle.context.relation_scope_token != relation_scope_token
+            || input.bundle.context.source_continuum_revision != input.receipt.next_revision
+        {
+            return Err(StoreError::ContinuityFence("field_upgrade_context"));
+        }
+        Self::context_closes(&input.bundle.context)?;
+        Ok(AttestedFieldDomainUpgradeV1 { upgrade, identity })
+    }
+
+    fn field_migration_backup_manifest(backup: &FieldMigrationPreimageBackupV1) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + (32 * 8) + 17);
+        bytes.extend_from_slice(b"AE-FMP1\0");
+        bytes.extend_from_slice(&backup.migration_id);
+        bytes.extend_from_slice(&backup.scope_digest);
+        bytes.extend_from_slice(&backup.source_revision.to_le_bytes());
+        for digest in [
+            backup.source_state_digest,
+            backup.source_formula_digest,
+            backup.source_graph_digest,
+            backup.incarnation_id,
+            backup.manifest_digest,
+        ] {
+            bytes.extend_from_slice(&digest);
+        }
+        bytes.extend_from_slice(&backup.byte_len.to_le_bytes());
+        bytes.extend_from_slice(&backup.sha256);
+        bytes.push(1);
+        bytes
+    }
+
+    fn sha256_file(path: &Path) -> Result<(u64, Digest), StoreError> {
+        let mut file = File::open(path).map_err(|source| StoreError::Io {
+            context: "opening field migration backup",
+            source,
+        })?;
+        let mut hasher = Sha256::new();
+        let mut bytes = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|source| StoreError::Io {
+                context: "reading field migration backup",
+                source,
+            })?;
+            if read == 0 {
+                break;
+            }
+            bytes = bytes
+                .checked_add(
+                    u64::try_from(read)
+                        .map_err(|_| StoreError::ContinuityFence("field_backup_length"))?,
+                )
+                .ok_or(StoreError::ContinuityFence("field_backup_length"))?;
+            hasher.update(&buffer[..read]);
+        }
+        let mut digest = [0_u8; 32];
+        digest.copy_from_slice(&hasher.finalize());
+        Ok((bytes, digest))
+    }
+
+    fn field_migration_backup_paths(
+        database_path: &Path,
+        migration_id: &Digest,
+        source_revision: u64,
+    ) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), StoreError> {
+        let parent = database_path
+            .parent()
+            .ok_or(StoreError::ContinuityFence("field_backup_path"))?;
+        let root = parent.join(".astr-embodiment-field-migration-preimages");
+        fs::create_dir_all(&root).map_err(|source| StoreError::Io {
+            context: "creating field migration backup directory",
+            source,
+        })?;
+        let stem = format!(
+            "migration-{}-r{}",
+            ae_contracts::hex::encode32(migration_id),
+            source_revision
+        );
+        let database = root.join(format!("{stem}.authority.sqlite"));
+        let manifest = root.join(format!("{stem}.manifest"));
+        let database_partial = root.join(format!("{stem}.authority.sqlite.partial"));
+        let manifest_partial = root.join(format!("{stem}.manifest.partial"));
+        Ok((database, manifest, database_partial, manifest_partial))
+    }
+
+    fn validate_preimage_backup_files(
+        database_path: &Path,
+        backup: &FieldMigrationPreimageBackupV1,
+    ) -> Result<(), StoreError> {
+        let (database, manifest, _, _) = Self::field_migration_backup_paths(
+            database_path,
+            &backup.migration_id,
+            backup.source_revision,
+        )?;
+        if !database.is_file() || !manifest.is_file() {
+            return Err(StoreError::ContinuityFence("field_backup_missing"));
+        }
+        let (byte_len, sha256) = Self::sha256_file(&database)?;
+        if byte_len != backup.byte_len || sha256 != backup.sha256 {
+            return Err(StoreError::ContinuityFence("field_backup_hash"));
+        }
+        let manifest_bytes = fs::read(&manifest).map_err(|source| StoreError::Io {
+            context: "reading field migration backup manifest",
+            source,
+        })?;
+        if manifest_bytes != Self::field_migration_backup_manifest(backup) {
+            return Err(StoreError::ContinuityFence("field_backup_manifest"));
+        }
+        Ok(())
+    }
+
+    fn field_migration_backup_from_row_tx(
+        tx: &Transaction<'_>,
+        expected: &FieldMigrationPreimageBackupV1,
+    ) -> Result<Option<FieldMigrationPreimageBackupV1>, StoreError> {
+        let stored: Option<StoredFieldMigrationBackupColumns> = tx
+            .query_row(
+                "SELECT scope_digest, source_revision, source_state_digest, source_formula_digest, source_graph_digest, incarnation_id, manifest_digest, byte_len, sha256, manifest_bytes FROM field_migration_preimage_backups WHERE migration_id = ?1",
+                params![blob(expected.migration_id)],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            scope_digest,
+            source_revision,
+            source_state_digest,
+            source_formula_digest,
+            source_graph_digest,
+            incarnation_id,
+            manifest_digest,
+            byte_len,
+            sha256,
+            manifest_bytes,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        let backup = FieldMigrationPreimageBackupV1 {
+            migration_id: expected.migration_id,
+            scope_digest: digest_from_blob(&scope_digest, "field_backup_scope")?,
+            source_revision: revision_from_sqlite(source_revision)?,
+            source_state_digest: digest_from_blob(&source_state_digest, "field_backup_state")?,
+            source_formula_digest: digest_from_blob(
+                &source_formula_digest,
+                "field_backup_formula",
+            )?,
+            source_graph_digest: digest_from_blob(&source_graph_digest, "field_backup_graph")?,
+            incarnation_id: digest_from_blob(&incarnation_id, "field_backup_incarnation")?,
+            manifest_digest: digest_from_blob(&manifest_digest, "field_backup_manifest_digest")?,
+            byte_len: u64::try_from(byte_len)
+                .map_err(|_| StoreError::ContinuityFence("field_backup_length"))?,
+            sha256: digest_from_blob(&sha256, "field_backup_sha256")?,
+        };
+        if backup.scope_digest != expected.scope_digest
+            || backup.source_revision != expected.source_revision
+            || backup.source_state_digest != expected.source_state_digest
+            || backup.source_formula_digest != expected.source_formula_digest
+            || backup.source_graph_digest != expected.source_graph_digest
+            || backup.incarnation_id != expected.incarnation_id
+            || backup.manifest_digest != expected.manifest_digest
+            || manifest_bytes != Self::field_migration_backup_manifest(&backup)
+        {
+            return Err(StoreError::ContinuityFence("field_backup_record"));
+        }
+        Ok(Some(backup))
+    }
+
+    fn ensure_field_migration_preimage_backup_tx(
+        tx: &Transaction<'_>,
+        database_path: Option<&Path>,
+        upgrade: &LegacySemanticFormulaUpgradeReceiptV1,
+        identity: &ActiveSemanticIdentityV1,
+    ) -> Result<FieldMigrationPreimageBackupV1, StoreError> {
+        let database_path =
+            database_path.ok_or(StoreError::ContinuityFence("field_backup_path"))?;
+        let expected = FieldMigrationPreimageBackupV1 {
+            migration_id: upgrade.migration_id,
+            scope_digest: upgrade.scope_digest,
+            source_revision: upgrade.base_revision,
+            source_state_digest: upgrade.source_state_digest,
+            source_formula_digest: upgrade.from_formula_digest,
+            source_graph_digest: upgrade.source_graph_digest,
+            incarnation_id: identity.incarnation_id,
+            manifest_digest: identity.manifest_digest,
+            byte_len: 0,
+            sha256: [0; 32],
+        };
+        if let Some(existing) = Self::field_migration_backup_from_row_tx(tx, &expected)? {
+            Self::validate_preimage_backup_files(database_path, &existing)?;
+            return Ok(existing);
+        }
+        let (database, manifest, database_partial, manifest_partial) =
+            Self::field_migration_backup_paths(
+                database_path,
+                &expected.migration_id,
+                expected.source_revision,
+            )?;
+        if database_partial.exists() || manifest_partial.exists() {
+            return Err(StoreError::ContinuityFence("field_backup_incomplete"));
+        }
+        if database.exists() || manifest.exists() {
+            if !database.is_file() || !manifest.is_file() {
+                return Err(StoreError::ContinuityFence("field_backup_incomplete"));
+            }
+            let (byte_len, sha256) = Self::sha256_file(&database)?;
+            let completed = FieldMigrationPreimageBackupV1 {
+                byte_len,
+                sha256,
+                ..expected
+            };
+            // A transaction may fail after the fsync/rename gate but before
+            // its SQLite commit.  The completed, identity-bound preimage is
+            // intentionally reusable by the exact retry; any partial or
+            // mismatched artifact remains a hard refusal.
+            Self::validate_preimage_backup_files(database_path, &completed)?;
+            return Ok(completed);
+        }
+        // SQLite's backup API cannot use the same connection while it owns a
+        // write transaction.  A second read-only handle observes the exact
+        // pre-write image while this `BEGIN IMMEDIATE` transaction excludes
+        // competing writers; the complete backup is re-hashed before any
+        // authority row is inserted below.
+        let source =
+            Connection::open_with_flags(database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        source.backup(rusqlite::DatabaseName::Main, &database_partial, None)?;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&database_partial)
+            .map_err(|source| StoreError::Io {
+                context: "opening field migration backup for sync",
+                source,
+            })?
+            .sync_all()
+            .map_err(|source| StoreError::Io {
+                context: "syncing field migration backup",
+                source,
+            })?;
+        let (byte_len, sha256) = Self::sha256_file(&database_partial)?;
+        let backup = FieldMigrationPreimageBackupV1 {
+            byte_len,
+            sha256,
+            ..expected
+        };
+        fs::rename(&database_partial, &database).map_err(|source| StoreError::Io {
+            context: "finalizing field migration backup",
+            source,
+        })?;
+        let manifest_bytes = Self::field_migration_backup_manifest(&backup);
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&manifest_partial)
+            .map_err(|source| StoreError::Io {
+                context: "creating field migration backup manifest",
+                source,
+            })?;
+        use std::io::Write;
+        output
+            .write_all(&manifest_bytes)
+            .map_err(|source| StoreError::Io {
+                context: "writing field migration backup manifest",
+                source,
+            })?;
+        output.sync_all().map_err(|source| StoreError::Io {
+            context: "syncing field migration backup manifest",
+            source,
+        })?;
+        drop(output);
+        fs::rename(&manifest_partial, &manifest).map_err(|source| StoreError::Io {
+            context: "finalizing field migration backup manifest",
+            source,
+        })?;
+        Self::validate_preimage_backup_files(database_path, &backup)?;
+        Ok(backup)
+    }
+
+    fn insert_field_migration_preimage_backup_tx(
+        tx: &Transaction<'_>,
+        backup: &FieldMigrationPreimageBackupV1,
+    ) -> Result<(), StoreError> {
+        tx.execute(
+            "INSERT INTO field_migration_preimage_backups (migration_id, scope_digest, source_revision, source_state_digest, source_formula_digest, source_graph_digest, incarnation_id, manifest_digest, byte_len, sha256, manifest_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                blob(backup.migration_id),
+                blob(backup.scope_digest),
+                revision_to_sqlite(backup.source_revision)?,
+                blob(backup.source_state_digest),
+                blob(backup.source_formula_digest),
+                blob(backup.source_graph_digest),
+                blob(backup.incarnation_id),
+                blob(backup.manifest_digest),
+                i64::try_from(backup.byte_len)
+                    .map_err(|_| StoreError::ContinuityFence("field_backup_length"))?,
+                blob(backup.sha256),
+                Self::field_migration_backup_manifest(backup),
+            ],
+        )?;
+        Ok(())
+    }
+
     fn phase0_formula_transition_is_allowed_tx(
         tx: &Transaction<'_>,
         input: Phase0FormulaTransitionInput<'_>,
@@ -2100,36 +2901,32 @@ impl Store {
     fn legacy_semantic_formula_upgrade_is_allowed_tx(
         tx: &Transaction<'_>,
         input: LegacySemanticFormulaUpgradeInput<'_>,
-    ) -> Result<Option<LegacySemanticFormulaUpgradeReceiptV1>, StoreError> {
-        let LegacySemanticFormulaUpgradeInput {
-            delta_bytes,
-            event,
-            event_scope,
-            receipt,
-            current_revision,
-            current_state_digest,
-            current_state_bytes,
-            current_graph_digest,
-            current_formula_digest,
-            incoming_formula_digest,
-            prior_chain_digest,
-        } = input;
-        if current_revision == 0
-            || !matches!(event, CanonicalEvent::UserStimulus(_))
-            || !current_state_bytes.starts_with(AESEM2_SNAPSHOT_MAGIC)
+    ) -> Result<Option<LegacySemanticAdmissionV1>, StoreError> {
+        if input.current_revision == 0
+            || !matches!(input.event, CanonicalEvent::UserStimulus(_))
+            || !input.current_state_bytes.starts_with(AESEM2_SNAPSHOT_MAGIC)
         {
             return Ok(None);
         }
-        let upgrade = LegacySemanticFormulaUpgradeReceiptV1::decode(delta_bytes)?;
-        if !Self::active_semantic_storage_scope_matches_tx(tx, event_scope, current_formula_digest)?
-        {
+        let upgrade = LegacySemanticFormulaUpgradeReceiptV1::decode(input.delta_bytes)?;
+        if upgrade.field_domain.is_some() {
+            let attested = Self::attest_field_domain_upgrade_tx(tx, &input, upgrade)?;
+            return Ok(Some(LegacySemanticAdmissionV1::FieldDomain(Box::new(
+                attested,
+            ))));
+        }
+        if !Self::active_semantic_storage_scope_matches_tx(
+            tx,
+            input.event_scope,
+            input.current_formula_digest,
+        )? {
             return Ok(None);
         }
-        let current_revision_sql = revision_to_sqlite(current_revision)?;
+        let current_revision_sql = revision_to_sqlite(input.current_revision)?;
         let source_receipt_bytes: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT receipt_bytes FROM journal WHERE scope_digest = ?1 AND logical_revision = ?2",
-                params![blob(receipt.scope_digest), current_revision_sql],
+                params![blob(input.receipt.scope_digest), current_revision_sql],
                 |row| row.get(0),
             )
             .optional()?;
@@ -2145,9 +2942,9 @@ impl Store {
             .query_row(
                 "SELECT 1 FROM legacy_semantic_formula_upgrades WHERE scope_digest = ?1 AND from_formula_digest = ?2 AND to_formula_digest = ?3",
                 params![
-                    blob(receipt.scope_digest),
-                    blob(current_formula_digest),
-                    blob(incoming_formula_digest),
+                    blob(input.receipt.scope_digest),
+                    blob(input.current_formula_digest),
+                    blob(input.incoming_formula_digest),
                 ],
                 |row| row.get(0),
             )
@@ -2156,37 +2953,26 @@ impl Store {
             return Ok(None);
         }
 
-        let expected_next_revision = current_revision
+        let expected_next_revision = input
+            .current_revision
             .checked_add(1)
             .ok_or(StoreError::ContinuityFence("revision_overflow"))?;
-        let expected_upgrade = match upgrade.field_domain {
-            Some(field_domain) => {
-                LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
-                    receipt,
-                    current_state_digest,
-                    current_graph_digest,
-                    current_formula_digest,
-                    prior_chain_digest,
-                    field_domain,
-                )
-            }
-            None => LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
-                receipt,
-                current_state_digest,
-                current_graph_digest,
-                current_formula_digest,
-                prior_chain_digest,
-            ),
-        };
+        let expected_upgrade = LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
+            input.receipt,
+            input.current_state_digest,
+            input.current_graph_digest,
+            input.current_formula_digest,
+            input.prior_chain_digest,
+        );
         let source_receipt_is_attested_aesem2 = source_receipt.schema_version == 1
             && source_receipt.status == CommitStatus::Committed
             && source_receipt.action_contract.is_none()
-            && source_receipt.scope_digest == receipt.scope_digest
-            && source_receipt.formula_digest == current_formula_digest
-            && source_receipt.next_revision == current_revision
-            && source_receipt.base_revision.checked_add(1) == Some(current_revision)
-            && source_receipt.state_after == current_state_digest
-            && source_receipt.graph_after == current_graph_digest;
+            && source_receipt.scope_digest == input.receipt.scope_digest
+            && source_receipt.formula_digest == input.current_formula_digest
+            && source_receipt.next_revision == input.current_revision
+            && source_receipt.base_revision.checked_add(1) == Some(input.current_revision)
+            && source_receipt.state_after == input.current_state_digest
+            && source_receipt.graph_after == input.current_graph_digest;
         if !source_receipt_is_attested_aesem2
             || upgrade != expected_upgrade
             || upgrade.next_revision != expected_next_revision
@@ -2196,7 +2982,9 @@ impl Store {
         {
             return Ok(None);
         }
-        Ok(Some(upgrade))
+        Ok(Some(LegacySemanticAdmissionV1::FormulaOnly(Box::new(
+            upgrade,
+        ))))
     }
 
     fn last_chain_digest_tx(
@@ -2331,7 +3119,7 @@ impl Store {
     pub fn commit_continuity_bundle(
         &mut self,
         bundle: &ContinuityCommitBundleV1,
-    ) -> Result<(u64, JournalRow), StoreError> {
+    ) -> Result<ContinuityCommitOutcomeV1, StoreError> {
         let event = Self::validate_continuity_payloads(bundle)?;
         let event_scope = scope_from_event(&event);
         let scope_digest = bundle.envelope.receipt.scope_digest;
@@ -2341,6 +3129,7 @@ impl Store {
             &bundle.envelope.event_bytes,
             &receipt_bytes,
         );
+        let database_path = self.database_path.clone();
 
         let conn = self.conn.as_mut().ok_or(StoreError::Closed)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2363,7 +3152,7 @@ impl Store {
                 return Err(StoreError::ContinuityDuplicateMismatch);
             }
             tx.commit()?;
-            return Ok((revision, row));
+            return Ok(ContinuityCommitOutcomeV1::ExistingIdentical { revision, row });
         }
 
         let current_sql: i64 = tx.query_row(
@@ -2450,6 +3239,7 @@ impl Store {
                     let Some(upgrade) = Self::legacy_semantic_formula_upgrade_is_allowed_tx(
                         &tx,
                         LegacySemanticFormulaUpgradeInput {
+                            bundle,
                             delta_bytes: &bundle.envelope.delta_bytes,
                             event: &event,
                             event_scope,
@@ -2480,9 +3270,26 @@ impl Store {
                 None
             }
         };
-        let legacy_upgrade = match transition_admission {
-            Some(FormulaTransitionAdmission::LegacySemantic(upgrade)) => Some(*upgrade),
-            Some(FormulaTransitionAdmission::Phase0) | None => None,
+        // The field-domain branch is deliberately re-attested from durable
+        // authority inside this `BEGIN IMMEDIATE` transaction.  The receipt's
+        // metadata is only a claim: no caller-provided aggregate can grant an
+        // overflow migration.  Before the first write, take and verify the
+        // one immutable preimage backup; failure leaves SQLite untouched.
+        let (legacy_upgrade, field_migration_backup) = match transition_admission {
+            Some(FormulaTransitionAdmission::LegacySemantic(admission)) => match *admission {
+                LegacySemanticAdmissionV1::FormulaOnly(upgrade) => (Some(*upgrade), None),
+                LegacySemanticAdmissionV1::FieldDomain(attested) => {
+                    let AttestedFieldDomainUpgradeV1 { upgrade, identity } = *attested;
+                    let backup = Self::ensure_field_migration_preimage_backup_tx(
+                        &tx,
+                        database_path.as_deref(),
+                        &upgrade,
+                        &identity,
+                    )?;
+                    (Some(upgrade), Some(backup))
+                }
+            },
+            Some(FormulaTransitionAdmission::Phase0) | None => (None, None),
         };
         let legacy_upgrade_revisions = legacy_upgrade
             .map(|upgrade| {
@@ -2498,6 +3305,10 @@ impl Store {
             {
                 return Err(StoreError::ContinuityFence("state_before"));
             }
+        }
+
+        if let Some(backup) = field_migration_backup.as_ref() {
+            Self::insert_field_migration_preimage_backup_tx(&tx, backup)?;
         }
 
         tx.execute(
@@ -2588,7 +3399,96 @@ impl Store {
             receipt_bytes,
             chain_digest,
         };
-        Ok((expected_next, row))
+        Ok(ContinuityCommitOutcomeV1::Inserted {
+            revision: expected_next,
+            row,
+        })
+    }
+
+    /// Read one immutable graph projection at an exact logical revision.  The
+    /// caller must still close its replay bytes against the corresponding
+    /// snapshot; this method exists so an auditor never substitutes a newer
+    /// graph while attesting historic semantic authority.
+    pub fn read_graph_commit_at_revision_v1(
+        &self,
+        scope_digest: &Digest,
+        revision: u64,
+    ) -> Result<Option<GraphCommitV1>, StoreError> {
+        let conn = self.connection()?;
+        let revision_sql = revision_to_sqlite(revision)?;
+        let stored: Option<StoredGraphColumns> = conn
+            .query_row(
+                "SELECT base_graph_digest, graph_digest, formula_digest, delta_bytes, replay_state_bytes FROM graph_commits WHERE scope_digest = ?1 AND revision = ?2",
+                params![blob(*scope_digest), revision_sql],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        stored
+            .map(
+                |(
+                    base_graph_digest,
+                    graph_digest_value,
+                    formula_digest,
+                    delta_bytes,
+                    replay_state_bytes,
+                )| {
+                    Ok(GraphCommitV1 {
+                        base_graph_digest: digest_from_blob(
+                            &base_graph_digest,
+                            "stored_graph_base_digest",
+                        )?,
+                        graph_digest: digest_from_blob(&graph_digest_value, "stored_graph_digest")?,
+                        formula_digest: digest_from_blob(&formula_digest, "stored_graph_formula")?,
+                        delta_bytes,
+                        replay_state_bytes,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    /// Read one immutable context projection at an exact logical revision and
+    /// independently close its canonical state and relation HMAC.
+    pub fn read_context_commit_at_revision_v1(
+        &self,
+        scope_digest: &Digest,
+        relation_scope_token: &[u8; 16],
+        revision: u64,
+    ) -> Result<Option<ContextCommitV1>, StoreError> {
+        let conn = self.connection()?;
+        let revision_sql = revision_to_sqlite(revision)?;
+        let stored: Option<StoredContextDuplicateColumns> = conn
+            .query_row(
+                "SELECT relation_hmac, context_digest, canonical_state_bytes, relation_scope_token FROM context_commits WHERE scope_digest = ?1 AND relation_scope_token = ?2 AND revision = ?3",
+                params![blob(*scope_digest), blob(*relation_scope_token), revision_sql],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((relation_hmac, context_digest, canonical_state_bytes, stored_relation_token)) =
+            stored
+        else {
+            return Ok(None);
+        };
+        let context = ContextCommitV1 {
+            relation_scope_token: token_from_blob(
+                &stored_relation_token,
+                "stored_context_relation_scope_token",
+            )?,
+            relation_hmac: digest_from_blob(&relation_hmac, "stored_context_hmac")?,
+            source_continuum_revision: revision,
+            context_digest: digest_from_blob(&context_digest, "stored_context_digest")?,
+            canonical_state_bytes,
+        };
+        Self::context_closes(&context)?;
+        Ok(Some(context))
     }
 
     /// Return the newest fully committed opaque context projection for one raw
@@ -3185,7 +4085,10 @@ mod tests {
             .unwrap();
 
         Store::migrate(&mut conn).unwrap();
-        let mut store = Store { conn: Some(conn) };
+        let mut store = Store {
+            conn: Some(conn),
+            database_path: None,
+        };
         assert_eq!(
             store
                 .read_journal(&scope_a)
@@ -3562,7 +4465,8 @@ mod tests {
             chain_seed: [87; 32],
             delta_bytes: vec![],
         });
-        let (_, first_row) = store.commit_continuity_bundle(&first).unwrap();
+        let first_commit = store.commit_continuity_bundle(&first).unwrap();
+        let first_row = first_commit.row().clone();
         let mut tagged = continuity_bundle_for_test(ContinuityBundleTestInput {
             scope: &scope,
             formula_digest: formula,

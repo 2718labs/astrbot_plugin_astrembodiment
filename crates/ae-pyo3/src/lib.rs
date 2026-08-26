@@ -113,6 +113,20 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
     NativeCoreError::new_err(format!("{code}::{message}"))
 }
 
+/// The semantic lane adds only the frozen aggregate migration classification
+/// to its existing native error.  `state_subcode` remains intact; neither
+/// error text nor this attribute carries source content, identity, paths, or
+/// raw field data.
+fn map_semantic_perception_error(error: ae_runtime::RuntimeError) -> PyErr {
+    let migration_subcode = error.migration_subcode_v1();
+    let mapped = map_error(error);
+    Python::attach(|py| {
+        let value = mapped.value(py);
+        let _ = value.setattr("migration_subcode", migration_subcode.as_str());
+    });
+    mapped
+}
+
 fn closed_schema(message: String) -> PyErr {
     NativeCoreError::new_err(format!("CLOSED_SCHEMA::{message}"))
 }
@@ -442,6 +456,7 @@ fn semantic_perception_payload(
                 "revision": decision.revision,
                 "deduplicated": decision.deduplicated,
                 "expression_projection": null,
+                "migration_subcode": decision.migration_subcode.map(|value| value.as_str()),
             }))
         }
         ae_runtime::SemanticClosureAvailabilityV1::Available => {
@@ -503,6 +518,7 @@ fn semantic_perception_payload(
                 "revision": decision.revision,
                 "deduplicated": decision.deduplicated,
                 "expression_projection": expression_projection,
+                "migration_subcode": decision.migration_subcode.map(|value| value.as_str()),
             }))
         }
     }
@@ -856,7 +872,7 @@ fn apply_perception_proposal_v1(scope_json: &str, proposal_json: &str) -> PyResu
         .ok_or_else(|| NativeCoreError::new_err("CLOSED::native core is not open"))?;
     let decision = runtime
         .apply_perception_proposal_v1(&scope_ref, &proposal)
-        .map_err(map_error)?;
+        .map_err(map_semantic_perception_error)?;
     let payload = semantic_perception_payload(&decision)?;
     serde_json::to_string(&payload)
         .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))

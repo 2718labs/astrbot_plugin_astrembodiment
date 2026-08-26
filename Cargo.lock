@@ -132,12 +132,17 @@ dependencies = [
 name = "ae-store"
 version = "1.0.0"
 dependencies = [
+ "ae-attention",
+ "ae-authority",
+ "ae-context-projector",
  "ae-continuum",
  "ae-contracts",
  "ae-fixed",
  "ae-genesis",
+ "ae-neurofield",
  "rusqlite",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
