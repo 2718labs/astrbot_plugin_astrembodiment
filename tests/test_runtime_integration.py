@@ -16,17 +16,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import astr_embodiment.bridge as bridge_module
-import main as main_module
-from astr_embodiment.auxiliary_transport import AuxiliaryTransportError
-from astr_embodiment.contracts import ScopeTokens
-from astr_embodiment.coordinator import GenesisCoordinator
-from astr_embodiment.persona_genesis import PersonaGenesisError
-from astr_embodiment.semantic_estimator import (
+import astr_embodiment.bridge as bridge_module  # noqa: E402
+import main as main_module  # noqa: E402
+from astr_embodiment.auxiliary_transport import AuxiliaryTransportError  # noqa: E402
+from astr_embodiment.contracts import ScopeTokens  # noqa: E402
+from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
+from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
+from astr_embodiment.semantic_estimator import (  # noqa: E402
     SemanticEstimateError,
     parse_estimator_output_v3,
 )
-from main import AstrEmbodimentPlugin
+from main import AstrEmbodimentPlugin  # noqa: E402
 
 
 def _unreachable_mandatory_native_abi(*_args: object, **_kwargs: object) -> str:
