@@ -1639,6 +1639,7 @@ def _v3_test_native_closure_v2() -> dict:
     closure = _v3_test_native_closure()
     closure["schema"] = "astrembodiment.semantic-perception-closure.v2"
     closure["availability"] = "AVAILABLE"
+    closure["migration_subcode"] = None
     closure["telemetry_receipt"] = {
         "schema": "native-telemetry-receipt.v1",
         "formula": "phase0-native-propagation-fxp6-v1",
@@ -1681,6 +1682,27 @@ def _v3_test_native_closure_v2() -> dict:
         "telemetry_digest": "dd" * 32,
     }
     return closure
+
+
+@pytest.mark.parametrize(
+    ("wire_subcode", "expected_subcode"),
+    (
+        (None, None),
+        ("FIELD_MIGRATION_APPLIED", "FIELD_MIGRATION_APPLIED"),
+        ("untrusted-migration-subcode", "FIELD_MIGRATION_UNKNOWN"),
+    ),
+)
+def test_v2_semantic_closure_accepts_only_closed_migration_subcodes(
+    wire_subcode: str | None, expected_subcode: str | None
+) -> None:
+    """Native v2 always emits this field; untrusted values fail closed."""
+
+    closure = _v3_test_native_closure_v2()
+    closure["migration_subcode"] = wire_subcode
+
+    result = bridge_module.validate_semantic_result(closure)
+
+    assert result["migration_subcode"] == expected_subcode
 
 
 def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
@@ -1831,12 +1853,21 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
         request = FakeRequest()
         request.prompt = "请不要再联系我，我明确拒绝。"
         event = FakeEvent()
+        observed_outcomes: list[dict[str, object]] = []
+        original_preflight = instance._coordinator.preflight_semantic_v3
+
+        async def capture_preflight(**kwargs):
+            result = await original_preflight(**kwargs)
+            observed_outcomes.append(result)
+            return result
+
+        instance._coordinator.preflight_semantic_v3 = capture_preflight
         await instance.on_llm_request(event, request)
-        return instance, context, native, event, request
+        return instance, context, native, event, request, observed_outcomes
 
     recorder = _SemanticRecordingLogger()
     monkeypatch.setattr(main_module, "logger", recorder)
-    instance, context, native, event, request = asyncio.run(run())
+    _instance, context, native, event, request, observed_outcomes = asyncio.run(run())
 
     assert event.stopped is False
     assert native.cursor_calls == 1
@@ -1846,6 +1877,7 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
         name: 0 for name in _V3_TEST_DIMENSIONS
     }
     assert native.proposals[0]["estimator_confidence"] == 900_000
+    assert observed_outcomes[0]["migration_subcode"] is None
     assert len(context.generate_calls) == 1
     provider_call = context.generate_calls[0]
     assert provider_call["chat_provider_id"] == "semantic"
@@ -1862,12 +1894,19 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
     )
     assert {
         key: semantic_record.get(key)
-        for key in ("status", "code", "calibration_state", "expression_state")
+        for key in (
+            "status",
+            "code",
+            "calibration_state",
+            "expression_state",
+            "migration_subcode",
+        )
     } == {
         "status": "DEGRADED",
         "code": "HUMAN_GOLD_UNVERIFIED",
         "calibration_state": "UNVERIFIED_HUMAN_GOLD",
         "expression_state": "APPLIED",
+        "migration_subcode": "NOT_APPLICABLE",
     }
     assert len(recorder.warning_messages) == 1
     assert recorder.info_messages == []
@@ -1961,29 +2000,56 @@ def test_invalid_neural_state_classification_requires_exact_closed_subcode(
 
 
 @pytest.mark.parametrize(
-    ("native_code", "native_state_subcode", "expected_state_subcode", "expected_stage"),
     (
-        ("LEGACY_UNATTESTED", None, None, "NATIVE_APPLY"),
+        "native_code",
+        "native_state_subcode",
+        "native_migration_subcode",
+        "expected_state_subcode",
+        "expected_migration_subcode",
+        "expected_stage",
+    ),
+    (
+        (
+            "LEGACY_UNATTESTED",
+            None,
+            "FIELD_MIGRATION_REFUSED_STRUCTURE",
+            None,
+            "FIELD_MIGRATION_REFUSED_STRUCTURE",
+            "NATIVE_APPLY",
+        ),
         (
             "INVALID_NEURAL_STATE",
             "GRAPH_STATE_INVALID",
+            "FIELD_MIGRATION_REFUSED_RANGE",
             "GRAPH_STATE_INVALID",
+            "FIELD_MIGRATION_REFUSED_RANGE",
             "NATIVE_APPLY",
         ),
         (
             "INVALID_NEURAL_STATE",
             "GRAPH_STATE_INVALID::raw-native-detail provider-id=private-provider-id",
+            "FIELD_MIGRATION_REFUSED_RANGE::raw-native-detail provider-id=private-provider-id",
             "UNKNOWN_INVALID_NEURAL_STATE",
+            "FIELD_MIGRATION_UNKNOWN",
             "NATIVE_APPLY",
         ),
-        ("STORAGE", None, None, "NATIVE_APPLY"),
+        (
+            "STORAGE",
+            None,
+            None,
+            None,
+            "FIELD_MIGRATION_UNKNOWN",
+            "NATIVE_APPLY",
+        ),
     ),
 )
 def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     monkeypatch: pytest.MonkeyPatch,
     native_code: str,
     native_state_subcode: str | None,
+    native_migration_subcode: str | None,
     expected_state_subcode: str | None,
+    expected_migration_subcode: str,
     expected_stage: str,
 ):
     """PyO3 codes survive the Python preview path without exposing detail."""
@@ -2000,7 +2066,10 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
             self, _scope_json: str, _proposal_json: str
         ) -> str:
             native_suffix = native_state_subcode or native_detail
-            raise RuntimeError(f"{native_code}::{native_suffix}")
+            error = RuntimeError(f"{native_code}::{native_suffix}")
+            if native_migration_subcode is not None:
+                error.migration_subcode = native_migration_subcode
+            raise error
 
     async def run() -> tuple[dict[str, object], FakeRequest]:
         context = FakeContext(configured_provider="semantic")
@@ -2053,6 +2122,7 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     }
     if expected_state_subcode is not None:
         expected_outcome["state_subcode"] = expected_state_subcode
+    expected_outcome["migration_subcode"] = expected_migration_subcode
     assert observed_outcome == expected_outcome
     semantic_record = getattr(
         request, "_astrembodiment_semantic_observatory_record_v1", {}
@@ -2065,6 +2135,7 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
             "reason",
             "cause_code",
             "state_subcode",
+            "migration_subcode",
             "dimensions_fxp6",
             "revision",
         )
@@ -2074,6 +2145,7 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
         "reason": "EXPRESSION_NOT_ATTEMPTED",
         "cause_code": native_code,
         "state_subcode": expected_state_subcode,
+        "migration_subcode": expected_migration_subcode,
         "dimensions_fxp6": None,
         "revision": None,
     }
@@ -2083,6 +2155,7 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     )
     if expected_state_subcode is not None:
         expected_warning += f" state_subcode={expected_state_subcode}"
+    expected_warning += f" migration_subcode={expected_migration_subcode}"
     assert recorder.warning_messages[0] == expected_warning
     assert len(recorder.warning_messages) == 2
     assert (

@@ -64,6 +64,7 @@ try:
     from .astr_embodiment.bridge import (
         SEMANTIC_NATIVE_ERROR_CODES,
         SEMANTIC_NATIVE_FAILURE_STAGES,
+        normalize_field_migration_subcode,
         normalize_invalid_neural_state_subcode,
     )
     from .astr_embodiment.contracts import (
@@ -97,6 +98,7 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment.bridge import (
         SEMANTIC_NATIVE_ERROR_CODES,
         SEMANTIC_NATIVE_FAILURE_STAGES,
+        normalize_field_migration_subcode,
         normalize_invalid_neural_state_subcode,
     )
     from astr_embodiment.contracts import (
@@ -147,6 +149,7 @@ def _is_inspect_display_incarnation_id(value: object) -> bool:
 
 _OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v3"
 _OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
+_MIGRATION_SUBCODE_NOT_APPLICABLE = "NOT_APPLICABLE"
 _OBSERVATORY_DIMENSIONS = (
     "positive",
     "affiliation",
@@ -179,6 +182,14 @@ _OBSERVATORY_EXPRESSION_PROFILE = (
     "engagement",
     "epistemic_caution",
 )
+
+
+def _observatory_migration_subcode(value: object) -> str:
+    if value is None:
+        return _MIGRATION_SUBCODE_NOT_APPLICABLE
+    return normalize_field_migration_subcode(value)
+
+
 _OBSERVATORY_FIELDS = (
     "schema",
     "status",
@@ -1327,6 +1338,7 @@ class AstrEmbodimentPlugin(Star):
             "node_counts": None,
             "expression_profile_fxp6": None,
             "state_subcode": None,
+            "migration_subcode": _MIGRATION_SUBCODE_NOT_APPLICABLE,
         }
         profile = cls._expression_profile_from_semantic_outcome(outcome)
         if expression_applied and profile is not None and expression_profile == profile:
@@ -1400,6 +1412,9 @@ class AstrEmbodimentPlugin(Star):
                     "node_counts": node_counts,
                     "expression_profile_fxp6": profile,
                     "state_subcode": None,
+                    "migration_subcode": _observatory_migration_subcode(
+                        closure.get("migration_subcode")
+                    ),
                 }
         if cause_code is None and isinstance(outcome, Mapping):
             candidate = outcome.get("cause_code")
@@ -1416,6 +1431,13 @@ class AstrEmbodimentPlugin(Star):
         ):
             empty_record["state_subcode"] = normalize_invalid_neural_state_subcode(
                 outcome.get("state_subcode")
+            )
+        if (
+            cause_code in SEMANTIC_NATIVE_ERROR_CODES
+            and outcome.get("native_stage") == "NATIVE_APPLY"
+        ):
+            empty_record["migration_subcode"] = _observatory_migration_subcode(
+                outcome.get("migration_subcode")
             )
         return empty_record
 
@@ -1443,21 +1465,27 @@ class AstrEmbodimentPlugin(Star):
             and type(native_stage) is str
             and native_stage in SEMANTIC_NATIVE_FAILURE_STAGES
         ):
+            migration_subcode = _observatory_migration_subcode(
+                outcome.get("migration_subcode")
+            )
             if native_code == "INVALID_NEURAL_STATE" and native_stage == "NATIVE_APPLY":
                 logger.warning(
                     "AstrEmbodiment semantic native failure: "
-                    "code=%s stage=%s state_subcode=%s",
+                    "code=%s stage=%s state_subcode=%s migration_subcode=%s",
                     native_code,
                     native_stage,
                     normalize_invalid_neural_state_subcode(
                         outcome.get("state_subcode")
                     ),
+                    migration_subcode,
                 )
             else:
                 logger.warning(
-                    "AstrEmbodiment semantic native failure: code=%s stage=%s",
+                    "AstrEmbodiment semantic native failure: "
+                    "code=%s stage=%s migration_subcode=%s",
                     native_code,
                     native_stage,
+                    migration_subcode,
                 )
         try:
             message = _OBSERVATORY_PREFIX + json.dumps(

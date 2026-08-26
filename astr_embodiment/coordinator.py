@@ -22,6 +22,7 @@ from .bridge import (
     RetryWait,
     SEMANTIC_NATIVE_ERROR_CODES,
     SEMANTIC_NATIVE_FAILURE_STAGES,
+    normalize_field_migration_subcode,
     normalize_invalid_neural_state_subcode,
     validate_context_summary_payload,
 )
@@ -287,7 +288,8 @@ class GenesisCoordinator:
         cause_code: str | None = None,
         native_stage: str | None = None,
         state_subcode: object = None,
-    ) -> dict[str, str]:
+        migration_subcode: object = None,
+    ) -> dict[str, Any]:
         """Return one non-echoing V3 preview failure."""
 
         if code not in _SEMANTIC_FAILURE_CODES:
@@ -300,6 +302,10 @@ class GenesisCoordinator:
                 if code == "INVALID_NEURAL_STATE" and native_stage == "NATIVE_APPLY":
                     result["state_subcode"] = normalize_invalid_neural_state_subcode(
                         state_subcode
+                    )
+                if native_stage == "NATIVE_APPLY":
+                    result["migration_subcode"] = normalize_field_migration_subcode(
+                        migration_subcode
                     )
         elif (
             code == "ESTIMATOR_MALFORMED" and cause_code in ESTIMATOR_MALFORMED_SUBCODES
@@ -473,6 +479,7 @@ class GenesisCoordinator:
                 str(closure.get("code", "NATIVE_ERROR")),
                 native_stage="NATIVE_APPLY",
                 state_subcode=closure.get("state_subcode"),
+                migration_subcode=closure.get("migration_subcode"),
             )
         if closure.get("schema") not in {
             "astrembodiment.semantic-perception-closure.v1",
@@ -499,6 +506,7 @@ class GenesisCoordinator:
             "dimensions_fxp6": dict(proposal["dimensions"]),
             "estimator_confidence_fxp6": proposal["estimator_confidence"],
             "semantic_closure": copy.deepcopy(closure),
+            "migration_subcode": closure.get("migration_subcode"),
         }
 
     async def apply_delivery(

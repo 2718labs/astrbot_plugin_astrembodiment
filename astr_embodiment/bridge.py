@@ -44,12 +44,42 @@ INVALID_NEURAL_STATE_SUBCODES = frozenset(
 _UNKNOWN_INVALID_NEURAL_STATE = "UNKNOWN_INVALID_NEURAL_STATE"
 _INVALID_NEURAL_STATE_MESSAGE = re.compile(r"\AINVALID_NEURAL_STATE::([A-Z0-9_]+)\Z")
 _STATE_SUBCODE_MISSING = object()
+FIELD_MIGRATION_SUBCODES = frozenset(
+    {
+        "FIELD_MIGRATION_APPLIED",
+        "FIELD_MIGRATION_REPLAYED",
+        "FIELD_MIGRATION_REFUSED_SOURCE",
+        "FIELD_MIGRATION_REFUSED_STRUCTURE",
+        "FIELD_MIGRATION_REFUSED_RANGE",
+        "FIELD_MIGRATION_TRANSFORM_INVALID",
+        "FIELD_MIGRATION_CONCURRENT_STALE",
+        "FIELD_MIGRATION_BACKUP_FAILED",
+        "FIELD_MIGRATION_STORAGE_FAILED",
+        "FIELD_MIGRATION_UNKNOWN",
+    }
+)
+_FIELD_MIGRATION_UNKNOWN = "FIELD_MIGRATION_UNKNOWN"
+_MIGRATION_SUBCODE_MISSING = object()
 
 
 def normalize_invalid_neural_state_subcode(value: object) -> str:
     if type(value) is str and value in INVALID_NEURAL_STATE_SUBCODES:
         return value
     return _UNKNOWN_INVALID_NEURAL_STATE
+
+
+def normalize_field_migration_subcode(value: object) -> str:
+    """Reduce native migration telemetry to its frozen, privacy-safe enum."""
+
+    if type(value) is str and value in FIELD_MIGRATION_SUBCODES:
+        return value
+    return _FIELD_MIGRATION_UNKNOWN
+
+
+def _migration_subcode(error: BaseException) -> str:
+    return normalize_field_migration_subcode(
+        getattr(error, "migration_subcode", _MIGRATION_SUBCODE_MISSING)
+    )
 
 
 def _invalid_neural_state_subcode(error: BaseException) -> str:
@@ -208,6 +238,7 @@ _SEMANTIC_RESULT_V2_FIELDS = frozenset(
         "revision",
         "deduplicated",
         "expression_projection",
+        "migration_subcode",
     }
 )
 _SEMANTIC_CLOSURE_AVAILABILITY = frozenset({"AVAILABLE", "UNAVAILABLE_LEGACY"})
@@ -612,11 +643,18 @@ def validate_context_summary_payload(payload: Any) -> dict[str, Any]:
 
 
 def _semantic_degraded(
-    code: str, *, state_subcode: object = _STATE_SUBCODE_MISSING
-) -> dict[str, str]:
+    code: str,
+    *,
+    state_subcode: object = _STATE_SUBCODE_MISSING,
+    migration_subcode: object = _MIGRATION_SUBCODE_MISSING,
+) -> dict[str, Any]:
     result = {"status": "DEGRADED", "code": code}
     if code == "INVALID_NEURAL_STATE" and state_subcode is not _STATE_SUBCODE_MISSING:
         result["state_subcode"] = normalize_invalid_neural_state_subcode(state_subcode)
+    if migration_subcode is not _MIGRATION_SUBCODE_MISSING:
+        result["migration_subcode"] = normalize_field_migration_subcode(
+            migration_subcode
+        )
     return result
 
 
@@ -1162,6 +1200,7 @@ def _validate_semantic_result(
     payload = _semantic_json(value)
     schema = payload.get("schema")
     availability: str | None = None
+    migration_subcode: str | None = None
     if schema == _SEMANTIC_RESULT_SCHEMA_V1:
         if set(payload) not in {
             _SEMANTIC_RESULT_BASE_FIELDS,
@@ -1177,6 +1216,9 @@ def _validate_semantic_result(
             or availability not in _SEMANTIC_CLOSURE_AVAILABILITY
         ):
             raise ValueError("semantic result")
+        raw_migration_subcode = payload["migration_subcode"]
+        if raw_migration_subcode is not None:
+            migration_subcode = normalize_field_migration_subcode(raw_migration_subcode)
     else:
         raise ValueError("semantic result")
     revision = payload["revision"]
@@ -1212,6 +1254,7 @@ def _validate_semantic_result(
             "revision": revision,
             "deduplicated": payload["deduplicated"],
             "expression_projection": None,
+            "migration_subcode": migration_subcode,
         }
     vector = _validate_semantic_vector_receipt(
         payload["semantic_vector_receipt"], expected_state_changed=state_changed
@@ -1245,6 +1288,7 @@ def _validate_semantic_result(
     }
     if schema == _SEMANTIC_RESULT_SCHEMA_V2:
         result["availability"] = "AVAILABLE"
+        result["migration_subcode"] = migration_subcode
         result["telemetry_receipt"] = _validate_native_telemetry_receipt(
             payload["telemetry_receipt"], receipt=receipt, revision=revision
         )
@@ -1546,6 +1590,7 @@ class NativeBridge:
                     if code == "INVALID_NEURAL_STATE"
                     else _STATE_SUBCODE_MISSING
                 ),
+                migration_subcode=_migration_subcode(exc),
             )
 
     @property
