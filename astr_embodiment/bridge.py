@@ -606,9 +606,7 @@ _SEED_CONFIG_OBSERVATION_SCHEMA = "astrembodiment.seed-config-observation.v1"
 _SEED_CONFIG_RESULT_SCHEMA = "astrembodiment.seed-config-result.v1"
 _SEED_CONFIG_ACK_SCHEMA = "astrembodiment.seed-config-ack.v1"
 _SEED_CONFIG_WRITEBACK_ACK_SCHEMA = "astrembodiment.seed-config-writeback-ack.v1"
-_SEED_CONFIG_SCOPE_KEYS = frozenset(
-    {"bot_token", "persona_token", "relation_token"}
-)
+_SEED_CONFIG_SCOPE_KEYS = frozenset({"bot_token", "persona_token", "relation_token"})
 _SEED_CONFIG_RECONCILE_REQUIRED_KEYS = frozenset(
     {
         "schema",
@@ -700,18 +698,17 @@ def _validate_seed_config_reconcile_request(payload: Any) -> dict[str, Any]:
     _validate_seed_config_scope(payload["scope"])
     observation = payload["observation"]
     origin = payload["origin"]
-    if observation not in _SEED_CONFIG_OBSERVATIONS or origin not in _SEED_CONFIG_ORIGINS:
+    if (
+        observation not in _SEED_CONFIG_OBSERVATIONS
+        or origin not in _SEED_CONFIG_ORIGINS
+    ):
         raise _seed_config_schema_error("seed config enum is invalid")
     previous = payload["previous_observation"]
     if previous is not None and previous != "PRESENT_NONEMPTY":
         raise _seed_config_schema_error("seed config previous observation is invalid")
     if observation == "PRESENT_NONEMPTY":
         seed_code = payload.get("seed_code")
-        if (
-            type(seed_code) is not str
-            or not seed_code
-            or len(seed_code) > 256
-        ):
+        if type(seed_code) is not str or not seed_code or len(seed_code) > 256:
             raise _seed_config_schema_error("seed config seed code is invalid")
     elif "seed_code" in payload:
         raise _seed_config_schema_error("seed config empty observation carries seed")
@@ -724,7 +721,10 @@ def _validate_seed_config_reconcile_request(payload: Any) -> dict[str, Any]:
         type(package_epoch) is not str
         or not package_epoch
         or len(package_epoch) > 128
-        or not all(char.isascii() and (char.isalnum() or char in "._-") for char in package_epoch)
+        or not all(
+            char.isascii() and (char.isalnum() or char in "._-")
+            for char in package_epoch
+        )
     ):
         raise _seed_config_schema_error("seed config package epoch is invalid")
     if payload["config_schema_version"] != 1:
@@ -754,7 +754,10 @@ def _validate_seed_config_result(payload: Any) -> dict[str, Any]:
     if payload["schema"] != _SEED_CONFIG_RESULT_SCHEMA:
         raise _seed_config_response_error("seed config result schema is invalid")
     state = payload["state"]
-    if state not in _SEED_CONFIG_RESULT_STATES or payload["reason"] not in _SEED_CONFIG_REASONS:
+    if (
+        state not in _SEED_CONFIG_RESULT_STATES
+        or payload["reason"] not in _SEED_CONFIG_REASONS
+    ):
         raise _seed_config_response_error("seed config result enum is invalid")
     writeback = payload["writeback"]
     if state in {"WRITE_MIRROR", "REBIRTH_COMMITTED", "REBIRTH_REPLAYED"}:
@@ -768,7 +771,9 @@ def _validate_seed_config_result(payload: Any) -> dict[str, Any]:
             or payload["after_revision"] != 0
         ):
             raise _seed_config_response_error("seed config rebirth revision is invalid")
-    elif payload["before_revision"] is not None or payload["after_revision"] is not None:
+    elif (
+        payload["before_revision"] is not None or payload["after_revision"] is not None
+    ):
         raise _seed_config_response_error("seed config nonrebirth revision is invalid")
     return dict(payload)
 
@@ -790,13 +795,17 @@ def _validate_seed_config_ack_request(payload: Any) -> dict[str, Any]:
 
 def _validate_seed_config_ack_result(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) != _SEED_CONFIG_ACK_RESULT_KEYS:
-        raise _seed_config_response_error("seed config acknowledgement result is not closed")
+        raise _seed_config_response_error(
+            "seed config acknowledgement result is not closed"
+        )
     if payload["schema"] != _SEED_CONFIG_ACK_SCHEMA or payload["state"] not in {
         "MIRROR_ACTIVE",
         "REPLAYED",
         "STALE",
     }:
-        raise _seed_config_response_error("seed config acknowledgement result is invalid")
+        raise _seed_config_response_error(
+            "seed config acknowledgement result is invalid"
+        )
     return dict(payload)
 
 

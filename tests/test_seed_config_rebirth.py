@@ -98,9 +98,7 @@ def test_startup_empty_seed_uses_only_native_seed_clear_reconciliation() -> None
         session_token="30" * 16,
     )
 
-    result = asyncio.run(
-        plugin._reconcile_seed_config_v1(scope, origin="STARTUP_READ")
-    )
+    result = asyncio.run(plugin._reconcile_seed_config_v1(scope, origin="STARTUP_READ"))
 
     assert result["state"] == "REBIRTH_COMMITTED"
     assert bridge.requests == [
@@ -214,9 +212,7 @@ def test_writeback_save_failure_logs_no_raw_seed_capability_or_host_error(
         session_token="30" * 16,
     )
 
-    result = asyncio.run(
-        plugin._reconcile_seed_config_v1(scope, origin="STARTUP_READ")
-    )
+    result = asyncio.run(plugin._reconcile_seed_config_v1(scope, origin="STARTUP_READ"))
 
     assert result["state"] == "REBIRTH_COMMITTED"
     assert bridge.acks == []

@@ -149,9 +149,7 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
 _G0_FORMULA_DIGEST = "00" * 32
 _G0_PROTOCOL_DIGEST = "00" * 32
 _SEED_CONFIG_OBSERVATION_SCHEMA_V1 = "astrembodiment.seed-config-observation.v1"
-_SEED_CONFIG_WRITEBACK_ACK_SCHEMA_V1 = (
-    "astrembodiment.seed-config-writeback-ack.v1"
-)
+_SEED_CONFIG_WRITEBACK_ACK_SCHEMA_V1 = "astrembodiment.seed-config-writeback-ack.v1"
 _SEED_CONFIG_SCHEMA_VERSION_V1 = 1
 _SEED_CONFIG_PACKAGE_EPOCH_PREFIX_V1 = "ae-pkg-"
 _INSPECT_INCARNATION_PREFIX = "AE-I1-"
@@ -333,9 +331,13 @@ class AstrEmbodimentPlugin(Star):
         # it existed when this plugin instance was created.  Later in-process
         # mutations have no trustworthy user-save origin, so they must never
         # be re-labelled as STARTUP_READ on an ordinary message turn.
-        self._seed_config_startup_observation_v1 = self._read_seed_config_observation_v1()
+        self._seed_config_startup_observation_v1 = (
+            self._read_seed_config_observation_v1()
+        )
         self._seed_config_startup_scopes_v1: set[tuple[str, str, str | None]] = set()
-        self._seed_config_package_epoch_v1_cached = self._compute_seed_config_package_epoch_v1()
+        self._seed_config_package_epoch_v1_cached = (
+            self._compute_seed_config_package_epoch_v1()
+        )
         self._injection_marker = "AstrEmbodiment Runtime Context"
         self._request_injected_attr = "_astrembodiment_runtime_injected_v1"
         self._expression_injection_marker = "AE Affect Expression Context"
@@ -735,7 +737,9 @@ class AstrEmbodimentPlugin(Star):
                 root / "_conf_schema.json",
                 root / "astr_embodiment" / "bridge.py",
             )
-            native_manifest = root / "astrembodiment_core" / "_bundled" / "manifest.json"
+            native_manifest = (
+                root / "astrembodiment_core" / "_bundled" / "manifest.json"
+            )
             native_init_candidates = (
                 root / "astrembodiment_core" / "__init__.py",
                 root / "python" / "astrembodiment_core" / "__init__.py",
@@ -743,7 +747,9 @@ class AstrEmbodimentPlugin(Star):
             native_identity = (
                 native_manifest
                 if native_manifest.is_file()
-                else next((path for path in native_init_candidates if path.is_file()), None)
+                else next(
+                    (path for path in native_init_candidates if path.is_file()), None
+                )
             )
             if native_identity is None:
                 return None
@@ -763,7 +769,9 @@ class AstrEmbodimentPlugin(Star):
         """Return the process-start build identity, or no authority epoch."""
         return self._seed_config_package_epoch_v1_cached
 
-    def _seed_config_scope_payload_v1(self, scope: ScopeTokens) -> dict[str, str | None]:
+    def _seed_config_scope_payload_v1(
+        self, scope: ScopeTokens
+    ) -> dict[str, str | None]:
         return {
             "bot_token": scope.bot_token,
             "persona_token": scope.persona_token,
@@ -910,7 +918,9 @@ class AstrEmbodimentPlugin(Star):
         )
         package_epoch = self._seed_config_package_epoch_v1()
         if package_epoch is None:
-            logger.warning("AstrEmbodiment seed config deferred: package epoch unavailable")
+            logger.warning(
+                "AstrEmbodiment seed config deferred: package epoch unavailable"
+            )
             return {
                 "schema": "astrembodiment.seed-config-result.v1",
                 "state": "DEFERRED",
@@ -976,7 +986,9 @@ class AstrEmbodimentPlugin(Star):
                 "MIRROR_ACTIVE",
                 "REPLAYED",
             }:
-                logger.warning("AstrEmbodiment seed config mirror acknowledgement stale")
+                logger.warning(
+                    "AstrEmbodiment seed config mirror acknowledgement stale"
+                )
 
         if result.get("state") in {"REBIRTH_COMMITTED", "REBIRTH_REPLAYED"}:
             self._forget_seed_clear_scope_v1(scope)
