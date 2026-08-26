@@ -2624,6 +2624,70 @@ mod tests {
         dir
     }
 
+    fn seed_config_request(
+        scope_token: Digest,
+        observation: SeedConfigObservationV1,
+        origin: SeedConfigOriginV1,
+        seed_code: Option<String>,
+        mirror_guard: Option<String>,
+        package_epoch: &str,
+    ) -> SeedConfigReconcileRequestV1 {
+        SeedConfigReconcileRequestV1 {
+            scope_token,
+            observation,
+            origin,
+            seed_code,
+            mirror_guard,
+            previous_observation: None,
+            package_epoch: package_epoch.to_owned(),
+            config_schema_version: 1,
+            host_config_revision: 0,
+        }
+    }
+
+    fn activate_seed_config_mirror(
+        runtime: &mut AstrRuntime,
+        scope: &ScopeRef,
+        package_epoch: &str,
+    ) -> (String, String) {
+        let scope_token = continuity_scope(scope);
+        let native_seed = runtime
+            .inspect(&scope.bot_token, &scope.persona_token)
+            .unwrap()
+            .seed_code;
+        let result = runtime
+            .reconcile_seed_config_v1(
+                scope,
+                &seed_config_request(
+                    scope_token,
+                    SeedConfigObservationV1::PresentNonempty,
+                    SeedConfigOriginV1::PluginWriteback,
+                    Some(native_seed.clone()),
+                    None,
+                    package_epoch,
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.state, SeedConfigStateV1::WriteMirror);
+        let writeback = result.writeback.unwrap();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: writeback.writeback_token,
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+        (native_seed, writeback.mirror_guard)
+    }
+
     fn semantic_proposal(scope: &ScopeRef, seed: u8, base_revision: u64) -> PerceptionProposalV1 {
         let mut proposal = PerceptionProposalV1 {
             schema_version: 1,
@@ -3342,6 +3406,13 @@ mod tests {
         let child_seed = reborn.writeback.as_ref().unwrap().seed_code.clone();
         assert_ne!(child_seed, before.seed_code);
 
+        // Simulate a crash after the locator transaction and before Python
+        // can persist/ack the repair. The old raw guard must replay only the
+        // committed child; its new host repair capability is freshly issued.
+        runtime.flush_and_close().unwrap();
+        drop(runtime);
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+
         let replayed = runtime
             .reconcile_seed_config_v1(
                 &scope,
@@ -3350,7 +3421,7 @@ mod tests {
                     observation: SeedConfigObservationV1::PresentEmpty,
                     origin: SeedConfigOriginV1::StartupRead,
                     seed_code: None,
-                    mirror_guard: Some(original_guard),
+                    mirror_guard: Some(original_guard.clone()),
                     previous_observation: None,
                     package_epoch: "test-epoch".to_owned(),
                     config_schema_version: 1,
@@ -3359,7 +3430,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(replayed.state, SeedConfigStateV1::RebirthReplayed);
-        assert_eq!(replayed.writeback.unwrap().seed_code, child_seed);
+        let replay_writeback = replayed.writeback.unwrap();
+        assert_eq!(replay_writeback.seed_code, child_seed);
+        assert_ne!(replay_writeback.mirror_guard, original_guard);
         assert_ne!(
             runtime
                 .inspect(&scope.bot_token, &scope.persona_token)
@@ -3368,6 +3441,488 @@ mod tests {
             before.seed_code
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_uncertain_upgrade_and_drift_observations_never_rebirth() {
+        let dir = temp_dir("seed-config-reject-gates");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(112);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+
+        // A schema default is an explicit empty value without an active
+        // mirror. It is a repair request, never a destructive intent.
+        assert_eq!(
+            runtime
+                .reconcile_seed_config_v1(
+                    &scope,
+                    &seed_config_request(
+                        scope_token,
+                        SeedConfigObservationV1::PresentEmpty,
+                        SeedConfigOriginV1::StartupRead,
+                        None,
+                        None,
+                        "test-epoch",
+                    ),
+                )
+                .unwrap()
+                .state,
+            SeedConfigStateV1::WriteMirror
+        );
+
+        let (native_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        for (observation, origin, guard_for_request) in [
+            (
+                SeedConfigObservationV1::Missing,
+                SeedConfigOriginV1::StartupRead,
+                None,
+            ),
+            (
+                SeedConfigObservationV1::ReadFailed,
+                SeedConfigOriginV1::StartupRead,
+                None,
+            ),
+            (
+                SeedConfigObservationV1::PresentEmpty,
+                SeedConfigOriginV1::LegacyConfigMigration,
+                Some(guard.clone()),
+            ),
+            (
+                SeedConfigObservationV1::PresentEmpty,
+                SeedConfigOriginV1::PluginWriteback,
+                Some(guard.clone()),
+            ),
+        ] {
+            let result = runtime
+                .reconcile_seed_config_v1(
+                    &scope,
+                    &seed_config_request(
+                        scope_token,
+                        observation,
+                        origin,
+                        None,
+                        guard_for_request,
+                        "test-epoch",
+                    ),
+                )
+                .unwrap();
+            assert_eq!(result.state, SeedConfigStateV1::Deferred);
+            assert_eq!(
+                runtime
+                    .inspect(&scope.bot_token, &scope.persona_token)
+                    .unwrap()
+                    .seed_code,
+                native_seed
+            );
+        }
+
+        // A package update must repair the epoch-bound mirror before any
+        // later clear can be eligible.
+        assert_eq!(
+            runtime
+                .reconcile_seed_config_v1(
+                    &scope,
+                    &seed_config_request(
+                        scope_token,
+                        SeedConfigObservationV1::PresentEmpty,
+                        SeedConfigOriginV1::StartupRead,
+                        None,
+                        Some(guard.clone()),
+                        "test-epoch-updated",
+                    ),
+                )
+                .unwrap()
+                .state,
+            SeedConfigStateV1::WriteMirror
+        );
+        let drift = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &seed_config_request(
+                    scope_token,
+                    SeedConfigObservationV1::PresentNonempty,
+                    SeedConfigOriginV1::PluginWriteback,
+                    Some("AE-S1-HOST-FORGED".to_owned()),
+                    None,
+                    "test-epoch-updated",
+                ),
+            )
+            .unwrap();
+        assert_eq!(drift.state, SeedConfigStateV1::WriteMirror);
+        assert_eq!(drift.writeback.unwrap().seed_code, native_seed);
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            native_seed
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_raw_capabilities_are_not_persisted_in_the_ledger() {
+        let dir = temp_dir("seed-config-private-capability");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(113);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let native_seed = runtime
+            .inspect(&scope.bot_token, &scope.persona_token)
+            .unwrap()
+            .seed_code;
+        let result = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &seed_config_request(
+                    scope_token,
+                    SeedConfigObservationV1::PresentNonempty,
+                    SeedConfigOriginV1::PluginWriteback,
+                    Some(native_seed),
+                    None,
+                    "test-epoch",
+                ),
+            )
+            .unwrap();
+        let writeback = result.writeback.unwrap();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    &scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: writeback.writeback_token.clone(),
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+        runtime.flush_and_close().unwrap();
+        drop(runtime);
+
+        let ledger = dir
+            .join("continuity-vault")
+            .join("rebirth_lifecycle.sqlite");
+        let bytes = std::fs::read(ledger).unwrap();
+        for raw in [&writeback.mirror_guard, &writeback.writeback_token] {
+            assert!(
+                !bytes
+                    .windows(raw.len())
+                    .any(|window| window == raw.as_bytes()),
+                "raw seed-config capability reached the durable ledger"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_competing_stagers_switch_once_then_replay() {
+        let dir = temp_dir("seed-config-competing-stagers");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(114);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard.clone()),
+            "test-epoch",
+        );
+        let first = runtime.select_rebirth_authority(&scope).unwrap();
+        let second = runtime.select_rebirth_authority(&scope).unwrap();
+        let first_permit = match first
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        let second_permit = match second
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("same clear did not replay its staging permit")
+            }
+        };
+        assert_eq!(first_permit, second_permit);
+
+        let first_child = first
+            .stage_seed_clear_child_v1(
+                &first_permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &first_permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let second_child = second
+            .stage_seed_clear_child_v1(
+                &second_permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &second_permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(first_child, second_child);
+        assert_eq!(
+            first
+                .commit_seed_clear_v1(&first_permit, &first_child)
+                .unwrap()
+                .state,
+            SeedConfigStateV1::RebirthCommitted
+        );
+        assert!(matches!(
+            second.commit_seed_clear_v1(&second_permit, &second_child),
+            Err(SeedConfigLifecycleError::InFlight)
+        ));
+        let replayed = runtime
+            .reconcile_seed_config_v1(&scope, &empty_request)
+            .unwrap();
+        assert_eq!(replayed.state, SeedConfigStateV1::RebirthReplayed);
+        assert_ne!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+        let ledger = rusqlite::Connection::open(
+            dir.join("continuity-vault")
+                .join("rebirth_lifecycle.sqlite"),
+        )
+        .unwrap();
+        for manual_table in ["rebirth_challenge_v1", "rebirth_receipt_v1"] {
+            let count: u64 = ledger
+                .query_row(&format!("SELECT COUNT(*) FROM {manual_table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "seed clear touched manual rebirth state");
+        }
+
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_parent_fence_stale_does_not_switch_staged_child() {
+        let dir = temp_dir("seed-config-parent-fence");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(115);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let lifecycle = runtime.select_rebirth_authority(&scope).unwrap();
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard),
+            "test-epoch",
+        );
+        let permit = match lifecycle
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        let child = lifecycle
+            .stage_seed_clear_child_v1(
+                &permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .apply_event(&scope, &stimulus(115, 0, 116))
+                .unwrap()
+                .revision,
+            1
+        );
+        assert!(matches!(
+            lifecycle.commit_seed_clear_v1(&permit, &child),
+            Err(SeedConfigLifecycleError::FenceStale)
+        ));
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_precommit_restart_keeps_parent_then_reuses_staged_child() {
+        let dir = temp_dir("seed-config-precommit-restart");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(117);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let lifecycle = runtime.select_rebirth_authority(&scope).unwrap();
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard),
+            "test-epoch",
+        );
+        let permit = match lifecycle
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        lifecycle
+            .stage_seed_clear_child_v1(
+                &permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        // Simulate a process crash after durable child staging but before the
+        // locator transaction: the old generation remains current, and the
+        // retry deterministically finds and commits that one child.
+        runtime.flush_and_close().unwrap();
+        drop(runtime);
+        let mut reopened = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let committed = reopened
+            .reconcile_seed_config_v1(&scope, &empty_request)
+            .unwrap();
+        assert_eq!(committed.state, SeedConfigStateV1::RebirthCommitted);
+        assert_eq!(committed.before_revision, Some(0));
+        assert_eq!(committed.after_revision, Some(0));
+        assert_ne!(
+            reopened
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_child_authority_is_rechecked_before_locator_cas() {
+        let dir = temp_dir("seed-config-child-fence");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(116);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let lifecycle = runtime.select_rebirth_authority(&scope).unwrap();
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard),
+            "test-epoch",
+        );
+        let permit = match lifecycle
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        let child = lifecycle
+            .stage_seed_clear_child_v1(
+                &permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let child_database = lifecycle
+            .child_authority_database_path(&child.child_generation_id)
+            .unwrap();
+        let connection = rusqlite::Connection::open(child_database).unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE incarnations SET parent_incarnation_id = ?2
+                     WHERE incarnation_id = ?1",
+                    rusqlite::params![
+                        child.child_authority.incarnation_id.to_vec(),
+                        vec![0_u8; 32],
+                    ],
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+
+        assert!(matches!(
+            lifecycle.commit_seed_clear_v1(&permit, &child),
+            Err(SeedConfigLifecycleError::FenceStale)
+        ));
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        drop(runtime);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

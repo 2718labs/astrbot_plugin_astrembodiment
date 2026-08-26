@@ -153,7 +153,7 @@ _SEED_CONFIG_WRITEBACK_ACK_SCHEMA_V1 = (
     "astrembodiment.seed-config-writeback-ack.v1"
 )
 _SEED_CONFIG_SCHEMA_VERSION_V1 = 1
-_SEED_CONFIG_PACKAGE_EPOCH_V1 = "astr-embodiment-1.0.0"
+_SEED_CONFIG_PACKAGE_EPOCH_PREFIX_V1 = "ae-pkg-"
 _INSPECT_INCARNATION_PREFIX = "AE-I1-"
 _INSPECT_INCARNATION_GROUP_COUNT = 13
 _INSPECT_CROCKFORD_ALPHABET = frozenset("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
@@ -329,6 +329,13 @@ class AstrEmbodimentPlugin(Star):
         self._turn_seq: dict[str, int] = {}
         self._pending: dict[str, dict[str, Any]] = {}
         self._seed_receipts: dict[str, dict[str, Any]] = {}
+        # The fallback is only allowed to describe the host configuration as
+        # it existed when this plugin instance was created.  Later in-process
+        # mutations have no trustworthy user-save origin, so they must never
+        # be re-labelled as STARTUP_READ on an ordinary message turn.
+        self._seed_config_startup_observation_v1 = self._read_seed_config_observation_v1()
+        self._seed_config_startup_scopes_v1: set[tuple[str, str, str | None]] = set()
+        self._seed_config_package_epoch_v1_cached = self._compute_seed_config_package_epoch_v1()
         self._injection_marker = "AstrEmbodiment Runtime Context"
         self._request_injected_attr = "_astrembodiment_runtime_injected_v1"
         self._expression_injection_marker = "AE Affect Expression Context"
@@ -710,9 +717,51 @@ class AstrEmbodimentPlugin(Star):
             and all(character in "0123456789abcdef" for character in value)
         )
 
-    def _seed_config_package_epoch_v1(self) -> str:
-        """Return the closed, non-secret package epoch sent to native."""
-        return _SEED_CONFIG_PACKAGE_EPOCH_V1
+    @staticmethod
+    def _compute_seed_config_package_epoch_v1() -> str | None:
+        """Hash the installed package identity, including the native bundle.
+
+        A release can be rebuilt or hot-fixed without changing its marketing
+        version.  The native mirror epoch therefore binds the actual package
+        inputs used at runtime rather than a long-lived ``1.0.0`` label.
+        Failure to read any mandatory identity input is fail-closed: Python
+        will defer reconciliation instead of inventing a stable epoch.
+        """
+        try:
+            root = Path(__file__).resolve().parent
+            required = (
+                root / "main.py",
+                root / "metadata.yaml",
+                root / "_conf_schema.json",
+                root / "astr_embodiment" / "bridge.py",
+            )
+            native_manifest = root / "astrembodiment_core" / "_bundled" / "manifest.json"
+            native_init_candidates = (
+                root / "astrembodiment_core" / "__init__.py",
+                root / "python" / "astrembodiment_core" / "__init__.py",
+            )
+            native_identity = (
+                native_manifest
+                if native_manifest.is_file()
+                else next((path for path in native_init_candidates if path.is_file()), None)
+            )
+            if native_identity is None:
+                return None
+            digest = hashlib.sha256()
+            for path in (*required, native_identity):
+                relative = path.relative_to(root).as_posix().encode("utf-8")
+                payload = path.read_bytes()
+                digest.update(len(relative).to_bytes(2, "big"))
+                digest.update(relative)
+                digest.update(len(payload).to_bytes(8, "big"))
+                digest.update(payload)
+            return _SEED_CONFIG_PACKAGE_EPOCH_PREFIX_V1 + digest.hexdigest()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _seed_config_package_epoch_v1(self) -> str | None:
+        """Return the process-start build identity, or no authority epoch."""
+        return self._seed_config_package_epoch_v1_cached
 
     def _seed_config_scope_payload_v1(self, scope: ScopeTokens) -> dict[str, str | None]:
         return {
@@ -720,6 +769,10 @@ class AstrEmbodimentPlugin(Star):
             "persona_token": scope.persona_token,
             "relation_token": scope.relation_token,
         }
+
+    @staticmethod
+    def _seed_config_scope_key_v1(scope: ScopeTokens) -> tuple[str, str, str | None]:
+        return (scope.bot_token, scope.persona_token, scope.relation_token)
 
     def _read_seed_config_observation_v1(self) -> tuple[str, str | None, str | None]:
         """Preserve explicit empty/missing/read-failed host states.
@@ -818,6 +871,23 @@ class AstrEmbodimentPlugin(Star):
             if isinstance(pending, Mapping) and pending.get("scope") == scope:
                 self._pending.pop(turn_token, None)
 
+    async def _consume_seed_config_startup_v1(
+        self,
+        scope: ScopeTokens,
+    ) -> dict[str, Any] | None:
+        """Use the persisted startup snapshot at most once per native scope."""
+        key = self._seed_config_scope_key_v1(scope)
+        if key in self._seed_config_startup_scopes_v1:
+            return None
+        # Consume before awaiting native work. A failure is deliberately not
+        # retried as a fresh STARTUP_READ on later ordinary messages.
+        self._seed_config_startup_scopes_v1.add(key)
+        return await self._reconcile_seed_config_v1(
+            scope,
+            origin="STARTUP_READ",
+            observation_override=self._seed_config_startup_observation_v1,
+        )
+
     async def _reconcile_seed_config_v1(
         self,
         scope: ScopeTokens,
@@ -825,6 +895,7 @@ class AstrEmbodimentPlugin(Star):
         origin: str,
         previous_observation: str | None = None,
         host_config_revision: int = 0,
+        observation_override: tuple[str, str | None, str | None] | None = None,
     ) -> dict[str, Any]:
         """Bridge a live config observation without manufacturing authority.
 
@@ -832,14 +903,29 @@ class AstrEmbodimentPlugin(Star):
         Rust. On host-save failure the native mirror intentionally stays
         pending; this method never rolls the native generation back.
         """
-        observation, seed_code, mirror_guard = self._read_seed_config_observation_v1()
+        observation, seed_code, mirror_guard = (
+            observation_override
+            if observation_override is not None
+            else self._read_seed_config_observation_v1()
+        )
+        package_epoch = self._seed_config_package_epoch_v1()
+        if package_epoch is None:
+            logger.warning("AstrEmbodiment seed config deferred: package epoch unavailable")
+            return {
+                "schema": "astrembodiment.seed-config-result.v1",
+                "state": "DEFERRED",
+                "writeback": None,
+                "before_revision": None,
+                "after_revision": None,
+                "reason": "SEED_CONFIG_OBSERVATION_DEFERRED",
+            }
         request: dict[str, Any] = {
             "schema": _SEED_CONFIG_OBSERVATION_SCHEMA_V1,
             "scope": self._seed_config_scope_payload_v1(scope),
             "observation": observation,
             "origin": origin,
             "previous_observation": previous_observation,
-            "package_epoch": self._seed_config_package_epoch_v1(),
+            "package_epoch": package_epoch,
             "config_schema_version": _SEED_CONFIG_SCHEMA_VERSION_V1,
             "host_config_revision": host_config_revision,
         }
@@ -2007,10 +2093,7 @@ class AstrEmbodimentPlugin(Star):
             # Only Rust may decide whether this live tri-state observation is
             # strong enough to switch authority. It may have just committed a
             # child, so discard hot state and read the native current again.
-            await self._reconcile_seed_config_v1(
-                scope,
-                origin="STARTUP_READ",
-            )
+            await self._consume_seed_config_startup_v1(scope)
             existing_identity = self._existing_native_identity(scope)
             if existing_identity is None:
                 raise PersonaGenesisError("SEED_CLEAR_UNKNOWN")

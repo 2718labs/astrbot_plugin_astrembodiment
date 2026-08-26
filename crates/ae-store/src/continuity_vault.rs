@@ -2,12 +2,22 @@ use crate::continuity_migration::ContinuityAuthority;
 use crate::{ClaimOutcome, Store};
 use ae_contracts::{hex, wire, Digest};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
-use std::fs;
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(windows)]
+use std::iter::once;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
+#[cfg(windows)]
+use windows_sys::core::PCWSTR;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
 
 const OWNER_METADATA_MAX_BYTES: u64 = 4096;
 const CURRENT_METADATA_MAX_BYTES: u64 = 4096;
@@ -1626,19 +1636,18 @@ impl VaultLifecycle {
                     &genesis.incarnation_id,
                     &permit.parent_authority.incarnation_id,
                 )?;
-                sync_sqlite_database(&temporary_database)?;
-                match fs::rename(&temporary, directory) {
-                    Ok(()) => stage_existing_child(
+                match durably_install_staged_generation(&temporary, directory, &temporary_database)?
+                {
+                    true => stage_existing_child(
                         &database,
                         &genesis,
                         &permit.parent_authority.incarnation_id,
                     )?,
-                    Err(_) if directory.exists() => stage_existing_child(
+                    false => stage_existing_child(
                         &database,
                         &genesis,
                         &permit.parent_authority.incarnation_id,
                     )?,
-                    Err(_) => return Err(RebirthLifecycleError::Durability),
                 }
             }
         };
@@ -1698,8 +1707,11 @@ impl VaultLifecycle {
         if locator_generation != current.current.generation_id {
             return Err(SeedConfigLifecycleError::FenceStale);
         }
-        let locked_current =
-            attached_seed_config_current(&transaction, &current.current.generation_id)?;
+        let locked_current = attached_seed_config_current(
+            &transaction,
+            AttachedSeedConfigAuthority::Parent,
+            &current.current.generation_id,
+        )?;
         if locked_current != current || locked_current.scope_token != request.scope_token {
             return Err(SeedConfigLifecycleError::FenceStale);
         }
@@ -1767,19 +1779,16 @@ impl VaultLifecycle {
                     );
                 }
 
-                let mirror = match active {
-                    Some(mirror) if current_matching && mirror.status == "PENDING_WRITEBACK" => {
-                        mirror
-                    }
-                    _ => create_seed_config_mirror(
-                        &transaction,
-                        &current,
-                        package_epoch_digest,
-                        request.config_schema_version,
-                        request.host_config_revision,
-                    )?,
-                };
-                let writeback = seed_config_writeback(&mirror)?;
+                // Raw writeback material is intentionally not recoverable
+                // from the ledger.  A pending acknowledgement retry therefore
+                // rotates the pending mirror to a new safe repair capability.
+                let (_, writeback) = create_seed_config_mirror(
+                    &transaction,
+                    &current,
+                    package_epoch_digest,
+                    request.config_schema_version,
+                    request.host_config_revision,
+                )?;
                 finish_seed_preflight(
                     transaction,
                     seed_config_result(
@@ -1793,7 +1802,7 @@ impl VaultLifecycle {
             }
             SeedConfigObservationV1::PresentEmpty => {
                 let Some(mirror) = active else {
-                    let mirror = create_seed_config_mirror(
+                    let (_, writeback) = create_seed_config_mirror(
                         &transaction,
                         &current,
                         package_epoch_digest,
@@ -1804,7 +1813,7 @@ impl VaultLifecycle {
                         transaction,
                         seed_config_result(
                             SeedConfigStateV1::WriteMirror,
-                            Some(seed_config_writeback(&mirror)?),
+                            Some(writeback),
                             None,
                             None,
                             "SEED_CONFIG_REPAIR_REQUIRED",
@@ -1812,7 +1821,7 @@ impl VaultLifecycle {
                     );
                 };
                 if !current_matching || mirror.status != "ACTIVE" {
-                    let mirror = create_seed_config_mirror(
+                    let (_, writeback) = create_seed_config_mirror(
                         &transaction,
                         &current,
                         package_epoch_digest,
@@ -1823,7 +1832,7 @@ impl VaultLifecycle {
                         transaction,
                         seed_config_result(
                             SeedConfigStateV1::WriteMirror,
-                            Some(seed_config_writeback(&mirror)?),
+                            Some(writeback),
                             None,
                             None,
                             "SEED_CONFIG_REPAIR_REQUIRED",
@@ -1930,8 +1939,11 @@ impl VaultLifecycle {
         if locator_generation != current.current.generation_id {
             return Err(SeedConfigLifecycleError::FenceStale);
         }
-        let locked_current =
-            attached_seed_config_current(&transaction, &current.current.generation_id)?;
+        let locked_current = attached_seed_config_current(
+            &transaction,
+            AttachedSeedConfigAuthority::Parent,
+            &current.current.generation_id,
+        )?;
         if locked_current != current || locked_current.scope_token != request.scope_token {
             return Err(SeedConfigLifecycleError::FenceStale);
         }
@@ -1947,7 +1959,8 @@ impl VaultLifecycle {
                 state: SeedConfigAckStateV1::Stale,
             });
         };
-        if mirror.scope_token != request.scope_token
+        if mirror.writeback_token_digest != token_digest
+            || mirror.scope_token != request.scope_token
             || !seed_config_mirror_matches_current(
                 &mirror,
                 &current,
@@ -2090,21 +2103,21 @@ impl VaultLifecycle {
                     &permit.parent_authority.incarnation_id,
                 )
                 .map_err(seed_error_from_rebirth)?;
-                sync_sqlite_database(&temporary_database).map_err(seed_error_from_rebirth)?;
-                match fs::rename(&temporary, directory) {
-                    Ok(()) => stage_existing_child(
+                match durably_install_staged_generation(&temporary, directory, &temporary_database)
+                    .map_err(seed_error_from_rebirth)?
+                {
+                    true => stage_existing_child(
                         &database,
                         &genesis,
                         &permit.parent_authority.incarnation_id,
                     )
                     .map_err(seed_error_from_rebirth)?,
-                    Err(_) if directory.exists() => stage_existing_child(
+                    false => stage_existing_child(
                         &database,
                         &genesis,
                         &permit.parent_authority.incarnation_id,
                     )
                     .map_err(seed_error_from_rebirth)?,
-                    Err(_) => return Err(SeedConfigLifecycleError::StorageFailed),
                 }
             }
         };
@@ -2149,16 +2162,24 @@ impl VaultLifecycle {
             }
             return Err(SeedConfigLifecycleError::FenceStale);
         }
-        validate_seed_clear_staged_child(self, permit, child)?;
+        validate_seed_clear_staged_child_shape(permit, child)?;
         let locator_path = self.root.join(LOCATOR_DATABASE);
         let authority_path = self
             .child_authority_database_path(&current.current.generation_id)
             .map_err(seed_error_from_rebirth)?;
-        if !locator_path.is_file() || !authority_path.is_file() {
+        let child_authority_path = self
+            .seed_clear_child_authority_database_path(&child.child_generation_id)
+            .map_err(seed_error_from_rebirth)?;
+        if !locator_path.is_file() || !authority_path.is_file() || !child_authority_path.is_file() {
             return Err(SeedConfigLifecycleError::LocatorInvalid);
         }
         let mut connection = self.open_seed_ledger()?;
-        attach_seed_config_fence_databases(&connection, &locator_path, &authority_path)?;
+        attach_seed_config_commit_fence_databases(
+            &connection,
+            &locator_path,
+            &authority_path,
+            &child_authority_path,
+        )?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
@@ -2183,8 +2204,11 @@ impl VaultLifecycle {
             }
             return Err(SeedConfigLifecycleError::FenceStale);
         }
-        let locked_current =
-            attached_seed_config_current(&transaction, &current.current.generation_id)?;
+        let locked_current = attached_seed_config_current(
+            &transaction,
+            AttachedSeedConfigAuthority::Parent,
+            &current.current.generation_id,
+        )?;
         if locked_current != current
             || locked_current.scope_token != permit.scope_token
             || locked_current.current.generation_id != permit.parent_generation_id
@@ -2244,6 +2268,7 @@ impl VaultLifecycle {
         if locator_generation != permit.parent_generation_id {
             return Err(SeedConfigLifecycleError::FenceStale);
         }
+        validate_attached_seed_clear_child(&transaction, permit, child)?;
         let receipt_id = seed_clear_receipt_id(permit, child);
         let now = crate::now_ms();
         let changed = transaction
@@ -2339,14 +2364,13 @@ impl VaultLifecycle {
             scope_token: permit.scope_token,
             seed_code_digest: child.child_seed_code_digest,
         };
-        let child_mirror = create_seed_config_mirror(
+        let (_, writeback) = create_seed_config_mirror(
             &transaction,
             &child_current,
             permit.package_epoch_digest,
             permit.config_schema_version,
             permit.host_config_revision,
         )?;
-        let writeback = seed_config_writeback(&child_mirror)?;
         transaction
             .commit()
             .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
@@ -2499,20 +2523,55 @@ fn attach_seed_config_fence_databases(
         .map_err(|_| SeedConfigLifecycleError::LocatorInvalid)
 }
 
+/// Commit additionally attaches the already-installed child before obtaining
+/// the transaction's immediate lock.  The child is re-read through that exact
+/// attachment before the locator CAS; no pre-transaction child inspection is
+/// treated as commit authority.
+fn attach_seed_config_commit_fence_databases(
+    connection: &Connection,
+    locator_path: &Path,
+    parent_authority_path: &Path,
+    child_authority_path: &Path,
+) -> Result<(), SeedConfigLifecycleError> {
+    attach_seed_config_fence_databases(connection, locator_path, parent_authority_path)?;
+    let child_literal =
+        sqlite_string_literal(child_authority_path).map_err(seed_error_from_rebirth)?;
+    connection
+        .execute_batch(&format!("ATTACH DATABASE {child_literal} AS seed_child;"))
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)
+}
+
+#[derive(Clone, Copy)]
+enum AttachedSeedConfigAuthority {
+    Parent,
+    Child,
+}
+
+impl AttachedSeedConfigAuthority {
+    const fn schema(self) -> &'static str {
+        match self {
+            Self::Parent => "seed_parent",
+            Self::Child => "seed_child",
+        }
+    }
+}
+
 /// Reconstruct the full current authority from the already attached selected
 /// generation. This intentionally does not call `locate_vault`: that helper
 /// opens a second connection and would not be protected by this transaction's
 /// authority lock.
 fn attached_seed_config_current(
     transaction: &rusqlite::Transaction<'_>,
+    attachment: AttachedSeedConfigAuthority,
     generation_id: &str,
 ) -> Result<SeedConfigCurrentV1, SeedConfigLifecycleError> {
+    let schema = attachment.schema();
     let mut statement = transaction
-        .prepare(
+        .prepare(&format!(
             "SELECT bot_token, persona_token, incarnation_id
-             FROM seed_parent.active_bindings
-             ORDER BY bot_token ASC, persona_token ASC",
-        )
+             FROM {schema}.active_bindings
+             ORDER BY bot_token ASC, persona_token ASC"
+        ))
         .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
     let mut rows = statement
         .query([])
@@ -2549,7 +2608,7 @@ fn attached_seed_config_current(
     let scope_token = wire::persona_scope_digest(&bot_token, &persona_token, None);
     let journal_revision: Option<i64> = transaction
         .query_row(
-            "SELECT MAX(logical_revision) FROM seed_parent.journal WHERE scope_digest = ?1",
+            &format!("SELECT MAX(logical_revision) FROM {schema}.journal WHERE scope_digest = ?1"),
             params![scope_token.to_vec()],
             |row| row.get(0),
         )
@@ -2562,7 +2621,7 @@ fn attached_seed_config_current(
     let revision = revision_from_sql(revision_sql).map_err(seed_error_from_rebirth)?;
     let snapshot_revision: Option<i64> = transaction
         .query_row(
-            "SELECT MAX(revision) FROM seed_parent.snapshots WHERE scope_digest = ?1",
+            &format!("SELECT MAX(revision) FROM {schema}.snapshots WHERE scope_digest = ?1"),
             params![scope_token.to_vec()],
             |row| row.get(0),
         )
@@ -2572,8 +2631,10 @@ fn attached_seed_config_current(
     }
     let (graph_digest, seed_code_digest): (Digest, Digest) = transaction
         .query_row(
-            "SELECT graph_digest, seed_code_digest
-             FROM seed_parent.incarnations WHERE incarnation_id = ?1",
+            &format!(
+                "SELECT graph_digest, seed_code_digest
+                 FROM {schema}.incarnations WHERE incarnation_id = ?1"
+            ),
             params![incarnation_id.to_vec()],
             |row| {
                 Ok((
@@ -2585,8 +2646,10 @@ fn attached_seed_config_current(
         .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
     let state_digest = transaction
         .query_row(
-            "SELECT state_digest FROM seed_parent.snapshots
-             WHERE scope_digest = ?1 AND revision = ?2",
+            &format!(
+                "SELECT state_digest FROM {schema}.snapshots
+                 WHERE scope_digest = ?1 AND revision = ?2"
+            ),
             params![scope_token.to_vec(), revision_sql],
             |row| digest_from_blob(row.get(0)?).map_err(sqlite_conversion_error),
         )
@@ -2599,8 +2662,10 @@ fn attached_seed_config_current(
     } else {
         transaction
             .query_row(
-                "SELECT chain_digest FROM seed_parent.journal
-                 WHERE scope_digest = ?1 AND logical_revision = ?2",
+                &format!(
+                    "SELECT chain_digest FROM {schema}.journal
+                     WHERE scope_digest = ?1 AND logical_revision = ?2"
+                ),
                 params![scope_token.to_vec(), revision_sql],
                 |row| digest_from_blob(row.get(0)?).map_err(sqlite_conversion_error),
             )
@@ -2848,35 +2913,17 @@ fn seed_config_writeback_token_digest(value: &str) -> Result<Digest, SeedConfigL
     ))
 }
 
-fn seed_config_guard_for_mirror(mirror_id: &Digest) -> String {
-    hex::encode32(&wire::domain_hash(
-        b"astr-embodiment/seed-config-mirror-guard-material-v1",
-        &[mirror_id],
-    ))
+/// Obtain independent CSPRNG material. The raw bytes live only in the stack
+/// until the immediate writeback is encoded; the ledger receives only a
+/// domain-separated digest.
+fn fresh_seed_config_material() -> Result<Digest, SeedConfigLifecycleError> {
+    let mut material = [0_u8; 32];
+    getrandom::fill(&mut material).map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    Ok(material)
 }
 
-fn seed_config_writeback_token_for_mirror(mirror_id: &Digest) -> String {
-    hex::encode32(&wire::domain_hash(
-        b"astr-embodiment/seed-config-writeback-token-material-v1",
-        &[mirror_id],
-    ))
-}
-
-fn seed_config_writeback(
-    mirror: &StoredSeedConfigMirrorV1,
-) -> Result<SeedConfigWritebackV1, SeedConfigLifecycleError> {
-    let mirror_guard = seed_config_guard_for_mirror(&mirror.mirror_id);
-    let writeback_token = seed_config_writeback_token_for_mirror(&mirror.mirror_id);
-    if seed_config_guard_digest(&mirror_guard)? != mirror.guard_digest
-        || seed_config_writeback_token_digest(&writeback_token)? != mirror.writeback_token_digest
-    {
-        return Err(SeedConfigLifecycleError::StorageFailed);
-    }
-    Ok(SeedConfigWritebackV1 {
-        seed_code: ae_genesis::format_seed_code(&mirror.native_seed_digest),
-        mirror_guard,
-        writeback_token,
-    })
+fn fresh_seed_config_capability() -> Result<String, SeedConfigLifecycleError> {
+    Ok(hex::encode32(&fresh_seed_config_material()?))
 }
 
 fn seed_config_mirror_matches_current(
@@ -3048,7 +3095,7 @@ fn create_seed_config_mirror(
     package_epoch_digest: Digest,
     config_schema_version: u16,
     host_config_revision: u64,
-) -> Result<StoredSeedConfigMirrorV1, SeedConfigLifecycleError> {
+) -> Result<(StoredSeedConfigMirrorV1, SeedConfigWritebackV1), SeedConfigLifecycleError> {
     transaction
         .execute(
             "UPDATE seed_config_mirror_v1 SET status = 'CONSUMED', updated_at_ms = ?2
@@ -3059,12 +3106,9 @@ fn create_seed_config_mirror(
             ],
         )
         .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
-    let random_id: Vec<u8> = transaction
-        .query_row("SELECT randomblob(32)", [], |row| row.get(0))
-        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
-    let mirror_id = digest_from_blob(random_id).map_err(seed_error_from_rebirth)?;
-    let mirror_guard = seed_config_guard_for_mirror(&mirror_id);
-    let writeback_token = seed_config_writeback_token_for_mirror(&mirror_id);
+    let mirror_id = fresh_seed_config_material()?;
+    let mirror_guard = fresh_seed_config_capability()?;
+    let writeback_token = fresh_seed_config_capability()?;
     let guard_digest = seed_config_guard_digest(&mirror_guard)?;
     let writeback_token_digest = seed_config_writeback_token_digest(&writeback_token)?;
     let now = crate::now_ms();
@@ -3095,7 +3139,7 @@ fn create_seed_config_mirror(
             ],
         )
         .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
-    Ok(StoredSeedConfigMirrorV1 {
+    let mirror = StoredSeedConfigMirrorV1 {
         mirror_id,
         scope_token: current.scope_token,
         authority_generation_id: current.current.generation_id.clone(),
@@ -3108,7 +3152,15 @@ fn create_seed_config_mirror(
         host_config_revision,
         status: "PENDING_WRITEBACK".to_owned(),
         writeback_token_digest,
-    })
+    };
+    Ok((
+        mirror,
+        SeedConfigWritebackV1 {
+            seed_code: ae_genesis::format_seed_code(&current.seed_code_digest),
+            mirror_guard,
+            writeback_token,
+        },
+    ))
 }
 
 type SeedClearIntentRow = (
@@ -3462,29 +3514,20 @@ fn replay_seed_clear_result_from_consumption(
             "SEED_CONFIG_OBSERVATION_DEFERRED",
         ));
     }
-    let active = load_active_seed_config_mirror(transaction, current.scope_token)?;
-    let mirror = match active {
-        Some(mirror)
-            if seed_config_mirror_matches_current(
-                &mirror,
-                current,
-                package_epoch_digest,
-                config_schema_version,
-            ) =>
-        {
-            mirror
-        }
-        _ => create_seed_config_mirror(
-            transaction,
-            current,
-            package_epoch_digest,
-            config_schema_version,
-            0,
-        )?,
-    };
+    // The durable ledger intentionally retains only capability digests.
+    // Replaying after a crash rotates any old pending/active mirror to a new
+    // repair capability instead of regenerating a raw guard or token from
+    // persisted material.
+    let (_, writeback) = create_seed_config_mirror(
+        transaction,
+        current,
+        package_epoch_digest,
+        config_schema_version,
+        0,
+    )?;
     Ok(seed_config_result(
         SeedConfigStateV1::RebirthReplayed,
-        Some(seed_config_writeback(&mirror)?),
+        Some(writeback),
         Some(consumption.before_revision),
         Some(consumption.after_revision),
         "SEED_CLEAR_REBIRTH_REPLAYED",
@@ -3509,8 +3552,7 @@ fn seed_clear_receipt_id(
     )
 }
 
-fn validate_seed_clear_staged_child(
-    lifecycle: &VaultLifecycle,
+fn validate_seed_clear_staged_child_shape(
     permit: &SeedClearCommitPermitV1,
     child: &SeedClearStagedChildV1,
 ) -> Result<(), SeedConfigLifecycleError> {
@@ -3530,21 +3572,40 @@ fn validate_seed_clear_staged_child(
     {
         return Err(SeedConfigLifecycleError::FenceStale);
     }
-    let database = lifecycle
-        .seed_clear_child_authority_database_path(&child.child_generation_id)
-        .map_err(seed_error_from_rebirth)?;
-    if !database.is_file() {
+    Ok(())
+}
+
+/// Re-read the complete staged child fence through the child attachment held
+/// by the same `BEGIN IMMEDIATE` transaction that will CAS the locator.
+fn validate_attached_seed_clear_child(
+    transaction: &rusqlite::Transaction<'_>,
+    permit: &SeedClearCommitPermitV1,
+    child: &SeedClearStagedChildV1,
+) -> Result<(), SeedConfigLifecycleError> {
+    validate_seed_clear_staged_child_shape(permit, child)?;
+    let actual = attached_seed_config_current(
+        transaction,
+        AttachedSeedConfigAuthority::Child,
+        &child.child_generation_id,
+    )?;
+    if actual.scope_token != permit.scope_token
+        || actual.current.authority != child.child_authority
+        || actual.seed_code_digest != child.child_seed_code_digest
+        || actual.current.authority.revision != 0
+        || actual.current.authority.incarnation_id == permit.parent_authority.incarnation_id
+    {
         return Err(SeedConfigLifecycleError::FenceStale);
     }
-    sync_sqlite_database(&database).map_err(seed_error_from_rebirth)?;
-    let (bot, persona, _, _) = read_single_binding(&database).map_err(seed_error_from_rebirth)?;
-    if wire::persona_scope_digest(&bot, &persona, None) != permit.scope_token
-        || capture_any_authority(&database).map_err(seed_error_from_rebirth)?
-            != child.child_authority
-        || read_seed_code_digest(&database, &child.child_authority.incarnation_id)
-            .map_err(seed_error_from_rebirth)?
-            != child.child_seed_code_digest
-    {
+    let stored_parent: Option<Vec<u8>> = transaction
+        .query_row(
+            "SELECT parent_incarnation_id FROM seed_child.incarnations
+             WHERE incarnation_id = ?1",
+            params![child.child_authority.incarnation_id.to_vec()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    if stored_parent.as_deref() != Some(permit.parent_authority.incarnation_id.as_slice()) {
         return Err(SeedConfigLifecycleError::FenceStale);
     }
     Ok(())
@@ -4156,17 +4217,103 @@ fn sqlite_shadow_backup(source: &Path, destination: &Path) -> Result<(), Rebirth
 }
 
 fn sync_sqlite_database(path: &Path) -> Result<(), RebirthLifecycleError> {
-    let connection = Connection::open(path).map_err(|_| RebirthLifecycleError::Durability)?;
-    connection
-        .pragma_update(None, "synchronous", "FULL")
+    {
+        let connection = Connection::open(path).map_err(|_| RebirthLifecycleError::Durability)?;
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(|_| RebirthLifecycleError::Durability)?;
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(|_| RebirthLifecycleError::Durability)?;
+        if integrity != "ok" {
+            return Err(RebirthLifecycleError::ChildInvalid);
+        }
+    }
+    // `FlushFileBuffers` (which backs `File::sync_all` on Windows) requires a
+    // writable handle.  The SQLite validation connection is closed above, so
+    // reopen the database read/write solely to make the file-data flush real.
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
         .map_err(|_| RebirthLifecycleError::Durability)?;
-    let integrity: String = connection
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|_| RebirthLifecycleError::Durability)?;
-    if integrity != "ok" {
-        return Err(RebirthLifecycleError::ChildInvalid);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_generation_directory(path: &Path) -> Result<(), RebirthLifecycleError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| RebirthLifecycleError::Durability)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn durable_rename_generation(
+    temporary: &Path,
+    destination: &Path,
+) -> Result<(), RebirthLifecycleError> {
+    let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain(once(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect();
+    // MoveFileExW with WRITE_THROUGH is the Windows durable counterpart to
+    // the Unix rename-plus-parent-directory-fsync sequence below.
+    // SAFETY: both UTF-16 vectors are NUL-terminated and remain alive for the
+    // duration of this synchronous Win32 call.
+    let moved = unsafe {
+        MoveFileExW(
+            temporary.as_ptr() as PCWSTR,
+            destination.as_ptr() as PCWSTR,
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(RebirthLifecycleError::Durability);
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn durable_rename_generation(
+    temporary: &Path,
+    destination: &Path,
+) -> Result<(), RebirthLifecycleError> {
+    fs::rename(temporary, destination).map_err(|_| RebirthLifecycleError::Durability)
+}
+
+/// Close the complete staging durability loop before returning a child as a
+/// commit candidate: SQLite integrity/file flush, temporary directory flush,
+/// atomic rename, and finally flushes of both the generations parent and the
+/// installed directory. A race that installed the same deterministic child is
+/// reported separately so its existing complete generation can be validated.
+fn durably_install_staged_generation(
+    temporary: &Path,
+    destination: &Path,
+    temporary_database: &Path,
+) -> Result<bool, RebirthLifecycleError> {
+    sync_sqlite_database(temporary_database)?;
+    #[cfg(unix)]
+    sync_generation_directory(temporary)?;
+    match durable_rename_generation(temporary, destination) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                let generations = destination
+                    .parent()
+                    .ok_or(RebirthLifecycleError::Durability)?;
+                sync_generation_directory(generations)?;
+                sync_generation_directory(destination)?;
+            }
+            sync_sqlite_database(&destination.join(AUTHORITY_DATABASE))?;
+            Ok(true)
+        }
+        Err(_) if destination.exists() => Ok(false),
+        Err(_) => Err(RebirthLifecycleError::Durability),
+    }
 }
 
 fn sqlite_string_literal(path: &Path) -> Result<String, RebirthLifecycleError> {

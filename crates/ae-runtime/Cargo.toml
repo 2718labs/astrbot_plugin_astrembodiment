@@ -19,3 +19,6 @@ ae-context-projector.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"
 subtle = "2"
+
+[dev-dependencies]
+rusqlite.workspace = true
