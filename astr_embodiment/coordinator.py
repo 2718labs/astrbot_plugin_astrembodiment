@@ -476,9 +476,9 @@ class GenesisCoordinator:
             ):
                 try:
                     self._transport_warning(result)
-                except (AttributeError, TypeError, ValueError):
-                    # A malformed optional observer must not change the
-                    # semantic outcome; the consumer may emit its fallback.
+                except Exception:  # noqa: BLE001 - best-effort observer boundary
+                    # The observer is optional: ordinary sink failure must not
+                    # change semantic data; the consumer may emit its fallback.
                     result["_transport_warning_emitted"] = False
                 else:
                     result["_transport_warning_emitted"] = True

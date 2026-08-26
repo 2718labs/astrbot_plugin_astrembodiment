@@ -293,3 +293,61 @@ def test_semantic_owner_emits_one_transport_warning_for_joined_followers() -> No
     assert calls == 1
     assert len(warnings) == 1
     assert warnings[0]["code"] == "ESTIMATOR_UNAVAILABLE"
+
+
+def test_semantic_owner_preserves_transport_outcome_when_warning_sink_raises() -> None:
+    scope = ScopeTokens(
+        bot_token="11" * 16,
+        persona_token="22" * 16,
+        session_token="33" * 16,
+    )
+    turn = FrozenTurn(
+        scope=scope,
+        event_id="44" * 16,
+        turn_id="55" * 16,
+        base_revision=0,
+        observed_at_ms=1,
+    )
+
+    def raising_sink(_outcome: dict[str, object]) -> None:
+        raise RuntimeError("sink unavailable")
+
+    async def run() -> dict[str, object]:
+        coordinator = GenesisCoordinator(
+            SimpleNamespace(), transport_warning=raising_sink
+        )
+
+        async def transient_failure(**_kwargs: object) -> dict[str, object]:
+            return {
+                "status": "DEGRADED",
+                "code": "ESTIMATOR_UNAVAILABLE",
+                "transport_subcode": "PROVIDER_CALL_FAILED",
+                "attempted": True,
+                "attempt_count": 2,
+            }
+
+        coordinator._run_semantic_v3 = transient_failure  # type: ignore[method-assign]
+        return await coordinator.preflight_semantic_v3(
+            scope=scope,
+            frozen_turn=turn,
+            request_text="closed request",
+            context_summary={},
+            estimator=lambda _request: None,
+        )
+
+    outcome = asyncio.run(run())
+
+    assert {
+        key: outcome.get(key)
+        for key in (
+            "code",
+            "transport_subcode",
+            "attempted",
+            "attempt_count",
+        )
+    } == {
+        "code": "ESTIMATOR_UNAVAILABLE",
+        "transport_subcode": "PROVIDER_CALL_FAILED",
+        "attempted": True,
+        "attempt_count": 2,
+    }
