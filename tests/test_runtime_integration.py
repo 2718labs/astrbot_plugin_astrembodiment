@@ -16,21 +16,54 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import astr_embodiment.bridge as bridge_module  # noqa: E402
-from astr_embodiment.auxiliary_transport import AuxiliaryTransportError  # noqa: E402
-import main as main_module  # noqa: E402
-from astr_embodiment.contracts import ScopeTokens  # noqa: E402
-from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
-from astr_embodiment.semantic_estimator import (  # noqa: E402
+import astr_embodiment.bridge as bridge_module
+import main as main_module
+from astr_embodiment.auxiliary_transport import AuxiliaryTransportError
+from astr_embodiment.contracts import ScopeTokens
+from astr_embodiment.coordinator import GenesisCoordinator
+from astr_embodiment.persona_genesis import PersonaGenesisError
+from astr_embodiment.semantic_estimator import (
     SemanticEstimateError,
     parse_estimator_output_v3,
 )
-from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
-from main import AstrEmbodimentPlugin  # noqa: E402
+from main import AstrEmbodimentPlugin
 
 
 def _unreachable_mandatory_native_abi(*_args: object, **_kwargs: object) -> str:
     raise AssertionError("loader fixture must not invoke mandatory native ABI stubs")
+
+
+def _install_seed_config_lifecycle_v1(
+    instance: AstrEmbodimentPlugin, *, seed_code: str | None = None
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Expose the mandatory native seed-config lifecycle to a host fixture."""
+
+    reconciliations: list[dict[str, object]] = []
+    acknowledgements: list[dict[str, object]] = []
+    writeback = (
+        {
+            "seed_code": seed_code,
+            "mirror_guard": "a" * 64,
+            "writeback_token": "b" * 64,
+        }
+        if seed_code is not None
+        else None
+    )
+
+    def reconcile(request: dict[str, object]) -> dict[str, object]:
+        reconciliations.append(dict(request))
+        return {
+            "state": "MIRROR_PENDING" if writeback is not None else "MIRROR_ACTIVE",
+            "writeback": writeback,
+        }
+
+    def acknowledge(request: dict[str, object]) -> dict[str, object]:
+        acknowledgements.append(dict(request))
+        return {"state": "MIRROR_ACTIVE"}
+
+    instance._bridge.reconcile_seed_config_v1 = reconcile  # type: ignore[method-assign]
+    instance._bridge.ack_seed_config_writeback_v1 = acknowledge  # type: ignore[method-assign]
+    return reconciliations, acknowledgements
 
 
 class FakeConfig(dict):
@@ -201,6 +234,7 @@ def test_bound_scope_reuses_durable_identity_without_calling_genesis():
         bridge = BoundBridge()
         instance._bridge = bridge
         instance._coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
         bound_keys: list[str] = []
 
         class BindingRecorder:
@@ -217,9 +251,11 @@ def test_bound_scope_reuses_durable_identity_without_calling_genesis():
             apply_stimulus=True,
             transport_context=BindingRecorder(),  # type: ignore[arg-type]
         )
-        return bridge, result, bound_keys, instance
+        return bridge, result, bound_keys, instance, reconciliations, acknowledgements
 
-    bridge, result, bound_keys, instance = asyncio.run(run())
+    bridge, result, bound_keys, instance, reconciliations, acknowledgements = (
+        asyncio.run(run())
+    )
     decision, scope, session_key, seq, _turn, base_revision = result
     assert bridge.genesis_calls == 0
     assert bridge.apply_calls == 1
@@ -227,6 +263,11 @@ def test_bound_scope_reuses_durable_identity_without_calling_genesis():
     assert bound_keys == [instance._semantic_request_key(scope, session_key, seq)]
     assert decision["incarnation_id"] == durable_incarnation_id
     assert decision["seed_code"] == "AE-S1-0123456789ABCDEF"
+    assert [request["origin"] for request in reconciliations] == [
+        "STARTUP_READ",
+        "PLUGIN_WRITEBACK",
+    ]
+    assert acknowledgements == []
 
 
 def test_first_genesis_binds_auxiliary_context_once_to_its_final_turn_key():
@@ -259,6 +300,7 @@ def test_first_genesis_binds_auxiliary_context_once_to_its_final_turn_key():
         recorder = BindingRecorder()
         instance._bridge = bridge
         instance._coordinator = AdvancingCoordinator()  # type: ignore[assignment]
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
 
         async def resolve(*_args, **_kwargs):
             return "persona-a", {"prompt": "new durable persona"}, "conversation"
@@ -270,14 +312,16 @@ def test_first_genesis_binds_auxiliary_context_once_to_its_final_turn_key():
             apply_stimulus=True,
             transport_context=recorder,  # type: ignore[arg-type]
         )
-        return instance, recorder, result
+        return instance, recorder, result, reconciliations, acknowledgements
 
     bridge = AdvancingBridge()
-    instance, recorder, result = asyncio.run(run())
+    instance, recorder, result, reconciliations, acknowledgements = asyncio.run(run())
     _decision, scope, session_key, seq, _turn, base_revision = result
 
     assert base_revision == 7
     assert recorder.keys == [instance._semantic_request_key(scope, session_key, seq)]
+    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
+    assert acknowledgements == []
 
 
 def test_explicit_assistant_provider_is_used_without_fallback():
@@ -574,7 +618,9 @@ def test_invalid_explicit_assistant_provider_does_not_fallback_or_expose_raw_id(
         raw_provider_id = "missing-provider-id"
         instance = plugin(FakeConfig(assistant_provider_id=raw_provider_id), context)
 
-        with pytest.raises(ValueError, match="辅助模型 Provider 不存在") as exc_info:
+        with pytest.raises(
+            AuxiliaryTransportError, match="ESTIMATOR_UNAVAILABLE"
+        ) as exc_info:
             await instance._llm_generate(
                 FakeEvent(), prompt="compile", system_prompt="compiler"
             )
@@ -585,6 +631,9 @@ def test_invalid_explicit_assistant_provider_does_not_fallback_or_expose_raw_id(
     assert context.current_calls == 0
     assert context.generate_calls == []
     assert raw_provider_id not in str(error)
+    assert error.meta.transport_subcode == "PROVIDER_NOT_FOUND"
+    assert error.meta.attempted is False
+    assert error.meta.attempt_count == 0
 
 
 def test_seed_mirror_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: Path):
@@ -665,6 +714,9 @@ def test_on_llm_request_mutates_the_provider_request_with_native_decision():
     async def run():
         instance = plugin(FakeConfig(), FakeContext())
         seed = "AE-S1-0123456789ABCDEF"
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
+            instance, seed_code=seed
+        )
 
         async def resolve(_event, _request=None):
             return "persona-1", {"prompt": "你是一个测试人格"}, "conversation"
@@ -688,9 +740,9 @@ def test_on_llm_request_mutates_the_provider_request_with_native_decision():
         instance._coordinator.first_turn = first_turn
         request = FakeRequest()
         await instance.on_llm_request(FakeEvent(), request)
-        return instance, request
+        return instance, request, reconciliations, acknowledgements
 
-    instance, request = asyncio.run(run())
+    instance, request, reconciliations, acknowledgements = asyncio.run(run())
 
     assert request.prompt == "用户原始问题"
     assert request.contexts == [{"role": "user", "content": "历史"}]
@@ -699,6 +751,9 @@ def test_on_llm_request_mutates_the_provider_request_with_native_decision():
     assert "seed_code=AE-S1-0123456789ABCDEF" in request.system_prompt
     assert "directness=0.450" in request.system_prompt
     assert instance.config["seed_code"] == "AE-S1-0123456789ABCDEF"
+    assert instance.config["seed_mirror_guard_v1"] == "a" * 64
+    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
+    assert acknowledgements[0]["writeback_token"] == "b" * 64
 
 
 def test_delivery_revision_synchronizes_native_result():
@@ -768,26 +823,45 @@ def test_reload_hydrates_revision_and_turn_id_without_reuse():
         instance._coordinator.ensure_genesis = ensure_genesis
         instance._bridge._native = object()
         instance._bridge.inspect = inspect
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
         instance._coordinator.apply_stimulus = apply_stimulus
         await instance.on_llm_request(event, request)
         scope = instance._scope_for(event, "persona-1")
         assert scope is not None
-        return instance, event, scope, calls, stimulus
+        return (
+            instance,
+            event,
+            scope,
+            calls,
+            stimulus,
+            reconciliations,
+            acknowledgements,
+        )
 
-    instance, event, scope, calls, stimulus = asyncio.run(run())
+    instance, event, scope, calls, stimulus, reconciliations, acknowledgements = (
+        asyncio.run(run())
+    )
 
-    assert calls == ["inspect", "stimulus"]
+    assert calls == ["inspect", "inspect", "stimulus"]
     assert "genesis" not in calls
     assert stimulus["base_revision"] == 7
     assert stimulus["turn_id"] == event.turn_token
     assert stimulus["turn_id"] != "turn-before-plugin-reload"
     assert instance._turn_seq[scope.session_token] == 8
+    assert [request["origin"] for request in reconciliations] == [
+        "STARTUP_READ",
+        "PLUGIN_WRITEBACK",
+    ]
+    assert acknowledgements == []
 
 
 def test_first_genesis_decision_persists_seed_to_astrbot_config():
     async def run():
         context = FakeContext()
         instance = plugin(FakeConfig(), context)
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
+            instance, seed_code="AE-S1-FIRST-GENESIS"
+        )
 
         async def resolve_default(*_args, **_kwargs):
             return "default", {"prompt": "默认人格"}, "provider_default"
@@ -809,12 +883,14 @@ def test_first_genesis_decision_persists_seed_to_astrbot_config():
         instance._coordinator.first_turn = first_turn
         request = FakeRequest()
         await instance.on_llm_request(FakeEvent(), request)
-        return instance
+        return instance, reconciliations, acknowledgements
 
-    instance = asyncio.run(run())
+    instance, reconciliations, acknowledgements = asyncio.run(run())
 
     assert instance.config["seed_code"] == "AE-S1-FIRST-GENESIS"
     assert instance.config.save_calls == 1
+    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
+    assert acknowledgements[0]["writeback_token"] == "b" * 64
 
 
 def test_seed_command_uses_main_chat_provider_through_full_genesis_compiler():
@@ -836,6 +912,9 @@ def test_seed_command_uses_main_chat_provider_through_full_genesis_compiler():
 
         context.llm_generate = llm_generate
         instance = plugin(FakeConfig(), context)
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
+            instance, seed_code="AE-S1-MAIN-PROVIDER"
+        )
 
         async def ensure_genesis(**kwargs):
             proposal = await kwargs["compiler"](kwargs["source"])
@@ -849,15 +928,17 @@ def test_seed_command_uses_main_chat_provider_through_full_genesis_compiler():
         instance._coordinator.ensure_genesis = ensure_genesis
         event = FakeEvent()
         results = [item async for item in instance.seed_command(event)]
-        return results, context, instance
+        return results, context, instance, reconciliations, acknowledgements
 
-    results, context, instance = asyncio.run(run())
+    results, context, instance, reconciliations, acknowledgements = asyncio.run(run())
 
     assert results == ["SeedCode: AE-S1-MAIN-PROVIDER"]
     assert context.current_calls == 1
     assert context.generate_calls[0]["chat_provider_id"] == "main-dialogue"
     assert instance.config["seed_code"] == "AE-S1-MAIN-PROVIDER"
     assert instance.config.save_calls == 1
+    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
+    assert acknowledgements[0]["writeback_token"] == "b" * 64
 
 
 def test_on_llm_request_stops_and_reports_when_genesis_fails():
@@ -886,6 +967,7 @@ def test_on_llm_request_stops_and_reports_when_genesis_fails():
 def test_on_llm_request_rejects_incomplete_native_genesis_receipt():
     async def run():
         instance = plugin(FakeConfig(), FakeContext())
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
 
         async def resolve(_event, _request=None):
             return "persona-1", {"prompt": "测试人格"}, "conversation"
@@ -903,9 +985,9 @@ def test_on_llm_request_rejects_incomplete_native_genesis_receipt():
         event = FakeEvent()
         request = FakeRequest()
         await instance.on_llm_request(event, request)
-        return event, request, instance
+        return event, request, instance, reconciliations, acknowledgements
 
-    event, request, instance = asyncio.run(run())
+    event, request, instance, reconciliations, acknowledgements = asyncio.run(run())
 
     assert event.stopped is True
     assert event.sent == [
@@ -913,11 +995,16 @@ def test_on_llm_request_rejects_incomplete_native_genesis_receipt():
     ]
     assert request.system_prompt == "原有系统提示"
     assert instance.config.get("seed_code", "") == ""
+    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
+    assert acknowledgements == []
 
 
 def test_persona_text_cannot_bypass_genesis_by_containing_the_injection_marker():
     async def run():
         instance = plugin(FakeConfig(seed_code=""), FakeContext())
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
+            instance, seed_code="AE-S1-MARKER-SAFE"
+        )
         calls = 0
 
         async def first_turn(*_args, **_kwargs):
@@ -943,55 +1030,59 @@ def test_persona_text_cannot_bypass_genesis_by_containing_the_injection_marker()
         request = FakeRequest()
         request.system_prompt += "\n人格会讨论 AstrEmbodiment Runtime Context。"
         await instance.on_llm_request(event, request)
-        return calls, event, request
+        return calls, event, request, reconciliations, acknowledgements
 
-    calls, event, request = asyncio.run(run())
+    calls, event, request, reconciliations, acknowledgements = asyncio.run(run())
 
     assert calls == 1
     assert event.stopped is False
     assert "seed_code=AE-S1-MARKER-SAFE" in request.system_prompt
+    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
+    assert acknowledgements[0]["writeback_token"] == "b" * 64
 
 
-def test_seed_save_failure_stops_the_host_llm_and_rolls_back_visible_seed():
+def test_seed_writeback_failure_keeps_native_generation_and_rolls_back_visible_seed():
     async def run():
         config = FailingConfig(seed_code="AE-S1-PREVIOUS")
         instance = plugin(config, FakeContext())
+        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
+            instance, seed_code="AE-S1-NOT-PERSISTED"
+        )
 
-        async def genesis(*_args, **_kwargs):
-            return (
-                {
-                    "genesis": {
-                        "seed_code": "AE-S1-NOT-PERSISTED",
-                        "incarnation_id": "AE-I1-NOT-PERSISTED",
-                    },
+        async def resolve(_event, _request=None):
+            return "persona-1", {"prompt": "测试人格"}, "conversation"
+
+        async def first_turn(**_kwargs):
+            return {
+                "genesis": {
                     "seed_code": "AE-S1-NOT-PERSISTED",
                     "incarnation_id": "AE-I1-NOT-PERSISTED",
-                    "revision": 1,
-                    "contract": {},
                 },
-                SimpleNamespace(persona_token="persona"),
-                "session",
-                0,
-                "turn",
-                0,
-            )
+                "seed_code": "AE-S1-NOT-PERSISTED",
+                "incarnation_id": "AE-I1-NOT-PERSISTED",
+                "revision": 1,
+                "contract": {},
+            }
 
-        instance._run_genesis = genesis
+        instance.resolve_effective_persona = resolve
+        instance._coordinator.first_turn = first_turn
         event = FakeEvent()
         request = FakeRequest()
         await instance.on_llm_request(event, request)
-        return config, instance, event, request
+        return config, instance, event, request, reconciliations, acknowledgements
 
-    config, instance, event, request = asyncio.run(run())
+    config, instance, event, request, reconciliations, acknowledgements = asyncio.run(
+        run()
+    )
 
-    assert event.stopped is True
-    assert event.sent == [
-        "AstrEmbodiment 创世未完成，本轮未调用对话模型：创世结果处理失败"
-    ]
+    assert event.stopped is False
+    assert event.sent == []
     assert config["seed_code"] == "AE-S1-PREVIOUS"
     assert instance._config_values["seed_code"] == "AE-S1-PREVIOUS"
-    assert request.system_prompt == "原有系统提示"
-    assert instance._pending == {}
+    assert config.save_calls == 1
+    assert "seed_code=AE-S1-NOT-PERSISTED" in request.system_prompt
+    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
+    assert acknowledgements == []
 
 
 def test_invalid_native_contract_stops_before_request_injection():
@@ -1223,6 +1314,8 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
             native.open = lambda *_args: None
             native.prepare_rebirth_v1 = _unreachable_mandatory_native_abi
             native.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
+            native.reconcile_seed_config_v1 = _unreachable_mandatory_native_abi
+            native.ack_seed_config_writeback_v1 = _unreachable_mandatory_native_abi
             native.semantic_revision_v1 = _unreachable_mandatory_native_abi
             native.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             native.verify_replay = lambda *_args: "{}"
@@ -1372,6 +1465,8 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
             module.apply_event = lambda *_args: "{}"
             module.prepare_rebirth_v1 = _unreachable_mandatory_native_abi
             module.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
+            module.reconcile_seed_config_v1 = _unreachable_mandatory_native_abi
+            module.ack_seed_config_writeback_v1 = _unreachable_mandatory_native_abi
             module.semantic_revision_v1 = _unreachable_mandatory_native_abi
             module.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             module.inspect = lambda *_args: "{}"
@@ -1469,7 +1564,8 @@ def test_schema_exposes_one_unified_chinese_provider_selector_and_seed_fields():
     )
     assert seed["type"] in {"string", "text"}
     assert seed["default"] == ""
-    assert seed["readonly"] is True
+    assert seed["readonly"] is False
+    assert "主动删除" in seed["hint"]
     assert "种子" in seed["description"]
 
 
@@ -2071,6 +2167,9 @@ def test_v3_unknown_success_migration_subcode_fails_closed_before_expression(
         "cause_code": "NATIVE_ERROR",
         "native_stage": "NATIVE_APPLY",
         "migration_subcode": "FIELD_MIGRATION_UNKNOWN",
+        "transport_subcode": "NONE",
+        "attempted": True,
+        "attempt_count": 1,
     }
     semantic_record = getattr(
         request, "_astrembodiment_semantic_observatory_record_v1", {}
@@ -2409,7 +2508,7 @@ def test_v3_dimension_value_provider_warn_includes_first_safe_diagnostic(
 
     recorder = _SemanticRecordingLogger()
     monkeypatch.setattr(main_module, "logger", recorder)
-    context, native, request = asyncio.run(run())
+    context, native, _request = asyncio.run(run())
 
     assert len(context.generate_calls) == 1
     assert native.cursor_calls == 1
@@ -2540,7 +2639,7 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
     contract_failures: list[str] = []
     structured_schema = main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA
     dimensions_schema = structured_schema["properties"]["dimensions"]
-    if dimensions_schema["$ref"] if "$ref" in dimensions_schema else False:
+    if dimensions_schema.get("$ref", False):
         contract_failures.append("dimensions schema must be inline and closed")
     if dimensions_schema["required"] != list(_V3_TEST_DIMENSIONS):
         contract_failures.append("schema must retain the canonical ordered 15D set")
