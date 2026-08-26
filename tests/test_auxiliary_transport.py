@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time as wall_time
 from types import SimpleNamespace
 
 import pytest
@@ -182,6 +184,48 @@ def test_sync_semantic_response_after_deadline_is_timeout_not_success(
         assert exc_info.value.meta.attempt_count == 1
 
     asyncio.run(run())
+
+
+def test_sync_semantic_call_returns_control_by_total_deadline() -> None:
+    """A blocking direct-return Host call must not hold the event loop past T."""
+
+    release = threading.Event()
+    release_timer = threading.Timer(1.1, release.set)
+
+    class Context:
+        def get_provider_by_id(self, provider_id: str) -> object | None:
+            return object() if provider_id == "fixed-private-id" else None
+
+        def llm_generate(self, **_kwargs: object) -> str:
+            release.wait()
+            return "late closed response"
+
+    async def run() -> float:
+        transport = AuxiliaryProviderTransport(
+            context=Context(),
+            configured_provider=lambda: ("fixed-private-id", "CONFIGURED"),
+            timeout_ms=lambda: 1_000,
+        )
+        request = transport.open_request(umo="private-umo")
+        request.bind_semantic_key("semantic-key")
+        started = wall_time.monotonic()
+        with pytest.raises(AuxiliaryTransportError) as exc_info:
+            await request.generate(
+                prompt="private prompt",
+                system_prompt="closed system prompt",
+                semantic_operation=True,
+            )
+        assert exc_info.value.meta.transport_subcode == "PROVIDER_CALL_TIMEOUT"
+        return wall_time.monotonic() - started
+
+    release_timer.start()
+    try:
+        elapsed = asyncio.run(run())
+    finally:
+        release.set()
+        release_timer.join()
+
+    assert elapsed < 1.05
 
 
 def test_semantic_owner_emits_one_transport_warning_for_joined_followers() -> None:

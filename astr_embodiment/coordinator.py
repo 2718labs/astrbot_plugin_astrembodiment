@@ -476,8 +476,10 @@ class GenesisCoordinator:
             ):
                 try:
                     self._transport_warning(result)
-                except Exception:
-                    pass
+                except (AttributeError, TypeError, ValueError):
+                    # A malformed optional observer must not change the
+                    # semantic outcome; the consumer may emit its fallback.
+                    result["_transport_warning_emitted"] = False
                 else:
                     result["_transport_warning_emitted"] = True
             if self._cacheable_semantic_result(result):

@@ -402,20 +402,22 @@ class AuxiliaryProviderTransport:
                 AuxiliaryTransportMetaV1("HOST_API_UNAVAILABLE", False, 0)
             )
         try:
-            generated = generate(
-                chat_provider_id=binding.provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                tools=None,
-            )
+            call_kwargs = {
+                "chat_provider_id": binding.provider_id,
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "tools": None,
+            }
+            if inspect.iscoroutinefunction(generate):
+                generated = generate(**call_kwargs)
+            else:
+                # to_thread propagates the request's contextvars while letting
+                # the event loop return at deadline if a sync Host call stalls.
+                generated = await self._await_with_deadline(
+                    asyncio.to_thread(generate, **call_kwargs), deadline=deadline
+                )
             if inspect.isawaitable(generated):
-                if deadline is None:
-                    result = await generated
-                else:
-                    result = await asyncio.wait_for(
-                        generated,
-                        timeout=max(0.0, deadline - time.monotonic()),
-                    )
+                result = await self._await_with_deadline(generated, deadline=deadline)
             else:
                 result = generated
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
@@ -459,6 +461,15 @@ class AuxiliaryProviderTransport:
         ):
             return DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS
         return value
+
+    @staticmethod
+    async def _await_with_deadline(awaitable: Any, *, deadline: float | None) -> Any:
+        if deadline is None:
+            return await awaitable
+        return await asyncio.wait_for(
+            awaitable,
+            timeout=max(0.0, deadline - time.monotonic()),
+        )
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:
