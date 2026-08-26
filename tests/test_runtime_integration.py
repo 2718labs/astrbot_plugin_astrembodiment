@@ -1369,7 +1369,7 @@ def test_schema_exposes_one_unified_chinese_provider_selector_and_seed_fields():
     assert provider["default"] == ""
     assert (
         provider["hint"]
-        == "统一用于辅助能力与当前请求的闭合 15 维语义估计；留空时使用当前会话 Provider。"
+        == "统一用于辅助能力与当前请求的闭合的十五维语义估计；留空时使用当前会话 Provider。"
     )
     assert legacy_provider["type"] == "string"
     assert legacy_provider["default"] == ""
@@ -1933,21 +1933,63 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
 
 
 @pytest.mark.parametrize(
-    ("native_code", "expected_stage"),
+    ("message", "expected_state_subcode"),
     (
-        ("LEGACY_UNATTESTED", "NATIVE_APPLY"),
-        ("INVALID_NEURAL_STATE", "NATIVE_APPLY"),
-        ("STORAGE", "NATIVE_APPLY"),
+        (
+            "INVALID_NEURAL_STATE::GRAPH_STATE_INVALID",
+            "GRAPH_STATE_INVALID",
+        ),
+        (
+            "INVALID_NEURAL_STATE::UNMAPPED_FUTURE_REJECTION",
+            "UNKNOWN_INVALID_NEURAL_STATE",
+        ),
+        (
+            "INVALID_NEURAL_STATE::GRAPH_STATE_INVALID::private-native-detail",
+            "UNKNOWN_INVALID_NEURAL_STATE",
+        ),
+    ),
+)
+def test_invalid_neural_state_classification_requires_exact_closed_subcode(
+    message: str, expected_state_subcode: str
+) -> None:
+    classified = bridge_module._classify(RuntimeError(message))
+
+    assert isinstance(classified, bridge_module.InvalidNeuralState)
+    assert classified.code == "INVALID_NEURAL_STATE"
+    assert classified.state_subcode == expected_state_subcode
+    assert classified.detail == expected_state_subcode
+    assert "private-native-detail" not in str(classified)
+
+
+@pytest.mark.parametrize(
+    ("native_code", "native_state_subcode", "expected_state_subcode", "expected_stage"),
+    (
+        ("LEGACY_UNATTESTED", None, None, "NATIVE_APPLY"),
+        (
+            "INVALID_NEURAL_STATE",
+            "GRAPH_STATE_INVALID",
+            "GRAPH_STATE_INVALID",
+            "NATIVE_APPLY",
+        ),
+        (
+            "INVALID_NEURAL_STATE",
+            "GRAPH_STATE_INVALID::raw-native-detail provider-id=private-provider-id",
+            "UNKNOWN_INVALID_NEURAL_STATE",
+            "NATIVE_APPLY",
+        ),
+        ("STORAGE", None, None, "NATIVE_APPLY"),
     ),
 )
 def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     monkeypatch: pytest.MonkeyPatch,
     native_code: str,
+    native_state_subcode: str | None,
+    expected_state_subcode: str | None,
     expected_stage: str,
 ):
     """PyO3 codes survive the Python preview path without exposing detail."""
 
-    native_detail = "private native detail must never appear in host logs"
+    native_detail = "private native detail provider-id=private-provider-id"
 
     class NativeAbi:
         def semantic_revision_v1(self, _scope_json: str) -> str:
@@ -1958,7 +2000,8 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
         def apply_perception_proposal_v1(
             self, _scope_json: str, _proposal_json: str
         ) -> str:
-            raise RuntimeError(f"{native_code}::{native_detail}")
+            native_suffix = native_state_subcode or native_detail
+            raise RuntimeError(f"{native_code}::{native_suffix}")
 
     async def run() -> tuple[dict[str, object], FakeRequest]:
         context = FakeContext(configured_provider="semantic")
@@ -2003,12 +2046,15 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     monkeypatch.setattr(main_module, "logger", recorder)
     observed_outcome, request = asyncio.run(run())
 
-    assert observed_outcome == {
+    expected_outcome: dict[str, object] = {
         "status": "DEGRADED",
         "code": native_code,
         "cause_code": native_code,
         "native_stage": expected_stage,
     }
+    if expected_state_subcode is not None:
+        expected_outcome["state_subcode"] = expected_state_subcode
+    assert observed_outcome == expected_outcome
     semantic_record = getattr(
         request, "_astrembodiment_semantic_observatory_record_v1", {}
     )
@@ -2019,6 +2065,7 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
             "code",
             "reason",
             "cause_code",
+            "state_subcode",
             "dimensions_fxp6",
             "revision",
         )
@@ -2027,15 +2074,24 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
         "code": "EXPRESSION_NOT_ATTEMPTED",
         "reason": "EXPRESSION_NOT_ATTEMPTED",
         "cause_code": native_code,
+        "state_subcode": expected_state_subcode,
         "dimensions_fxp6": None,
         "revision": None,
     }
-    assert recorder.warning_messages[0] == (
+    expected_warning = (
         "AstrEmbodiment semantic native failure: "
         f"code={native_code} stage={expected_stage}"
     )
+    if expected_state_subcode is not None:
+        expected_warning += f" state_subcode={expected_state_subcode}"
+    assert recorder.warning_messages[0] == expected_warning
     assert len(recorder.warning_messages) == 2
+    assert json.loads(
+        recorder.warning_messages[1].removeprefix(main_module._OBSERVATORY_PREFIX)
+    ) == semantic_record
     assert native_detail not in "\n".join(recorder.warning_messages)
+    assert "raw-native-detail" not in "\n".join(recorder.warning_messages)
+    assert "private-provider-id" not in "\n".join(recorder.warning_messages)
 
 
 def test_v3_dimension_value_provider_warn_includes_first_safe_diagnostic(

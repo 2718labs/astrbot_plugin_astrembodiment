@@ -22,6 +22,7 @@ from .bridge import (
     RetryWait,
     SEMANTIC_NATIVE_ERROR_CODES,
     SEMANTIC_NATIVE_FAILURE_STAGES,
+    normalize_invalid_neural_state_subcode,
     validate_context_summary_payload,
 )
 from .contracts import (
@@ -282,6 +283,7 @@ class GenesisCoordinator:
         *,
         cause_code: str | None = None,
         native_stage: str | None = None,
+        state_subcode: object = None,
     ) -> dict[str, str]:
         """Return one non-echoing V3 preview failure."""
 
@@ -292,6 +294,10 @@ class GenesisCoordinator:
             result["cause_code"] = code
             if native_stage in SEMANTIC_NATIVE_FAILURE_STAGES:
                 result["native_stage"] = native_stage
+                if code == "INVALID_NEURAL_STATE" and native_stage == "NATIVE_APPLY":
+                    result["state_subcode"] = normalize_invalid_neural_state_subcode(
+                        state_subcode
+                    )
         elif (
             code == "ESTIMATOR_MALFORMED"
             and cause_code in ESTIMATOR_MALFORMED_SUBCODES
@@ -464,6 +470,7 @@ class GenesisCoordinator:
             return self._semantic_failure(
                 str(closure.get("code", "NATIVE_ERROR")),
                 native_stage="NATIVE_APPLY",
+                state_subcode=closure.get("state_subcode"),
             )
         if closure.get("schema") not in {
             "astrembodiment.semantic-perception-closure.v1",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import sys
 from dataclasses import dataclass
 from importlib import import_module
@@ -26,6 +27,41 @@ from .semantic_estimator import (
 )
 
 _STORE_FILENAME = "astrembodiment.sqlite3"
+INVALID_NEURAL_STATE_SUBCODES = frozenset(
+    {
+        "BASELINE_STATE_INVALID",
+        "FIELD_STATE_INVALID",
+        "GRAPH_STATE_INVALID",
+        "DYNAMICS_INVALID",
+        "SEMANTIC_CLOSURE_INVALID",
+        "SNAPSHOT_WIRE_INVALID",
+        "SNAPSHOT_ATTESTATION_MISMATCH",
+        "AESEM3_RETIRED_COMPENSATION_NONZERO",
+        "RELATION_SCOPE_MISSING",
+        "UNKNOWN_INVALID_NEURAL_STATE",
+    }
+)
+_UNKNOWN_INVALID_NEURAL_STATE = "UNKNOWN_INVALID_NEURAL_STATE"
+_INVALID_NEURAL_STATE_MESSAGE = re.compile(r"\AINVALID_NEURAL_STATE::([A-Z0-9_]+)\Z")
+_STATE_SUBCODE_MISSING = object()
+
+
+def normalize_invalid_neural_state_subcode(value: object) -> str:
+    if type(value) is str and value in INVALID_NEURAL_STATE_SUBCODES:
+        return value
+    return _UNKNOWN_INVALID_NEURAL_STATE
+
+
+def _invalid_neural_state_subcode(error: BaseException) -> str:
+    state_subcode = getattr(error, "state_subcode", _STATE_SUBCODE_MISSING)
+    if state_subcode is not _STATE_SUBCODE_MISSING:
+        if getattr(error, "code", None) != "INVALID_NEURAL_STATE":
+            return _UNKNOWN_INVALID_NEURAL_STATE
+        return normalize_invalid_neural_state_subcode(state_subcode)
+    match = _INVALID_NEURAL_STATE_MESSAGE.fullmatch(str(error))
+    if match is None:
+        return _UNKNOWN_INVALID_NEURAL_STATE
+    return normalize_invalid_neural_state_subcode(match.group(1))
 
 
 class NativeCoreUnavailable(RuntimeError):
@@ -39,6 +75,14 @@ class NativeCoreError(RuntimeError):
         super().__init__(f"{code}::{detail}")
         self.code = code
         self.detail = detail
+
+
+class InvalidNeuralState(NativeCoreError):
+    """A closed native-state rejection that never retains raw exception detail."""
+
+    def __init__(self, state_subcode: object) -> None:
+        self.state_subcode = normalize_invalid_neural_state_subcode(state_subcode)
+        super().__init__("INVALID_NEURAL_STATE", self.state_subcode)
 
 
 class GenesisUnavailable(NativeCoreError):
@@ -564,8 +608,15 @@ def validate_context_summary_payload(payload: Any) -> dict[str, Any]:
     return dict(payload)
 
 
-def _semantic_degraded(code: str) -> dict[str, str]:
-    return {"status": "DEGRADED", "code": code}
+def _semantic_degraded(
+    code: str, *, state_subcode: object = _STATE_SUBCODE_MISSING
+) -> dict[str, str]:
+    result = {"status": "DEGRADED", "code": code}
+    if code == "INVALID_NEURAL_STATE" and state_subcode is not _STATE_SUBCODE_MISSING:
+        result["state_subcode"] = normalize_invalid_neural_state_subcode(
+            state_subcode
+        )
+    return result
 
 
 def _semantic_error_code(error: BaseException) -> str:
@@ -1221,6 +1272,8 @@ def _classify(error: BaseException) -> NativeCoreError:
         code, _, detail = message.partition("::")
     else:
         code, detail = getattr(error, "code", "STORAGE"), message
+    if code == "INVALID_NEURAL_STATE":
+        return InvalidNeuralState(_invalid_neural_state_subcode(error))
     error_type = _ERROR_TYPES.get(code, NativeCoreError)
     return error_type(code, detail)
 
@@ -1484,7 +1537,15 @@ class NativeBridge:
         except BaseException as exc:
             if isinstance(exc, (TypeError, ValueError, json.JSONDecodeError)):
                 return _semantic_degraded("NATIVE_MALFORMED")
-            return _semantic_degraded(_semantic_error_code(exc))
+            code = _semantic_error_code(exc)
+            return _semantic_degraded(
+                code,
+                state_subcode=(
+                    _invalid_neural_state_subcode(exc)
+                    if code == "INVALID_NEURAL_STATE"
+                    else _STATE_SUBCODE_MISSING
+                ),
+            )
 
     @property
     def loaded(self) -> bool:

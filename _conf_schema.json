@@ -43,13 +43,13 @@
     "items": {
       "assistant_provider_id": {
         "description": "辅助模型 Provider",
-        "hint": "统一用于辅助能力与当前请求的闭合 15 维语义估计；留空时使用当前会话 Provider。",
+        "hint": "统一用于辅助能力与当前请求的闭合的十五维语义估计；留空时使用当前会话 Provider。",
         "type": "string",
         "_special": "select_provider",
         "default": ""
       },
       "semantic_estimator_provider_id": {
-        "description": "V3 语义估计 Provider",
+        "description": "十五维语义估计 Provider",
         "hint": "旧版兼容字段；统一 Provider 配置请使用辅助模型 Provider。",
         "type": "string",
         "_special": "select_provider",
@@ -57,7 +57,7 @@
         "invisible": true
       },
       "semantic_estimator_timeout_ms": {
-        "description": "V3 语义估计超时（毫秒）",
+        "description": "十五维语义估计超时（毫秒）",
         "hint": "超时后不提交语义、不回退固定零，并记录 EXPRESSION_NOT_ATTEMPTED 警告。",
         "type": "int",
         "default": 8000,

@@ -64,6 +64,7 @@ try:
     from .astr_embodiment.bridge import (
         SEMANTIC_NATIVE_ERROR_CODES,
         SEMANTIC_NATIVE_FAILURE_STAGES,
+        normalize_invalid_neural_state_subcode,
     )
     from .astr_embodiment.contracts import (
         FrozenTurn,
@@ -96,6 +97,7 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment.bridge import (
         SEMANTIC_NATIVE_ERROR_CODES,
         SEMANTIC_NATIVE_FAILURE_STAGES,
+        normalize_invalid_neural_state_subcode,
     )
     from astr_embodiment.contracts import (
         FrozenTurn,
@@ -1323,6 +1325,7 @@ class AstrEmbodimentPlugin(Star):
             "semantic_vector_counts": None,
             "node_counts": None,
             "expression_profile_fxp6": None,
+            "state_subcode": None,
         }
         profile = cls._expression_profile_from_semantic_outcome(outcome)
         if expression_applied and profile is not None and expression_profile == profile:
@@ -1395,6 +1398,7 @@ class AstrEmbodimentPlugin(Star):
                     "semantic_vector_counts": vector_counts,
                     "node_counts": node_counts,
                     "expression_profile_fxp6": profile,
+                    "state_subcode": None,
                 }
         if cause_code is None and isinstance(outcome, Mapping):
             candidate = outcome.get("cause_code")
@@ -1405,6 +1409,13 @@ class AstrEmbodimentPlugin(Star):
         if cause_code not in _SEMANTIC_NOT_ATTEMPTED_CAUSES:
             cause_code = "NATIVE_ERROR"
         empty_record["cause_code"] = cause_code
+        if (
+            cause_code == "INVALID_NEURAL_STATE"
+            and outcome.get("native_stage") == "NATIVE_APPLY"
+        ):
+            empty_record["state_subcode"] = normalize_invalid_neural_state_subcode(
+                outcome.get("state_subcode")
+            )
         return empty_record
 
     def _emit_semantic_observatory(
@@ -1431,11 +1442,22 @@ class AstrEmbodimentPlugin(Star):
             and type(native_stage) is str
             and native_stage in SEMANTIC_NATIVE_FAILURE_STAGES
         ):
-            logger.warning(
-                "AstrEmbodiment semantic native failure: code=%s stage=%s",
-                native_code,
-                native_stage,
-            )
+            if native_code == "INVALID_NEURAL_STATE" and native_stage == "NATIVE_APPLY":
+                logger.warning(
+                    "AstrEmbodiment semantic native failure: "
+                    "code=%s stage=%s state_subcode=%s",
+                    native_code,
+                    native_stage,
+                    normalize_invalid_neural_state_subcode(
+                        outcome.get("state_subcode")
+                    ),
+                )
+            else:
+                logger.warning(
+                    "AstrEmbodiment semantic native failure: code=%s stage=%s",
+                    native_code,
+                    native_stage,
+                )
         try:
             message = _OBSERVATORY_PREFIX + json.dumps(
                 record,

@@ -35,6 +35,23 @@ PROFILE = (
     "engagement",
     "epistemic_caution",
 )
+
+
+def test_user_visible_semantic_config_uses_fifteen_dimension_wording() -> None:
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    settings = schema["model_settings"]["items"]
+
+    assert settings["semantic_estimator_provider_id"]["description"] == (
+        "十五维语义估计 Provider"
+    )
+    assert settings["semantic_estimator_timeout_ms"]["description"] == (
+        "十五维语义估计超时（毫秒）"
+    )
+    assert "闭合的十五维语义估计" in settings["assistant_provider_id"]["hint"]
 DETAILED_FIELDS = (
     "schema",
     "status",
