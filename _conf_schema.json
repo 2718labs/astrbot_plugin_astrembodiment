@@ -69,9 +69,16 @@
   },
   "seed_code": {
     "description": "SeedCode（身份种子）",
-    "hint": "系统生成，仅用于查看；真实身份与连续状态由 durable Store/Vault 保存。重载或插件更新不会以 SeedCode 重新初始化；只有用户明确发起并确认的重生/清空动作才会创建新 incarnation。",
+    "hint": "显示当前原生身份种子。若你在配置页主动删除并保存此字段，插件会在下次安全检查时仅重生该人格的当前代建模/经历状态，并生成新的 SeedCode；旧 generation 保留。留空默认值、字段缺失、配置读取失败、迁移或插件更新不会触发重生。",
     "type": "text",
     "default": "",
-    "readonly": true
+    "readonly": false
+  },
+  "seed_mirror_guard_v1": {
+    "description": "SeedCode 镜像校验",
+    "hint": "内部字段，用于确认配置页的明确删空操作；请勿修改。",
+    "type": "text",
+    "default": "",
+    "invisible": true
   }
 }

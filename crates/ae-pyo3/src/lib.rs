@@ -14,7 +14,10 @@ use ae_contracts::{
 };
 use ae_store::{
     RebirthActionV1, RebirthAuditReceiptV1, RebirthOutcomeV1, RebirthPrepareRequestV1,
-    RebirthResponseEnvelopeV1, RebirthResponseStateV1, UserAuthorizedRebirthV1,
+    RebirthResponseEnvelopeV1, RebirthResponseStateV1, SeedConfigAckStateV1,
+    SeedConfigLifecycleError, SeedConfigObservationV1, SeedConfigOriginV1,
+    SeedConfigReconcileRequestV1, SeedConfigStateV1, SeedConfigWritebackAckV1,
+    UserAuthorizedRebirthV1,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -42,6 +45,15 @@ fn invalid_neural_state_error(subcode: StateSubcodeV1) -> PyErr {
     error
 }
 
+fn seed_config_error(code: &'static str) -> PyErr {
+    let error = NativeCoreError::new_err(code);
+    Python::attach(|py| {
+        let value = error.value(py);
+        let _ = value.setattr("code", code);
+    });
+    error
+}
+
 fn core() -> PyResult<MutexGuard<'static, Option<ae_runtime::AstrRuntime>>> {
     let mutex = CORE.get_or_init(|| Mutex::new(None));
     mutex
@@ -54,6 +66,7 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
         ae_runtime::RuntimeError::Genesis(_) => ("GENESIS_UNAVAILABLE", error.to_string()),
         ae_runtime::RuntimeError::RetryWait => ("RETRY_WAIT", error.to_string()),
         ae_runtime::RuntimeError::Rebirth(rebirth) => (rebirth.code(), error.to_string()),
+        ae_runtime::RuntimeError::SeedConfig(seed) => return seed_config_error(seed.code()),
         ae_runtime::RuntimeError::Store(ae_store::StoreError::SeedDigestCollision) => {
             ("SEED_DIGEST_COLLISION", error.to_string())
         }
@@ -587,6 +600,42 @@ fn rebirth_envelope_payload(envelope: &RebirthResponseEnvelopeV1) -> serde_json:
     })
 }
 
+fn seed_config_state_name(state: SeedConfigStateV1) -> &'static str {
+    match state {
+        SeedConfigStateV1::Unchanged => "UNCHANGED",
+        SeedConfigStateV1::WriteMirror => "WRITE_MIRROR",
+        SeedConfigStateV1::Deferred => "DEFERRED",
+        SeedConfigStateV1::RebirthCommitted => "REBIRTH_COMMITTED",
+        SeedConfigStateV1::RebirthReplayed => "REBIRTH_REPLAYED",
+    }
+}
+
+fn seed_config_ack_state_name(state: SeedConfigAckStateV1) -> &'static str {
+    match state {
+        SeedConfigAckStateV1::MirrorActive => "MIRROR_ACTIVE",
+        SeedConfigAckStateV1::Replayed => "REPLAYED",
+        SeedConfigAckStateV1::Stale => "STALE",
+    }
+}
+
+fn seed_config_result_payload(result: ae_store::SeedConfigReconcileResultV1) -> serde_json::Value {
+    let writeback = result.writeback.map(|value| {
+        serde_json::json!({
+            "seed_code": value.seed_code,
+            "mirror_guard": value.mirror_guard,
+            "writeback_token": value.writeback_token,
+        })
+    });
+    serde_json::json!({
+        "schema": "astrembodiment.seed-config-result.v1",
+        "state": seed_config_state_name(result.state),
+        "writeback": writeback,
+        "before_revision": result.before_revision,
+        "after_revision": result.after_revision,
+        "reason": result.reason,
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FfiScope {
@@ -594,6 +643,218 @@ struct FfiScope {
     persona_token: String,
     session_token: String,
     relation_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FfiSeedConfigScopeV1 {
+    bot_token: String,
+    persona_token: String,
+    relation_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum FfiSeedConfigObservationV1 {
+    PresentNonempty,
+    PresentEmpty,
+    Missing,
+    ReadFailed,
+}
+
+impl FfiSeedConfigObservationV1 {
+    fn into_runtime(self) -> SeedConfigObservationV1 {
+        match self {
+            Self::PresentNonempty => SeedConfigObservationV1::PresentNonempty,
+            Self::PresentEmpty => SeedConfigObservationV1::PresentEmpty,
+            Self::Missing => SeedConfigObservationV1::Missing,
+            Self::ReadFailed => SeedConfigObservationV1::ReadFailed,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum FfiSeedConfigOriginV1 {
+    UserSaveEvent,
+    StartupRead,
+    PluginWriteback,
+    LegacyConfigMigration,
+}
+
+impl FfiSeedConfigOriginV1 {
+    fn into_runtime(self) -> SeedConfigOriginV1 {
+        match self {
+            Self::UserSaveEvent => SeedConfigOriginV1::UserSaveEvent,
+            Self::StartupRead => SeedConfigOriginV1::StartupRead,
+            Self::PluginWriteback => SeedConfigOriginV1::PluginWriteback,
+            Self::LegacyConfigMigration => SeedConfigOriginV1::LegacyConfigMigration,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FfiSeedConfigReconcileRequestV1 {
+    schema: String,
+    scope: FfiSeedConfigScopeV1,
+    observation: FfiSeedConfigObservationV1,
+    origin: FfiSeedConfigOriginV1,
+    seed_code: Option<String>,
+    mirror_guard: Option<String>,
+    previous_observation: Option<FfiSeedConfigObservationV1>,
+    package_epoch: String,
+    config_schema_version: u16,
+    host_config_revision: u64,
+}
+
+impl FfiSeedConfigReconcileRequestV1 {
+    fn into_runtime(self) -> Result<(ScopeRef, SeedConfigReconcileRequestV1), ()> {
+        if self.schema != "astrembodiment.seed-config-observation.v1" {
+            return Err(());
+        }
+        let scope = self.scope.scope_ref()?;
+        let scope_token = wire::persona_scope_digest(
+            &scope.bot_token,
+            &scope.persona_token,
+            scope.relation_token.as_ref(),
+        );
+        let observation = self.observation.into_runtime();
+        let seed_code = self.seed_code;
+        let mirror_guard = self.mirror_guard;
+        if mirror_guard
+            .as_deref()
+            .is_some_and(|value| !strict_seed_config_capability(value))
+        {
+            return Err(());
+        }
+        if seed_code.as_deref().is_some_and(|value| value.len() > 256) {
+            return Err(());
+        }
+        match observation {
+            SeedConfigObservationV1::PresentNonempty => {
+                if !seed_code
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    return Err(());
+                }
+            }
+            SeedConfigObservationV1::PresentEmpty
+            | SeedConfigObservationV1::Missing
+            | SeedConfigObservationV1::ReadFailed => {
+                if seed_code.is_some() {
+                    return Err(());
+                }
+            }
+        }
+        if self.package_epoch.is_empty()
+            || self.package_epoch.len() > 128
+            || !self
+                .package_epoch
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || self.config_schema_version != 1
+            || self.previous_observation.as_ref().is_some_and(|previous| {
+                !matches!(previous, FfiSeedConfigObservationV1::PresentNonempty)
+            })
+        {
+            return Err(());
+        }
+        Ok((
+            scope,
+            SeedConfigReconcileRequestV1 {
+                scope_token,
+                observation,
+                origin: self.origin.into_runtime(),
+                seed_code,
+                mirror_guard,
+                previous_observation: self
+                    .previous_observation
+                    .map(FfiSeedConfigObservationV1::into_runtime),
+                package_epoch: self.package_epoch,
+                config_schema_version: self.config_schema_version,
+                host_config_revision: self.host_config_revision,
+            },
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FfiSeedConfigWritebackAckV1 {
+    schema: String,
+    scope: FfiSeedConfigScopeV1,
+    writeback_token: String,
+    write_succeeded: bool,
+    host_config_revision: u64,
+}
+
+impl FfiSeedConfigWritebackAckV1 {
+    fn into_runtime(self) -> Result<(ScopeRef, SeedConfigWritebackAckV1), ()> {
+        if self.schema != "astrembodiment.seed-config-writeback-ack.v1"
+            || !self.write_succeeded
+            || !strict_seed_config_capability(&self.writeback_token)
+        {
+            return Err(());
+        }
+        let scope = self.scope.scope_ref()?;
+        let scope_token = wire::persona_scope_digest(
+            &scope.bot_token,
+            &scope.persona_token,
+            scope.relation_token.as_ref(),
+        );
+        Ok((
+            scope,
+            SeedConfigWritebackAckV1 {
+                scope_token,
+                writeback_token: self.writeback_token,
+                write_succeeded: self.write_succeeded,
+                host_config_revision: self.host_config_revision,
+            },
+        ))
+    }
+}
+
+impl FfiSeedConfigScopeV1 {
+    fn scope_ref(&self) -> Result<ScopeRef, ()> {
+        if !strict_seed_config_token(&self.bot_token)
+            || !strict_seed_config_token(&self.persona_token)
+            || self
+                .relation_token
+                .as_deref()
+                .is_some_and(|value| !strict_seed_config_token(value))
+        {
+            return Err(());
+        }
+        Ok(ScopeRef {
+            bot_token: hex::decode16(&self.bot_token).map_err(|_| ())?,
+            persona_token: hex::decode16(&self.persona_token).map_err(|_| ())?,
+            relation_token: self
+                .relation_token
+                .as_deref()
+                .map(hex::decode16)
+                .transpose()
+                .map_err(|_| ())?,
+            // Seed configuration owns only the Bot/Persona scope.  Session
+            // is deliberately absent from this ABI and is fixed to zero.
+            session_token: [0; 16],
+        })
+    }
+}
+
+fn strict_seed_config_token(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn strict_seed_config_capability(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Deserialize)]
@@ -803,6 +1064,50 @@ fn confirm_rebirth_v1(request_json: &str) -> PyResult<String> {
         .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
 }
 
+/// Reconcile a tri-state host SeedCode observation. The only destructive
+/// authority is inside the dedicated Rust seed-config lifecycle; this JSON
+/// boundary accepts no incarnation/revision fence and no manual consent flag.
+#[pyfunction]
+fn reconcile_seed_config_v1(request_json: &str) -> PyResult<String> {
+    let request: FfiSeedConfigReconcileRequestV1 = serde_json::from_str(request_json)
+        .map_err(|_| seed_config_error(SeedConfigLifecycleError::SchemaInvalid.code()))?;
+    let (scope, request) = request
+        .into_runtime()
+        .map_err(|_| seed_config_error(SeedConfigLifecycleError::SchemaInvalid.code()))?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| seed_config_error(SeedConfigLifecycleError::Unknown.code()))?;
+    let result = runtime
+        .reconcile_seed_config_v1(&scope, &request)
+        .map_err(map_error)?;
+    serde_json::to_string(&seed_config_result_payload(result))
+        .map_err(|_| seed_config_error(SeedConfigLifecycleError::Unknown.code()))
+}
+
+/// Mark a native pending mirror active only after AstrBot reports that the
+/// exact configuration writeback succeeded.
+#[pyfunction]
+fn ack_seed_config_writeback_v1(request_json: &str) -> PyResult<String> {
+    let request: FfiSeedConfigWritebackAckV1 = serde_json::from_str(request_json)
+        .map_err(|_| seed_config_error(SeedConfigLifecycleError::SchemaInvalid.code()))?;
+    let (scope, request) = request
+        .into_runtime()
+        .map_err(|_| seed_config_error(SeedConfigLifecycleError::SchemaInvalid.code()))?;
+    let mut guard = core()?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| seed_config_error(SeedConfigLifecycleError::Unknown.code()))?;
+    let result = runtime
+        .ack_seed_config_writeback_v1(&scope, &request)
+        .map_err(map_error)?;
+    serde_json::to_string(&serde_json::json!({
+        "schema": "astrembodiment.seed-config-ack.v1",
+        "state": seed_config_ack_state_name(result.state),
+    }))
+    .map_err(|_| seed_config_error(SeedConfigLifecycleError::Unknown.code()))
+}
+
 /// Apply one closed canonical event through the deterministic G0 no-op lane.
 #[pyfunction]
 fn apply_event(scope_json: &str, event_json: &str) -> PyResult<String> {
@@ -955,6 +1260,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ensure_genesis, module)?)?;
     module.add_function(wrap_pyfunction!(prepare_rebirth_v1, module)?)?;
     module.add_function(wrap_pyfunction!(confirm_rebirth_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(reconcile_seed_config_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(ack_seed_config_writeback_v1, module)?)?;
     module.add_function(wrap_pyfunction!(apply_event, module)?)?;
     module.add_function(wrap_pyfunction!(semantic_revision_v1, module)?)?;
     module.add_function(wrap_pyfunction!(apply_perception_proposal_v1, module)?)?;

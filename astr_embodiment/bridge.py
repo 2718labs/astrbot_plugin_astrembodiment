@@ -167,6 +167,10 @@ class RebirthNonceConflict(NativeCoreError):
     pass
 
 
+class SeedConfigLifecycleFailure(NativeCoreError):
+    """Closed failure emitted by the dedicated native seed-config lifecycle."""
+
+
 class ContextProjectionIntegrity(NativeCoreError):
     pass
 
@@ -204,6 +208,14 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "REBIRTH_CONFIRMATION_REQUIRED": RebirthConfirmationRequired,
     "REBIRTH_FENCE_STALE": RebirthFenceStale,
     "REBIRTH_NONCE_CONFLICT": RebirthNonceConflict,
+    "SEED_CONFIG_SCHEMA_INVALID": SeedConfigLifecycleFailure,
+    "SEED_CONFIG_OBSERVATION_UNCERTAIN": SeedConfigLifecycleFailure,
+    "SEED_CONFIG_MIRROR_STALE": SeedConfigLifecycleFailure,
+    "SEED_CLEAR_FENCE_STALE": SeedConfigLifecycleFailure,
+    "SEED_CLEAR_IN_FLIGHT": SeedConfigLifecycleFailure,
+    "SEED_CLEAR_STORAGE_FAILED": SeedConfigLifecycleFailure,
+    "SEED_CLEAR_LOCATOR_INVALID": SeedConfigLifecycleFailure,
+    "SEED_CLEAR_UNKNOWN": SeedConfigLifecycleFailure,
     "CONTEXT_RECEIPT_INVALID": ContextProjectionIntegrity,
     "CONTEXT_PROJECTION": ContextProjectionIntegrity,
     "CONTEXT_COMMIT_MISSING": ContextProjectionIntegrity,
@@ -587,6 +599,204 @@ def _validate_rebirth_response(payload: Any) -> dict[str, Any]:
         raise _rebirth_integrity_error("rebirth receipt revision is invalid")
     if not _positive_int(receipt["audit_time_ms"]):
         raise _rebirth_integrity_error("rebirth audit time is invalid")
+    return dict(payload)
+
+
+_SEED_CONFIG_OBSERVATION_SCHEMA = "astrembodiment.seed-config-observation.v1"
+_SEED_CONFIG_RESULT_SCHEMA = "astrembodiment.seed-config-result.v1"
+_SEED_CONFIG_ACK_SCHEMA = "astrembodiment.seed-config-ack.v1"
+_SEED_CONFIG_WRITEBACK_ACK_SCHEMA = "astrembodiment.seed-config-writeback-ack.v1"
+_SEED_CONFIG_SCOPE_KEYS = frozenset(
+    {"bot_token", "persona_token", "relation_token"}
+)
+_SEED_CONFIG_RECONCILE_REQUIRED_KEYS = frozenset(
+    {
+        "schema",
+        "scope",
+        "observation",
+        "origin",
+        "previous_observation",
+        "package_epoch",
+        "config_schema_version",
+        "host_config_revision",
+    }
+)
+_SEED_CONFIG_RECONCILE_OPTIONAL_KEYS = frozenset({"seed_code", "mirror_guard"})
+_SEED_CONFIG_RESULT_KEYS = frozenset(
+    {"schema", "state", "writeback", "before_revision", "after_revision", "reason"}
+)
+_SEED_CONFIG_WRITEBACK_KEYS = frozenset(
+    {"seed_code", "mirror_guard", "writeback_token"}
+)
+_SEED_CONFIG_ACK_REQUEST_KEYS = frozenset(
+    {"schema", "scope", "writeback_token", "write_succeeded", "host_config_revision"}
+)
+_SEED_CONFIG_ACK_RESULT_KEYS = frozenset({"schema", "state"})
+_SEED_CONFIG_OBSERVATIONS = frozenset(
+    {"PRESENT_NONEMPTY", "PRESENT_EMPTY", "MISSING", "READ_FAILED"}
+)
+_SEED_CONFIG_ORIGINS = frozenset(
+    {
+        "USER_SAVE_EVENT",
+        "STARTUP_READ",
+        "PLUGIN_WRITEBACK",
+        "LEGACY_CONFIG_MIGRATION",
+    }
+)
+_SEED_CONFIG_RESULT_STATES = frozenset(
+    {
+        "UNCHANGED",
+        "WRITE_MIRROR",
+        "DEFERRED",
+        "REBIRTH_COMMITTED",
+        "REBIRTH_REPLAYED",
+    }
+)
+_SEED_CONFIG_REASONS = frozenset(
+    {
+        "SEED_CONFIG_NATIVE_MATCH",
+        "SEED_CONFIG_REPAIR_REQUIRED",
+        "SEED_CONFIG_OBSERVATION_DEFERRED",
+        "SEED_CLEAR_REBIRTH_COMMITTED",
+        "SEED_CLEAR_REBIRTH_REPLAYED",
+    }
+)
+
+
+def _seed_config_schema_error(detail: str) -> SeedConfigLifecycleFailure:
+    return SeedConfigLifecycleFailure("SEED_CONFIG_SCHEMA_INVALID", detail)
+
+
+def _seed_config_response_error(detail: str) -> SeedConfigLifecycleFailure:
+    return SeedConfigLifecycleFailure("SEED_CLEAR_UNKNOWN", detail)
+
+
+def _is_seed_config_capability(value: Any) -> bool:
+    return _is_digest_hex(value) and value == value.lower()
+
+
+def _validate_seed_config_scope(scope: Any) -> None:
+    if not isinstance(scope, dict) or set(scope) != _SEED_CONFIG_SCOPE_KEYS:
+        raise _seed_config_schema_error("seed config scope is not closed")
+    if not _is_token_hex(scope["bot_token"]) or not _is_token_hex(
+        scope["persona_token"]
+    ):
+        raise _seed_config_schema_error("seed config scope token is invalid")
+    relation_token = scope["relation_token"]
+    if relation_token is not None and not _is_token_hex(relation_token):
+        raise _seed_config_schema_error("seed config relation token is invalid")
+
+
+def _validate_seed_config_reconcile_request(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise _seed_config_schema_error("seed config request is invalid")
+    keys = set(payload)
+    if not _SEED_CONFIG_RECONCILE_REQUIRED_KEYS <= keys or not keys <= (
+        _SEED_CONFIG_RECONCILE_REQUIRED_KEYS | _SEED_CONFIG_RECONCILE_OPTIONAL_KEYS
+    ):
+        raise _seed_config_schema_error("seed config request is not closed")
+    if payload["schema"] != _SEED_CONFIG_OBSERVATION_SCHEMA:
+        raise _seed_config_schema_error("seed config schema is invalid")
+    _validate_seed_config_scope(payload["scope"])
+    observation = payload["observation"]
+    origin = payload["origin"]
+    if observation not in _SEED_CONFIG_OBSERVATIONS or origin not in _SEED_CONFIG_ORIGINS:
+        raise _seed_config_schema_error("seed config enum is invalid")
+    previous = payload["previous_observation"]
+    if previous is not None and previous != "PRESENT_NONEMPTY":
+        raise _seed_config_schema_error("seed config previous observation is invalid")
+    if observation == "PRESENT_NONEMPTY":
+        seed_code = payload.get("seed_code")
+        if (
+            type(seed_code) is not str
+            or not seed_code
+            or len(seed_code) > 256
+        ):
+            raise _seed_config_schema_error("seed config seed code is invalid")
+    elif "seed_code" in payload:
+        raise _seed_config_schema_error("seed config empty observation carries seed")
+    if "mirror_guard" in payload and not _is_seed_config_capability(
+        payload["mirror_guard"]
+    ):
+        raise _seed_config_schema_error("seed config mirror guard is invalid")
+    package_epoch = payload["package_epoch"]
+    if (
+        type(package_epoch) is not str
+        or not package_epoch
+        or len(package_epoch) > 128
+        or not all(char.isascii() and (char.isalnum() or char in "._-") for char in package_epoch)
+    ):
+        raise _seed_config_schema_error("seed config package epoch is invalid")
+    if payload["config_schema_version"] != 1:
+        raise _seed_config_schema_error("seed config schema version is invalid")
+    if not _positive_int_or_zero(payload["host_config_revision"]):
+        raise _seed_config_schema_error("seed config revision is invalid")
+    return dict(payload)
+
+
+def _validate_seed_config_writeback(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != _SEED_CONFIG_WRITEBACK_KEYS:
+        raise _seed_config_response_error("seed config writeback is not closed")
+    if (
+        type(payload["seed_code"]) is not str
+        or not payload["seed_code"]
+        or len(payload["seed_code"]) > 256
+        or not _is_seed_config_capability(payload["mirror_guard"])
+        or not _is_seed_config_capability(payload["writeback_token"])
+    ):
+        raise _seed_config_response_error("seed config writeback is invalid")
+    return dict(payload)
+
+
+def _validate_seed_config_result(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != _SEED_CONFIG_RESULT_KEYS:
+        raise _seed_config_response_error("seed config result is not closed")
+    if payload["schema"] != _SEED_CONFIG_RESULT_SCHEMA:
+        raise _seed_config_response_error("seed config result schema is invalid")
+    state = payload["state"]
+    if state not in _SEED_CONFIG_RESULT_STATES or payload["reason"] not in _SEED_CONFIG_REASONS:
+        raise _seed_config_response_error("seed config result enum is invalid")
+    writeback = payload["writeback"]
+    if state in {"WRITE_MIRROR", "REBIRTH_COMMITTED", "REBIRTH_REPLAYED"}:
+        payload = dict(payload)
+        payload["writeback"] = _validate_seed_config_writeback(writeback)
+    elif writeback is not None:
+        raise _seed_config_response_error("seed config unexpected writeback")
+    if state in {"REBIRTH_COMMITTED", "REBIRTH_REPLAYED"}:
+        if (
+            not _positive_int_or_zero(payload["before_revision"])
+            or payload["after_revision"] != 0
+        ):
+            raise _seed_config_response_error("seed config rebirth revision is invalid")
+    elif payload["before_revision"] is not None or payload["after_revision"] is not None:
+        raise _seed_config_response_error("seed config nonrebirth revision is invalid")
+    return dict(payload)
+
+
+def _validate_seed_config_ack_request(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != _SEED_CONFIG_ACK_REQUEST_KEYS:
+        raise _seed_config_schema_error("seed config acknowledgement is not closed")
+    if payload["schema"] != _SEED_CONFIG_WRITEBACK_ACK_SCHEMA:
+        raise _seed_config_schema_error("seed config acknowledgement schema is invalid")
+    _validate_seed_config_scope(payload["scope"])
+    if (
+        payload["write_succeeded"] is not True
+        or not _is_seed_config_capability(payload["writeback_token"])
+        or not _positive_int_or_zero(payload["host_config_revision"])
+    ):
+        raise _seed_config_schema_error("seed config acknowledgement is invalid")
+    return dict(payload)
+
+
+def _validate_seed_config_ack_result(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != _SEED_CONFIG_ACK_RESULT_KEYS:
+        raise _seed_config_response_error("seed config acknowledgement result is not closed")
+    if payload["schema"] != _SEED_CONFIG_ACK_SCHEMA or payload["state"] not in {
+        "MIRROR_ACTIVE",
+        "REPLAYED",
+        "STALE",
+    }:
+        raise _seed_config_response_error("seed config acknowledgement result is invalid")
     return dict(payload)
 
 
@@ -1500,6 +1710,39 @@ class NativeBridge:
         except Exception as exc:
             raise _classify(exc) from exc
         return _validate_rebirth_response(_parse_payload(result))
+
+    def reconcile_seed_config_v1(
+        self, closed_request: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Reconcile a closed tri-state SeedCode observation in native code.
+
+        The bridge validates only the observation envelope. It never calls
+        ``inspect``, supplies a manual confirmation flag, or caches a native
+        authority fence for this lifecycle.
+        """
+        request = _validate_seed_config_reconcile_request(closed_request)
+        native = self._require()
+        try:
+            result = native.reconcile_seed_config_v1(
+                json.dumps(request, ensure_ascii=False, sort_keys=True)
+            )
+        except Exception as exc:
+            raise _classify(exc) from exc
+        return _validate_seed_config_result(_parse_payload(result))
+
+    def ack_seed_config_writeback_v1(
+        self, closed_request: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Activate a native mirror after the exact host writeback succeeds."""
+        request = _validate_seed_config_ack_request(closed_request)
+        native = self._require()
+        try:
+            result = native.ack_seed_config_writeback_v1(
+                json.dumps(request, ensure_ascii=False, sort_keys=True)
+            )
+        except Exception as exc:
+            raise _classify(exc) from exc
+        return _validate_seed_config_ack_result(_parse_payload(result))
 
     def apply_event(
         self, scope: dict[str, Any], event: dict[str, Any]

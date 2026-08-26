@@ -1,6 +1,6 @@
 use crate::continuity_migration::ContinuityAuthority;
 use crate::{ClaimOutcome, Store};
-use ae_contracts::{wire, Digest};
+use ae_contracts::{hex, wire, Digest};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::fs;
 use std::io::{Read, Write};
@@ -811,6 +811,225 @@ impl From<VaultLocateError> for RebirthLifecycleError {
     }
 }
 
+/// Closed observation values accepted by the seed-configuration lifecycle.
+/// These values deliberately preserve the distinction between an explicit
+/// empty value, a missing key, and a failed host read; collapsing those cases
+/// would make an upgrade/default read look like a destructive user action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedConfigObservationV1 {
+    PresentNonempty,
+    PresentEmpty,
+    Missing,
+    ReadFailed,
+}
+
+/// The host path that produced a seed configuration observation.  Rust keeps
+/// this closed so a new Python caller cannot accidentally acquire destructive
+/// authority merely by inventing an origin string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedConfigOriginV1 {
+    UserSaveEvent,
+    StartupRead,
+    PluginWriteback,
+    LegacyConfigMigration,
+}
+
+/// Coarse result state of the seed configuration reconciler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedConfigStateV1 {
+    Unchanged,
+    WriteMirror,
+    Deferred,
+    RebirthCommitted,
+    RebirthReplayed,
+}
+
+/// Closed writeback acknowledgement state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeedConfigAckStateV1 {
+    MirrorActive,
+    Replayed,
+    Stale,
+}
+
+/// The immediate, non-persisted host repair values.  This intentionally has
+/// no `Debug` implementation: SeedCode, guard and token must never enter a
+/// trace or an error formatter.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SeedConfigWritebackV1 {
+    pub seed_code: String,
+    pub mirror_guard: String,
+    pub writeback_token: String,
+}
+
+/// Raw host observations cross this boundary once.  The lifecycle persists
+/// only one-way digests of the guard/token and never derives identity from the
+/// presented SeedCode.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SeedConfigReconcileRequestV1 {
+    pub scope_token: Digest,
+    pub observation: SeedConfigObservationV1,
+    pub origin: SeedConfigOriginV1,
+    pub seed_code: Option<String>,
+    pub mirror_guard: Option<String>,
+    pub previous_observation: Option<SeedConfigObservationV1>,
+    pub package_epoch: String,
+    pub config_schema_version: u16,
+    pub host_config_revision: u64,
+}
+
+/// A result is deliberately non-Debug because it may carry immediate raw
+/// writeback values.  The `reason` member is a closed, non-secret code.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SeedConfigReconcileResultV1 {
+    pub state: SeedConfigStateV1,
+    pub writeback: Option<SeedConfigWritebackV1>,
+    pub before_revision: Option<u64>,
+    pub after_revision: Option<u64>,
+    pub reason: &'static str,
+}
+
+/// Raw acknowledgement capability.  A false acknowledgement is never an
+/// activation request and is rejected at the native boundary.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SeedConfigWritebackAckV1 {
+    pub scope_token: Digest,
+    pub writeback_token: String,
+    pub write_succeeded: bool,
+    pub host_config_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedConfigAckResultV1 {
+    pub state: SeedConfigAckStateV1,
+}
+
+/// A dedicated seed-clear permit.  It is intentionally unrelated to manual
+/// rebirth challenge/nonce/confirmation state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeedClearCommitPermitV1 {
+    pub scope_token: Digest,
+    pub intent_id: Digest,
+    pub source_guard_digest: Digest,
+    pub parent_generation_id: String,
+    pub parent_authority: ContinuityAuthority,
+    pub parent_seed_code_digest: Digest,
+    pub package_epoch_digest: Digest,
+    pub config_schema_version: u16,
+    pub host_config_revision: u64,
+    pub created_at_ms: u64,
+    stage_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeedClearStagedChildV1 {
+    pub scope_token: Digest,
+    pub intent_id: Digest,
+    pub source_guard_digest: Digest,
+    pub parent_generation_id: String,
+    pub parent_authority: ContinuityAuthority,
+    pub parent_seed_code_digest: Digest,
+    pub child_generation_id: String,
+    pub child_authority: ContinuityAuthority,
+    pub child_seed_code_digest: Digest,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum SeedConfigPreflightV1 {
+    Result(SeedConfigReconcileResultV1),
+    Stage(Box<SeedClearCommitPermitV1>),
+}
+
+/// Fixed-code failures for the new seed-config ABI.  Do not add dynamic
+/// details here: PyO3 must expose only this closed code set.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum SeedConfigLifecycleError {
+    #[error("SEED_CONFIG_SCHEMA_INVALID")]
+    SchemaInvalid,
+    #[error("SEED_CONFIG_OBSERVATION_UNCERTAIN")]
+    ObservationUncertain,
+    #[error("SEED_CONFIG_MIRROR_STALE")]
+    MirrorStale,
+    #[error("SEED_CLEAR_FENCE_STALE")]
+    FenceStale,
+    #[error("SEED_CLEAR_IN_FLIGHT")]
+    InFlight,
+    #[error("SEED_CLEAR_STORAGE_FAILED")]
+    StorageFailed,
+    #[error("SEED_CLEAR_LOCATOR_INVALID")]
+    LocatorInvalid,
+    #[error("SEED_CLEAR_UNKNOWN")]
+    Unknown,
+}
+
+impl SeedConfigLifecycleError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::SchemaInvalid => "SEED_CONFIG_SCHEMA_INVALID",
+            Self::ObservationUncertain => "SEED_CONFIG_OBSERVATION_UNCERTAIN",
+            Self::MirrorStale => "SEED_CONFIG_MIRROR_STALE",
+            Self::FenceStale => "SEED_CLEAR_FENCE_STALE",
+            Self::InFlight => "SEED_CLEAR_IN_FLIGHT",
+            Self::StorageFailed => "SEED_CLEAR_STORAGE_FAILED",
+            Self::LocatorInvalid => "SEED_CLEAR_LOCATOR_INVALID",
+            Self::Unknown => "SEED_CLEAR_UNKNOWN",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SeedConfigCurrentV1 {
+    current: RebirthCurrentV1,
+    scope_token: Digest,
+    seed_code_digest: Digest,
+}
+
+#[derive(Clone, Debug)]
+struct StoredSeedConfigMirrorV1 {
+    mirror_id: Digest,
+    scope_token: Digest,
+    authority_generation_id: String,
+    authority_incarnation_id: Digest,
+    authority_revision: u64,
+    native_seed_digest: Digest,
+    package_epoch_digest: Digest,
+    config_schema_version: u16,
+    guard_digest: Digest,
+    host_config_revision: u64,
+    status: String,
+    writeback_token_digest: Digest,
+}
+
+#[derive(Clone, Debug)]
+struct StoredSeedClearIntentV1 {
+    intent_id: Digest,
+    scope_token: Digest,
+    source_mirror_id: Digest,
+    source_guard_digest: Digest,
+    expected_generation_id: String,
+    expected_incarnation_id: Digest,
+    expected_revision: u64,
+    expected_seed_digest: Digest,
+    package_epoch_digest: Digest,
+    config_schema_version: u16,
+    host_config_revision: u64,
+    status: String,
+    stage_epoch: u64,
+    created_at_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct StoredSeedClearConsumptionV1 {
+    guard_digest: Digest,
+    intent_id: Digest,
+    scope_token: Digest,
+    child_generation_id: String,
+    child_incarnation_id: Digest,
+    child_seed_digest: Digest,
+    before_revision: u64,
+    after_revision: u64,
+}
+
 /// Durable lifecycle owner for a package-external Continuity Vault.  It does
 /// not own the live Store connection and therefore cannot accidentally turn a
 /// regular open, upgrade or recovery path into Genesis.
@@ -1436,6 +1655,732 @@ impl VaultLifecycle {
         })
     }
 
+    /// Reconcile one closed host configuration observation.  This is the
+    /// first Rust-owned authority fence: it re-reads the lifecycle-selected
+    /// generation and its authority DB before creating a mirror or seed-clear
+    /// intent.  Python supplies no incarnation/revision fence.
+    pub fn reconcile_seed_config_preflight_v1(
+        &self,
+        request: &SeedConfigReconcileRequestV1,
+    ) -> Result<SeedConfigPreflightV1, SeedConfigLifecycleError> {
+        validate_seed_config_request(request)?;
+        let initial_current = self.current_seed_config_authority_v1()?;
+        if initial_current.scope_token != request.scope_token {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let package_epoch_digest = seed_config_package_epoch_digest(&request.package_epoch);
+        let current = self.current_seed_config_authority_v1()?;
+        if current != initial_current || current.scope_token != request.scope_token {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let locator_path = self.root.join(LOCATOR_DATABASE);
+        let authority_path = self
+            .child_authority_database_path(&current.current.generation_id)
+            .map_err(seed_error_from_rebirth)?;
+        if !locator_path.is_file() || !authority_path.is_file() {
+            return Err(SeedConfigLifecycleError::LocatorInvalid);
+        }
+        let mut connection = self.open_seed_ledger()?;
+        attach_seed_config_fence_databases(&connection, &locator_path, &authority_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        initialize_ledger_schema(&transaction).map_err(seed_error_from_rebirth)?;
+        initialize_seed_config_ledger_schema(&transaction)?;
+        validate_attached_locator(&transaction).map_err(seed_error_from_rebirth)?;
+        let locator_generation: String = transaction
+            .query_row(
+                "SELECT generation_id FROM rebirth_locator.continuity_generation_locator WHERE slot = ?1",
+                params![LOCATOR_SLOT],
+                |row| row.get(0),
+            )
+            .map_err(|_| SeedConfigLifecycleError::LocatorInvalid)?;
+        if locator_generation != current.current.generation_id {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let locked_current =
+            attached_seed_config_current(&transaction, &current.current.generation_id)?;
+        if locked_current != current || locked_current.scope_token != request.scope_token {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        ensure_ledger_current(&transaction, &locked_current.current)
+            .map_err(seed_error_from_rebirth)?;
+        let current = locked_current;
+
+        let active = load_active_seed_config_mirror(&transaction, request.scope_token)?;
+        let current_matching = active.as_ref().is_some_and(|mirror| {
+            seed_config_mirror_matches_current(
+                mirror,
+                &current,
+                package_epoch_digest,
+                request.config_schema_version,
+            )
+        });
+
+        // Consumption is checked before the current active mirror.  After an
+        // authority-first commit, an old empty config may be retried while the
+        // new mirror is still pending host writeback; it must replay rather
+        // than mint a second child.
+        if request.observation == SeedConfigObservationV1::PresentEmpty {
+            if let Some(raw_guard) = request.mirror_guard.as_deref() {
+                let guard_digest = seed_config_guard_digest(raw_guard)?;
+                if let Some(consumption) = load_seed_clear_consumption(&transaction, guard_digest)?
+                {
+                    let result = replay_seed_clear_result(
+                        &transaction,
+                        &current,
+                        request,
+                        package_epoch_digest,
+                        &consumption,
+                    )?;
+                    return finish_seed_preflight(transaction, result);
+                }
+            }
+        }
+
+        match request.observation {
+            SeedConfigObservationV1::PresentNonempty => {
+                let native_seed = ae_genesis::format_seed_code(&current.seed_code_digest);
+                let seed_matches = request.seed_code.as_deref() == Some(native_seed.as_str());
+                let guard_matches = active
+                    .as_ref()
+                    .zip(request.mirror_guard.as_deref())
+                    .map(|(mirror, guard)| seed_config_mirror_guard_matches(mirror, guard))
+                    .transpose()?
+                    .unwrap_or(false);
+                if seed_matches
+                    && current_matching
+                    && active
+                        .as_ref()
+                        .is_some_and(|mirror| mirror.status == "ACTIVE")
+                    && guard_matches
+                {
+                    return finish_seed_preflight(
+                        transaction,
+                        seed_config_result(
+                            SeedConfigStateV1::Unchanged,
+                            None,
+                            None,
+                            None,
+                            "SEED_CONFIG_NATIVE_MATCH",
+                        ),
+                    );
+                }
+
+                let mirror = match active {
+                    Some(mirror) if current_matching && mirror.status == "PENDING_WRITEBACK" => {
+                        mirror
+                    }
+                    _ => create_seed_config_mirror(
+                        &transaction,
+                        &current,
+                        package_epoch_digest,
+                        request.config_schema_version,
+                        request.host_config_revision,
+                    )?,
+                };
+                let writeback = seed_config_writeback(&mirror)?;
+                finish_seed_preflight(
+                    transaction,
+                    seed_config_result(
+                        SeedConfigStateV1::WriteMirror,
+                        Some(writeback),
+                        None,
+                        None,
+                        "SEED_CONFIG_REPAIR_REQUIRED",
+                    ),
+                )
+            }
+            SeedConfigObservationV1::PresentEmpty => {
+                let Some(mirror) = active else {
+                    let mirror = create_seed_config_mirror(
+                        &transaction,
+                        &current,
+                        package_epoch_digest,
+                        request.config_schema_version,
+                        request.host_config_revision,
+                    )?;
+                    return finish_seed_preflight(
+                        transaction,
+                        seed_config_result(
+                            SeedConfigStateV1::WriteMirror,
+                            Some(seed_config_writeback(&mirror)?),
+                            None,
+                            None,
+                            "SEED_CONFIG_REPAIR_REQUIRED",
+                        ),
+                    );
+                };
+                if !current_matching || mirror.status != "ACTIVE" {
+                    let mirror = create_seed_config_mirror(
+                        &transaction,
+                        &current,
+                        package_epoch_digest,
+                        request.config_schema_version,
+                        request.host_config_revision,
+                    )?;
+                    return finish_seed_preflight(
+                        transaction,
+                        seed_config_result(
+                            SeedConfigStateV1::WriteMirror,
+                            Some(seed_config_writeback(&mirror)?),
+                            None,
+                            None,
+                            "SEED_CONFIG_REPAIR_REQUIRED",
+                        ),
+                    );
+                }
+                let Some(raw_guard) = request.mirror_guard.as_deref() else {
+                    return finish_seed_preflight(
+                        transaction,
+                        seed_config_result(
+                            SeedConfigStateV1::Deferred,
+                            None,
+                            None,
+                            None,
+                            "SEED_CONFIG_OBSERVATION_DEFERRED",
+                        ),
+                    );
+                };
+                if !seed_config_mirror_guard_matches(&mirror, raw_guard)?
+                    || !seed_config_empty_authorized(request, &mirror)
+                {
+                    return finish_seed_preflight(
+                        transaction,
+                        seed_config_result(
+                            SeedConfigStateV1::Deferred,
+                            None,
+                            None,
+                            None,
+                            "SEED_CONFIG_OBSERVATION_DEFERRED",
+                        ),
+                    );
+                }
+                let guard_digest = seed_config_guard_digest(raw_guard)?;
+                let permit = begin_seed_clear_intent(
+                    &transaction,
+                    &current,
+                    &mirror,
+                    guard_digest,
+                    package_epoch_digest,
+                    request.config_schema_version,
+                    request.host_config_revision,
+                )?;
+                transaction
+                    .commit()
+                    .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+                Ok(SeedConfigPreflightV1::Stage(Box::new(permit)))
+            }
+            SeedConfigObservationV1::Missing | SeedConfigObservationV1::ReadFailed => {
+                finish_seed_preflight(
+                    transaction,
+                    seed_config_result(
+                        SeedConfigStateV1::Deferred,
+                        None,
+                        None,
+                        None,
+                        "SEED_CONFIG_OBSERVATION_DEFERRED",
+                    ),
+                )
+            }
+        }
+    }
+
+    /// Acknowledge only a successful host writeback.  This is the second Rust
+    /// authority fence: a stale pending mirror cannot be activated after a
+    /// generation switch or authority revision change.
+    pub fn ack_seed_config_writeback_v1(
+        &self,
+        request: &SeedConfigWritebackAckV1,
+    ) -> Result<SeedConfigAckResultV1, SeedConfigLifecycleError> {
+        if !request.write_succeeded || request.writeback_token.is_empty() {
+            return Err(SeedConfigLifecycleError::SchemaInvalid);
+        }
+        let initial_current = self.current_seed_config_authority_v1()?;
+        if initial_current.scope_token != request.scope_token {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let token_digest = seed_config_writeback_token_digest(&request.writeback_token)?;
+        let current = self.current_seed_config_authority_v1()?;
+        if current != initial_current || current.scope_token != request.scope_token {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let locator_path = self.root.join(LOCATOR_DATABASE);
+        let authority_path = self
+            .child_authority_database_path(&current.current.generation_id)
+            .map_err(seed_error_from_rebirth)?;
+        if !locator_path.is_file() || !authority_path.is_file() {
+            return Err(SeedConfigLifecycleError::LocatorInvalid);
+        }
+        let mut connection = self.open_seed_ledger()?;
+        attach_seed_config_fence_databases(&connection, &locator_path, &authority_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        initialize_ledger_schema(&transaction).map_err(seed_error_from_rebirth)?;
+        initialize_seed_config_ledger_schema(&transaction)?;
+        validate_attached_locator(&transaction).map_err(seed_error_from_rebirth)?;
+        let locator_generation: String = transaction
+            .query_row(
+                "SELECT generation_id FROM rebirth_locator.continuity_generation_locator WHERE slot = ?1",
+                params![LOCATOR_SLOT],
+                |row| row.get(0),
+            )
+            .map_err(|_| SeedConfigLifecycleError::LocatorInvalid)?;
+        if locator_generation != current.current.generation_id {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let locked_current =
+            attached_seed_config_current(&transaction, &current.current.generation_id)?;
+        if locked_current != current || locked_current.scope_token != request.scope_token {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        ensure_ledger_current(&transaction, &locked_current.current)
+            .map_err(seed_error_from_rebirth)?;
+        let current = locked_current;
+        let mirror = load_seed_config_mirror_by_writeback_token(&transaction, token_digest)?;
+        let Some(mirror) = mirror else {
+            transaction
+                .commit()
+                .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+            return Ok(SeedConfigAckResultV1 {
+                state: SeedConfigAckStateV1::Stale,
+            });
+        };
+        if mirror.scope_token != request.scope_token
+            || !seed_config_mirror_matches_current(
+                &mirror,
+                &current,
+                mirror.package_epoch_digest,
+                mirror.config_schema_version,
+            )
+        {
+            transaction
+                .commit()
+                .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+            return Ok(SeedConfigAckResultV1 {
+                state: SeedConfigAckStateV1::Stale,
+            });
+        }
+        let state = match mirror.status.as_str() {
+            "ACTIVE" => SeedConfigAckStateV1::Replayed,
+            "PENDING_WRITEBACK" => {
+                if request.host_config_revision != 0
+                    && request.host_config_revision < mirror.host_config_revision
+                {
+                    SeedConfigAckStateV1::Stale
+                } else {
+                    let updated = transaction
+                        .execute(
+                            "UPDATE seed_config_mirror_v1
+                             SET status = 'ACTIVE', host_config_revision = ?2,
+                                 updated_at_ms = ?3
+                             WHERE mirror_id = ?1 AND status = 'PENDING_WRITEBACK'",
+                            params![
+                                mirror.mirror_id.to_vec(),
+                                revision_to_sql(request.host_config_revision)
+                                    .map_err(seed_error_from_rebirth)?,
+                                revision_to_sql(crate::now_ms())
+                                    .map_err(seed_error_from_rebirth)?,
+                            ],
+                        )
+                        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+                    if updated == 1 {
+                        SeedConfigAckStateV1::MirrorActive
+                    } else {
+                        SeedConfigAckStateV1::Stale
+                    }
+                }
+            }
+            _ => SeedConfigAckStateV1::Stale,
+        };
+        transaction
+            .commit()
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        Ok(SeedConfigAckResultV1 { state })
+    }
+
+    /// Seed-clear children reuse the durable Store staging mechanics but have
+    /// their own permit/domain and never touch manual rebirth challenge state.
+    pub fn stage_seed_clear_child_v1(
+        &self,
+        permit: &SeedClearCommitPermitV1,
+        request: RebirthChildStageRequestV1,
+    ) -> Result<SeedClearStagedChildV1, SeedConfigLifecycleError> {
+        let expected_nonce = Self::seed_clear_child_genesis_nonce_digest_for_permit(permit);
+        let source_scope = wire::persona_scope_digest(
+            &request.genesis.source.scope.bot_token,
+            &request.genesis.source.scope.persona_token,
+            None,
+        );
+        if request.genesis.nonce_digest != expected_nonce
+            || source_scope != permit.scope_token
+            || request.genesis.incarnation_id == permit.parent_authority.incarnation_id
+            || request.genesis.seed_code_digest == permit.parent_seed_code_digest
+            || request.genesis.receipt.incarnation_id != request.genesis.incarnation_id
+            || request.genesis.receipt.seed_code_digest != request.genesis.seed_code_digest
+        {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let expected_incarnation = request.genesis.incarnation_id;
+        let child_seed_code_digest = request.genesis.seed_code_digest;
+        let generation_id = Self::seed_clear_child_generation_id_for(&expected_incarnation);
+        let database = self
+            .seed_clear_child_authority_database_path(&generation_id)
+            .map_err(seed_error_from_rebirth)?;
+        let directory = database
+            .parent()
+            .ok_or(SeedConfigLifecycleError::StorageFailed)?;
+        let existing = if directory.exists() {
+            Some(
+                stage_existing_child(
+                    &database,
+                    &request.genesis,
+                    &permit.parent_authority.incarnation_id,
+                )
+                .map_err(seed_error_from_rebirth)?,
+            )
+        } else {
+            None
+        };
+        let child_authority = match existing {
+            Some(authority) => authority,
+            None => {
+                let generations = directory
+                    .parent()
+                    .ok_or(SeedConfigLifecycleError::StorageFailed)?;
+                fs::create_dir_all(generations)
+                    .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+                let stage_sequence = NEXT_CONTROL_WRITE.fetch_add(1, Ordering::Relaxed);
+                let temporary = generations.join(format!(
+                    ".seed-clear-stage-{generation_id}-{}-{stage_sequence}",
+                    std::process::id()
+                ));
+                fs::create_dir(&temporary).map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+                let temporary_database = temporary.join(AUTHORITY_DATABASE);
+                let mut store = Store::open(&temporary_database)
+                    .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+                let mut genesis = request.genesis;
+                match store
+                    .claim_lease(&genesis.scope_key, Some(genesis.nonce_digest))
+                    .map_err(|_| SeedConfigLifecycleError::StorageFailed)?
+                {
+                    ClaimOutcome::Claimed { lease_epoch, nonce }
+                        if nonce == genesis.nonce_digest =>
+                    {
+                        genesis.lease_epoch = lease_epoch;
+                    }
+                    ClaimOutcome::InFlight => return Err(SeedConfigLifecycleError::InFlight),
+                    ClaimOutcome::Committed => return Err(SeedConfigLifecycleError::FenceStale),
+                    ClaimOutcome::Claimed { .. } => {
+                        return Err(SeedConfigLifecycleError::FenceStale)
+                    }
+                }
+                store
+                    .commit_genesis(&genesis)
+                    .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+                store
+                    .close()
+                    .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+                install_child_lineage(
+                    &temporary_database,
+                    &genesis.source.scope.bot_token,
+                    &genesis.source.scope.persona_token,
+                    &genesis.incarnation_id,
+                    &permit.parent_authority.incarnation_id,
+                )
+                .map_err(seed_error_from_rebirth)?;
+                sync_sqlite_database(&temporary_database).map_err(seed_error_from_rebirth)?;
+                match fs::rename(&temporary, directory) {
+                    Ok(()) => stage_existing_child(
+                        &database,
+                        &genesis,
+                        &permit.parent_authority.incarnation_id,
+                    )
+                    .map_err(seed_error_from_rebirth)?,
+                    Err(_) if directory.exists() => stage_existing_child(
+                        &database,
+                        &genesis,
+                        &permit.parent_authority.incarnation_id,
+                    )
+                    .map_err(seed_error_from_rebirth)?,
+                    Err(_) => return Err(SeedConfigLifecycleError::StorageFailed),
+                }
+            }
+        };
+        if child_authority.revision != 0 || child_authority.incarnation_id != expected_incarnation {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        Ok(SeedClearStagedChildV1 {
+            scope_token: permit.scope_token,
+            intent_id: permit.intent_id,
+            source_guard_digest: permit.source_guard_digest,
+            parent_generation_id: permit.parent_generation_id.clone(),
+            parent_authority: permit.parent_authority.clone(),
+            parent_seed_code_digest: permit.parent_seed_code_digest,
+            child_generation_id: generation_id,
+            child_authority,
+            child_seed_code_digest,
+        })
+    }
+
+    /// Second Rust authority fence and atomic locator/consumption commit for
+    /// seed-clear.  Manual rebirth tables are neither read nor written here.
+    pub fn commit_seed_clear_v1(
+        &self,
+        permit: &SeedClearCommitPermitV1,
+        child: &SeedClearStagedChildV1,
+    ) -> Result<SeedConfigReconcileResultV1, SeedConfigLifecycleError> {
+        let current = self.current_seed_config_authority_v1()?;
+        if current.scope_token != permit.scope_token {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        if current.current.generation_id != permit.parent_generation_id
+            || current.current.authority != permit.parent_authority
+            || current.seed_code_digest != permit.parent_seed_code_digest
+        {
+            if self.seed_clear_consumed_by_permit_v1(permit)? {
+                // A peer can have committed after this caller staged the same
+                // deterministic child.  The normal next reconcile will
+                // return the durable REBIRTH_REPLAYED response; this in-flight
+                // commit must not report a generic stale fence or attempt a
+                // second locator switch.
+                return Err(SeedConfigLifecycleError::InFlight);
+            }
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        validate_seed_clear_staged_child(self, permit, child)?;
+        let locator_path = self.root.join(LOCATOR_DATABASE);
+        let authority_path = self
+            .child_authority_database_path(&current.current.generation_id)
+            .map_err(seed_error_from_rebirth)?;
+        if !locator_path.is_file() || !authority_path.is_file() {
+            return Err(SeedConfigLifecycleError::LocatorInvalid);
+        }
+        let mut connection = self.open_seed_ledger()?;
+        attach_seed_config_fence_databases(&connection, &locator_path, &authority_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        initialize_ledger_schema(&transaction).map_err(seed_error_from_rebirth)?;
+        initialize_seed_config_ledger_schema(&transaction)?;
+        validate_attached_locator(&transaction).map_err(seed_error_from_rebirth)?;
+        let locator_generation: String = transaction
+            .query_row(
+                "SELECT generation_id FROM rebirth_locator.continuity_generation_locator WHERE slot = ?1",
+                params![LOCATOR_SLOT],
+                |row| row.get(0),
+            )
+            .map_err(|_| SeedConfigLifecycleError::LocatorInvalid)?;
+        if locator_generation != permit.parent_generation_id {
+            if load_seed_clear_consumption(&transaction, permit.source_guard_digest)?
+                .as_ref()
+                .is_some_and(|consumption| {
+                    seed_clear_consumption_matches_permit(consumption, permit)
+                })
+            {
+                return Err(SeedConfigLifecycleError::InFlight);
+            }
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let locked_current =
+            attached_seed_config_current(&transaction, &current.current.generation_id)?;
+        if locked_current != current
+            || locked_current.scope_token != permit.scope_token
+            || locked_current.current.generation_id != permit.parent_generation_id
+            || locked_current.current.authority != permit.parent_authority
+            || locked_current.seed_code_digest != permit.parent_seed_code_digest
+        {
+            if load_seed_clear_consumption(&transaction, permit.source_guard_digest)?
+                .as_ref()
+                .is_some_and(|consumption| {
+                    seed_clear_consumption_matches_permit(consumption, permit)
+                })
+            {
+                return Err(SeedConfigLifecycleError::InFlight);
+            }
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        ensure_ledger_current(&transaction, &locked_current.current)
+            .map_err(seed_error_from_rebirth)?;
+        let current = locked_current;
+
+        if let Some(consumption) =
+            load_seed_clear_consumption(&transaction, permit.source_guard_digest)?
+        {
+            if consumption.guard_digest != permit.source_guard_digest
+                || consumption.intent_id != permit.intent_id
+            {
+                return Err(SeedConfigLifecycleError::StorageFailed);
+            }
+            let result = replay_seed_clear_result_from_consumption(
+                &transaction,
+                &current,
+                permit.package_epoch_digest,
+                permit.config_schema_version,
+                &consumption,
+            )?;
+            transaction
+                .commit()
+                .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+            return Ok(result);
+        }
+        let intent = load_seed_clear_intent(&transaction, permit.intent_id)?
+            .ok_or(SeedConfigLifecycleError::FenceStale)?;
+        if !seed_clear_intent_matches_permit(&intent, permit) {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        if intent.status != "STAGING" || intent.stage_epoch != permit.stage_epoch {
+            return Err(SeedConfigLifecycleError::InFlight);
+        }
+        validate_attached_locator(&transaction).map_err(seed_error_from_rebirth)?;
+        let locator_generation: String = transaction
+            .query_row(
+                "SELECT generation_id FROM rebirth_locator.continuity_generation_locator WHERE slot = ?1",
+                params![LOCATOR_SLOT],
+                |row| row.get(0),
+            )
+            .map_err(|_| SeedConfigLifecycleError::LocatorInvalid)?;
+        if locator_generation != permit.parent_generation_id {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let receipt_id = seed_clear_receipt_id(permit, child);
+        let now = crate::now_ms();
+        let changed = transaction
+            .execute(
+                "UPDATE rebirth_locator.continuity_generation_locator
+                 SET generation_id = ?2 WHERE slot = ?1 AND generation_id = ?3",
+                params![
+                    LOCATOR_SLOT,
+                    child.child_generation_id,
+                    permit.parent_generation_id,
+                ],
+            )
+            .map_err(|_| SeedConfigLifecycleError::LocatorInvalid)?;
+        if changed != 1 {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        transaction
+            .execute(
+                "UPDATE rebirth_current_v1 SET generation_id = ?2, incarnation_id = ?3,
+                 revision = ?4, state_digest = ?5, graph_digest = ?6, history_digest = ?7
+                 WHERE slot = ?1",
+                params![
+                    CURRENT_SLOT,
+                    child.child_generation_id,
+                    child.child_authority.incarnation_id.to_vec(),
+                    revision_to_sql(child.child_authority.revision)
+                        .map_err(seed_error_from_rebirth)?,
+                    child.child_authority.state_digest.to_vec(),
+                    child.child_authority.graph_digest.to_vec(),
+                    child.child_authority.history_digest.to_vec(),
+                ],
+            )
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        let parent_consumed = transaction
+            .execute(
+                "UPDATE seed_config_mirror_v1 SET status = 'CONSUMED', updated_at_ms = ?2
+                 WHERE mirror_id = ?1 AND guard_digest = ?3
+                       AND status = 'ACTIVE'",
+                params![
+                    intent.source_mirror_id.to_vec(),
+                    revision_to_sql(now).map_err(seed_error_from_rebirth)?,
+                    permit.source_guard_digest.to_vec(),
+                ],
+            )
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        if parent_consumed != 1 {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        transaction
+            .execute(
+                "INSERT INTO seed_clear_consumption_v1 (
+                     guard_digest, intent_id, receipt_id, scope_token,
+                     child_generation_id, child_incarnation_id, child_seed_digest,
+                     before_revision, after_revision, committed_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9)",
+                params![
+                    permit.source_guard_digest.to_vec(),
+                    permit.intent_id.to_vec(),
+                    receipt_id.to_vec(),
+                    permit.scope_token.to_vec(),
+                    child.child_generation_id,
+                    child.child_authority.incarnation_id.to_vec(),
+                    child.child_seed_code_digest.to_vec(),
+                    revision_to_sql(permit.parent_authority.revision)
+                        .map_err(seed_error_from_rebirth)?,
+                    revision_to_sql(now).map_err(seed_error_from_rebirth)?,
+                ],
+            )
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        let intent_updated = transaction
+            .execute(
+                "UPDATE seed_clear_intent_v1
+                 SET status = 'COMMITTED', staged_child_generation_id = ?2,
+                     receipt_id = ?3, updated_at_ms = ?4
+                 WHERE intent_id = ?1 AND status = 'STAGING' AND stage_epoch = ?5",
+                params![
+                    permit.intent_id.to_vec(),
+                    child.child_generation_id,
+                    receipt_id.to_vec(),
+                    revision_to_sql(now).map_err(seed_error_from_rebirth)?,
+                    revision_to_sql(permit.stage_epoch).map_err(seed_error_from_rebirth)?,
+                ],
+            )
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        if intent_updated != 1 {
+            return Err(SeedConfigLifecycleError::FenceStale);
+        }
+        let child_current = SeedConfigCurrentV1 {
+            current: RebirthCurrentV1 {
+                generation_id: child.child_generation_id.clone(),
+                authority: child.child_authority.clone(),
+            },
+            scope_token: permit.scope_token,
+            seed_code_digest: child.child_seed_code_digest,
+        };
+        let child_mirror = create_seed_config_mirror(
+            &transaction,
+            &child_current,
+            permit.package_epoch_digest,
+            permit.config_schema_version,
+            permit.host_config_revision,
+        )?;
+        let writeback = seed_config_writeback(&child_mirror)?;
+        transaction
+            .commit()
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        Ok(seed_config_result(
+            SeedConfigStateV1::RebirthCommitted,
+            Some(writeback),
+            Some(permit.parent_authority.revision),
+            Some(0),
+            "SEED_CLEAR_REBIRTH_COMMITTED",
+        ))
+    }
+
+    /// Deterministic retry nonce for exactly one seed-clear child.  It is a
+    /// separate domain from manual rebirth and contains no raw guard/token.
+    pub fn seed_clear_child_genesis_nonce_digest_for_permit(
+        permit: &SeedClearCommitPermitV1,
+    ) -> Digest {
+        wire::domain_hash(
+            b"astr-embodiment/seed-config-clear-child-genesis-nonce-v1",
+            &[&permit.intent_id, &permit.source_guard_digest],
+        )
+    }
+
+    pub fn seed_clear_child_generation_id_for(incarnation_id: &Digest) -> String {
+        format!("seed-clear-{}", short_digest(incarnation_id))
+    }
+
+    fn seed_clear_child_authority_database_path(
+        &self,
+        generation_id: &str,
+    ) -> Result<PathBuf, RebirthLifecycleError> {
+        self.child_authority_database_path(generation_id)
+    }
+
     pub fn child_generation_id_for(incarnation_id: &Digest) -> String {
         format!("rebirth-{}", short_digest(incarnation_id))
     }
@@ -1462,6 +2407,52 @@ impl VaultLifecycle {
         Ok((current, wire::persona_scope_digest(&bot, &persona, None)))
     }
 
+    /// Capture the full native authority fence used by the seed-config
+    /// lifecycle.  This is intentionally private to Rust; neither Python nor
+    /// the JSON ABI receives incarnation/generation/revision fence material.
+    fn current_seed_config_authority_v1(
+        &self,
+    ) -> Result<SeedConfigCurrentV1, SeedConfigLifecycleError> {
+        let (current, scope_token) = self.current_with_scope().map_err(seed_error_from_rebirth)?;
+        let database = self
+            .child_authority_database_path(&current.generation_id)
+            .map_err(seed_error_from_rebirth)?;
+        let seed_code_digest = read_seed_code_digest(&database, &current.authority.incarnation_id)
+            .map_err(seed_error_from_rebirth)?;
+        Ok(SeedConfigCurrentV1 {
+            current,
+            scope_token,
+            seed_code_digest,
+        })
+    }
+
+    fn open_seed_ledger(&self) -> Result<Connection, SeedConfigLifecycleError> {
+        self.open_ledger().map_err(seed_error_from_rebirth)
+    }
+
+    /// Resolve a post-stage authority change without trusting a Python-side
+    /// observation.  This is intentionally only a durable consumption lookup:
+    /// it cannot create a mirror, intent, child, or locator mutation.  A
+    /// caller that loses the race receives `SEED_CLEAR_IN_FLIGHT` and a later
+    /// reconcile replays the committed writeback from the child authority.
+    fn seed_clear_consumed_by_permit_v1(
+        &self,
+        permit: &SeedClearCommitPermitV1,
+    ) -> Result<bool, SeedConfigLifecycleError> {
+        let mut connection = self.open_seed_ledger()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        initialize_seed_config_ledger_schema(&transaction)?;
+        let consumed = load_seed_clear_consumption(&transaction, permit.source_guard_digest)?
+            .as_ref()
+            .is_some_and(|consumption| seed_clear_consumption_matches_permit(consumption, permit));
+        transaction
+            .commit()
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+        Ok(consumed)
+    }
+
     fn ledger_path(&self) -> PathBuf {
         self.root.join(REBIRTH_LEDGER_DATABASE)
     }
@@ -1483,6 +2474,152 @@ impl VaultLifecycle {
             .map_err(|_| RebirthLifecycleError::Durability)?;
         Ok(connection)
     }
+}
+
+/// Attach the two durable databases which participate in the seed-config
+/// authority fence before `BEGIN IMMEDIATE`. SQLite then acquires the writer
+/// reservation for the selected authority database as well as the lifecycle
+/// ledger/locator, so a concurrent event cannot advance its revision between
+/// the second read and the locator CAS.
+fn attach_seed_config_fence_databases(
+    connection: &Connection,
+    locator_path: &Path,
+    authority_path: &Path,
+) -> Result<(), SeedConfigLifecycleError> {
+    let locator_literal = sqlite_string_literal(locator_path).map_err(seed_error_from_rebirth)?;
+    let authority_literal =
+        sqlite_string_literal(authority_path).map_err(seed_error_from_rebirth)?;
+    connection
+        .execute_batch(&format!(
+            "ATTACH DATABASE {locator_literal} AS rebirth_locator;\
+             PRAGMA rebirth_locator.journal_mode = DELETE;\
+             PRAGMA rebirth_locator.synchronous = FULL;\
+             ATTACH DATABASE {authority_literal} AS seed_parent;"
+        ))
+        .map_err(|_| SeedConfigLifecycleError::LocatorInvalid)
+}
+
+/// Reconstruct the full current authority from the already attached selected
+/// generation. This intentionally does not call `locate_vault`: that helper
+/// opens a second connection and would not be protected by this transaction's
+/// authority lock.
+fn attached_seed_config_current(
+    transaction: &rusqlite::Transaction<'_>,
+    generation_id: &str,
+) -> Result<SeedConfigCurrentV1, SeedConfigLifecycleError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT bot_token, persona_token, incarnation_id
+             FROM seed_parent.active_bindings
+             ORDER BY bot_token ASC, persona_token ASC",
+        )
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    let mut rows = statement
+        .query([])
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    let row = rows
+        .next()
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?
+        .ok_or(SeedConfigLifecycleError::FenceStale)?;
+    let bot_token: [u8; 16] = row
+        .get::<_, Vec<u8>>(0)
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?
+        .try_into()
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    let persona_token: [u8; 16] = row
+        .get::<_, Vec<u8>>(1)
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?
+        .try_into()
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    let incarnation_id = digest_from_blob(
+        row.get::<_, Vec<u8>>(2)
+            .map_err(|_| SeedConfigLifecycleError::FenceStale)?,
+    )
+    .map_err(seed_error_from_rebirth)?;
+    if rows
+        .next()
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?
+        .is_some()
+    {
+        return Err(SeedConfigLifecycleError::FenceStale);
+    }
+    drop(rows);
+    drop(statement);
+
+    let scope_token = wire::persona_scope_digest(&bot_token, &persona_token, None);
+    let journal_revision: Option<i64> = transaction
+        .query_row(
+            "SELECT MAX(logical_revision) FROM seed_parent.journal WHERE scope_digest = ?1",
+            params![scope_token.to_vec()],
+            |row| row.get(0),
+        )
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    let revision_sql = match journal_revision {
+        None => 0,
+        Some(value) if value > 0 => value,
+        Some(_) => return Err(SeedConfigLifecycleError::FenceStale),
+    };
+    let revision = revision_from_sql(revision_sql).map_err(seed_error_from_rebirth)?;
+    let snapshot_revision: Option<i64> = transaction
+        .query_row(
+            "SELECT MAX(revision) FROM seed_parent.snapshots WHERE scope_digest = ?1",
+            params![scope_token.to_vec()],
+            |row| row.get(0),
+        )
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    if snapshot_revision != Some(revision_sql) {
+        return Err(SeedConfigLifecycleError::FenceStale);
+    }
+    let (graph_digest, seed_code_digest): (Digest, Digest) = transaction
+        .query_row(
+            "SELECT graph_digest, seed_code_digest
+             FROM seed_parent.incarnations WHERE incarnation_id = ?1",
+            params![incarnation_id.to_vec()],
+            |row| {
+                Ok((
+                    digest_from_blob(row.get(0)?).map_err(sqlite_conversion_error)?,
+                    digest_from_blob(row.get(1)?).map_err(sqlite_conversion_error)?,
+                ))
+            },
+        )
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    let state_digest = transaction
+        .query_row(
+            "SELECT state_digest FROM seed_parent.snapshots
+             WHERE scope_digest = ?1 AND revision = ?2",
+            params![scope_token.to_vec(), revision_sql],
+            |row| digest_from_blob(row.get(0)?).map_err(sqlite_conversion_error),
+        )
+        .map_err(|_| SeedConfigLifecycleError::FenceStale)?;
+    let history_digest = if journal_revision.is_none() {
+        wire::domain_hash(
+            b"astr-embodiment/continuity-empty-history-v1",
+            &[&incarnation_id, &revision.to_le_bytes()],
+        )
+    } else {
+        transaction
+            .query_row(
+                "SELECT chain_digest FROM seed_parent.journal
+                 WHERE scope_digest = ?1 AND logical_revision = ?2",
+                params![scope_token.to_vec(), revision_sql],
+                |row| digest_from_blob(row.get(0)?).map_err(sqlite_conversion_error),
+            )
+            .map_err(|_| SeedConfigLifecycleError::FenceStale)?
+    };
+    Ok(SeedConfigCurrentV1 {
+        current: RebirthCurrentV1 {
+            generation_id: generation_id.to_owned(),
+            authority: ContinuityAuthority {
+                incarnation_id,
+                revision,
+                state_digest,
+                graph_digest,
+                history_digest,
+            },
+        },
+        scope_token,
+        seed_code_digest,
+    })
 }
 
 fn initialize_ledger_schema(
@@ -1524,6 +2661,893 @@ fn initialize_ledger_schema(
              );",
         )
         .map_err(|_| RebirthLifecycleError::Durability)
+}
+
+/// Dedicated seed-config lifecycle ledger.  It shares the durable lifecycle
+/// SQLite file and atomic locator transaction, but never shares the manual
+/// rebirth challenge/confirmation tables or their nonce domain.
+fn initialize_seed_config_ledger_schema(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), SeedConfigLifecycleError> {
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS seed_config_mirror_v1 (
+                 mirror_id BLOB PRIMARY KEY CHECK (length(mirror_id) = 32),
+                 scope_token BLOB NOT NULL CHECK (length(scope_token) = 32),
+                 authority_generation_id TEXT NOT NULL,
+                 authority_incarnation_id BLOB NOT NULL
+                     CHECK (length(authority_incarnation_id) = 32),
+                 authority_revision INTEGER NOT NULL,
+                 native_seed_digest BLOB NOT NULL CHECK (length(native_seed_digest) = 32),
+                 package_epoch_digest BLOB NOT NULL
+                     CHECK (length(package_epoch_digest) = 32),
+                 config_schema_version INTEGER NOT NULL,
+                 guard_digest BLOB NOT NULL UNIQUE CHECK (length(guard_digest) = 32),
+                 host_config_revision INTEGER NOT NULL,
+                 status TEXT NOT NULL CHECK (
+                     status IN ('PENDING_WRITEBACK', 'ACTIVE', 'CONSUMED')
+                 ),
+                 writeback_token_digest BLOB NOT NULL UNIQUE
+                     CHECK (length(writeback_token_digest) = 32),
+                 created_at_ms INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS seed_config_active_scope_v1
+                 ON seed_config_mirror_v1 (scope_token)
+                 WHERE status IN ('PENDING_WRITEBACK', 'ACTIVE');
+             CREATE TABLE IF NOT EXISTS seed_clear_intent_v1 (
+                 intent_id BLOB PRIMARY KEY CHECK (length(intent_id) = 32),
+                 scope_token BLOB NOT NULL CHECK (length(scope_token) = 32),
+                 source_mirror_id BLOB NOT NULL CHECK (length(source_mirror_id) = 32),
+                 source_guard_digest BLOB NOT NULL UNIQUE
+                     CHECK (length(source_guard_digest) = 32),
+                 expected_generation_id TEXT NOT NULL,
+                 expected_incarnation_id BLOB NOT NULL
+                     CHECK (length(expected_incarnation_id) = 32),
+                 expected_revision INTEGER NOT NULL,
+                 expected_seed_digest BLOB NOT NULL
+                     CHECK (length(expected_seed_digest) = 32),
+                 package_epoch_digest BLOB NOT NULL
+                     CHECK (length(package_epoch_digest) = 32),
+                 config_schema_version INTEGER NOT NULL,
+                 host_config_revision INTEGER NOT NULL,
+                 status TEXT NOT NULL CHECK (status IN ('STAGING', 'COMMITTED')),
+                 stage_epoch INTEGER NOT NULL,
+                 staged_child_generation_id TEXT,
+                 receipt_id BLOB CHECK (receipt_id IS NULL OR length(receipt_id) = 32),
+                 created_at_ms INTEGER NOT NULL,
+                 updated_at_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS seed_clear_consumption_v1 (
+                 guard_digest BLOB PRIMARY KEY CHECK (length(guard_digest) = 32),
+                 intent_id BLOB NOT NULL UNIQUE CHECK (length(intent_id) = 32),
+                 receipt_id BLOB NOT NULL UNIQUE CHECK (length(receipt_id) = 32),
+                 scope_token BLOB NOT NULL CHECK (length(scope_token) = 32),
+                 child_generation_id TEXT NOT NULL,
+                 child_incarnation_id BLOB NOT NULL
+                     CHECK (length(child_incarnation_id) = 32),
+                 child_seed_digest BLOB NOT NULL CHECK (length(child_seed_digest) = 32),
+                 before_revision INTEGER NOT NULL,
+                 after_revision INTEGER NOT NULL CHECK (after_revision = 0),
+                 committed_at_ms INTEGER NOT NULL
+             );",
+        )
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)
+}
+
+fn seed_error_from_rebirth(error: RebirthLifecycleError) -> SeedConfigLifecycleError {
+    match error {
+        RebirthLifecycleError::FenceStale => SeedConfigLifecycleError::FenceStale,
+        RebirthLifecycleError::InFlight => SeedConfigLifecycleError::InFlight,
+        RebirthLifecycleError::LocatorInvalid => SeedConfigLifecycleError::LocatorInvalid,
+        RebirthLifecycleError::ChildInvalid => SeedConfigLifecycleError::FenceStale,
+        RebirthLifecycleError::BootstrapConflict => SeedConfigLifecycleError::FenceStale,
+        RebirthLifecycleError::ConfirmationRequired
+        | RebirthLifecycleError::NonceConflict
+        | RebirthLifecycleError::Durability
+        | RebirthLifecycleError::InjectedFault(_) => SeedConfigLifecycleError::StorageFailed,
+    }
+}
+
+fn validate_seed_config_request(
+    request: &SeedConfigReconcileRequestV1,
+) -> Result<(), SeedConfigLifecycleError> {
+    if request.config_schema_version != 1
+        || request.package_epoch.is_empty()
+        || request.package_epoch.len() > 128
+        || !request
+            .package_epoch
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || request
+            .previous_observation
+            .is_some_and(|observation| observation != SeedConfigObservationV1::PresentNonempty)
+    {
+        return Err(SeedConfigLifecycleError::SchemaInvalid);
+    }
+    if let Some(raw_guard) = request.mirror_guard.as_deref() {
+        let _ = seed_config_guard_digest(raw_guard)?;
+    }
+    match request.observation {
+        SeedConfigObservationV1::PresentNonempty => {
+            let Some(seed_code) = request.seed_code.as_deref() else {
+                return Err(SeedConfigLifecycleError::SchemaInvalid);
+            };
+            if seed_code.is_empty() || seed_code.len() > 256 {
+                return Err(SeedConfigLifecycleError::SchemaInvalid);
+            }
+        }
+        SeedConfigObservationV1::PresentEmpty
+        | SeedConfigObservationV1::Missing
+        | SeedConfigObservationV1::ReadFailed => {
+            if request.seed_code.is_some() {
+                return Err(SeedConfigLifecycleError::SchemaInvalid);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn finish_seed_preflight(
+    transaction: rusqlite::Transaction<'_>,
+    result: SeedConfigReconcileResultV1,
+) -> Result<SeedConfigPreflightV1, SeedConfigLifecycleError> {
+    transaction
+        .commit()
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    Ok(SeedConfigPreflightV1::Result(result))
+}
+
+fn seed_config_result(
+    state: SeedConfigStateV1,
+    writeback: Option<SeedConfigWritebackV1>,
+    before_revision: Option<u64>,
+    after_revision: Option<u64>,
+    reason: &'static str,
+) -> SeedConfigReconcileResultV1 {
+    SeedConfigReconcileResultV1 {
+        state,
+        writeback,
+        before_revision,
+        after_revision,
+        reason,
+    }
+}
+
+fn seed_config_package_epoch_digest(package_epoch: &str) -> Digest {
+    wire::domain_hash(
+        b"astr-embodiment/seed-config-package-epoch-v1",
+        &[package_epoch.as_bytes()],
+    )
+}
+
+fn decode_seed_config_capability(value: &str) -> Result<Digest, SeedConfigLifecycleError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SeedConfigLifecycleError::SchemaInvalid);
+    }
+    hex::decode32(value).map_err(|_| SeedConfigLifecycleError::SchemaInvalid)
+}
+
+fn seed_config_guard_digest(value: &str) -> Result<Digest, SeedConfigLifecycleError> {
+    let raw = decode_seed_config_capability(value)?;
+    Ok(wire::domain_hash(
+        b"astr-embodiment/seed-config-mirror-guard-v1",
+        &[&raw],
+    ))
+}
+
+fn seed_config_writeback_token_digest(value: &str) -> Result<Digest, SeedConfigLifecycleError> {
+    let raw = decode_seed_config_capability(value)?;
+    Ok(wire::domain_hash(
+        b"astr-embodiment/seed-config-writeback-token-v1",
+        &[&raw],
+    ))
+}
+
+fn seed_config_guard_for_mirror(mirror_id: &Digest) -> String {
+    hex::encode32(&wire::domain_hash(
+        b"astr-embodiment/seed-config-mirror-guard-material-v1",
+        &[mirror_id],
+    ))
+}
+
+fn seed_config_writeback_token_for_mirror(mirror_id: &Digest) -> String {
+    hex::encode32(&wire::domain_hash(
+        b"astr-embodiment/seed-config-writeback-token-material-v1",
+        &[mirror_id],
+    ))
+}
+
+fn seed_config_writeback(
+    mirror: &StoredSeedConfigMirrorV1,
+) -> Result<SeedConfigWritebackV1, SeedConfigLifecycleError> {
+    let mirror_guard = seed_config_guard_for_mirror(&mirror.mirror_id);
+    let writeback_token = seed_config_writeback_token_for_mirror(&mirror.mirror_id);
+    if seed_config_guard_digest(&mirror_guard)? != mirror.guard_digest
+        || seed_config_writeback_token_digest(&writeback_token)? != mirror.writeback_token_digest
+    {
+        return Err(SeedConfigLifecycleError::StorageFailed);
+    }
+    Ok(SeedConfigWritebackV1 {
+        seed_code: ae_genesis::format_seed_code(&mirror.native_seed_digest),
+        mirror_guard,
+        writeback_token,
+    })
+}
+
+fn seed_config_mirror_matches_current(
+    mirror: &StoredSeedConfigMirrorV1,
+    current: &SeedConfigCurrentV1,
+    package_epoch_digest: Digest,
+    config_schema_version: u16,
+) -> bool {
+    mirror.scope_token == current.scope_token
+        && mirror.authority_generation_id == current.current.generation_id
+        && mirror.authority_incarnation_id == current.current.authority.incarnation_id
+        && mirror.authority_revision == current.current.authority.revision
+        && mirror.native_seed_digest == current.seed_code_digest
+        && mirror.package_epoch_digest == package_epoch_digest
+        && mirror.config_schema_version == config_schema_version
+}
+
+fn seed_config_mirror_guard_matches(
+    mirror: &StoredSeedConfigMirrorV1,
+    raw_guard: &str,
+) -> Result<bool, SeedConfigLifecycleError> {
+    Ok(seed_config_guard_digest(raw_guard)? == mirror.guard_digest)
+}
+
+fn seed_config_empty_authorized(
+    request: &SeedConfigReconcileRequestV1,
+    mirror: &StoredSeedConfigMirrorV1,
+) -> bool {
+    match request.origin {
+        SeedConfigOriginV1::StartupRead => true,
+        SeedConfigOriginV1::UserSaveEvent => {
+            request.previous_observation == Some(SeedConfigObservationV1::PresentNonempty)
+                && request.host_config_revision != 0
+                && request.host_config_revision > mirror.host_config_revision
+        }
+        SeedConfigOriginV1::PluginWriteback | SeedConfigOriginV1::LegacyConfigMigration => false,
+    }
+}
+
+type SeedConfigMirrorRow = (
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    i64,
+    String,
+    Vec<u8>,
+);
+
+fn decode_seed_config_mirror(
+    row: SeedConfigMirrorRow,
+) -> Result<StoredSeedConfigMirrorV1, SeedConfigLifecycleError> {
+    let (
+        mirror_id,
+        scope_token,
+        authority_generation_id,
+        authority_incarnation_id,
+        authority_revision,
+        native_seed_digest,
+        package_epoch_digest,
+        config_schema_version,
+        guard_digest,
+        host_config_revision,
+        status,
+        writeback_token_digest,
+    ) = row;
+    let config_schema_version = u16::try_from(config_schema_version)
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    Ok(StoredSeedConfigMirrorV1 {
+        mirror_id: digest_from_blob(mirror_id).map_err(seed_error_from_rebirth)?,
+        scope_token: digest_from_blob(scope_token).map_err(seed_error_from_rebirth)?,
+        authority_generation_id,
+        authority_incarnation_id: digest_from_blob(authority_incarnation_id)
+            .map_err(seed_error_from_rebirth)?,
+        authority_revision: revision_from_sql(authority_revision)
+            .map_err(seed_error_from_rebirth)?,
+        native_seed_digest: digest_from_blob(native_seed_digest)
+            .map_err(seed_error_from_rebirth)?,
+        package_epoch_digest: digest_from_blob(package_epoch_digest)
+            .map_err(seed_error_from_rebirth)?,
+        config_schema_version,
+        guard_digest: digest_from_blob(guard_digest).map_err(seed_error_from_rebirth)?,
+        host_config_revision: revision_from_sql(host_config_revision)
+            .map_err(seed_error_from_rebirth)?,
+        status,
+        writeback_token_digest: digest_from_blob(writeback_token_digest)
+            .map_err(seed_error_from_rebirth)?,
+    })
+}
+
+fn mirror_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeedConfigMirrorRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+    ))
+}
+
+fn load_active_seed_config_mirror(
+    connection: &Connection,
+    scope_token: Digest,
+) -> Result<Option<StoredSeedConfigMirrorV1>, SeedConfigLifecycleError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT mirror_id, scope_token, authority_generation_id,
+                    authority_incarnation_id, authority_revision, native_seed_digest,
+                    package_epoch_digest, config_schema_version, guard_digest,
+                    host_config_revision, status, writeback_token_digest
+             FROM seed_config_mirror_v1
+             WHERE scope_token = ?1 AND status IN ('PENDING_WRITEBACK', 'ACTIVE')",
+        )
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    let mut rows = statement
+        .query(params![scope_token.to_vec()])
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    let first = rows
+        .next()
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?
+        .map(mirror_row_from_row)
+        .transpose()
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    if rows
+        .next()
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?
+        .is_some()
+    {
+        return Err(SeedConfigLifecycleError::StorageFailed);
+    }
+    first.map(decode_seed_config_mirror).transpose()
+}
+
+fn load_seed_config_mirror_by_writeback_token(
+    connection: &Connection,
+    token_digest: Digest,
+) -> Result<Option<StoredSeedConfigMirrorV1>, SeedConfigLifecycleError> {
+    connection
+        .query_row(
+            "SELECT mirror_id, scope_token, authority_generation_id,
+                    authority_incarnation_id, authority_revision, native_seed_digest,
+                    package_epoch_digest, config_schema_version, guard_digest,
+                    host_config_revision, status, writeback_token_digest
+             FROM seed_config_mirror_v1 WHERE writeback_token_digest = ?1",
+            params![token_digest.to_vec()],
+            mirror_row_from_row,
+        )
+        .optional()
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?
+        .map(decode_seed_config_mirror)
+        .transpose()
+}
+
+fn create_seed_config_mirror(
+    transaction: &rusqlite::Transaction<'_>,
+    current: &SeedConfigCurrentV1,
+    package_epoch_digest: Digest,
+    config_schema_version: u16,
+    host_config_revision: u64,
+) -> Result<StoredSeedConfigMirrorV1, SeedConfigLifecycleError> {
+    transaction
+        .execute(
+            "UPDATE seed_config_mirror_v1 SET status = 'CONSUMED', updated_at_ms = ?2
+             WHERE scope_token = ?1 AND status IN ('PENDING_WRITEBACK', 'ACTIVE')",
+            params![
+                current.scope_token.to_vec(),
+                revision_to_sql(crate::now_ms()).map_err(seed_error_from_rebirth)?,
+            ],
+        )
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    let random_id: Vec<u8> = transaction
+        .query_row("SELECT randomblob(32)", [], |row| row.get(0))
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    let mirror_id = digest_from_blob(random_id).map_err(seed_error_from_rebirth)?;
+    let mirror_guard = seed_config_guard_for_mirror(&mirror_id);
+    let writeback_token = seed_config_writeback_token_for_mirror(&mirror_id);
+    let guard_digest = seed_config_guard_digest(&mirror_guard)?;
+    let writeback_token_digest = seed_config_writeback_token_digest(&writeback_token)?;
+    let now = crate::now_ms();
+    transaction
+        .execute(
+            "INSERT INTO seed_config_mirror_v1 (
+                 mirror_id, scope_token, authority_generation_id,
+                 authority_incarnation_id, authority_revision, native_seed_digest,
+                 package_epoch_digest, config_schema_version, guard_digest,
+                 host_config_revision, status, writeback_token_digest,
+                 created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                       'PENDING_WRITEBACK', ?11, ?12, ?12)",
+            params![
+                mirror_id.to_vec(),
+                current.scope_token.to_vec(),
+                current.current.generation_id,
+                current.current.authority.incarnation_id.to_vec(),
+                revision_to_sql(current.current.authority.revision)
+                    .map_err(seed_error_from_rebirth)?,
+                current.seed_code_digest.to_vec(),
+                package_epoch_digest.to_vec(),
+                i64::from(config_schema_version),
+                guard_digest.to_vec(),
+                revision_to_sql(host_config_revision).map_err(seed_error_from_rebirth)?,
+                writeback_token_digest.to_vec(),
+                revision_to_sql(now).map_err(seed_error_from_rebirth)?,
+            ],
+        )
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+    Ok(StoredSeedConfigMirrorV1 {
+        mirror_id,
+        scope_token: current.scope_token,
+        authority_generation_id: current.current.generation_id.clone(),
+        authority_incarnation_id: current.current.authority.incarnation_id,
+        authority_revision: current.current.authority.revision,
+        native_seed_digest: current.seed_code_digest,
+        package_epoch_digest,
+        config_schema_version,
+        guard_digest,
+        host_config_revision,
+        status: "PENDING_WRITEBACK".to_owned(),
+        writeback_token_digest,
+    })
+}
+
+type SeedClearIntentRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    i64,
+    String,
+    i64,
+    i64,
+);
+
+fn intent_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeedClearIntentRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+    ))
+}
+
+fn decode_seed_clear_intent(
+    row: SeedClearIntentRow,
+) -> Result<StoredSeedClearIntentV1, SeedConfigLifecycleError> {
+    let (
+        intent_id,
+        scope_token,
+        source_mirror_id,
+        source_guard_digest,
+        expected_generation_id,
+        expected_incarnation_id,
+        expected_revision,
+        expected_seed_digest,
+        package_epoch_digest,
+        config_schema_version,
+        host_config_revision,
+        status,
+        stage_epoch,
+        created_at_ms,
+    ) = row;
+    Ok(StoredSeedClearIntentV1 {
+        intent_id: digest_from_blob(intent_id).map_err(seed_error_from_rebirth)?,
+        scope_token: digest_from_blob(scope_token).map_err(seed_error_from_rebirth)?,
+        source_mirror_id: digest_from_blob(source_mirror_id).map_err(seed_error_from_rebirth)?,
+        source_guard_digest: digest_from_blob(source_guard_digest)
+            .map_err(seed_error_from_rebirth)?,
+        expected_generation_id,
+        expected_incarnation_id: digest_from_blob(expected_incarnation_id)
+            .map_err(seed_error_from_rebirth)?,
+        expected_revision: revision_from_sql(expected_revision).map_err(seed_error_from_rebirth)?,
+        expected_seed_digest: digest_from_blob(expected_seed_digest)
+            .map_err(seed_error_from_rebirth)?,
+        package_epoch_digest: digest_from_blob(package_epoch_digest)
+            .map_err(seed_error_from_rebirth)?,
+        config_schema_version: u16::try_from(config_schema_version)
+            .map_err(|_| SeedConfigLifecycleError::StorageFailed)?,
+        host_config_revision: revision_from_sql(host_config_revision)
+            .map_err(seed_error_from_rebirth)?,
+        status,
+        stage_epoch: revision_from_sql(stage_epoch).map_err(seed_error_from_rebirth)?,
+        created_at_ms: revision_from_sql(created_at_ms).map_err(seed_error_from_rebirth)?,
+    })
+}
+
+fn load_seed_clear_intent(
+    connection: &Connection,
+    intent_id: Digest,
+) -> Result<Option<StoredSeedClearIntentV1>, SeedConfigLifecycleError> {
+    connection
+        .query_row(
+            "SELECT intent_id, scope_token, source_mirror_id, source_guard_digest,
+                    expected_generation_id, expected_incarnation_id, expected_revision,
+                    expected_seed_digest, package_epoch_digest, config_schema_version,
+                    host_config_revision, status, stage_epoch, created_at_ms
+             FROM seed_clear_intent_v1 WHERE intent_id = ?1",
+            params![intent_id.to_vec()],
+            intent_row_from_row,
+        )
+        .optional()
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?
+        .map(decode_seed_clear_intent)
+        .transpose()
+}
+
+type SeedClearConsumptionRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    String,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    i64,
+);
+
+fn consumption_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeedClearConsumptionRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+    ))
+}
+
+fn decode_seed_clear_consumption(
+    row: SeedClearConsumptionRow,
+) -> Result<StoredSeedClearConsumptionV1, SeedConfigLifecycleError> {
+    let (
+        guard_digest,
+        intent_id,
+        scope_token,
+        child_generation_id,
+        child_incarnation_id,
+        child_seed_digest,
+        before_revision,
+        after_revision,
+    ) = row;
+    Ok(StoredSeedClearConsumptionV1 {
+        guard_digest: digest_from_blob(guard_digest).map_err(seed_error_from_rebirth)?,
+        intent_id: digest_from_blob(intent_id).map_err(seed_error_from_rebirth)?,
+        scope_token: digest_from_blob(scope_token).map_err(seed_error_from_rebirth)?,
+        child_generation_id,
+        child_incarnation_id: digest_from_blob(child_incarnation_id)
+            .map_err(seed_error_from_rebirth)?,
+        child_seed_digest: digest_from_blob(child_seed_digest).map_err(seed_error_from_rebirth)?,
+        before_revision: revision_from_sql(before_revision).map_err(seed_error_from_rebirth)?,
+        after_revision: revision_from_sql(after_revision).map_err(seed_error_from_rebirth)?,
+    })
+}
+
+fn load_seed_clear_consumption(
+    connection: &Connection,
+    guard_digest: Digest,
+) -> Result<Option<StoredSeedClearConsumptionV1>, SeedConfigLifecycleError> {
+    connection
+        .query_row(
+            "SELECT guard_digest, intent_id, scope_token, child_generation_id,
+                    child_incarnation_id, child_seed_digest, before_revision, after_revision
+             FROM seed_clear_consumption_v1 WHERE guard_digest = ?1",
+            params![guard_digest.to_vec()],
+            consumption_row_from_row,
+        )
+        .optional()
+        .map_err(|_| SeedConfigLifecycleError::StorageFailed)?
+        .map(decode_seed_clear_consumption)
+        .transpose()
+}
+
+fn seed_clear_intent_id(
+    current: &SeedConfigCurrentV1,
+    guard_digest: Digest,
+    package_epoch_digest: Digest,
+    config_schema_version: u16,
+    host_config_revision: u64,
+) -> Digest {
+    wire::domain_hash(
+        b"astr-embodiment/seed-config-clear-intent-v1",
+        &[
+            &current.scope_token,
+            &guard_digest,
+            current.current.generation_id.as_bytes(),
+            &current.current.authority.incarnation_id,
+            &current.current.authority.revision.to_le_bytes(),
+            &current.seed_code_digest,
+            &package_epoch_digest,
+            &config_schema_version.to_le_bytes(),
+            &host_config_revision.to_le_bytes(),
+        ],
+    )
+}
+
+fn begin_seed_clear_intent(
+    transaction: &rusqlite::Transaction<'_>,
+    current: &SeedConfigCurrentV1,
+    mirror: &StoredSeedConfigMirrorV1,
+    source_guard_digest: Digest,
+    package_epoch_digest: Digest,
+    config_schema_version: u16,
+    host_config_revision: u64,
+) -> Result<SeedClearCommitPermitV1, SeedConfigLifecycleError> {
+    if mirror.guard_digest != source_guard_digest
+        || !seed_config_mirror_matches_current(
+            mirror,
+            current,
+            package_epoch_digest,
+            config_schema_version,
+        )
+    {
+        return Err(SeedConfigLifecycleError::MirrorStale);
+    }
+    let intent_id = seed_clear_intent_id(
+        current,
+        source_guard_digest,
+        package_epoch_digest,
+        config_schema_version,
+        host_config_revision,
+    );
+    let now = crate::now_ms();
+    let existing = load_seed_clear_intent(transaction, intent_id)?;
+    let intent = match existing {
+        Some(intent) => intent,
+        None => {
+            transaction
+                .execute(
+                    "INSERT INTO seed_clear_intent_v1 (
+                         intent_id, scope_token, source_mirror_id, source_guard_digest,
+                         expected_generation_id, expected_incarnation_id, expected_revision,
+                         expected_seed_digest, package_epoch_digest, config_schema_version,
+                         host_config_revision, status, stage_epoch, staged_child_generation_id,
+                         receipt_id, created_at_ms, updated_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                               'STAGING', 1, NULL, NULL, ?12, ?12)",
+                    params![
+                        intent_id.to_vec(),
+                        current.scope_token.to_vec(),
+                        mirror.mirror_id.to_vec(),
+                        source_guard_digest.to_vec(),
+                        current.current.generation_id,
+                        current.current.authority.incarnation_id.to_vec(),
+                        revision_to_sql(current.current.authority.revision)
+                            .map_err(seed_error_from_rebirth)?,
+                        current.seed_code_digest.to_vec(),
+                        package_epoch_digest.to_vec(),
+                        i64::from(config_schema_version),
+                        revision_to_sql(host_config_revision).map_err(seed_error_from_rebirth)?,
+                        revision_to_sql(now).map_err(seed_error_from_rebirth)?,
+                    ],
+                )
+                .map_err(|_| SeedConfigLifecycleError::StorageFailed)?;
+            load_seed_clear_intent(transaction, intent_id)?
+                .ok_or(SeedConfigLifecycleError::StorageFailed)?
+        }
+    };
+    if intent.status != "STAGING"
+        || intent.stage_epoch == 0
+        || intent.scope_token != current.scope_token
+        || intent.source_mirror_id != mirror.mirror_id
+        || intent.source_guard_digest != source_guard_digest
+        || intent.expected_generation_id != current.current.generation_id
+        || intent.expected_incarnation_id != current.current.authority.incarnation_id
+        || intent.expected_revision != current.current.authority.revision
+        || intent.expected_seed_digest != current.seed_code_digest
+        || intent.package_epoch_digest != package_epoch_digest
+        || intent.config_schema_version != config_schema_version
+        || intent.host_config_revision != host_config_revision
+    {
+        return Err(SeedConfigLifecycleError::FenceStale);
+    }
+    Ok(SeedClearCommitPermitV1 {
+        scope_token: current.scope_token,
+        intent_id,
+        source_guard_digest,
+        parent_generation_id: current.current.generation_id.clone(),
+        parent_authority: current.current.authority.clone(),
+        parent_seed_code_digest: current.seed_code_digest,
+        package_epoch_digest,
+        config_schema_version,
+        host_config_revision,
+        created_at_ms: intent.created_at_ms,
+        stage_epoch: intent.stage_epoch,
+    })
+}
+
+fn seed_clear_intent_matches_permit(
+    intent: &StoredSeedClearIntentV1,
+    permit: &SeedClearCommitPermitV1,
+) -> bool {
+    intent.intent_id == permit.intent_id
+        && intent.scope_token == permit.scope_token
+        && intent.source_guard_digest == permit.source_guard_digest
+        && intent.expected_generation_id == permit.parent_generation_id
+        && intent.expected_incarnation_id == permit.parent_authority.incarnation_id
+        && intent.expected_revision == permit.parent_authority.revision
+        && intent.expected_seed_digest == permit.parent_seed_code_digest
+        && intent.package_epoch_digest == permit.package_epoch_digest
+        && intent.config_schema_version == permit.config_schema_version
+        && intent.host_config_revision == permit.host_config_revision
+}
+
+fn seed_clear_consumption_matches_permit(
+    consumption: &StoredSeedClearConsumptionV1,
+    permit: &SeedClearCommitPermitV1,
+) -> bool {
+    consumption.guard_digest == permit.source_guard_digest
+        && consumption.intent_id == permit.intent_id
+        && consumption.scope_token == permit.scope_token
+}
+
+fn replay_seed_clear_result(
+    transaction: &rusqlite::Transaction<'_>,
+    current: &SeedConfigCurrentV1,
+    request: &SeedConfigReconcileRequestV1,
+    package_epoch_digest: Digest,
+    consumption: &StoredSeedClearConsumptionV1,
+) -> Result<SeedConfigReconcileResultV1, SeedConfigLifecycleError> {
+    let guard = request
+        .mirror_guard
+        .as_deref()
+        .ok_or(SeedConfigLifecycleError::SchemaInvalid)?;
+    if seed_config_guard_digest(guard)? != consumption.guard_digest {
+        return Err(SeedConfigLifecycleError::StorageFailed);
+    }
+    replay_seed_clear_result_from_consumption(
+        transaction,
+        current,
+        package_epoch_digest,
+        request.config_schema_version,
+        consumption,
+    )
+}
+
+fn replay_seed_clear_result_from_consumption(
+    transaction: &rusqlite::Transaction<'_>,
+    current: &SeedConfigCurrentV1,
+    package_epoch_digest: Digest,
+    config_schema_version: u16,
+    consumption: &StoredSeedClearConsumptionV1,
+) -> Result<SeedConfigReconcileResultV1, SeedConfigLifecycleError> {
+    if consumption.scope_token != current.scope_token
+        || consumption.child_generation_id != current.current.generation_id
+        || consumption.child_incarnation_id != current.current.authority.incarnation_id
+        || consumption.child_seed_digest != current.seed_code_digest
+        || consumption.after_revision != 0
+    {
+        return Ok(seed_config_result(
+            SeedConfigStateV1::Deferred,
+            None,
+            None,
+            None,
+            "SEED_CONFIG_OBSERVATION_DEFERRED",
+        ));
+    }
+    let active = load_active_seed_config_mirror(transaction, current.scope_token)?;
+    let mirror = match active {
+        Some(mirror)
+            if seed_config_mirror_matches_current(
+                &mirror,
+                current,
+                package_epoch_digest,
+                config_schema_version,
+            ) =>
+        {
+            mirror
+        }
+        _ => create_seed_config_mirror(
+            transaction,
+            current,
+            package_epoch_digest,
+            config_schema_version,
+            0,
+        )?,
+    };
+    Ok(seed_config_result(
+        SeedConfigStateV1::RebirthReplayed,
+        Some(seed_config_writeback(&mirror)?),
+        Some(consumption.before_revision),
+        Some(consumption.after_revision),
+        "SEED_CLEAR_REBIRTH_REPLAYED",
+    ))
+}
+
+fn seed_clear_receipt_id(
+    permit: &SeedClearCommitPermitV1,
+    child: &SeedClearStagedChildV1,
+) -> Digest {
+    wire::domain_hash(
+        b"astr-embodiment/seed-config-clear-receipt-v1",
+        &[
+            &permit.intent_id,
+            &permit.source_guard_digest,
+            &permit.parent_authority.incarnation_id,
+            &child.child_authority.incarnation_id,
+            &child.child_seed_code_digest,
+            &child.child_authority.state_digest,
+            &child.child_authority.graph_digest,
+        ],
+    )
+}
+
+fn validate_seed_clear_staged_child(
+    lifecycle: &VaultLifecycle,
+    permit: &SeedClearCommitPermitV1,
+    child: &SeedClearStagedChildV1,
+) -> Result<(), SeedConfigLifecycleError> {
+    if child.scope_token != permit.scope_token
+        || child.intent_id != permit.intent_id
+        || child.source_guard_digest != permit.source_guard_digest
+        || child.parent_generation_id != permit.parent_generation_id
+        || child.parent_authority != permit.parent_authority
+        || child.parent_seed_code_digest != permit.parent_seed_code_digest
+        || child.child_authority.revision != 0
+        || child.child_authority.incarnation_id == permit.parent_authority.incarnation_id
+        || child.child_seed_code_digest == permit.parent_seed_code_digest
+        || child.child_generation_id
+            != VaultLifecycle::seed_clear_child_generation_id_for(
+                &child.child_authority.incarnation_id,
+            )
+    {
+        return Err(SeedConfigLifecycleError::FenceStale);
+    }
+    let database = lifecycle
+        .seed_clear_child_authority_database_path(&child.child_generation_id)
+        .map_err(seed_error_from_rebirth)?;
+    if !database.is_file() {
+        return Err(SeedConfigLifecycleError::FenceStale);
+    }
+    sync_sqlite_database(&database).map_err(seed_error_from_rebirth)?;
+    let (bot, persona, _, _) = read_single_binding(&database).map_err(seed_error_from_rebirth)?;
+    if wire::persona_scope_digest(&bot, &persona, None) != permit.scope_token
+        || capture_any_authority(&database).map_err(seed_error_from_rebirth)?
+            != child.child_authority
+        || read_seed_code_digest(&database, &child.child_authority.incarnation_id)
+            .map_err(seed_error_from_rebirth)?
+            != child.child_seed_code_digest
+    {
+        return Err(SeedConfigLifecycleError::FenceStale);
+    }
+    Ok(())
 }
 
 fn ensure_ledger_current(
@@ -1977,6 +4001,21 @@ fn capture_any_authority(database: &Path) -> Result<ContinuityAuthority, Rebirth
         graph_digest,
         history_digest,
     })
+}
+
+fn read_seed_code_digest(
+    database: &Path,
+    incarnation_id: &Digest,
+) -> Result<Digest, RebirthLifecycleError> {
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| RebirthLifecycleError::ChildInvalid)?;
+    connection
+        .query_row(
+            "SELECT seed_code_digest FROM incarnations WHERE incarnation_id = ?1",
+            params![incarnation_id.to_vec()],
+            |row| digest_from_blob(row.get(0)?).map_err(sqlite_conversion_error),
+        )
+        .map_err(|_| RebirthLifecycleError::ChildInvalid)
 }
 
 fn read_single_binding(

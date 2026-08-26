@@ -25,11 +25,12 @@ use ae_context_projector::{
 };
 use ae_continuum::{CommitEnvelope, ReplayReport};
 use ae_contracts::{
-    hex, perception_dimension_values, wire, ActionContract, CanonicalEvent, CausalRef,
-    CommitStatus, Digest, GenesisManifestProposal, GenesisReceipt, GenesisStatus, Id128,
-    InvariantResiduals, NativeTelemetryReceiptV1, PerceptionProposalV1, PersonaGenesisRequest,
-    PersonalityVector, ScopeRef, SemanticEstimate, StateSubcodeV1, TransitionReceipt,
-    TransitionReceiptV2, UserStimulus,
+    hex, perception_dimension_values, wire, ActionContract, AllostaticSetpoints, CanonicalEvent,
+    CausalRef, CommitStatus, Digest, EpistemicPriors, ExpressionPhenotype, GenesisManifestProposal,
+    GenesisReceipt, GenesisStatus, Id128, InvariantResiduals, NativeTelemetryReceiptV1,
+    PerceptionProposalV1, PersonaGenesisRequest, PersonaScopeRef, PersonaSelectionKind,
+    PersonaSourceRef, PersonalityVector, ScopeRef, SemanticEstimate, SocialPriors, StateSubcodeV1,
+    TransitionReceipt, TransitionReceiptV2, UserStimulus,
 };
 use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
@@ -39,9 +40,11 @@ use ae_store::{
     ContinuityCommitOutcomeV1, GenesisCommit, GraphCommitV1, LegacySemanticFieldDomainUpgradeV1,
     LegacySemanticFormulaUpgradeReceiptV1, RebirthChildStageRequestV1, RebirthCommitPermitV1,
     RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1, RebirthPrepareResponseV1,
-    RebirthResponseEnvelopeV1, SnapshotCommitV1, Store, StoreError, UserAuthorizedRebirthV1,
-    VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1, LEGACY_FIELD_FXP6_SCALE,
-    SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
+    SeedClearCommitPermitV1, SeedConfigAckResultV1, SeedConfigLifecycleError,
+    SeedConfigPreflightV1, SeedConfigReconcileRequestV1, SeedConfigReconcileResultV1,
+    SeedConfigStateV1, SeedConfigWritebackAckV1, SnapshotCommitV1, Store, StoreError,
+    UserAuthorizedRebirthV1, VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1,
+    LEGACY_FIELD_FXP6_SCALE, SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -56,6 +59,8 @@ pub enum RuntimeError {
     Genesis(#[from] ae_genesis::GenesisError),
     #[error("rebirth lifecycle error: {0}")]
     Rebirth(#[from] RebirthLifecycleError),
+    #[error("seed configuration lifecycle error: {0}")]
+    SeedConfig(#[from] SeedConfigLifecycleError),
     #[error("persona genesis is required before production events")]
     PersonaGenesisRequired,
     #[error("event persona does not match the bound incarnation")]
@@ -450,6 +455,35 @@ fn fully_confident_personality() -> PersonalityVector {
         attachment_propensity: ae_fixed::Fixed::ONE,
         expression_drive: ae_fixed::Fixed::ONE,
         curiosity: ae_fixed::Fixed::ONE,
+    }
+}
+
+fn seed_clear_trait(intent_id: &Digest, label: &[u8]) -> ae_fixed::Fixed {
+    let digest = wire::domain_hash(
+        b"astr-embodiment/seed-config-clear-neutral-trait-v1",
+        &[intent_id, label],
+    );
+    let sample = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    // Keep the regenerated baseline inside the ordinary [0.15, 0.85] range.
+    // It is born from the dedicated seed-clear intent rather than from any
+    // parent phenotype, semantic state, dialogue or context history.
+    ae_fixed::Fixed::from_raw(150_000 + i64::from(sample % 700_001))
+}
+
+fn seed_clear_personality_from_intent(permit: &SeedClearCommitPermitV1) -> PersonalityVector {
+    PersonalityVector {
+        baseline_warmth: seed_clear_trait(&permit.intent_id, b"baseline_warmth"),
+        baseline_patience: seed_clear_trait(&permit.intent_id, b"baseline_patience"),
+        sensitivity: seed_clear_trait(&permit.intent_id, b"sensitivity"),
+        irritability: seed_clear_trait(&permit.intent_id, b"irritability"),
+        composure: seed_clear_trait(&permit.intent_id, b"composure"),
+        epistemic_pride: seed_clear_trait(&permit.intent_id, b"epistemic_pride"),
+        epistemic_openness: seed_clear_trait(&permit.intent_id, b"epistemic_openness"),
+        boundary_strength: seed_clear_trait(&permit.intent_id, b"boundary_strength"),
+        forgiveness: seed_clear_trait(&permit.intent_id, b"forgiveness"),
+        attachment_propensity: seed_clear_trait(&permit.intent_id, b"attachment_propensity"),
+        expression_drive: seed_clear_trait(&permit.intent_id, b"expression_drive"),
+        curiosity: seed_clear_trait(&permit.intent_id, b"curiosity"),
     }
 }
 
@@ -1089,6 +1123,141 @@ impl AstrRuntime {
         })
     }
 
+    /// Build a fresh, neutral seed-clear child without reading the parent's
+    /// modeled phenotype, semantic lane, context lane or history.  The sole
+    /// retained inputs are the Bot/Persona scope, the runtime formula and the
+    /// Rust-owned seed-clear permit.  A permit-derived baseline is used only
+    /// to make the new Manifest/SeedCode distinct; no parent model is copied.
+    fn fresh_seed_clear_child_genesis(
+        &mut self,
+        scope: &ScopeRef,
+        permit: &SeedClearCommitPermitV1,
+    ) -> Result<GenesisCommit, RuntimeError> {
+        if permit.scope_token != continuity_scope(scope) {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let committed = self
+            .store
+            .lookup_bound_genesis(&scope.bot_token, &scope.persona_token)?
+            .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        if committed.receipt.incarnation_id != permit.parent_authority.incarnation_id
+            || committed.receipt.seed_code_digest != permit.parent_seed_code_digest
+            || self.store.current_revision(&permit.scope_token)? != permit.parent_authority.revision
+        {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+
+        let source = PersonaSourceRef {
+            scope: PersonaScopeRef {
+                bot_token: scope.bot_token,
+                persona_token: scope.persona_token,
+            },
+            source_digest: wire::domain_hash(
+                b"astr-embodiment/seed-config-clear-source-v1",
+                &[&permit.intent_id],
+            ),
+            capability_digest: wire::domain_hash(
+                b"astr-embodiment/seed-config-clear-capability-v1",
+                &[&permit.intent_id],
+            ),
+            selection: PersonaSelectionKind::Conversation,
+            prompt_chars: 0,
+            begin_dialog_count: 0,
+            mood_dialog_count: 0,
+        };
+        let compiler_protocol_digest = wire::domain_hash(
+            b"astr-embodiment/seed-config-clear-compiler-protocol-v1",
+            &[&permit.intent_id],
+        );
+        let compiler_model_digest = wire::domain_hash(
+            b"astr-embodiment/seed-config-clear-compiler-model-v1",
+            &[&permit.intent_id],
+        );
+        let child_nonce_digest =
+            VaultLifecycle::seed_clear_child_genesis_nonce_digest_for_permit(permit);
+        let formula_digest = committed.receipt.formula_digest;
+        let child_request = PersonaGenesisRequest {
+            source: source.clone(),
+            proposal: GenesisManifestProposal {
+                schema_version: 1,
+                source: source.clone(),
+                traits: seed_clear_personality_from_intent(permit),
+                trait_confidence: fully_confident_personality(),
+                expression: ExpressionPhenotype::default(),
+                allostasis: AllostaticSetpoints::default(),
+                epistemic: EpistemicPriors::default(),
+                social: SocialPriors::default(),
+                compiler_protocol_digest,
+                compiler_model_digest,
+            },
+            formula_digest,
+            incarnation_nonce: child_nonce_digest,
+            parent_incarnation_id: Some(permit.parent_authority.incarnation_id),
+            observed_at_ms: permit.created_at_ms,
+        };
+        let child_identity =
+            ae_genesis::derive_identity(&child_request, &ae_genesis::GenesisPrior::default())?;
+        if child_identity.seed_code_digest == permit.parent_seed_code_digest
+            || child_identity.incarnation_id == permit.parent_authority.incarnation_id
+        {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+        let (field, graph) = initial_state_from_manifest(
+            &child_identity.manifest,
+            &formula_digest,
+            &child_identity.development_seed_digest,
+        );
+        if !field.validate() || !graph.validate() {
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::BaselineStateInvalid,
+            ));
+        }
+        let initial_snapshot_digest = state_digest(&field, &formula_digest);
+        let initial_graph_digest = graph_digest(&graph);
+        let receipt = GenesisReceipt {
+            schema_version: 1,
+            seed_code_digest: child_identity.seed_code_digest,
+            manifest_digest: child_identity.manifest_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest,
+            persona_source_digest: source.source_digest,
+            compiler_protocol_digest,
+            compiler_model_digest,
+            development_seed_digest: child_identity.development_seed_digest,
+            initial_snapshot_digest,
+            graph_digest: initial_graph_digest,
+            equilibrium_residual: ae_fixed::Fixed::ZERO,
+            energy_residual: ae_fixed::Fixed::ZERO,
+            capacity_residual: ae_fixed::Fixed::ZERO,
+            sample_fit_residual: ae_fixed::Fixed::ZERO,
+            status: GenesisStatus::Committed,
+        };
+        Ok(GenesisCommit {
+            scope_key: ae_genesis::genesis_scope_key(
+                &source.scope.bot_token,
+                &source.scope.persona_token,
+                &source.source_digest,
+                &formula_digest,
+            ),
+            lease_epoch: 0,
+            nonce_digest: child_nonce_digest,
+            manifest_body: wire::encode_manifest_body(&child_identity.manifest),
+            seed_code_digest: child_identity.seed_code_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest,
+            source,
+            compiler_protocol_digest,
+            compiler_model_digest,
+            compiled_at_ms: permit.created_at_ms,
+            receipt,
+            initial_snapshot_digest,
+            state_bytes: Self::encode_state(&field, &graph),
+            graph_digest: initial_graph_digest,
+            manifest: child_identity.manifest,
+        })
+    }
+
     /// First explicit destructive action: create only a durable challenge.
     /// The caller's scope token must exactly name the active lifecycle lane.
     pub fn prepare_rebirth_v1(
@@ -1128,6 +1297,56 @@ impl AstrRuntime {
                 Ok(envelope)
             }
         }
+    }
+
+    /// Reconcile one tri-state seed configuration observation through the
+    /// dedicated Rust lifecycle.  There is no manual `confirmed` path here:
+    /// only an active native mirror plus an explicit empty observation can
+    /// yield the private seed-clear stage permit.
+    pub fn reconcile_seed_config_v1(
+        &mut self,
+        scope: &ScopeRef,
+        request: &SeedConfigReconcileRequestV1,
+    ) -> Result<SeedConfigReconcileResultV1, RuntimeError> {
+        if request.scope_token != continuity_scope(scope) {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        match lifecycle.reconcile_seed_config_preflight_v1(request)? {
+            SeedConfigPreflightV1::Result(result) => {
+                if matches!(
+                    result.state,
+                    SeedConfigStateV1::RebirthCommitted | SeedConfigStateV1::RebirthReplayed
+                ) {
+                    self.reopen_authoritative_store(&lifecycle, scope)?;
+                }
+                Ok(result)
+            }
+            SeedConfigPreflightV1::Stage(permit) => {
+                let genesis = self.fresh_seed_clear_child_genesis(scope, &permit)?;
+                let child = lifecycle
+                    .stage_seed_clear_child_v1(&permit, RebirthChildStageRequestV1 { genesis })?;
+                let result = lifecycle.commit_seed_clear_v1(&permit, &child)?;
+                self.reopen_authoritative_store(&lifecycle, scope)?;
+                Ok(result)
+            }
+        }
+    }
+
+    /// Activate only the durable pending mirror selected by the lifecycle
+    /// owner.  A stale token is a non-destructive result, never a fallback.
+    pub fn ack_seed_config_writeback_v1(
+        &mut self,
+        scope: &ScopeRef,
+        request: &SeedConfigWritebackAckV1,
+    ) -> Result<SeedConfigAckResultV1, RuntimeError> {
+        if request.scope_token != continuity_scope(scope) {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        Ok(lifecycle.ack_seed_config_writeback_v1(request)?)
     }
 
     // --------------------------------------------------------------- events
@@ -2329,6 +2548,7 @@ mod tests {
         PersonaSourceRef, PersonalityVector, SemanticEstimate, SocialPriors, UserStimulus,
     };
     use ae_fixed::Fixed;
+    use ae_store::{SeedConfigAckStateV1, SeedConfigObservationV1, SeedConfigOriginV1};
 
     fn request(seed: u8) -> PersonaGenesisRequest {
         let scope = PersonaScopeRef {
@@ -3006,6 +3226,148 @@ mod tests {
         assert!(!inspect.observatory_genesis_unavailable);
 
         runtime.flush_and_close().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_empty_after_an_acked_mirror_rebirths_only_once() {
+        let dir = temp_dir("seed-config-rebirth");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(101);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let before = runtime
+            .inspect(&scope.bot_token, &scope.persona_token)
+            .unwrap();
+
+        let mirrored = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentNonempty,
+                    origin: SeedConfigOriginV1::PluginWriteback,
+                    seed_code: Some(before.seed_code.clone()),
+                    mirror_guard: None,
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(mirrored.state, SeedConfigStateV1::WriteMirror);
+        let mirror_writeback = mirrored.writeback.unwrap();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    &scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: mirror_writeback.writeback_token,
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+
+        // Ordinary native work advances the revision. The old guard must no
+        // longer authorize a clear; a fresh mirror is acknowledged for the
+        // new authority before the explicit empty observation is considered.
+        assert_eq!(
+            runtime
+                .apply_event(&scope, &stimulus(101, 0, 102))
+                .unwrap()
+                .revision,
+            1
+        );
+        let refreshed = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentNonempty,
+                    origin: SeedConfigOriginV1::PluginWriteback,
+                    seed_code: Some(before.seed_code.clone()),
+                    mirror_guard: None,
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(refreshed.state, SeedConfigStateV1::WriteMirror);
+        let refreshed_writeback = refreshed.writeback.unwrap();
+        let original_guard = refreshed_writeback.mirror_guard.clone();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    &scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: refreshed_writeback.writeback_token,
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+
+        let reborn = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentEmpty,
+                    origin: SeedConfigOriginV1::StartupRead,
+                    seed_code: None,
+                    mirror_guard: Some(original_guard.clone()),
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(reborn.state, SeedConfigStateV1::RebirthCommitted);
+        assert_eq!(reborn.before_revision, Some(1));
+        assert_eq!(reborn.after_revision, Some(0));
+        let child_seed = reborn.writeback.as_ref().unwrap().seed_code.clone();
+        assert_ne!(child_seed, before.seed_code);
+
+        let replayed = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentEmpty,
+                    origin: SeedConfigOriginV1::StartupRead,
+                    seed_code: None,
+                    mirror_guard: Some(original_guard),
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(replayed.state, SeedConfigStateV1::RebirthReplayed);
+        assert_eq!(replayed.writeback.unwrap().seed_code, child_seed);
+        assert_ne!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            before.seed_code
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -106,6 +106,8 @@ try:
     open = _native_module.open
     prepare_rebirth_v1 = _native_module.prepare_rebirth_v1
     confirm_rebirth_v1 = _native_module.confirm_rebirth_v1
+    reconcile_seed_config_v1 = _native_module.reconcile_seed_config_v1
+    ack_seed_config_writeback_v1 = _native_module.ack_seed_config_writeback_v1
     semantic_revision_v1 = _native_module.semantic_revision_v1
     apply_perception_proposal_v1 = _native_module.apply_perception_proposal_v1
     verify_replay = _native_module.verify_replay
@@ -133,6 +135,8 @@ __all__ = [
     "open",
     "prepare_rebirth_v1",
     "confirm_rebirth_v1",
+    "reconcile_seed_config_v1",
+    "ack_seed_config_writeback_v1",
     "semantic_revision_v1",
     "apply_perception_proposal_v1",
     "verify_replay",

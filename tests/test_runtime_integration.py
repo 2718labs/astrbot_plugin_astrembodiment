@@ -587,14 +587,20 @@ def test_invalid_explicit_assistant_provider_does_not_fallback_or_expose_raw_id(
     assert raw_provider_id not in str(error)
 
 
-def test_seed_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: Path):
+def test_seed_mirror_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: Path):
     config_path = tmp_path / "plugin.json"
     first = FakeConfig(seed_code="")
     instance = plugin(first, FakeContext())
 
-    asyncio.run(instance._persist_seed("AE-S1-0123456789ABCDEF"))
+    asyncio.run(
+        instance._persist_seed_mirror_v1(
+            seed_code="AE-S1-0123456789ABCDEF",
+            mirror_guard="a" * 64,
+        )
+    )
 
     assert first["seed_code"] == "AE-S1-0123456789ABCDEF"
+    assert first["seed_mirror_guard_v1"] == "a" * 64
     assert first.save_calls == 1
 
     second = FakeConfig(seed_code=first["seed_code"])
@@ -604,12 +610,17 @@ def test_seed_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: Path):
     )  # persistence belongs to AstrBotConfig, not plugin files
 
 
-def test_seed_persistence_rolls_back_when_astrbot_config_save_fails():
+def test_seed_mirror_persistence_rolls_back_when_astrbot_config_save_fails():
     config = FailingConfig(seed_code="AE-S1-PREVIOUS")
     instance = plugin(config, FakeContext())
 
     with pytest.raises(OSError, match="storage is unavailable"):
-        asyncio.run(instance._persist_seed("AE-S1-NOT-PERSISTED"))
+        asyncio.run(
+            instance._persist_seed_mirror_v1(
+                seed_code="AE-S1-NOT-PERSISTED",
+                mirror_guard="b" * 64,
+            )
+        )
 
     assert config["seed_code"] == "AE-S1-PREVIOUS"
     assert instance._config_values["seed_code"] == "AE-S1-PREVIOUS"

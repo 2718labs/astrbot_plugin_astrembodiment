@@ -14,8 +14,11 @@ pub use continuity_vault::{
     RebirthChildStageRequestV1, RebirthCommitPermitV1, RebirthCurrentV1, RebirthFaultV1,
     RebirthLifecycleError, RebirthOutcomeV1, RebirthPreflightV1, RebirthPrepareRequestV1,
     RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, RebirthResponseStateV1,
-    RebirthStagedChildV1, UserAuthorizedRebirthV1, VaultLifecycle, VaultLocateError, VaultLocation,
-    VaultMode,
+    RebirthStagedChildV1, SeedClearCommitPermitV1, SeedClearStagedChildV1, SeedConfigAckResultV1,
+    SeedConfigAckStateV1, SeedConfigLifecycleError, SeedConfigObservationV1, SeedConfigOriginV1,
+    SeedConfigPreflightV1, SeedConfigReconcileRequestV1, SeedConfigReconcileResultV1,
+    SeedConfigStateV1, SeedConfigWritebackAckV1, SeedConfigWritebackV1, UserAuthorizedRebirthV1,
+    VaultLifecycle, VaultLocateError, VaultLocation, VaultMode,
 };
 pub mod continuity_migration;
 pub use continuity_migration::{

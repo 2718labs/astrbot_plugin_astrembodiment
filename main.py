@@ -148,6 +148,12 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
 
 _G0_FORMULA_DIGEST = "00" * 32
 _G0_PROTOCOL_DIGEST = "00" * 32
+_SEED_CONFIG_OBSERVATION_SCHEMA_V1 = "astrembodiment.seed-config-observation.v1"
+_SEED_CONFIG_WRITEBACK_ACK_SCHEMA_V1 = (
+    "astrembodiment.seed-config-writeback-ack.v1"
+)
+_SEED_CONFIG_SCHEMA_VERSION_V1 = 1
+_SEED_CONFIG_PACKAGE_EPOCH_V1 = "astr-embodiment-1.0.0"
 _INSPECT_INCARNATION_PREFIX = "AE-I1-"
 _INSPECT_INCARNATION_GROUP_COUNT = 13
 _INSPECT_CROCKFORD_ALPHABET = frozenset("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
@@ -406,7 +412,6 @@ class AstrEmbodimentPlugin(Star):
             ):
                 raise PersonaGenesisError("原生创世回执身份不一致")
             self._seed_receipts[scope.persona_token] = dict(genesis)
-            await self._persist_seed(seed_code)
         except (PersonaCompilerMalformed, PersonaGenesisError) as exc:
             logger.error("AstrEmbodiment SeedCode generation failed: %s", exc)
             yield event.plain_result(f"SeedCode 生成失败：{exc}")
@@ -697,15 +702,82 @@ class AstrEmbodimentPlugin(Star):
         )
         raise malformed
 
-    async def _persist_seed(self, seed_code: str) -> None:
-        """Persist the latest native SeedCode through AstrBotConfig."""
-        seed_code = str(seed_code or "").strip()
-        if not seed_code:
-            return
+    @staticmethod
+    def _seed_config_capability_v1(value: object) -> bool:
+        return (
+            type(value) is str
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    def _seed_config_package_epoch_v1(self) -> str:
+        """Return the closed, non-secret package epoch sent to native."""
+        return _SEED_CONFIG_PACKAGE_EPOCH_V1
+
+    def _seed_config_scope_payload_v1(self, scope: ScopeTokens) -> dict[str, str | None]:
+        return {
+            "bot_token": scope.bot_token,
+            "persona_token": scope.persona_token,
+            "relation_token": scope.relation_token,
+        }
+
+    def _read_seed_config_observation_v1(self) -> tuple[str, str | None, str | None]:
+        """Preserve explicit empty/missing/read-failed host states.
+
+        This routine intentionally reads the live AstrBot config rather than
+        the bootstrap cache. A stale process-local default must never turn a
+        user's clear action into a guessed native authority decision.
+        """
         missing = object()
-        previous_config = self.config.get("seed_code", missing)
-        previous_cached = self._config_values.get("seed_code", missing)
+        try:
+            config = self.config
+            if isinstance(config, Mapping):
+                raw_seed = config.get("seed_code", missing)
+                raw_guard = config.get("seed_mirror_guard_v1", missing)
+            else:
+                getter = getattr(config, "get", None)
+                if not callable(getter):
+                    return "READ_FAILED", None, None
+                raw_seed = getter("seed_code", missing)
+                raw_guard = getter("seed_mirror_guard_v1", missing)
+        except Exception:
+            return "READ_FAILED", None, None
+
+        # The hidden schema field starts as an explicit empty-string default.
+        # It means “no native mirror has been written yet”, not a malformed
+        # guard and certainly not evidence for a clear action. Any non-empty
+        # malformed value remains a read failure and cannot create intent.
+        if raw_guard is missing or raw_guard == "":
+            mirror_guard = None
+        elif not self._seed_config_capability_v1(raw_guard):
+            return "READ_FAILED", None, None
+        else:
+            mirror_guard = raw_guard
+        if raw_seed is missing:
+            return "MISSING", None, mirror_guard
+        if type(raw_seed) is not str:
+            return "READ_FAILED", None, None
+        seed_code = raw_seed.strip()
+        if seed_code:
+            return "PRESENT_NONEMPTY", seed_code, mirror_guard
+        return "PRESENT_EMPTY", None, mirror_guard
+
+    async def _persist_seed_mirror_v1(
+        self,
+        *,
+        seed_code: str,
+        mirror_guard: str,
+    ) -> None:
+        """Persist native repair values together in one AstrBot save call."""
+        if not seed_code or not self._seed_config_capability_v1(mirror_guard):
+            raise PersonaGenesisError("SEED_CONFIG_SCHEMA_INVALID")
+        missing = object()
+        previous_seed = self.config.get("seed_code", missing)
+        previous_guard = self.config.get("seed_mirror_guard_v1", missing)
+        previous_cached_seed = self._config_values.get("seed_code", missing)
+        previous_cached_guard = self._config_values.get("seed_mirror_guard_v1", missing)
         self.config["seed_code"] = seed_code
+        self.config["seed_mirror_guard_v1"] = mirror_guard
         try:
             save_async = getattr(self.config, "save_config_async", None)
             if callable(save_async):
@@ -716,16 +788,113 @@ class AstrEmbodimentPlugin(Star):
                     raise TypeError("AstrBot 配置不支持保存 SeedCode")
                 await self._maybe_await(save())
         except BaseException:
-            if previous_config is missing:
-                self.config.pop("seed_code", None)
-            else:
-                self.config["seed_code"] = previous_config
-            if previous_cached is missing:
-                self._config_values.pop("seed_code", None)
-            else:
-                self._config_values["seed_code"] = previous_cached
+            for key, previous in (
+                ("seed_code", previous_seed),
+                ("seed_mirror_guard_v1", previous_guard),
+            ):
+                if previous is missing:
+                    self.config.pop(key, None)
+                else:
+                    self.config[key] = previous
+            for key, previous in (
+                ("seed_code", previous_cached_seed),
+                ("seed_mirror_guard_v1", previous_cached_guard),
+            ):
+                if previous is missing:
+                    self._config_values.pop(key, None)
+                else:
+                    self._config_values[key] = previous
             raise
         self._config_values["seed_code"] = seed_code
+        self._config_values["seed_mirror_guard_v1"] = mirror_guard
+
+    def _forget_seed_clear_scope_v1(self, scope: ScopeTokens) -> None:
+        """Drop only process-local mirrors after native authority switches."""
+        self._coordinator.forget_scope(scope)
+        self._revisions.pop(scope.persona_token, None)
+        self._seed_receipts.pop(scope.persona_token, None)
+        self._turn_seq.pop(scope.session_token, None)
+        for turn_token, pending in tuple(self._pending.items()):
+            if isinstance(pending, Mapping) and pending.get("scope") == scope:
+                self._pending.pop(turn_token, None)
+
+    async def _reconcile_seed_config_v1(
+        self,
+        scope: ScopeTokens,
+        *,
+        origin: str,
+        previous_observation: str | None = None,
+        host_config_revision: int = 0,
+    ) -> dict[str, Any]:
+        """Bridge a live config observation without manufacturing authority.
+
+        All intent, authority fences, consumption and child creation remain in
+        Rust. On host-save failure the native mirror intentionally stays
+        pending; this method never rolls the native generation back.
+        """
+        observation, seed_code, mirror_guard = self._read_seed_config_observation_v1()
+        request: dict[str, Any] = {
+            "schema": _SEED_CONFIG_OBSERVATION_SCHEMA_V1,
+            "scope": self._seed_config_scope_payload_v1(scope),
+            "observation": observation,
+            "origin": origin,
+            "previous_observation": previous_observation,
+            "package_epoch": self._seed_config_package_epoch_v1(),
+            "config_schema_version": _SEED_CONFIG_SCHEMA_VERSION_V1,
+            "host_config_revision": host_config_revision,
+        }
+        if seed_code is not None:
+            request["seed_code"] = seed_code
+        if mirror_guard is not None:
+            request["mirror_guard"] = mirror_guard
+        result = self._bridge.reconcile_seed_config_v1(request)
+        if not isinstance(result, Mapping):
+            raise PersonaGenesisError("SEED_CLEAR_UNKNOWN")
+
+        writeback = result.get("writeback")
+        if isinstance(writeback, Mapping):
+            next_seed = writeback.get("seed_code")
+            next_guard = writeback.get("mirror_guard")
+            writeback_token = writeback.get("writeback_token")
+            if (
+                type(next_seed) is not str
+                or not next_seed
+                or not self._seed_config_capability_v1(next_guard)
+                or not self._seed_config_capability_v1(writeback_token)
+            ):
+                raise PersonaGenesisError("SEED_CLEAR_UNKNOWN")
+            try:
+                await self._persist_seed_mirror_v1(
+                    seed_code=next_seed,
+                    mirror_guard=next_guard,
+                )
+            except Exception:
+                # The native authority is intentionally not rolled back. Do
+                # not interpolate the exception: it could contain host config
+                # data or one of the immediate raw writeback values.
+                logger.warning(
+                    "AstrEmbodiment seed config writeback pending: state=%s",
+                    result.get("state", "UNKNOWN"),
+                )
+                return dict(result)
+            ack = self._bridge.ack_seed_config_writeback_v1(
+                {
+                    "schema": _SEED_CONFIG_WRITEBACK_ACK_SCHEMA_V1,
+                    "scope": self._seed_config_scope_payload_v1(scope),
+                    "writeback_token": writeback_token,
+                    "write_succeeded": True,
+                    "host_config_revision": host_config_revision,
+                }
+            )
+            if not isinstance(ack, Mapping) or ack.get("state") not in {
+                "MIRROR_ACTIVE",
+                "REPLAYED",
+            }:
+                logger.warning("AstrEmbodiment seed config mirror acknowledgement stale")
+
+        if result.get("state") in {"REBIRTH_COMMITTED", "REBIRTH_REPLAYED"}:
+            self._forget_seed_clear_scope_v1(scope)
+        return dict(result)
 
     async def _stop_genesis_turn(self, event: Any, detail: str) -> None:
         """Stop the host LLM lane and report why no unseeded reply was allowed."""
@@ -1546,12 +1715,6 @@ class AstrEmbodimentPlugin(Star):
         logger.warning(message)
         return record
 
-    async def _save_receipt(self, receipt: Mapping[str, Any]) -> str:
-        seed_code = str(receipt.get("seed_code", "") or "").strip()
-        if seed_code:
-            await self._persist_seed(seed_code)
-        return seed_code
-
     # ------------------------------------------------------------ persona adapter
 
     async def resolve_effective_persona(
@@ -1841,6 +2004,16 @@ class AstrEmbodimentPlugin(Star):
 
         existing_identity = self._existing_native_identity(scope)
         if existing_identity is not None:
+            # Only Rust may decide whether this live tri-state observation is
+            # strong enough to switch authority. It may have just committed a
+            # child, so discard hot state and read the native current again.
+            await self._reconcile_seed_config_v1(
+                scope,
+                origin="STARTUP_READ",
+            )
+            existing_identity = self._existing_native_identity(scope)
+            if existing_identity is None:
+                raise PersonaGenesisError("SEED_CLEAR_UNKNOWN")
             # A normal plugin reopen/update reads the durable native binding
             # first.  It must not invoke Genesis merely because Python process
             # memory was lost or a plugin artifact changed.
@@ -1865,6 +2038,13 @@ class AstrEmbodimentPlugin(Star):
                 decision["seed_code"] = genesis["seed_code"]
                 decision["seed_code_short"] = genesis["seed_code_short"]
                 decision["incarnation_id"] = genesis["incarnation_id"]
+                # The event may have advanced the authority revision. Refresh
+                # the mirror afterward so a future explicit empty value binds
+                # to the current native fence rather than stale state.
+                await self._reconcile_seed_config_v1(
+                    scope,
+                    origin="PLUGIN_WRITEBACK",
+                )
             else:
                 decision = dict(genesis)
                 decision["genesis"] = dict(genesis)
@@ -1934,6 +2114,12 @@ class AstrEmbodimentPlugin(Star):
             decision["seed_code"] = genesis.get("seed_code", "")
             decision["seed_code_short"] = genesis.get("seed_code_short", "")
             decision["incarnation_id"] = genesis.get("incarnation_id", "")
+        # A fresh generation has no active config mirror. Native performs the
+        # repair and returns the only values Python is permitted to write.
+        await self._reconcile_seed_config_v1(
+            scope,
+            origin="PLUGIN_WRITEBACK",
+        )
         return decision, scope, session_key, seq, turn_token, base_revision
 
     # ------------------------------------------------------------ hooks
@@ -2093,7 +2279,6 @@ class AstrEmbodimentPlugin(Star):
                 semantic_outcome
             )
 
-            await self._persist_seed(seed_code)
             self._inject_request(request, seed_code, contract, context_summary)
 
             expression_applied = False
