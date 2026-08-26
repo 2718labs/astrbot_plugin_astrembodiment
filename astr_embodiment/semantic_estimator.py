@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from .auxiliary_transport import AuxiliaryTransportMetaV1
 from .context_binding import ContextBindingV1, validate_context_summary
 from .contracts import FrozenTurn, ScopeTokens
 from .semantic_contract import (
@@ -189,6 +190,7 @@ class SemanticEstimateError(ValueError):
         code: str = "ESTIMATOR_MALFORMED",
         subcode: str | None = None,
         diagnostic: DimensionValueDiagnostic | None = None,
+        transport_meta: AuxiliaryTransportMetaV1 | None = None,
     ) -> None:
         if subcode is not None and subcode not in ESTIMATOR_MALFORMED_SUBCODES:
             raise ValueError("invalid estimator malformed subcode")
@@ -197,10 +199,16 @@ class SemanticEstimateError(ValueError):
             or type(diagnostic) is not DimensionValueDiagnostic
         ):
             raise ValueError("invalid estimator dimension value diagnostic")
+        if (
+            transport_meta is not None
+            and type(transport_meta) is not AuxiliaryTransportMetaV1
+        ):
+            raise ValueError("invalid estimator transport metadata")
         super().__init__(code)
         self.code = code
         self.subcode = subcode
         self.diagnostic = diagnostic
+        self.transport_meta = transport_meta
 
     def diagnostic_json(self) -> dict[str, int | float | str] | None:
         if self.diagnostic is None:
@@ -415,10 +423,16 @@ class SemanticEstimateV3:
 
     dimensions: Mapping[str, DimensionEstimateV3]
     schema: str = SEMANTIC_ESTIMATE_V3_SCHEMA
+    transport_meta: AuxiliaryTransportMetaV1 | None = None
 
     def __post_init__(self) -> None:
         if self.schema != SEMANTIC_ESTIMATE_V3_SCHEMA:
             raise _invalid_estimate("SCHEMA_VERSION")
+        if (
+            self.transport_meta is not None
+            and type(self.transport_meta) is not AuxiliaryTransportMetaV1
+        ):
+            raise _invalid_estimate("DIMENSION_VALUE")
         if type(self.dimensions) is not dict or set(self.dimensions) != set(
             DIMENSION_NAMES
         ):
@@ -808,6 +822,8 @@ async def estimate_context_bound(
         raise
     except BaseException:
         raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE") from None
+    if type(result) is SemanticEstimateV3:
+        return result
     try:
         return parse_estimator_output_v3(result)
     except SemanticEstimateError as exc:

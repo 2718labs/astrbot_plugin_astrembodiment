@@ -15,6 +15,10 @@ import secrets
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from .auxiliary_transport import (
+    AuxiliaryTransportMetaV1,
+    not_applicable_transport_meta,
+)
 from .bridge import (
     ContextProjectionIntegrity,
     GenesisUnavailable,
@@ -289,12 +293,22 @@ class GenesisCoordinator:
         native_stage: str | None = None,
         state_subcode: object = None,
         migration_subcode: object = None,
+        transport_meta: AuxiliaryTransportMetaV1 | None = None,
     ) -> dict[str, Any]:
         """Return one non-echoing V3 preview failure."""
 
         if code not in _SEMANTIC_FAILURE_CODES:
             code = "NATIVE_ERROR"
-        result = {"status": "DEGRADED", "code": code}
+        meta = (
+            transport_meta
+            if type(transport_meta) is AuxiliaryTransportMetaV1
+            else not_applicable_transport_meta()
+        )
+        result: dict[str, Any] = {
+            "status": "DEGRADED",
+            "code": code,
+            **meta.as_json(),
+        }
         if code in SEMANTIC_NATIVE_ERROR_CODES:
             result["cause_code"] = code
             if native_stage in SEMANTIC_NATIVE_FAILURE_STAGES:
@@ -312,6 +326,44 @@ class GenesisCoordinator:
         ):
             result["cause_code"] = cause_code
         return result
+
+    @staticmethod
+    def _cacheable_semantic_result(result: Mapping[str, Any]) -> bool:
+        """Only a fully committed native receipt may survive request singleflight."""
+
+        if (
+            type(result) is not dict
+            or result.get("status") != "SUCCESS"
+            or result.get("code") != "SEMANTIC_COMMITTED"
+            or result.get("transport_subcode") != "NONE"
+            or result.get("attempted") is not True
+            or result.get("attempt_count") not in {1, 2}
+        ):
+            return False
+        dimensions = result.get("dimensions_fxp6")
+        closure = result.get("semantic_closure")
+        if (
+            type(dimensions) is not dict
+            or type(closure) is not dict
+            or closure.get("schema")
+            not in {
+                "astrembodiment.semantic-perception-closure.v1",
+                "astrembodiment.semantic-perception-closure.v2",
+            }
+            or type(closure.get("revision")) is not int
+            or closure.get("revision") < 0
+            or closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
+            or closure.get("node_observability_state") != "CONFIRMED"
+        ):
+            return False
+        vector = closure.get("semantic_vector_receipt")
+        return (
+            type(vector) is dict
+            and vector.get("dimension_slot_count") == 15
+            and vector.get("evaluated_dimension_count") == 15
+            and vector.get("injected_dimension_count") == 15
+            and vector.get("unavailable_dimension_count") == 0
+        )
 
     @staticmethod
     def _semantic_key(scope: ScopeTokens, frozen_turn: FrozenTurn) -> str:
@@ -374,7 +426,8 @@ class GenesisCoordinator:
         task = self._semantic_inflight.get(key)
         if task is None:
             task = asyncio.create_task(
-                self._run_semantic_v3(
+                self._run_semantic_owner_v3(
+                    key=key,
                     scope=scope,
                     frozen_turn=frozen_turn,
                     request_text=request_text,
@@ -389,10 +442,35 @@ class GenesisCoordinator:
             raise
         except BaseException:
             result = self._semantic_failure("NATIVE_ERROR")
-        self._semantic_results[key] = copy.deepcopy(result)
-        if task.done() and self._semantic_inflight.get(key) is task:
-            self._semantic_inflight.pop(key, None)
         return copy.deepcopy(result)
+
+    async def _run_semantic_owner_v3(
+        self,
+        *,
+        key: str,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        context_summary: Mapping[str, Any],
+        estimator: ContextBoundEstimatorProvider,
+    ) -> dict[str, Any]:
+        """Own one semantic task and clear only its matching inflight entry."""
+
+        try:
+            result = await self._run_semantic_v3(
+                scope=scope,
+                frozen_turn=frozen_turn,
+                request_text=request_text,
+                context_summary=context_summary,
+                estimator=estimator,
+            )
+            if self._cacheable_semantic_result(result):
+                self._semantic_results[key] = copy.deepcopy(result)
+            return result
+        finally:
+            task = asyncio.current_task()
+            if self._semantic_inflight.get(key) is task:
+                self._semantic_inflight.pop(key, None)
 
     async def _run_semantic_v3(
         self,
@@ -454,9 +532,19 @@ class GenesisCoordinator:
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
             raise
         except SemanticEstimateError as exc:
-            return self._semantic_failure(exc.code, cause_code=exc.subcode)
+            return self._semantic_failure(
+                exc.code,
+                cause_code=exc.subcode,
+                transport_meta=exc.transport_meta,
+            )
         except BaseException:
             return self._semantic_failure("ESTIMATOR_UNAVAILABLE")
+
+        transport_meta = (
+            estimate.transport_meta
+            if type(estimate.transport_meta) is AuxiliaryTransportMetaV1
+            else not_applicable_transport_meta()
+        )
 
         try:
             proposal = build_perception_proposal_v3(
@@ -467,25 +555,32 @@ class GenesisCoordinator:
                 nonce_digest=nonce_digest,
             )
         except SemanticProposalError as exc:
-            return self._semantic_failure(exc.code)
+            return self._semantic_failure(exc.code, transport_meta=transport_meta)
         except BaseException:
-            return self._semantic_failure("ESTIMATOR_MALFORMED")
+            return self._semantic_failure(
+                "ESTIMATOR_MALFORMED", transport_meta=transport_meta
+            )
 
         closure = self._bridge.apply_perception_proposal_v1(scope, proposal)
         if type(closure) is not dict:
-            return self._semantic_failure("NATIVE_MALFORMED")
+            return self._semantic_failure(
+                "NATIVE_MALFORMED", transport_meta=transport_meta
+            )
         if closure.get("status") == "DEGRADED":
             return self._semantic_failure(
                 str(closure.get("code", "NATIVE_ERROR")),
                 native_stage="NATIVE_APPLY",
                 state_subcode=closure.get("state_subcode"),
                 migration_subcode=closure.get("migration_subcode"),
+                transport_meta=transport_meta,
             )
         if closure.get("schema") not in {
             "astrembodiment.semantic-perception-closure.v1",
             "astrembodiment.semantic-perception-closure.v2",
         }:
-            return self._semantic_failure("NATIVE_MALFORMED")
+            return self._semantic_failure(
+                "NATIVE_MALFORMED", transport_meta=transport_meta
+            )
         vector = closure.get("semantic_vector_receipt")
         if (
             closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
@@ -496,17 +591,22 @@ class GenesisCoordinator:
             or vector.get("injected_dimension_count") != 15
             or vector.get("unavailable_dimension_count") != 0
         ):
-            return self._semantic_failure("SEMANTIC_VECTOR_UNAVAILABLE")
+            return self._semantic_failure(
+                "SEMANTIC_VECTOR_UNAVAILABLE", transport_meta=transport_meta
+            )
         if closure.get("expression_projection") is None:
-            return self._semantic_failure("EXPRESSION_PROJECTION_UNAVAILABLE")
+            return self._semantic_failure(
+                "EXPRESSION_PROJECTION_UNAVAILABLE", transport_meta=transport_meta
+            )
         return {
-            "status": "DEGRADED",
-            "code": "HUMAN_GOLD_UNVERIFIED",
+            "status": "SUCCESS",
+            "code": "SEMANTIC_COMMITTED",
             "calibration_state": "UNVERIFIED_HUMAN_GOLD",
             "dimensions_fxp6": dict(proposal["dimensions"]),
             "estimator_confidence_fxp6": proposal["estimator_confidence"],
             "semantic_closure": copy.deepcopy(closure),
             "migration_subcode": closure.get("migration_subcode"),
+            **transport_meta.as_json(),
         }
 
     async def apply_delivery(

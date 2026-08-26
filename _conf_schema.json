@@ -58,7 +58,7 @@
       },
       "semantic_estimator_timeout_ms": {
         "description": "十五维语义估计超时（毫秒）",
-        "hint": "超时后不提交语义、不回退固定零，并记录 EXPRESSION_NOT_ATTEMPTED 警告。",
+        "hint": "一次十五维语义操作的总时间预算；超时后不提交语义、不回退固定零，并记录 EXPRESSION_NOT_ATTEMPTED 警告。",
         "type": "int",
         "default": 8000,
         "minimum": 1000,

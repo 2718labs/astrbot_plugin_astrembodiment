@@ -61,6 +61,15 @@ except ImportError:  # Static checks outside AstrBot.
 
 try:
     from .astr_embodiment import NativeBridge, NativeCoreUnavailable
+    from .astr_embodiment.auxiliary_transport import (
+        AuxiliaryProviderTransport,
+        AuxiliaryTransportError,
+        AuxiliaryTransportMetaV1,
+        DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
+        RequestTransportContext,
+        normalized_transport_meta,
+        not_applicable_transport_meta,
+    )
     from .astr_embodiment.bridge import (
         SEMANTIC_NATIVE_ERROR_CODES,
         SEMANTIC_NATIVE_FAILURE_STAGES,
@@ -95,6 +104,15 @@ try:
     )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment import NativeBridge, NativeCoreUnavailable
+    from astr_embodiment.auxiliary_transport import (
+        AuxiliaryProviderTransport,
+        AuxiliaryTransportError,
+        AuxiliaryTransportMetaV1,
+        DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
+        RequestTransportContext,
+        normalized_transport_meta,
+        not_applicable_transport_meta,
+    )
     from astr_embodiment.bridge import (
         SEMANTIC_NATIVE_ERROR_CODES,
         SEMANTIC_NATIVE_FAILURE_STAGES,
@@ -290,9 +308,13 @@ class AstrEmbodimentPlugin(Star):
         # generated SeedCode to appear in the WebUI after reload.
         self.config = config if config is not None else AstrBotConfig()
         self._config_values = dict(config or {})
-        self._unified_provider_legacy_warning_emitted = False
         self._bridge = NativeBridge()
         self._coordinator = GenesisCoordinator(self._bridge)
+        self._auxiliary_transport = AuxiliaryProviderTransport(
+            context=self.context,
+            configured_provider=self._configured_auxiliary_provider,
+            timeout_ms=self._semantic_estimator_timeout_ms,
+        )
         self._health = None
         self._revisions: dict[str, int] = {}
         self._turn_seq: dict[str, int] = {}
@@ -494,62 +516,29 @@ class AstrEmbodimentPlugin(Star):
             self._config_value("semantic_estimator_provider_id", "") or ""
         ).strip()
 
-    def _configured_auxiliary_provider_id(self) -> tuple[str, str]:
-        """Select the unified configured Provider before any session fallback."""
+    def _configured_auxiliary_provider(self) -> tuple[str, str]:
+        """Select only the configured unified Provider source for this request."""
 
         provider_id = self._assistant_provider_id()
         if provider_id:
-            return provider_id, "assistant"
+            return provider_id, "CONFIGURED"
         provider_id = self._semantic_estimator_provider_id()
         if provider_id:
-            return provider_id, "legacy_v3"
-        return "", "session"
+            return provider_id, "LEGACY_COMPAT"
+        return "", "CURRENT_SESSION"
 
-    async def _resolve_auxiliary_provider_id(
-        self,
-        event: Any,
-        *,
-        consumer: str,
-    ) -> str:
-        """Resolve one validated Provider for compiler and V3 estimator calls."""
+    def _semantic_estimator_timeout_ms(self) -> int:
+        """Read the one shared, schema-bounded semantic operation budget."""
 
-        provider_id, source = self._configured_auxiliary_provider_id()
-        if source != "session":
-            try:
-                get_provider = getattr(self.context, "get_provider_by_id", None)
-                provider = get_provider(provider_id) if callable(get_provider) else None
-            except Exception:
-                provider = None
-            if provider is None:
-                logger.warning(
-                    f"UNIFIED_PROVIDER_UNAVAILABLE source={source} consumer={consumer}"
-                )
-                raise ValueError("辅助模型 Provider 不存在") from None
-            if (
-                source == "legacy_v3"
-                and not self._unified_provider_legacy_warning_emitted
-            ):
-                self._unified_provider_legacy_warning_emitted = True
-                logger.warning("UNIFIED_PROVIDER_LEGACY_FALLBACK")
-            return provider_id
-
-        get_current = getattr(self.context, "get_current_chat_provider_id", None)
-        if not callable(get_current):
-            raise TypeError("AstrBot 未提供当前会话模型接口")
-        provider_id = await self._maybe_await(
-            get_current(umo=getattr(event, "unified_msg_origin", None))
+        value = self._config_value(
+            "semantic_estimator_timeout_ms",
+            DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
         )
-        if type(provider_id) is not str or not provider_id.strip():
-            raise ValueError("辅助模型 Provider 不存在")
-        return provider_id.strip()
-
-    def _semantic_estimator_timeout_seconds(self) -> float:
-        """Keep the V3 provider timeout bounded even for malformed config."""
-
-        value = self._config_value("semantic_estimator_timeout_ms", 8_000)
-        if type(value) is not int or not 1_000 <= value <= 15_000:
-            value = 8_000
-        return value / 1_000
+        return (
+            value
+            if type(value) is int and 1_000 <= value <= 15_000
+            else DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS
+        )
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:
@@ -564,29 +553,33 @@ class AstrEmbodimentPlugin(Star):
         *,
         prompt: str,
         system_prompt: str,
-    ) -> Any:
-        """Call the unified auxiliary Provider without history or tool leakage."""
-        provider_id = await self._resolve_auxiliary_provider_id(
-            event,
-            consumer="assistant",
-        )
+        transport_context: RequestTransportContext | None = None,
+    ) -> str:
+        """Use one fixed, validated auxiliary Provider with no history leakage."""
 
-        generate = getattr(self.context, "llm_generate", None)
-        if not callable(generate):
-            raise TypeError("AstrBot 未提供 llm_generate 接口")
-        return await generate(
-            chat_provider_id=provider_id,
-            prompt=prompt,
-            system_prompt=system_prompt,
-            contexts=None,
-            tools=None,
-            temperature=0,
-        )
+        own_context = transport_context is None
+        if transport_context is None:
+            transport_context = self._auxiliary_transport.open_request(
+                umo=getattr(event, "unified_msg_origin", None)
+            )
+            transport_context.bind_semantic_key(f"auxiliary:{id(event)}")
+        try:
+            result = await transport_context.generate(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                semantic_operation=False,
+            )
+            return result.text
+        finally:
+            if own_context:
+                transport_context.close()
 
     async def _semantic_estimate_v3(
         self,
         event: Any,
         request_mapping: Mapping[str, Any],
+        *,
+        transport_context: RequestTransportContext | None = None,
     ) -> Any:
         """Adapt the V3-only provider mapping without history or tool leakage."""
 
@@ -613,14 +606,6 @@ class AstrEmbodimentPlugin(Star):
         ):
             raise ValueError("invalid semantic estimate request")
 
-        provider_id = await self._resolve_auxiliary_provider_id(
-            event,
-            consumer="semantic_v3",
-        )
-
-        generate = getattr(self.context, "llm_generate", None)
-        if not callable(generate):
-            raise TypeError("semantic estimator provider unavailable")
         try:
             canonical_schema = json.dumps(
                 structured_schema,
@@ -636,54 +621,66 @@ class AstrEmbodimentPlugin(Star):
             f"{canonical_schema}\n"
             "Return exactly one JSON object matching this closed schema."
         )
-        generated = generate(
-            chat_provider_id=provider_id,
-            prompt=current_turn_text,
-            system_prompt=provider_system_prompt,
-            contexts=None,
-            tools=None,
-            temperature=0,
-        )
-        if inspect.isawaitable(generated):
-            result = await asyncio.wait_for(
-                generated,
-                timeout=self._semantic_estimator_timeout_seconds(),
+        own_context = transport_context is None
+        if transport_context is None:
+            transport_context = self._auxiliary_transport.open_request(
+                umo=getattr(event, "unified_msg_origin", None)
+            )
+            transport_context.bind_semantic_key(f"semantic:{id(event)}")
+        try:
+            transport_result = await transport_context.generate(
+                prompt=current_turn_text,
+                system_prompt=provider_system_prompt,
+                semantic_operation=True,
+            )
+        except AuxiliaryTransportError as exc:
+            raise SemanticEstimateError(
+                "ESTIMATOR_UNAVAILABLE",
+                transport_meta=exc.meta,
+            ) from None
+        finally:
+            if own_context:
+                transport_context.close()
+
+        completion_text = transport_result.text
+        try:
+            estimate = parse_estimator_output_v3(completion_text)
+        except SemanticEstimateError as exc:
+            malformed = SemanticEstimateError(
+                exc.code,
+                exc.subcode,
+                exc.diagnostic,
+                transport_meta=transport_result.meta,
             )
         else:
-            result = generated
-        if type(result) is str:
-            extraction_path = "direct_str"
-            completion_text = result
-        else:
-            extraction_path = "completion_text"
-            try:
-                completion_text = getattr(result, "completion_text", None)
-            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException:
-                completion_text = None
+            return type(estimate)(
+                dimensions=dict(estimate.dimensions),
+                schema=estimate.schema,
+                transport_meta=transport_result.meta,
+            )
 
         if type(completion_text) is str:
             try:
-                return parse_estimator_output_v3(completion_text)
-            except SemanticEstimateError as exc:
-                malformed = exc
-        else:
-            malformed = SemanticEstimateError("ESTIMATOR_MALFORMED", "JSON_DECODE")
+                warning_payload: dict[str, Any] = {
+                    "return_type": "canonical_completion_text",
+                    "extraction_path": "canonical_text",
+                    "character_length": len(completion_text),
+                    "sha256": hashlib.sha256(
+                        completion_text.encode("utf-8")
+                    ).hexdigest(),
+                    "subcode": malformed.subcode or "JSON_DECODE",
+                    **transport_result.meta.as_json(),
+                }
+            except (TypeError, ValueError):
+                warning_payload = {
+                    "return_type": "canonical_completion_text",
+                    "extraction_path": "canonical_text",
+                    "character_length": None,
+                    "sha256": None,
+                    "subcode": "JSON_DECODE",
+                    **transport_result.meta.as_json(),
+                }
 
-        warning_payload: dict[str, Any] = {
-            "return_type": f"{type(result).__module__}.{type(result).__qualname__}",
-            "extraction_path": extraction_path,
-            "character_length": (
-                len(completion_text) if type(completion_text) is str else None
-            ),
-            "sha256": (
-                hashlib.sha256(completion_text.encode("utf-8")).hexdigest()
-                if type(completion_text) is str
-                else None
-            ),
-            "subcode": malformed.subcode or "JSON_DECODE",
-        }
         dimension_diagnostic = malformed.diagnostic_json()
         if dimension_diagnostic is not None:
             warning_payload["dimension_diagnostic"] = dimension_diagnostic
@@ -1168,6 +1165,7 @@ class AstrEmbodimentPlugin(Star):
             return
         if bool(getattr(request, self._request_injected_attr, False)):
             return
+
         current = str(getattr(request, "system_prompt", "") or "")
         if contract is None:
             contract = {}
@@ -1228,8 +1226,8 @@ class AstrEmbodimentPlugin(Star):
         if not isinstance(outcome, Mapping):
             return None
         if (
-            outcome.get("status") != "DEGRADED"
-            or outcome.get("code") != "HUMAN_GOLD_UNVERIFIED"
+            outcome.get("status") != "SUCCESS"
+            or outcome.get("code") != "SEMANTIC_COMMITTED"
             or outcome.get("calibration_state") != _SEMANTIC_CALIBRATION_UNVERIFIED
         ):
             return None
@@ -1306,6 +1304,18 @@ class AstrEmbodimentPlugin(Star):
             return False
         return True
 
+    @staticmethod
+    def _transport_meta_for_outcome(
+        outcome: Mapping[str, Any] | Any,
+    ) -> AuxiliaryTransportMetaV1:
+        if not isinstance(outcome, Mapping):
+            return not_applicable_transport_meta()
+        return normalized_transport_meta(
+            outcome.get("transport_subcode"),
+            outcome.get("attempted"),
+            outcome.get("attempt_count"),
+        )
+
     @classmethod
     def _semantic_observatory_record(
         cls,
@@ -1321,6 +1331,7 @@ class AstrEmbodimentPlugin(Star):
         request/provider text, digest material, exception details, or paths.
         """
 
+        transport_meta = cls._transport_meta_for_outcome(outcome)
         empty_record: dict[str, Any] = {
             "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
             "status": "DEGRADED",
@@ -1338,6 +1349,7 @@ class AstrEmbodimentPlugin(Star):
             "expression_profile_fxp6": None,
             "state_subcode": None,
             "migration_subcode": None,
+            **transport_meta.as_json(),
         }
         profile = cls._expression_profile_from_semantic_outcome(outcome)
         if expression_applied and profile is not None and expression_profile == profile:
@@ -1414,6 +1426,7 @@ class AstrEmbodimentPlugin(Star):
                     "migration_subcode": _observatory_migration_subcode(
                         closure.get("migration_subcode")
                     ),
+                    **transport_meta.as_json(),
                 }
         if cause_code is None and isinstance(outcome, Mapping):
             candidate = outcome.get("cause_code")
@@ -1458,6 +1471,16 @@ class AstrEmbodimentPlugin(Star):
         )
         native_code = outcome.get("cause_code")
         native_stage = outcome.get("native_stage")
+        transport_meta = self._transport_meta_for_outcome(outcome)
+        if outcome.get("code") == "ESTIMATOR_UNAVAILABLE":
+            logger.warning(
+                "AstrEmbodiment semantic transport failure: "
+                "code=ESTIMATOR_UNAVAILABLE transport_subcode=%s attempted=%s "
+                "attempt_count=%d",
+                transport_meta.transport_subcode,
+                transport_meta.attempted,
+                transport_meta.attempt_count,
+            )
         if (
             type(native_code) is str
             and native_code in SEMANTIC_NATIVE_ERROR_CODES
@@ -1629,6 +1652,19 @@ class AstrEmbodimentPlugin(Star):
             session_token=session_token(str(session_key)),
         )
 
+    @staticmethod
+    def _semantic_request_key(scope: ScopeTokens, session_key: str, seq: int) -> str:
+        """Build the same private key used by semantic singleflight for this turn."""
+
+        return ":".join(
+            (
+                scope.bot_token,
+                scope.persona_token,
+                event_id(f"{session_key}#{seq}"),
+                turn_id(session_key, seq),
+            )
+        )
+
     def _native_revision(self, scope: ScopeTokens) -> int:
         """Read and validate the native revision mirror for one scope."""
         inspected = self._bridge.inspect(scope.scope_json())
@@ -1741,6 +1777,7 @@ class AstrEmbodimentPlugin(Star):
         request: Any = None,
         *,
         apply_stimulus: bool,
+        transport_context: RequestTransportContext | None = None,
     ) -> tuple[dict[str, Any], ScopeTokens, str, int, str | None, int]:
         """Resolve the active Persona and run the native Genesis boundary.
 
@@ -1761,6 +1798,13 @@ class AstrEmbodimentPlugin(Star):
         turn_token = None
         base_revision = self._revisions.get(scope.persona_token, 0)
         observed_at_ms = int(time.time() * 1000)
+        if transport_context is None:
+            transport_context = self._auxiliary_transport.open_request(
+                umo=getattr(event, "unified_msg_origin", None)
+            )
+        transport_context.bind_semantic_key(
+            self._semantic_request_key(scope, session_key, seq)
+        )
 
         existing_identity = self._existing_native_identity(scope)
         if existing_identity is not None:
@@ -1795,7 +1839,11 @@ class AstrEmbodimentPlugin(Star):
         )
 
         async def generate(**prompt_kwargs: Any) -> Any:
-            return await self._llm_generate(event, **prompt_kwargs)
+            return await self._llm_generate(
+                event,
+                transport_context=transport_context,
+                **prompt_kwargs,
+            )
 
         async def compiler(snapshot: PersonaSourceSnapshot) -> dict[str, Any]:
             return await compile_with_provider(generate=generate, source=snapshot)
@@ -1866,6 +1914,9 @@ class AstrEmbodimentPlugin(Star):
         if bool(getattr(request, self._request_injected_attr, False)):
             return
 
+        transport_context = self._auxiliary_transport.open_request(
+            umo=getattr(event, "unified_msg_origin", None)
+        )
         semantic_outcome: Mapping[str, Any] = {
             "status": "DEGRADED",
             "code": "EMPTY_REQUEST" if frozen_request_text is None else "NATIVE_ERROR",
@@ -1885,8 +1936,13 @@ class AstrEmbodimentPlugin(Star):
                 event,
                 request,
                 apply_stimulus=True,
+                transport_context=transport_context,
             )
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            transport_context.close()
+            raise
         except (PersonaCompilerMalformed, PersonaGenesisError) as exc:
+            transport_context.close()
             semantic_record = self._emit_semantic_observatory(
                 semantic_outcome,
                 expression_applied=False,
@@ -1905,6 +1961,7 @@ class AstrEmbodimentPlugin(Star):
             await self._stop_genesis_turn(event, str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - fail closed before host LLM
+            transport_context.close()
             semantic_record = self._emit_semantic_observatory(
                 semantic_outcome,
                 expression_applied=False,
@@ -1967,11 +2024,18 @@ class AstrEmbodimentPlugin(Star):
                     base_revision=base_revision,
                     observed_at_ms=int(time.time() * 1000),
                 )
+                transport_context.bind_semantic_key(
+                    self._semantic_request_key(scope, session_key, seq)
+                )
 
                 async def semantic_estimator(
                     request_mapping: Mapping[str, Any],
                 ) -> Any:
-                    return await self._semantic_estimate_v3(event, request_mapping)
+                    return await self._semantic_estimate_v3(
+                        event,
+                        request_mapping,
+                        transport_context=transport_context,
+                    )
 
                 semantic_outcome = await self._coordinator.preflight_semantic_v3(
                     scope=scope,
@@ -2062,6 +2126,8 @@ class AstrEmbodimentPlugin(Star):
             self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))
             logger.exception("AstrEmbodiment Genesis result processing failed")
             await self._stop_genesis_turn(event, "创世结果处理失败")
+        finally:
+            transport_context.close()
 
     @filter.on_llm_response(desc="LLM 响应后：登记候选行动（当前仅观察）")
     async def on_llm_response(

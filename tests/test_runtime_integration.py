@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import astr_embodiment.bridge as bridge_module  # noqa: E402
+from astr_embodiment.auxiliary_transport import AuxiliaryTransportError  # noqa: E402
 import main as main_module  # noqa: E402
 from astr_embodiment.contracts import ScopeTokens  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
@@ -73,7 +74,7 @@ class FakeContext:
 
     def get_provider_by_id(self, provider_id: str):
         self.provider_calls.append(provider_id)
-        if provider_id == self.configured_provider:
+        if provider_id in {self.configured_provider, self.current_provider}:
             return object()
         return None
 
@@ -232,11 +233,14 @@ def test_explicit_assistant_provider_is_used_without_fallback():
 
     context, response = asyncio.run(run())
 
-    assert response.completion_text == '{"ok": true}'
+    assert response == '{"ok": true}'
     assert context.current_calls == 0
-    assert context.generate_calls[0]["chat_provider_id"] == "helper"
-    assert context.generate_calls[0]["contexts"] is None
-    assert context.generate_calls[0]["tools"] is None
+    assert context.generate_calls[0] == {
+        "chat_provider_id": "helper",
+        "prompt": "compile",
+        "system_prompt": "compiler",
+        "tools": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -250,7 +254,7 @@ def test_explicit_assistant_provider_is_used_without_fallback():
     [
         ("assistant", "legacy", "assistant", "assistant", 0),
         ("   ", "legacy", "legacy", "legacy", 0),
-        ("   ", "   ", "unused", "chat", 2),
+        ("   ", "   ", "chat", "chat", 2),
     ],
 )
 def test_unified_auxiliary_provider_selection_is_shared_by_compiler_and_v3(
@@ -359,11 +363,11 @@ def test_unified_auxiliary_provider_unavailable_is_fail_closed_for_both_consumer
             "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
             "input": {"context_summary": {}},
         }
-        with pytest.raises(ValueError) as compiler_error:
+        with pytest.raises(AuxiliaryTransportError) as compiler_error:
             await instance._llm_generate(
                 event, prompt="compile", system_prompt="compiler"
             )
-        with pytest.raises(ValueError) as semantic_error:
+        with pytest.raises(SemanticEstimateError) as semantic_error:
             await instance._semantic_estimate_v3(event, request_mapping)
         await instance._stop_genesis_turn(event, str(compiler_error.value))
         return context, event, compiler_error.value, semantic_error.value
@@ -372,8 +376,16 @@ def test_unified_auxiliary_provider_unavailable_is_fail_closed_for_both_consumer
 
     assert context.current_calls == 0
     assert context.generate_calls == []
-    assert str(compiler_error) == "辅助模型 Provider 不存在"
-    assert str(semantic_error) == "辅助模型 Provider 不存在"
+    assert str(compiler_error) == "ESTIMATOR_UNAVAILABLE"
+    assert semantic_error.code == "ESTIMATOR_UNAVAILABLE"
+    assert semantic_error.transport_meta is not None
+    expected_subcode = (
+        "PROVIDER_RESOLUTION_FAILED" if lookup_raises else "PROVIDER_NOT_FOUND"
+    )
+    assert compiler_error.meta.transport_subcode == expected_subcode
+    assert semantic_error.transport_meta.transport_subcode == expected_subcode
+    assert compiler_error.meta.attempted is False
+    assert compiler_error.meta.attempt_count == 0
     assert raw_provider_id not in "\n".join(recorder.warning_messages)
     assert raw_provider_id not in "\n".join(event.sent)
 
@@ -1777,13 +1789,9 @@ def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
         "chat_provider_id",
         "prompt",
         "system_prompt",
-        "contexts",
         "tools",
-        "temperature",
     }
-    assert provider_call["contexts"] is None
     assert provider_call["tools"] is None
-    assert provider_call["temperature"] == 0
     assert current_turn_text not in provider_call["system_prompt"]
     assert canonical_schema in provider_call["system_prompt"]
     assert all(
@@ -1806,11 +1814,14 @@ def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
     assert len(recorder.warning_messages) == 1
     warning_payload = json.loads(recorder.warning_messages[0])
     assert warning_payload == {
-        "return_type": f"{HostResponse.__module__}.{HostResponse.__qualname__}",
-        "extraction_path": "completion_text",
+        "return_type": "canonical_completion_text",
+        "extraction_path": "canonical_text",
         "character_length": len(malformed_completion),
         "sha256": hashlib.sha256(malformed_completion.encode("utf-8")).hexdigest(),
         "subcode": "DIMENSION_KEYS",
+        "transport_subcode": "NONE",
+        "attempted": True,
+        "attempt_count": 1,
     }
     assert current_turn_text not in recorder.warning_messages[0]
     assert malformed_completion not in recorder.warning_messages[0]
@@ -1894,9 +1905,7 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
     provider_call = context.generate_calls[0]
     assert provider_call["chat_provider_id"] == "semantic"
     assert provider_call["prompt"] == "请不要再联系我，我明确拒绝。"
-    assert provider_call["contexts"] is None
     assert provider_call["tools"] is None
-    assert provider_call["temperature"] == 0
     assert provider_call["prompt"] not in provider_call["system_prompt"]
     assert request.prompt == "请不要再联系我，我明确拒绝。"
     assert request.contexts == [{"role": "user", "content": "历史"}]
@@ -2055,7 +2064,12 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
         "reason": "EXPRESSION_NOT_ATTEMPTED",
         "cause_code": "ESTIMATOR_UNAVAILABLE",
     }
-    assert len(recorder.warning_messages) == 1
+    assert recorder.warning_messages[0] == (
+        "AstrEmbodiment semantic transport failure: "
+        "code=ESTIMATOR_UNAVAILABLE transport_subcode=PROVIDER_CALL_FAILED "
+        "attempted=True attempt_count=2"
+    )
+    assert len(recorder.warning_messages) == 2
     assert recorder.info_messages == []
 
 
@@ -2208,6 +2222,9 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
         "code": native_code,
         "cause_code": native_code,
         "native_stage": expected_stage,
+        "transport_subcode": "NONE",
+        "attempted": True,
+        "attempt_count": 1,
     }
     if expected_state_subcode is not None:
         expected_outcome["state_subcode"] = expected_state_subcode
