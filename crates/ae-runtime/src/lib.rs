@@ -40,11 +40,11 @@ use ae_store::{
     ContinuityCommitOutcomeV1, GenesisCommit, GraphCommitV1, LegacySemanticFieldDomainUpgradeV1,
     LegacySemanticFormulaUpgradeReceiptV1, RebirthChildStageRequestV1, RebirthCommitPermitV1,
     RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1, RebirthPrepareResponseV1,
-    SeedClearCommitPermitV1, SeedConfigAckResultV1, SeedConfigLifecycleError,
-    SeedConfigPreflightV1, SeedConfigReconcileRequestV1, SeedConfigReconcileResultV1,
-    SeedConfigStateV1, SeedConfigWritebackAckV1, SnapshotCommitV1, Store, StoreError,
-    UserAuthorizedRebirthV1, VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1,
-    LEGACY_FIELD_FXP6_SCALE, SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
+    RebirthResponseEnvelopeV1, SeedClearCommitPermitV1, SeedConfigAckResultV1,
+    SeedConfigLifecycleError, SeedConfigPreflightV1, SeedConfigReconcileRequestV1,
+    SeedConfigReconcileResultV1, SeedConfigStateV1, SeedConfigWritebackAckV1, SnapshotCommitV1,
+    Store, StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
+    JOINT_MAX_LINEAR_FXP6_V1, LEGACY_FIELD_FXP6_SCALE, SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::path::{Path, PathBuf};
