@@ -73,8 +73,6 @@ native_gate=min(energy_headroom,capacity_headroom,residual_health)
 
 `native-telemetry-receipt.v1` 闭合字段：schema/formula、scope/event、base/next revision、`PREPARE`、state/graph before/after、local/compensation/effective digests、energy ledger/headroom、node/edge used/limit/headroom、五 residual、health、gate、canonical telemetry digest。新 closure v2 必须 verified；legacy 明确 unavailable。
 
-新增专用 `SemanticLearningCompensationProposalV1`/`apply_learning_compensation_v1`，绑定 job/source-event/text digest、当前 base、local/teacher 15D 和逐维 confidence、policy/provider/model/prompt/schema/formula/telemetry/checkpoint digests。Rust 独立重算 Phase 0-B。成功只追加 revision/checkpoint，不直接改 field/graph，不返回 expression；后续正常 perception 才合入 u。
-
 ## 5. 最低验收
 
-`cargo check --workspace --locked --offline` exit 0；focused fixture 证明 source→target 边传播；telemetry 可复算；AESEM2 可读且不回写；compensation append-only/CAS/幂等/no-expression，后续 normal perception 才观察影响。不声称 release acceptance。
+`cargo check --workspace --locked --offline` exit 0；focused fixture 证明 source→target 边传播；telemetry 可复算；AESEM2 可读且不回写。不声称 release acceptance。

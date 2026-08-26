@@ -619,7 +619,6 @@ class GenesisCoordinator:
         return {
             "status": "SUCCESS",
             "code": "SEMANTIC_COMMITTED",
-            "calibration_state": "UNVERIFIED_HUMAN_GOLD",
             "dimensions_fxp6": dict(proposal["dimensions"]),
             "estimator_confidence_fxp6": proposal["estimator_confidence"],
             "semantic_closure": copy.deepcopy(closure),

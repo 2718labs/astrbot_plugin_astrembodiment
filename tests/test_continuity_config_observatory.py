@@ -281,13 +281,14 @@ def test_observatory_uses_closed_compact_detailed_and_unmasked_failure(
             "expression_state",
         )
     } == {
-        "schema": "astr-embodiment.semantic-observatory.v1",
+        "schema": "astr-embodiment.semantic-observatory.v2",
         "status": "DEGRADED",
         "code": "EXPRESSION_NOT_ATTEMPTED",
         "reason": "EXPRESSION_NOT_ATTEMPTED",
         "cause_code": "EXPRESSION_PROJECTION_UNAVAILABLE",
         "expression_state": "NOT_ATTEMPTED",
     }
+    assert all("calibration" not in key for key in structured)
     assert all(
         sensitive not in logs.entries[0][1]
         for sensitive in (

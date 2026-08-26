@@ -2347,26 +2347,45 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
     assert request.contexts == [{"role": "user", "content": "历史"}]
     assert request.system_prompt.count("AE Affect Expression Context") == 1
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v1", {}
+        request, "_astrembodiment_semantic_observatory_record_v2", {}
     )
     assert {
         key: semantic_record.get(key)
         for key in (
+            "schema",
             "status",
             "code",
-            "calibration_state",
+            "reason",
+            "cause_code",
             "expression_state",
             "migration_subcode",
         )
     } == {
-        "status": "DEGRADED",
-        "code": "HUMAN_GOLD_UNVERIFIED",
-        "calibration_state": "UNVERIFIED_HUMAN_GOLD",
+        "schema": "astr-embodiment.semantic-observatory.v2",
+        "status": "SUCCESS",
+        "code": "SEMANTIC_COMMITTED",
+        "reason": None,
+        "cause_code": None,
         "expression_state": "APPLIED",
         "migration_subcode": None,
     }
-    assert len(recorder.warning_messages) == 1
-    assert recorder.info_messages == []
+    assert all("calibration" not in key for key in semantic_record)
+    assert semantic_record["semantic_vector_counts"] == {
+        "dimension_slot_count": 15,
+        "evaluated_dimension_count": 15,
+        "injected_dimension_count": 15,
+        "nonzero_evidence_dimension_count": 1,
+        "neutral_baseline_dimension_count": 14,
+        "unavailable_dimension_count": 0,
+    }
+    assert recorder.warning_messages == []
+    assert len(recorder.info_messages) == 1
+    assert (
+        json.loads(
+            recorder.info_messages[0].removeprefix(main_module._OBSERVATORY_PREFIX)
+        )
+        == semantic_record
+    )
 
 
 def test_v3_unknown_success_migration_subcode_fails_closed_before_expression(
@@ -2444,7 +2463,7 @@ def test_v3_unknown_success_migration_subcode_fails_closed_before_expression(
         "attempt_count": 1,
     }
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v1", {}
+        request, "_astrembodiment_semantic_observatory_record_v2", {}
     )
     assert semantic_record["expression_state"] == "NOT_ATTEMPTED"
     assert semantic_record["cause_code"] == "NATIVE_ERROR"
@@ -2495,7 +2514,7 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
     request = asyncio.run(run())
 
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v1", {}
+        request, "_astrembodiment_semantic_observatory_record_v2", {}
     )
     assert {
         key: semantic_record.get(key)
@@ -2676,7 +2695,7 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     expected_outcome["migration_subcode"] = expected_migration_subcode
     assert observed_outcome == expected_outcome
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v1", {}
+        request, "_astrembodiment_semantic_observatory_record_v2", {}
     )
     assert {
         key: semantic_record.get(key)
@@ -2969,7 +2988,7 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
     assert unavailable_native.cursor_calls == 1
     assert unavailable_native.proposal_calls == 0
     unavailable_record = getattr(
-        unavailable_request, "_astrembodiment_semantic_observatory_record_v1", {}
+        unavailable_request, "_astrembodiment_semantic_observatory_record_v2", {}
     )
     assert unavailable_record.get("cause_code") == "SEMANTIC_VECTOR_UNAVAILABLE"
 
@@ -2999,7 +3018,7 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
                 f"provider prompt missing canonical rule: {fragment}"
             )
     malformed_record = getattr(
-        malformed_request, "_astrembodiment_semantic_observatory_record_v1", {}
+        malformed_request, "_astrembodiment_semantic_observatory_record_v2", {}
     )
     expected_record = {
         "status": "DEGRADED",

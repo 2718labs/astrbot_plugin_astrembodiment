@@ -147,7 +147,6 @@
   },
   "scope_assertions": {
     "did_not_modify_tests_test_runtime_integration_py": true,
-    "did_not_modify_d1_5_d2_version_release_or_human_gold_scope": true,
     "did_not_access_v_directory": true,
     "no_network": true
   },

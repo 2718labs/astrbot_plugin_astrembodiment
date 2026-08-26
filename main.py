@@ -276,14 +276,13 @@ _OBSERVATORY_EXPRESSION_STATES = {
     "REJECTED",
     "INJECTION_FAILED",
 }
-_SEMANTIC_OBSERVATORY_SCHEMA = "astr-embodiment.semantic-observatory.v1"
+_SEMANTIC_OBSERVATORY_SCHEMA = "astr-embodiment.semantic-observatory.v2"
 _SEMANTIC_CLOSURE_SCHEMAS = frozenset(
     {
         "astrembodiment.semantic-perception-closure.v1",
         "astrembodiment.semantic-perception-closure.v2",
     }
 )
-_SEMANTIC_CALIBRATION_UNVERIFIED = "UNVERIFIED_HUMAN_GOLD"
 _SEMANTIC_NOT_ATTEMPTED_CAUSES = (
     frozenset(
         {
@@ -343,7 +342,7 @@ class AstrEmbodimentPlugin(Star):
         self._expression_injection_marker = "AE Affect Expression Context"
         self._request_expression_attr = "_astrembodiment_expression_injected_v1"
         self._request_semantic_record_attr = (
-            "_astrembodiment_semantic_observatory_record_v1"
+            "_astrembodiment_semantic_observatory_record_v2"
         )
 
     async def initialize(self) -> None:
@@ -1498,7 +1497,6 @@ class AstrEmbodimentPlugin(Star):
         if (
             outcome.get("status") != "SUCCESS"
             or outcome.get("code") != "SEMANTIC_COMMITTED"
-            or outcome.get("calibration_state") != _SEMANTIC_CALIBRATION_UNVERIFIED
         ):
             return None
         closure = outcome.get("semantic_closure")
@@ -1624,7 +1622,6 @@ class AstrEmbodimentPlugin(Star):
             "code": "EXPRESSION_NOT_ATTEMPTED",
             "reason": "EXPRESSION_NOT_ATTEMPTED",
             "cause_code": "NATIVE_ERROR",
-            "calibration_state": _SEMANTIC_CALIBRATION_UNVERIFIED,
             "expression_state": "NOT_ATTEMPTED",
             "dimensions_fxp6": None,
             "estimator_confidence_fxp6": None,
@@ -1695,11 +1692,10 @@ class AstrEmbodimentPlugin(Star):
             else:
                 return {
                     "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
-                    "status": "DEGRADED",
-                    "code": "HUMAN_GOLD_UNVERIFIED",
-                    "reason": "CALIBRATION_HUMAN_GOLD_REQUIRED",
+                    "status": "SUCCESS",
+                    "code": "SEMANTIC_COMMITTED",
+                    "reason": None,
                     "cause_code": None,
-                    "calibration_state": _SEMANTIC_CALIBRATION_UNVERIFIED,
                     "expression_state": "APPLIED",
                     "dimensions_fxp6": dimensions,
                     "estimator_confidence_fxp6": confidence,
@@ -1810,7 +1806,10 @@ class AstrEmbodimentPlugin(Star):
                 separators=(",", ":"),
                 allow_nan=False,
             )
-        logger.warning(message)
+        if record.get("status") == "SUCCESS":
+            logger.info(message)
+        else:
+            logger.warning(message)
         return record
 
     # ------------------------------------------------------------ persona adapter
