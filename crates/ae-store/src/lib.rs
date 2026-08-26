@@ -364,7 +364,7 @@ struct LegacySemanticFormulaUpgradeInput<'a> {
 
 enum FormulaTransitionAdmission {
     Phase0,
-    LegacySemantic(LegacySemanticFormulaUpgradeReceiptV1),
+    LegacySemantic(Box<LegacySemanticFormulaUpgradeReceiptV1>),
 }
 
 impl Phase0FormulaTransitionV1 {
@@ -450,33 +450,21 @@ impl Phase0FormulaTransitionV1 {
 }
 
 impl LegacySemanticFormulaUpgradeReceiptV1 {
-    fn migration_id(
-        scope_digest: Digest,
-        event_digest: Digest,
-        receipt_digest: Digest,
-        base_revision: u64,
-        next_revision: u64,
-        source_state_digest: Digest,
-        target_state_before: Digest,
-        source_graph_digest: Digest,
-        prior_chain_digest: Digest,
-        from_formula_digest: Digest,
-        to_formula_digest: Digest,
-    ) -> Digest {
+    fn expected_migration_id(&self) -> Digest {
         wire::domain_hash(
             LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1,
             &[
-                &scope_digest,
-                &event_digest,
-                &receipt_digest,
-                &base_revision.to_le_bytes(),
-                &next_revision.to_le_bytes(),
-                &source_state_digest,
-                &target_state_before,
-                &source_graph_digest,
-                &prior_chain_digest,
-                &from_formula_digest,
-                &to_formula_digest,
+                &self.scope_digest,
+                &self.event_digest,
+                &self.receipt_digest,
+                &self.base_revision.to_le_bytes(),
+                &self.next_revision.to_le_bytes(),
+                &self.source_state_digest,
+                &self.target_state_before,
+                &self.source_graph_digest,
+                &self.prior_chain_digest,
+                &self.from_formula_digest,
+                &self.to_formula_digest,
             ],
         )
     }
@@ -492,20 +480,7 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
     ) -> Self {
         let receipt_digest = wire::receipt_digest(receipt);
         let to_formula_digest = receipt.formula_digest;
-        let migration_id = Self::migration_id(
-            receipt.scope_digest,
-            receipt.event_digest,
-            receipt_digest,
-            receipt.base_revision,
-            receipt.next_revision,
-            source_state_digest,
-            receipt.state_before,
-            source_graph_digest,
-            prior_chain_digest,
-            from_formula_digest,
-            to_formula_digest,
-        );
-        Self {
+        let mut upgrade = Self {
             scope_digest: receipt.scope_digest,
             event_digest: receipt.event_digest,
             receipt_digest,
@@ -517,8 +492,10 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
             prior_chain_digest,
             from_formula_digest,
             to_formula_digest,
-            migration_id,
-        }
+            migration_id: [0; 32],
+        };
+        upgrade.migration_id = upgrade.expected_migration_id();
+        upgrade
     }
 
     /// Canonical opaque bytes persisted with the transition and the upgrade
@@ -608,23 +585,7 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
         reader
             .finish()
             .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
-        let expected_migration_id = Self::migration_id(
-            scope_digest,
-            event_digest,
-            receipt_digest,
-            base_revision,
-            next_revision,
-            source_state_digest,
-            target_state_before,
-            source_graph_digest,
-            prior_chain_digest,
-            from_formula_digest,
-            to_formula_digest,
-        );
-        if migration_id != expected_migration_id {
-            return Err(StoreError::ContinuityFence("legacy_upgrade_id"));
-        }
-        Ok(Self {
+        let upgrade = Self {
             scope_digest,
             event_digest,
             receipt_digest,
@@ -637,7 +598,11 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
             from_formula_digest,
             to_formula_digest,
             migration_id,
-        })
+        };
+        if upgrade.migration_id != upgrade.expected_migration_id() {
+            return Err(StoreError::ContinuityFence("legacy_upgrade_id"));
+        }
+        Ok(upgrade)
     }
 }
 
@@ -2318,7 +2283,9 @@ impl Store {
                     else {
                         return Err(StoreError::ContinuityFence("graph_current_formula"));
                     };
-                    Some(FormulaTransitionAdmission::LegacySemantic(upgrade))
+                    Some(FormulaTransitionAdmission::LegacySemantic(Box::new(
+                        upgrade,
+                    )))
                 } else {
                     return Err(StoreError::ContinuityFence("graph_current_formula"));
                 }
@@ -2331,7 +2298,7 @@ impl Store {
             }
         };
         let legacy_upgrade = match transition_admission {
-            Some(FormulaTransitionAdmission::LegacySemantic(upgrade)) => Some(upgrade),
+            Some(FormulaTransitionAdmission::LegacySemantic(upgrade)) => Some(*upgrade),
             Some(FormulaTransitionAdmission::Phase0) | None => None,
         };
         let legacy_upgrade_revisions = legacy_upgrade
@@ -2809,8 +2776,8 @@ mod tests {
         }
     }
 
-    fn continuity_bundle_for_test(
-        scope: &ScopeRef,
+    struct ContinuityBundleTestInput<'a> {
+        scope: &'a ScopeRef,
         formula_digest: Digest,
         revision: u64,
         marker: u8,
@@ -2818,7 +2785,21 @@ mod tests {
         base_graph_digest: Digest,
         chain_seed: Digest,
         delta_bytes: Vec<u8>,
+    }
+
+    fn continuity_bundle_for_test(
+        input: ContinuityBundleTestInput<'_>,
     ) -> ContinuityCommitBundleV1 {
+        let ContinuityBundleTestInput {
+            scope,
+            formula_digest,
+            revision,
+            marker,
+            state_before,
+            base_graph_digest,
+            chain_seed,
+            delta_bytes,
+        } = input;
         let event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
             event_id: [marker; 16],
             scope: scope.clone(),
@@ -2893,7 +2874,7 @@ mod tests {
         let mut counts = [0_i64; 6];
         for (index, query) in queries.iter().enumerate() {
             counts[index] = conn
-                .query_row(*query, params![blob(scope_digest)], |row| row.get(0))
+                .query_row(query, params![blob(scope_digest)], |row| row.get(0))
                 .expect("count succeeds");
         }
         counts
@@ -3388,19 +3369,27 @@ mod tests {
             session_token: [84; 16],
         };
         let formula = [85; 32];
-        let first =
-            continuity_bundle_for_test(&scope, formula, 1, 86, [0; 32], [0; 32], [87; 32], vec![]);
+        let first = continuity_bundle_for_test(ContinuityBundleTestInput {
+            scope: &scope,
+            formula_digest: formula,
+            revision: 1,
+            marker: 86,
+            state_before: [0; 32],
+            base_graph_digest: [0; 32],
+            chain_seed: [87; 32],
+            delta_bytes: vec![],
+        });
         let (_, first_row) = store.commit_continuity_bundle(&first).unwrap();
-        let mut tagged = continuity_bundle_for_test(
-            &scope,
-            formula,
-            2,
-            88,
-            first.snapshot.state_digest,
-            first.graph.graph_digest,
-            first_row.chain_digest,
-            vec![],
-        );
+        let mut tagged = continuity_bundle_for_test(ContinuityBundleTestInput {
+            scope: &scope,
+            formula_digest: formula,
+            revision: 2,
+            marker: 88,
+            state_before: first.snapshot.state_digest,
+            base_graph_digest: first.graph.graph_digest,
+            chain_seed: first_row.chain_digest,
+            delta_bytes: vec![],
+        });
         let tagged_delta = LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
             &tagged.envelope.receipt,
             first.snapshot.state_digest,
@@ -3453,16 +3442,16 @@ mod tests {
         };
         let formula = [95; 32];
         let revision = u64::try_from(i64::MAX).unwrap();
-        let predecessor = continuity_bundle_for_test(
-            &scope,
-            formula,
+        let predecessor = continuity_bundle_for_test(ContinuityBundleTestInput {
+            scope: &scope,
+            formula_digest: formula,
             revision,
-            96,
-            [97; 32],
-            [98; 32],
-            [99; 32],
-            vec![],
-        );
+            marker: 96,
+            state_before: [97; 32],
+            base_graph_digest: [98; 32],
+            chain_seed: [99; 32],
+            delta_bytes: vec![],
+        });
         let predecessor_chain = [100; 32];
         let scope_digest = predecessor.envelope.receipt.scope_digest;
         let revision_sql = i64::try_from(revision).unwrap();
@@ -3529,16 +3518,16 @@ mod tests {
         }
         assert_eq!(store.current_revision(&scope_digest).unwrap(), revision);
         let successor_revision = revision.checked_add(1).unwrap();
-        let successor = continuity_bundle_for_test(
-            &scope,
-            formula,
-            successor_revision,
-            101,
-            predecessor.snapshot.state_digest,
-            predecessor.graph.graph_digest,
-            predecessor_chain,
-            vec![],
-        );
+        let successor = continuity_bundle_for_test(ContinuityBundleTestInput {
+            scope: &scope,
+            formula_digest: formula,
+            revision: successor_revision,
+            marker: 101,
+            state_before: predecessor.snapshot.state_digest,
+            base_graph_digest: predecessor.graph.graph_digest,
+            chain_seed: predecessor_chain,
+            delta_bytes: vec![],
+        });
         let before = continuity_row_counts(&store, scope_digest);
 
         assert!(matches!(
