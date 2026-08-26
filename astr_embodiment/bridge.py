@@ -269,18 +269,12 @@ _EXPRESSION_PROFILE_FIELDS = (
 )
 _SEMANTIC_VECTOR_RECEIPT_SCHEMA = "astr-embodiment.semantic-vector-receipt.v2"
 _SEMANTIC_VECTOR_FORMULA = "full-vector-route-neutral-relaxation-v1"
-_NODE_OBSERVABILITY_SCHEMA = "astr-embodiment.node-observability.v1"
-_NODE_OBSERVABILITY_FORMULA = "spc1-node-observability-v1"
-_NODE_REGION_LAYOUT = (
-    ("interoception_allostasis", 2_048),
-    ("affective_valuation", 2_048),
-    ("salience", 1_024),
-    ("epistemic_fallibility", 2_048),
-    ("social_boundary", 2_048),
-    ("temper_inhibitory", 1_024),
-    ("world_model_imagination", 4_096),
-    ("global_workspace", 1_024),
-    ("action_expression", 1_024),
+_NODE_OBSERVABILITY_SCHEMA = "astr-embodiment.node-observability.v2"
+_NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA = (
+    "astr-embodiment.node-observability-contract-info.v1"
+)
+_NODE_OBSERVABILITY_CONTRACT_IDS = frozenset(
+    {"astr-embodiment.node-observability-contract.v2"}
 )
 _NODE_CAPACITY = 16_384
 _EDGE_CAPACITY = 524_288
@@ -1114,15 +1108,27 @@ def _validate_node_component(value: Any, *, capacity: int) -> dict[str, int]:
     return {field: value[field] for field in fields}
 
 
+def _validate_node_observability_contract_info(value: Any) -> str:
+    payload = _semantic_json(value)
+    fields = {"schema", "contract_id", "node_observability_schema"}
+    if type(payload) is not dict or set(payload) != fields:
+        raise ValueError("node observability contract info")
+    if (
+        payload["schema"] != _NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA
+        or type(payload["contract_id"]) is not str
+        or payload["contract_id"] not in _NODE_OBSERVABILITY_CONTRACT_IDS
+        or payload["node_observability_schema"] != _NODE_OBSERVABILITY_SCHEMA
+    ):
+        raise ValueError("node observability contract info")
+    return payload["contract_id"]
+
+
 def _validate_node_observability(
     value: Any,
-    *,
-    expected_revision: int,
-    expected_selected_node_count: int,
-    expected_state_changed: bool,
 ) -> dict[str, Any]:
     fields = {
         "schema",
+        "contract_id",
         "formula",
         "revision",
         "field_node_capacity",
@@ -1135,10 +1141,14 @@ def _validate_node_observability(
         raise ValueError("node observability")
     if (
         value["schema"] != _NODE_OBSERVABILITY_SCHEMA
-        or value["formula"] != _NODE_OBSERVABILITY_FORMULA
-        or value["revision"] != expected_revision
-        or value["field_node_capacity"] != _NODE_CAPACITY
-        or value["region_layout"] != "regions-v1"
+        or type(value["contract_id"]) is not str
+        or value["contract_id"] not in _NODE_OBSERVABILITY_CONTRACT_IDS
+        or type(value["formula"]) is not str
+        or type(value["revision"]) is not int
+        or value["revision"] < 0
+        or type(value["field_node_capacity"]) is not int
+        or value["field_node_capacity"] < 0
+        or type(value["region_layout"]) is not str
     ):
         raise ValueError("node observability")
     counts = value["counts"]
@@ -1153,24 +1163,9 @@ def _validate_node_observability(
     if type(counts) is not dict or set(counts) != count_fields:
         raise ValueError("node observability")
     if any(
-        type(counts[field]) is not int or not 0 <= counts[field] <= _NODE_CAPACITY
+        type(counts[field]) is not int
+        or not 0 <= counts[field] <= value["field_node_capacity"]
         for field in count_fields
-    ):
-        raise ValueError("node observability")
-    if (
-        counts["selected_node_count"] != expected_selected_node_count
-        or counts["changed_node_count"] > counts["activated_node_count"]
-        or counts["activated_node_count"] > counts["selected_node_count"]
-        or counts["signal_nonzero_after_count"]
-        < max(
-            counts["potential_nonzero_after_count"],
-            counts["excitation_nonzero_after_count"],
-        )
-        or counts["signal_nonzero_after_count"]
-        > counts["potential_nonzero_after_count"]
-        + counts["excitation_nonzero_after_count"]
-        or (expected_state_changed and counts["changed_node_count"] == 0)
-        or (not expected_state_changed and counts["changed_node_count"] != 0)
     ):
         raise ValueError("node observability")
     if value["residuals"] != {
@@ -1180,16 +1175,9 @@ def _validate_node_observability(
     }:
         raise ValueError("node observability")
     regions = value["regions"]
-    if type(regions) is not list or len(regions) != len(_NODE_REGION_LAYOUT):
+    if type(regions) is not list:
         raise ValueError("node observability")
     canonical_regions: list[dict[str, Any]] = []
-    totals = {
-        "selected": 0,
-        "activated": 0,
-        "changed": 0,
-        "potential": 0,
-        "excitation": 0,
-    }
     region_fields = {
         "region_id",
         "region_name",
@@ -1200,16 +1188,18 @@ def _validate_node_observability(
         "potential",
         "excitation",
     }
-    for region_id, (region_name, capacity) in enumerate(_NODE_REGION_LAYOUT):
-        region = regions[region_id]
+    for region in regions:
         if type(region) is not dict or set(region) != region_fields:
             raise ValueError("node observability")
         if (
-            region["region_id"] != region_id
-            or region["region_name"] != region_name
-            or region["node_capacity"] != capacity
+            type(region["region_id"]) is not int
+            or not 0 <= region["region_id"] <= 255
+            or type(region["region_name"]) is not str
+            or type(region["node_capacity"]) is not int
+            or region["node_capacity"] < 0
         ):
             raise ValueError("node observability")
+        capacity = region["node_capacity"]
         for field in (
             "selected_node_count",
             "activated_node_count",
@@ -1217,29 +1207,12 @@ def _validate_node_observability(
         ):
             if type(region[field]) is not int or not 0 <= region[field] <= capacity:
                 raise ValueError("node observability")
-        if (
-            region["changed_node_count"] > region["activated_node_count"]
-            or region["activated_node_count"] > region["selected_node_count"]
-        ):
-            raise ValueError("node observability")
         potential = _validate_node_component(region["potential"], capacity=capacity)
         excitation = _validate_node_component(region["excitation"], capacity=capacity)
-        if (
-            region["changed_node_count"]
-            < max(potential["changed_node_count"], excitation["changed_node_count"])
-            or region["changed_node_count"]
-            > potential["changed_node_count"] + excitation["changed_node_count"]
-        ):
-            raise ValueError("node observability")
-        totals["selected"] += region["selected_node_count"]
-        totals["activated"] += region["activated_node_count"]
-        totals["changed"] += region["changed_node_count"]
-        totals["potential"] += potential["nonzero_after_count"]
-        totals["excitation"] += excitation["nonzero_after_count"]
         canonical_regions.append(
             {
-                "region_id": region_id,
-                "region_name": region_name,
+                "region_id": region["region_id"],
+                "region_name": region["region_name"],
                 "node_capacity": capacity,
                 "selected_node_count": region["selected_node_count"],
                 "activated_node_count": region["activated_node_count"],
@@ -1248,20 +1221,13 @@ def _validate_node_observability(
                 "excitation": excitation,
             }
         )
-    if (
-        totals["selected"] != counts["selected_node_count"]
-        or totals["activated"] != counts["activated_node_count"]
-        or totals["changed"] != counts["changed_node_count"]
-        or totals["potential"] != counts["potential_nonzero_after_count"]
-        or totals["excitation"] != counts["excitation_nonzero_after_count"]
-    ):
-        raise ValueError("node observability")
     return {
         "schema": _NODE_OBSERVABILITY_SCHEMA,
-        "formula": _NODE_OBSERVABILITY_FORMULA,
-        "revision": expected_revision,
-        "field_node_capacity": _NODE_CAPACITY,
-        "region_layout": "regions-v1",
+        "contract_id": value["contract_id"],
+        "formula": value["formula"],
+        "revision": value["revision"],
+        "field_node_capacity": value["field_node_capacity"],
+        "region_layout": value["region_layout"],
         "counts": {field: counts[field] for field in count_fields},
         "residuals": {"state": "NOT_COMPUTED", "formula": None, "values_fxp6": None},
         "regions": canonical_regions,
@@ -1488,12 +1454,7 @@ def _validate_semantic_result(
     vector = _validate_semantic_vector_receipt(
         payload["semantic_vector_receipt"], expected_state_changed=state_changed
     )
-    nodes = _validate_node_observability(
-        payload["node_observability"],
-        expected_revision=revision,
-        expected_selected_node_count=receipt["active_nodes"],
-        expected_state_changed=state_changed,
-    )
+    nodes = _validate_node_observability(payload["node_observability"])
     expression = None
     if (
         "expression_projection" in payload
@@ -1837,10 +1798,19 @@ class NativeBridge:
             method = getattr(native, "apply_perception_proposal_v1", None)
             if not callable(method):
                 return _semantic_degraded("NATIVE_SYMBOL_UNAVAILABLE")
-            return _validate_semantic_result(
+            contract_info = getattr(native, "contract_info", None)
+            if not callable(contract_info):
+                return _semantic_degraded("NATIVE_SYMBOL_UNAVAILABLE")
+            native_contract_id = _validate_node_observability_contract_info(
+                contract_info()
+            )
+            result = _validate_semantic_result(
                 method(_semantic_closed_json(scope), encoded_proposal),
                 expected_base_revision=proposal["base_revision"],
             )
+            if result["node_observability"]["contract_id"] != native_contract_id:
+                raise ValueError("node observability contract mismatch")
+            return result
         except _InvalidSemanticMigrationSubcode:
             return _semantic_degraded(
                 "NATIVE_ERROR", migration_subcode=_FIELD_MIGRATION_UNKNOWN

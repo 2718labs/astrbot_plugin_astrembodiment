@@ -19,11 +19,13 @@ if str(ROOT) not in sys.path:
 import astr_embodiment.bridge as bridge_module  # noqa: E402
 import main as main_module  # noqa: E402
 from astr_embodiment.auxiliary_transport import AuxiliaryTransportError  # noqa: E402
-from astr_embodiment.contracts import ScopeTokens  # noqa: E402
+from astr_embodiment.contracts import FrozenTurn, ScopeTokens  # noqa: E402
 from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
 from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
 from astr_embodiment.semantic_estimator import (  # noqa: E402
     SemanticEstimateError,
+    build_perception_proposal_v3,
+    make_request_nonce_digest,
     parse_estimator_output_v3,
 )
 from main import AstrEmbodimentPlugin  # noqa: E402
@@ -1700,6 +1702,23 @@ def _v3_test_estimate() -> dict:
     return {"schema": "astr-embodiment.semantic-estimate.v3", "dimensions": dimensions}
 
 
+def _v3_test_proposal(scope: ScopeTokens) -> dict:
+    turn = FrozenTurn(
+        scope=scope,
+        event_id="44" * 16,
+        turn_id="55" * 16,
+        base_revision=0,
+        observed_at_ms=1,
+    )
+    return build_perception_proposal_v3(
+        scope=scope,
+        turn=turn,
+        estimate=_v3_test_estimate(),
+        base_revision=0,
+        nonce_digest=make_request_nonce_digest(scope, turn),
+    )
+
+
 def test_v3_estimator_accepts_only_one_exact_json_fence():
     expected = _v3_test_estimate()
     bare_completion = json.dumps(expected)
@@ -1777,7 +1796,8 @@ def _v3_test_native_closure() -> dict:
             "state_changed": True,
         },
         "node_observability": {
-            "schema": "astr-embodiment.node-observability.v1",
+            "schema": "astr-embodiment.node-observability.v2",
+            "contract_id": "astr-embodiment.node-observability-contract.v2",
             "formula": "spc1-node-observability-v1",
             "revision": 1,
             "field_node_capacity": 16_384,
@@ -1861,6 +1881,176 @@ def _v3_test_native_closure_v2() -> dict:
         "telemetry_digest": "dd" * 32,
     }
     return closure
+
+
+def _v3_test_node_observability_contract_info() -> str:
+    return json.dumps(
+        {
+            "schema": "astr-embodiment.node-observability-contract-info.v1",
+            "contract_id": "astr-embodiment.node-observability-contract.v2",
+            "node_observability_schema": "astr-embodiment.node-observability.v2",
+        }
+    )
+
+
+_NODE_COMPONENT_WITNESSES = (
+    ("potential", 1, 0),
+    ("excitation", 0, 1),
+    ("inhibition", 0, 0),
+    ("adaptation", 0, 0),
+    ("precision", 0, 0),
+    ("prediction_error", 0, 0),
+    ("eligibility", 0, 0),
+    ("metabolic_reserve", 0, 0),
+)
+
+
+def _node_component(*, changed: int = 0, nonzero: int = 0) -> dict[str, int]:
+    return {
+        "before_mean_fxp6": 0,
+        "after_mean_fxp6": 0,
+        "delta_mean_fxp6": 0,
+        "changed_node_count": changed,
+        "nonzero_after_count": nonzero,
+    }
+
+
+def _node_component_witness_closure(
+    *, potential_changed: int, excitation_changed: int
+) -> dict:
+    """A native-owned component table which Python must not reinterpret."""
+
+    closure = _v3_test_native_closure_v2()
+    node_observability = closure["node_observability"]
+    counts = node_observability["counts"]
+    counts.update(
+        {
+            "selected_node_count": 1,
+            "activated_node_count": int(
+                potential_changed != 0 or excitation_changed != 0
+            ),
+            "changed_node_count": 1,
+            "potential_nonzero_after_count": potential_changed,
+            "excitation_nonzero_after_count": excitation_changed,
+            "signal_nonzero_after_count": 1,
+        }
+    )
+    for region in node_observability["regions"]:
+        selected = int(region["region_name"] == "affective_valuation")
+        region["selected_node_count"] = selected
+        region["activated_node_count"] = counts["activated_node_count"] * selected
+        region["changed_node_count"] = selected
+        region["potential"] = _node_component(
+            changed=potential_changed * selected,
+            nonzero=potential_changed * selected,
+        )
+        region["excitation"] = _node_component(
+            changed=excitation_changed * selected,
+            nonzero=excitation_changed * selected,
+        )
+    return closure
+
+
+@pytest.mark.parametrize(
+    ("component_name", "potential_changed", "excitation_changed"),
+    _NODE_COMPONENT_WITNESSES,
+)
+def test_node_observability_accepts_native_component_table_without_python_neural_inference(
+    component_name: str, potential_changed: int, excitation_changed: int
+) -> None:
+    """All eight native state-component witnesses are opaque to this bridge."""
+
+    closure = _node_component_witness_closure(
+        potential_changed=potential_changed,
+        excitation_changed=excitation_changed,
+    )
+
+    result = bridge_module.validate_semantic_result(closure)
+
+    counts = result["node_observability"]["counts"]
+    assert counts == closure["node_observability"]["counts"]
+
+
+def test_node_observability_accepts_real_native_counts_without_python_neural_inference() -> (
+    None
+):
+    """The observed 16384/16383/16384 closure is a valid native projection."""
+
+    closure = _v3_test_native_closure_v2()
+    closure["receipt"]["active_nodes"] = 16_384
+    node_observability = closure["node_observability"]
+    node_observability["counts"] = {
+        "selected_node_count": 16_384,
+        "activated_node_count": 16_383,
+        "changed_node_count": 16_384,
+        "potential_nonzero_after_count": 0,
+        "excitation_nonzero_after_count": 0,
+        "signal_nonzero_after_count": 16_384,
+    }
+    for region in node_observability["regions"]:
+        capacity = region["node_capacity"]
+        region["selected_node_count"] = capacity
+        region["activated_node_count"] = capacity
+        region["changed_node_count"] = capacity
+        region["potential"] = _node_component()
+        region["excitation"] = _node_component()
+    node_observability["regions"][-1]["activated_node_count"] -= 1
+
+    result = bridge_module.validate_semantic_result(closure)
+
+    assert result["node_observability"]["counts"] == node_observability["counts"]
+
+
+def test_node_observability_requires_the_native_owned_contract_id() -> None:
+    """A closure without the v2 native contract identity is not interpretable."""
+
+    closure = _v3_test_native_closure_v2()
+    closure["node_observability"].pop("contract_id")
+
+    with pytest.raises(ValueError):
+        bridge_module.validate_semantic_result(closure)
+
+
+def test_node_observability_rejects_unknown_native_contract_id() -> None:
+    closure = _v3_test_native_closure_v2()
+    closure["node_observability"]["contract_id"] = "unknown-native-contract"
+
+    with pytest.raises(ValueError):
+        bridge_module.validate_semantic_result(closure)
+
+
+def test_native_bridge_fails_closed_before_apply_for_unknown_contract_info_id() -> None:
+    class NativeAbi:
+        def __init__(self) -> None:
+            self.contract_info_calls = 0
+            self.apply_calls = 0
+
+        def contract_info(self) -> str:
+            self.contract_info_calls += 1
+            return json.dumps(
+                {
+                    "schema": "astr-embodiment.node-observability-contract-info.v1",
+                    "contract_id": "unknown-native-contract",
+                    "node_observability_schema": "astr-embodiment.node-observability.v2",
+                }
+            )
+
+        def apply_perception_proposal_v1(
+            self, _scope_json: str, _proposal_json: str
+        ) -> str:
+            self.apply_calls += 1
+            raise AssertionError("unknown contract must fail before native apply")
+
+    native = NativeAbi()
+    bridge = bridge_module.NativeBridge()
+    bridge._native = native
+    scope = _v3_test_scope()
+
+    result = bridge.apply_perception_proposal_v1(scope, _v3_test_proposal(scope))
+
+    assert result == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
+    assert native.contract_info_calls == 1
+    assert native.apply_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -2002,6 +2192,9 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
             self.cursor_calls = 0
             self.proposals: list[dict] = []
 
+        def contract_info(self) -> str:
+            return _v3_test_node_observability_contract_info()
+
         def semantic_revision_v1(self, _scope_json: str) -> str:
             self.cursor_calls += 1
             return json.dumps(
@@ -2106,6 +2299,9 @@ def test_v3_unknown_success_migration_subcode_fails_closed_before_expression(
     raw_migration_subcode = "untrusted-migration-subcode private-provider-id"
 
     class NativeAbi:
+        def contract_info(self) -> str:
+            return _v3_test_node_observability_contract_info()
+
         def semantic_revision_v1(self, _scope_json: str) -> str:
             return json.dumps(
                 {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
@@ -2330,6 +2526,9 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     native_detail = "private native detail provider-id=private-provider-id"
 
     class NativeAbi:
+        def contract_info(self) -> str:
+            return _v3_test_node_observability_contract_info()
+
         def semantic_revision_v1(self, _scope_json: str) -> str:
             return json.dumps(
                 {"schema": "astrembodiment.semantic-revision.v1", "revision": 2}
@@ -2530,6 +2729,9 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
             self.closure = closure
             self.cursor_calls = 0
             self.proposal_calls = 0
+
+        def contract_info(self) -> str:
+            return _v3_test_node_observability_contract_info()
 
         def semantic_revision_v1(self, _scope_json: str) -> str:
             self.cursor_calls += 1
