@@ -20,6 +20,8 @@ pub const DYNAMICS_FORMULA_V2: &str = ae_contracts::PHASE0_NATIVE_DYNAMICS_FORMU
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DynamicsError {
+    FieldStateInvalid,
+    GraphStateInvalid,
     InvalidInput,
     Arithmetic,
 }
@@ -78,7 +80,7 @@ fn require_unit(value: Fixed) -> Result<(), DynamicsError> {
 
 fn validate_field(field: &NeuralField) -> Result<(), DynamicsError> {
     if !field.validate() {
-        return Err(DynamicsError::InvalidInput);
+        return Err(DynamicsError::FieldStateInvalid);
     }
     for values in [
         &field.potential,
@@ -91,7 +93,7 @@ fn validate_field(field: &NeuralField) -> Result<(), DynamicsError> {
         &field.metabolic_reserve,
     ] {
         for value in values {
-            require_unit(*value)?;
+            require_unit(*value).map_err(|_| DynamicsError::FieldStateInvalid)?;
         }
     }
     Ok(())
@@ -213,7 +215,7 @@ pub fn propagate_semantic_dynamics_v2(
     validate_field(input.field)?;
     validate_field(input.baseline)?;
     if !input.graph.validate() || input.graph.edges.len() > EDGE_CAPACITY {
-        return Err(DynamicsError::InvalidInput);
+        return Err(DynamicsError::GraphStateInvalid);
     }
 
     let mut effective_by_region = [Fixed::ZERO; REGION_LAYOUT.len()];

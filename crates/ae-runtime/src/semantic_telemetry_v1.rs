@@ -8,7 +8,7 @@
 use ae_attention::r7::FullVectorLoad;
 use ae_contracts::{
     wire, CapacityTelemetryV1, Digest, EnergyTelemetryV1, InvariantResiduals,
-    NativeTelemetryFormulaV1, NativeTelemetryPhaseV1, NativeTelemetryReceiptV1,
+    NativeTelemetryFormulaV1, NativeTelemetryPhaseV1, NativeTelemetryReceiptV1, StateSubcodeV1,
     NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1,
 };
 use ae_fixed::Fixed;
@@ -41,14 +41,19 @@ pub(crate) fn effective_vector_digest(values: &[Fixed; REGION_LAYOUT.len()]) -> 
 
 fn bounded_headroom(used: usize, limit: usize) -> Result<Fixed, RuntimeError> {
     if used > limit {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(RuntimeError::invalid_neural_state(
+            StateSubcodeV1::SemanticClosureInvalid,
+        ));
     }
-    let used_ratio = ratio6_raw(used, limit).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let used_ratio = ratio6_raw(used, limit)
+        .map_err(|_| RuntimeError::invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
     Ok(Fixed::from_raw(
         Fixed::ONE
             .raw()
             .checked_sub(used_ratio)
-            .ok_or(RuntimeError::InvalidNeuralState)?,
+            .ok_or(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::SemanticClosureInvalid,
+            ))?,
     ))
 }
 
@@ -77,23 +82,27 @@ pub(crate) fn prepare_native_telemetry_v1(
             != base_revision
                 .checked_add(1)
                 .ok_or(RuntimeError::SemanticRevisionOverflow)?
-        || usize::try_from(dynamics.propagated_edge_count)
-            .map_err(|_| RuntimeError::InvalidNeuralState)?
-            > EDGE_CAPACITY
-        || usize::try_from(dynamics.upper_saturated_nodes)
-            .map_err(|_| RuntimeError::InvalidNeuralState)?
-            > NEURON_SLOTS
+        || usize::try_from(dynamics.propagated_edge_count).map_err(|_| {
+            RuntimeError::invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid)
+        })? > EDGE_CAPACITY
+        || usize::try_from(dynamics.upper_saturated_nodes).map_err(|_| {
+            RuntimeError::invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid)
+        })? > NEURON_SLOTS
     {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(RuntimeError::invalid_neural_state(
+            StateSubcodeV1::SemanticClosureInvalid,
+        ));
     }
     let node_headroom = bounded_headroom(
-        usize::try_from(dynamics.upper_saturated_nodes)
-            .map_err(|_| RuntimeError::InvalidNeuralState)?,
+        usize::try_from(dynamics.upper_saturated_nodes).map_err(|_| {
+            RuntimeError::invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid)
+        })?,
         NEURON_SLOTS,
     )?;
     let edge_headroom = bounded_headroom(
-        usize::try_from(dynamics.propagated_edge_count)
-            .map_err(|_| RuntimeError::InvalidNeuralState)?,
+        usize::try_from(dynamics.propagated_edge_count).map_err(|_| {
+            RuntimeError::invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid)
+        })?,
         EDGE_CAPACITY,
     )?;
     let capacity_headroom = node_headroom.min(edge_headroom);
@@ -115,7 +124,9 @@ pub(crate) fn prepare_native_telemetry_v1(
     ]
     .into_iter()
     .max()
-    .ok_or(RuntimeError::InvalidNeuralState)?;
+    .ok_or(RuntimeError::invalid_neural_state(
+        StateSubcodeV1::SemanticClosureInvalid,
+    ))?;
     let residual_health = Fixed::ONE.saturating_sub(largest_residual);
     let native_gate = dynamics
         .energy
@@ -151,12 +162,14 @@ pub(crate) fn prepare_native_telemetry_v1(
         },
         capacity: CapacityTelemetryV1 {
             upper_saturated_nodes: dynamics.upper_saturated_nodes,
-            node_limit: u32::try_from(NEURON_SLOTS)
-                .map_err(|_| RuntimeError::InvalidNeuralState)?,
+            node_limit: u32::try_from(NEURON_SLOTS).map_err(|_| {
+                RuntimeError::invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid)
+            })?,
             node_headroom,
             edge_used: dynamics.propagated_edge_count,
-            edge_limit: u32::try_from(EDGE_CAPACITY)
-                .map_err(|_| RuntimeError::InvalidNeuralState)?,
+            edge_limit: u32::try_from(EDGE_CAPACITY).map_err(|_| {
+                RuntimeError::invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid)
+            })?,
             edge_headroom,
             headroom: capacity_headroom,
             residual: Fixed::ZERO,
@@ -169,7 +182,9 @@ pub(crate) fn prepare_native_telemetry_v1(
     }
     .seal();
     if !receipt.validate() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(RuntimeError::invalid_neural_state(
+            StateSubcodeV1::SemanticClosureInvalid,
+        ));
     }
     Ok(receipt)
 }

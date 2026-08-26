@@ -4,8 +4,8 @@ use crate::RuntimeError;
 use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
 use ae_contracts::{
     phase0_canonical_formula_digest_v1, wire, CommitStatus, NativeTelemetryReceiptV1,
-    PerceptionProposalV1, SemanticVectorFormulaV2, SemanticVectorReceiptV2, TransitionReceipt,
-    TransitionReceiptV2,
+    PerceptionProposalV1, SemanticVectorFormulaV2, SemanticVectorReceiptV2, StateSubcodeV1,
+    TransitionReceipt, TransitionReceiptV2,
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
@@ -14,7 +14,7 @@ use ae_neurofield::{
 };
 
 use crate::semantic_dynamics_v2::{
-    propagate_semantic_dynamics_v2, DynamicsInputV2, PreparedSemanticDynamicsV2,
+    propagate_semantic_dynamics_v2, DynamicsError, DynamicsInputV2, PreparedSemanticDynamicsV2,
 };
 
 const SNAPSHOT_MAGIC_V2: &[u8] = b"AESEM2\0";
@@ -33,6 +33,18 @@ const REGION_NAMES: [&str; 9] = [
     "global_workspace",
     "action_expression",
 ];
+
+fn invalid_neural_state(subcode: StateSubcodeV1) -> RuntimeError {
+    RuntimeError::invalid_neural_state(subcode)
+}
+
+fn state_subcode_for_dynamics_error(error: DynamicsError) -> StateSubcodeV1 {
+    match error {
+        DynamicsError::FieldStateInvalid => StateSubcodeV1::FieldStateInvalid,
+        DynamicsError::GraphStateInvalid => StateSubcodeV1::GraphStateInvalid,
+        DynamicsError::InvalidInput | DynamicsError::Arithmetic => StateSubcodeV1::DynamicsInvalid,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedSemanticTransitionV2 {
@@ -135,12 +147,12 @@ pub(crate) fn prepare_semantic_transition_v2(
     }
     let next_graph = if graph.edges.is_empty() {
         develop_graph(manifest_digest, development_seed_digest, GraphFormula::V1)
-            .map_err(|_| RuntimeError::InvalidNeuralState)?
+            .map_err(|_| invalid_neural_state(StateSubcodeV1::GraphStateInvalid))?
     } else {
         graph.clone()
     };
     if !next_graph.validate() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid));
     }
     let local_by_region = full_vector_load.evidence_means;
     // The Provider proposal and its supplied confidence are the complete
@@ -153,7 +165,7 @@ pub(crate) fn prepare_semantic_transition_v2(
         local_by_region,
         local_confidence_by_region,
     })
-    .map_err(|_| RuntimeError::InvalidNeuralState)?;
+    .map_err(|error| invalid_neural_state(state_subcode_for_dynamics_error(error)))?;
     let active_nodes = u32::try_from(
         (0..NEURON_SLOTS)
             .filter(|node| {
@@ -169,7 +181,7 @@ pub(crate) fn prepare_semantic_transition_v2(
             })
             .count(),
     )
-    .map_err(|_| RuntimeError::InvalidNeuralState)?;
+    .map_err(|_| invalid_neural_state(StateSubcodeV1::DynamicsInvalid))?;
     Ok(PreparedSemanticTransitionV2 {
         next_field: dynamics.next_field.clone(),
         next_graph,
@@ -196,7 +208,7 @@ pub(crate) fn semantic_vector_receipt_v2(
 ) -> Result<TransitionReceiptV2, RuntimeError> {
     let neutral_baseline_dimension_count = evaluated_dimension_count
         .checked_sub(nonzero_evidence_dimension_count)
-        .ok_or(RuntimeError::InvalidNeuralState)?;
+        .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
     TransitionReceiptV2::from_legacy(
         legacy,
         SemanticVectorReceiptV2 {
@@ -211,7 +223,7 @@ pub(crate) fn semantic_vector_receipt_v2(
             state_changed: legacy.state_before != legacy.state_after,
         },
     )
-    .ok_or(RuntimeError::InvalidNeuralState)
+    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))
 }
 
 pub(crate) fn semantic_v2_matches_legacy_receipt(
@@ -242,8 +254,9 @@ fn mean_fxp6(sum: i128, count: usize) -> Result<i64, RuntimeError> {
     let count = i128::try_from(count)
         .ok()
         .filter(|count| *count > 0)
-        .ok_or(RuntimeError::InvalidNeuralState)?;
-    i64::try_from(sum / count).map_err(|_| RuntimeError::InvalidNeuralState)
+        .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
+    i64::try_from(sum / count)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))
 }
 
 /// Observability for the Phase 0 sparse dynamics.  It reports what was
@@ -254,7 +267,7 @@ pub(crate) fn node_observability_projection_v2(
     revision: u64,
 ) -> Result<NodeObservabilityProjectionV1, RuntimeError> {
     if !before.validate() || !after.validate() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
     }
     let mut regions = Vec::with_capacity(REGION_LAYOUT.len());
     let mut selected_total = 0_u32;
@@ -269,7 +282,7 @@ pub(crate) fn node_observability_projection_v2(
         let end = start
             .checked_add(count)
             .filter(|end| *end <= NEURON_SLOTS && start == expected_start)
-            .ok_or(RuntimeError::InvalidNeuralState)?;
+            .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
         expected_start = end;
         let mut selected = 0_u32;
         let mut activated = 0_u32;
@@ -299,50 +312,50 @@ pub(crate) fn node_observability_projection_v2(
             if changes.into_iter().any(|changed| changed) {
                 selected = selected
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
                 changed = changed
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
                 selected_total = selected_total
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
                 changed_total = changed_total
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
             if changes[0] || changes[1] || changes[2] {
                 activated = activated
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
                 activated_total = activated_total
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
             if changes[0] {
                 potential_changed = potential_changed
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
             if changes[1] {
                 excitation_changed = excitation_changed
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
             if after.potential[node] != Fixed::ZERO {
                 potential_nonzero_after = potential_nonzero_after
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
                 potential_nonzero_after_total = potential_nonzero_after_total
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
             if after.excitation[node] != Fixed::ZERO {
                 excitation_nonzero_after = excitation_nonzero_after
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
                 excitation_nonzero_after_total = excitation_nonzero_after_total
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
             if after.potential[node] != Fixed::ZERO
                 || after.excitation[node] != Fixed::ZERO
@@ -350,7 +363,7 @@ pub(crate) fn node_observability_projection_v2(
             {
                 signal_nonzero_after_total = signal_nonzero_after_total
                     .checked_add(1)
-                    .ok_or(RuntimeError::InvalidNeuralState)?;
+                    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
             potential_before_sum += i128::from(before.potential[node].raw());
             potential_after_sum += i128::from(after.potential[node].raw());
@@ -362,9 +375,11 @@ pub(crate) fn node_observability_projection_v2(
                 - i128::from(before.excitation[node].raw());
         }
         regions.push(NodeObservabilityRegionV1 {
-            region_id: u8::try_from(region).map_err(|_| RuntimeError::InvalidNeuralState)?,
+            region_id: u8::try_from(region)
+                .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?,
             region_name: REGION_NAMES[region],
-            node_capacity: u32::try_from(count).map_err(|_| RuntimeError::InvalidNeuralState)?,
+            node_capacity: u32::try_from(count)
+                .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?,
             selected_node_count: selected,
             activated_node_count: activated,
             changed_node_count: changed,
@@ -385,12 +400,12 @@ pub(crate) fn node_observability_projection_v2(
         });
     }
     if expected_start != NEURON_SLOTS || regions.len() != REGION_LAYOUT.len() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
     }
     Ok(NodeObservabilityProjectionV1 {
         revision,
         field_node_capacity: u32::try_from(NEURON_SLOTS)
-            .map_err(|_| RuntimeError::InvalidNeuralState)?,
+            .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?,
         counts: NodeObservabilityCountsV1 {
             selected_node_count: selected_total,
             activated_node_count: activated_total,
@@ -410,39 +425,40 @@ pub(crate) fn node_observability_projection_v2(
 
 fn region_expression_signal_fxp6(field: &NeuralField, region: usize) -> Result<u32, RuntimeError> {
     if !field.validate() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
     }
     let (start, count) = REGION_LAYOUT
         .get(region)
         .copied()
-        .ok_or(RuntimeError::InvalidNeuralState)?;
+        .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
     let end = start
         .checked_add(count)
         .filter(|end| *end <= NEURON_SLOTS)
-        .ok_or(RuntimeError::InvalidNeuralState)?;
+        .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
     let denominator = i128::try_from(count)
         .ok()
         .and_then(|count| count.checked_mul(2))
         .filter(|count| *count > 0)
-        .ok_or(RuntimeError::InvalidNeuralState)?;
+        .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
     let sum = (start..end).fold(0_i128, |total, node| {
         total + i128::from(field.potential[node].raw()) + i128::from(field.excitation[node].raw())
     });
     u32::try_from((sum / denominator).clamp(0, i128::from(EXPRESSION_FXP6_MAX)))
-        .map_err(|_| RuntimeError::InvalidNeuralState)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))
 }
 
 fn expression_mean_fxp6(field: &NeuralField, regions: &[usize]) -> Result<u32, RuntimeError> {
     let count = u64::try_from(regions.len())
         .ok()
         .filter(|count| *count > 0)
-        .ok_or(RuntimeError::InvalidNeuralState)?;
+        .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
     let sum = regions.iter().try_fold(0_u64, |total, region| {
         total
             .checked_add(u64::from(region_expression_signal_fxp6(field, *region)?))
-            .ok_or(RuntimeError::InvalidNeuralState)
+            .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))
     })?;
-    u32::try_from(sum / count).map_err(|_| RuntimeError::InvalidNeuralState)
+    u32::try_from(sum / count)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))
 }
 
 pub(crate) fn expression_projection_from_field_v1(
@@ -477,7 +493,7 @@ impl<'a> Cursor<'a> {
             .position
             .checked_add(count)
             .filter(|end| *end <= self.bytes.len())
-            .ok_or(RuntimeError::InvalidNeuralState)?;
+            .ok_or(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
         let value = &self.bytes[self.position..end];
         self.position = end;
         Ok(value)
@@ -508,7 +524,7 @@ impl<'a> Cursor<'a> {
 
 fn encode_field(field: &NeuralField) -> Result<Vec<u8>, RuntimeError> {
     if !field.validate() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
     }
     let mut out = Vec::with_capacity(8 * (4 + NEURON_SLOTS * 8));
     for values in [
@@ -522,8 +538,9 @@ fn encode_field(field: &NeuralField) -> Result<Vec<u8>, RuntimeError> {
         &field.metabolic_reserve,
     ] {
         out.extend_from_slice(
-            &(u32::try_from(values.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
-                .to_le_bytes(),
+            &(u32::try_from(values.len())
+                .map_err(|_| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?)
+            .to_le_bytes(),
         );
         for value in values {
             out.extend_from_slice(&value.encode());
@@ -536,10 +553,11 @@ fn decode_field(bytes: &[u8]) -> Result<NeuralField, RuntimeError> {
     let mut cursor = Cursor::new(bytes);
     let mut vectors = Vec::with_capacity(8);
     for _ in 0..8 {
-        if usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?
+        if usize::try_from(cursor.u32()?)
+            .map_err(|_| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?
             != NEURON_SLOTS
         {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
         }
         let mut values = Vec::with_capacity(NEURON_SLOTS);
         for _ in 0..NEURON_SLOTS {
@@ -548,41 +566,59 @@ fn decode_field(bytes: &[u8]) -> Result<NeuralField, RuntimeError> {
         vectors.push(values);
     }
     if !cursor.eof() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
     }
     let mut vectors = vectors.into_iter();
     let field = NeuralField {
-        potential: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        excitation: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        inhibition: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        adaptation: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        precision: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        prediction_error: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        eligibility: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        metabolic_reserve: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
+        potential: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
+        excitation: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
+        inhibition: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
+        adaptation: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
+        precision: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
+        prediction_error: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
+        eligibility: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
+        metabolic_reserve: vectors
+            .next()
+            .ok_or(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?,
     };
     if field.validate() {
         Ok(field)
     } else {
-        Err(RuntimeError::InvalidNeuralState)
+        Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid))
     }
 }
 
 fn encode_graph(graph: &SparseGraph) -> Result<Vec<u8>, RuntimeError> {
     if !graph.validate() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid));
     }
     let mut out = Vec::with_capacity(4 + graph.row_offsets.len() * 4 + 4 + graph.edges.len() * 16);
     out.extend_from_slice(
-        &(u32::try_from(graph.row_offsets.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
-            .to_le_bytes(),
+        &(u32::try_from(graph.row_offsets.len())
+            .map_err(|_| invalid_neural_state(StateSubcodeV1::GraphStateInvalid))?)
+        .to_le_bytes(),
     );
     for offset in &graph.row_offsets {
         out.extend_from_slice(&offset.to_le_bytes());
     }
     out.extend_from_slice(
-        &(u32::try_from(graph.edges.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
-            .to_le_bytes(),
+        &(u32::try_from(graph.edges.len())
+            .map_err(|_| invalid_neural_state(StateSubcodeV1::GraphStateInvalid))?)
+        .to_le_bytes(),
     );
     for edge in &graph.edges {
         out.extend_from_slice(&edge.target.to_le_bytes());
@@ -599,18 +635,19 @@ fn encode_graph(graph: &SparseGraph) -> Result<Vec<u8>, RuntimeError> {
 
 fn decode_graph(bytes: &[u8]) -> Result<SparseGraph, RuntimeError> {
     let mut cursor = Cursor::new(bytes);
-    let offsets_len =
-        usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let offsets_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::GraphStateInvalid))?;
     if offsets_len != NEURON_SLOTS + 1 {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid));
     }
     let mut row_offsets = Vec::with_capacity(offsets_len);
     for _ in 0..offsets_len {
         row_offsets.push(cursor.u32()?);
     }
-    let edge_len = usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let edge_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::GraphStateInvalid))?;
     if edge_len > EDGE_CAPACITY {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid));
     }
     let mut edges = Vec::with_capacity(edge_len);
     for _ in 0..edge_len {
@@ -639,13 +676,13 @@ fn decode_graph(bytes: &[u8]) -> Result<SparseGraph, RuntimeError> {
         });
     }
     if !cursor.eof() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid));
     }
     let graph = SparseGraph { row_offsets, edges };
     if graph.validate() {
         Ok(graph)
     } else {
-        Err(RuntimeError::InvalidNeuralState)
+        Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid))
     }
 }
 
@@ -660,29 +697,38 @@ pub(crate) fn decode_semantic_snapshot_v2(
     if cursor.take(SNAPSHOT_MAGIC_V2.len())? != SNAPSHOT_MAGIC_V2
         || cursor.u16()? != SNAPSHOT_SCHEMA_V2
     {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
     }
-    let field_len = usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let field_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
     let field = decode_field(cursor.take(field_len)?)?;
-    let graph_len = usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let graph_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
     let graph = decode_graph(cursor.take(graph_len)?)?;
-    let receipt_len =
-        usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let receipt_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
     let receipt_bytes = cursor.take(receipt_len)?;
     if !cursor.eof() {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
     }
     let receipt = wire::decode_transition_receipt_v2(receipt_bytes)
-        .map_err(|_| RuntimeError::InvalidNeuralState)?;
-    if wire::encode_transition_receipt_v2(&receipt) != receipt_bytes
-        || receipt.formula_digest != *expected_formula_digest
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
+    if wire::encode_transition_receipt_v2(&receipt) != receipt_bytes {
+        return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
+    }
+    if !receipt.validate() {
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
+    }
+    if receipt.formula_digest != *expected_formula_digest
         || receipt.state_after != *expected_state_digest
         || receipt.graph_after != *expected_graph_digest
         || !semantic_v2_matches_legacy_receipt(&receipt, legacy_receipt)
         || state_digest(&field, expected_formula_digest) != *expected_state_digest
         || graph_digest(&graph) != *expected_graph_digest
     {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(
+            StateSubcodeV1::SnapshotAttestationMismatch,
+        ));
     }
     Ok((field, graph, receipt))
 }
@@ -696,12 +742,16 @@ pub(crate) fn encode_semantic_snapshot_v2_for_test(
     graph: &SparseGraph,
     receipt: &TransitionReceiptV2,
 ) -> Result<Vec<u8>, RuntimeError> {
-    if !receipt.validate()
-        || receipt.formula_digest != *formula_digest
+    if !receipt.validate() {
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
+    }
+    if receipt.formula_digest != *formula_digest
         || receipt.state_after != state_digest(field, formula_digest)
         || receipt.graph_after != graph_digest(graph)
     {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(
+            StateSubcodeV1::SnapshotAttestationMismatch,
+        ));
     }
     let field_bytes = encode_field(field)?;
     let graph_bytes = encode_graph(graph)?;
@@ -720,8 +770,9 @@ pub(crate) fn encode_semantic_snapshot_v2_for_test(
     out.extend_from_slice(&SNAPSHOT_SCHEMA_V2.to_le_bytes());
     for bytes in [&field_bytes, &graph_bytes, &receipt_bytes] {
         out.extend_from_slice(
-            &(u32::try_from(bytes.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
-                .to_le_bytes(),
+            &(u32::try_from(bytes.len())
+                .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?)
+            .to_le_bytes(),
         );
         out.extend_from_slice(bytes);
     }
@@ -757,13 +808,17 @@ pub(crate) fn encode_semantic_snapshot_v3(
     graph: &SparseGraph,
     telemetry: &NativeTelemetryReceiptV1,
 ) -> Result<Vec<u8>, RuntimeError> {
-    if !telemetry.validate()
-        || telemetry.formula_digest != *formula_digest
+    if !telemetry.validate() {
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
+    }
+    if telemetry.formula_digest != *formula_digest
         || telemetry.state_after != state_digest(field, formula_digest)
         || telemetry.graph_after != graph_digest(graph)
         || telemetry.compensation_digest != ae_contracts::legacy_reserved_zero_digest_v1()
     {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(
+            StateSubcodeV1::SnapshotAttestationMismatch,
+        ));
     }
     let field_bytes = encode_field(field)?;
     let graph_bytes = encode_graph(graph)?;
@@ -793,8 +848,9 @@ pub(crate) fn encode_semantic_snapshot_v3(
         &reserved_zero_bytes,
     ] {
         out.extend_from_slice(
-            &(u32::try_from(bytes.len()).map_err(|_| RuntimeError::InvalidNeuralState)?)
-                .to_le_bytes(),
+            &(u32::try_from(bytes.len())
+                .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?)
+            .to_le_bytes(),
         );
         out.extend_from_slice(bytes);
     }
@@ -814,39 +870,48 @@ pub(crate) fn decode_semantic_snapshot_v3(
     {
         return Err(RuntimeError::LegacyUnattested);
     }
-    let field_len = usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let field_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
     let field = decode_field(cursor.take(field_len)?)?;
-    let graph_len = usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let graph_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
     let graph = decode_graph(cursor.take(graph_len)?)?;
-    let telemetry_len =
-        usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+    let telemetry_len = usize::try_from(cursor.u32()?)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
     let telemetry_bytes = cursor.take(telemetry_len)?;
     // The early three-block precursor has the same all-zero reserved value.
     // Current writes always carry the fourth AESEM3 block; a non-zero legacy
     // value cannot be replayed safely because it may already have affected the
     // sealed field, so it fails closed rather than being ignored.
     if !cursor.eof() {
-        let reserved_len =
-            usize::try_from(cursor.u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
+        let reserved_len = usize::try_from(cursor.u32()?)
+            .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
         if reserved_len != REGION_LAYOUT.len() * 8 {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
         }
         let reserved_bytes = cursor.take(reserved_len)?;
         if !cursor.eof() {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
         }
         for chunk in reserved_bytes.as_chunks::<8>().0 {
             let mut raw = [0u8; 8];
             raw.copy_from_slice(chunk);
             if Fixed::decode(raw) != Fixed::ZERO {
-                return Err(RuntimeError::InvalidNeuralState);
+                return Err(invalid_neural_state(
+                    StateSubcodeV1::Aesem3RetiredCompensationNonzero,
+                ));
             }
         }
     }
     let telemetry = wire::decode_native_telemetry_receipt_v1(telemetry_bytes)
-        .map_err(|_| RuntimeError::InvalidNeuralState)?;
-    if wire::encode_native_telemetry_receipt_v1(&telemetry) != telemetry_bytes
-        || telemetry.formula_digest != *expected_formula_digest
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
+    if wire::encode_native_telemetry_receipt_v1(&telemetry) != telemetry_bytes {
+        return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
+    }
+    if !telemetry.validate() {
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
+    }
+    if telemetry.formula_digest != *expected_formula_digest
         || telemetry.state_after != *expected_state_digest
         || telemetry.graph_after != *expected_graph_digest
         || telemetry.compensation_digest != ae_contracts::legacy_reserved_zero_digest_v1()
@@ -854,7 +919,9 @@ pub(crate) fn decode_semantic_snapshot_v3(
         || state_digest(&field, expected_formula_digest) != *expected_state_digest
         || graph_digest(&graph) != *expected_graph_digest
     {
-        return Err(RuntimeError::InvalidNeuralState);
+        return Err(invalid_neural_state(
+            StateSubcodeV1::SnapshotAttestationMismatch,
+        ));
     }
     Ok((field, graph, telemetry))
 }
@@ -863,9 +930,44 @@ pub(crate) fn decode_semantic_snapshot_v3(
 mod tests {
     use super::*;
     use ae_contracts::{
-        CapacityTelemetryV1, EnergyTelemetryV1, InvariantResiduals, NativeTelemetryFormulaV1,
-        NativeTelemetryPhaseV1, NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1,
+        CapacityTelemetryV1, EnergyTelemetryV1, EvidenceVector, InvariantResiduals,
+        NativeTelemetryFormulaV1, NativeTelemetryPhaseV1, PerceptionProposalV1, StateSubcodeV1,
+        NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1,
     };
+
+    fn valid_proposal() -> PerceptionProposalV1 {
+        PerceptionProposalV1 {
+            schema_version: PerceptionProposalV1::SCHEMA_VERSION,
+            event_id: [1; 16],
+            turn_id: [2; 16],
+            observed_at_ms: 1,
+            base_revision: 0,
+            dimensions: EvidenceVector::default(),
+            estimator_confidence: Fixed::ONE,
+            protocol_version: PerceptionProposalV1::PROTOCOL_VERSION,
+            request_nonce_digest: [3; 32],
+        }
+    }
+
+    #[test]
+    fn out_of_unit_historical_field_is_classified_before_dynamics() {
+        let mut field = NeuralField::zeroed();
+        field.potential[0] = Fixed::from_raw(1_000_001);
+
+        assert!(matches!(
+            prepare_semantic_transition_v2(
+                &field,
+                &NeuralField::zeroed(),
+                &SparseGraph::empty(),
+                &[4; 32],
+                &[5; 32],
+                &valid_proposal(),
+            ),
+            Err(RuntimeError::InvalidNeuralState(
+                StateSubcodeV1::FieldStateInvalid
+            ))
+        ));
+    }
 
     #[test]
     fn aesem3_reserved_zero_replays_and_nonzero_history_fails_closed() {
@@ -952,6 +1054,20 @@ mod tests {
         )
         .is_ok());
 
+        let truncated_wire = &snapshot[..SNAPSHOT_MAGIC_V3.len() + 2];
+        assert!(matches!(
+            decode_semantic_snapshot_v3(
+                truncated_wire,
+                &formula_digest,
+                &state_after,
+                &graph_after,
+                &legacy_receipt,
+            ),
+            Err(RuntimeError::InvalidNeuralState(
+                StateSubcodeV1::SnapshotWireInvalid
+            ))
+        ));
+
         let mut nonzero_history = snapshot;
         *nonzero_history
             .last_mut()
@@ -964,7 +1080,9 @@ mod tests {
                 &graph_after,
                 &legacy_receipt,
             ),
-            Err(RuntimeError::InvalidNeuralState)
+            Err(RuntimeError::InvalidNeuralState(
+                StateSubcodeV1::Aesem3RetiredCompensationNonzero
+            ))
         ));
     }
 }

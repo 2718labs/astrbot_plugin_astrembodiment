@@ -10,6 +10,7 @@
 use ae_context_projector::{ContextSummaryV1, DeliveryOutcome as ContextDeliveryOutcome};
 use ae_contracts::{
     hex, wire, CanonicalEvent, PerceptionProposalV1, PersonaGenesisRequest, ScopeRef,
+    StateSubcodeV1,
 };
 use ae_store::{
     RebirthActionV1, RebirthAuditReceiptV1, RebirthOutcomeV1, RebirthPrepareRequestV1,
@@ -25,6 +26,21 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 create_exception!(_native, NativeCoreError, PyRuntimeError);
 
 static CORE: OnceLock<Mutex<Option<ae_runtime::AstrRuntime>>> = OnceLock::new();
+
+fn invalid_neural_state_message(subcode: StateSubcodeV1) -> String {
+    format!("INVALID_NEURAL_STATE::{}", subcode.as_str())
+}
+
+fn invalid_neural_state_error(subcode: StateSubcodeV1) -> PyErr {
+    let error = NativeCoreError::new_err(invalid_neural_state_message(subcode));
+    Python::attach(|py| {
+        let value = error.value(py);
+        let _ = value.setattr("code", "INVALID_NEURAL_STATE");
+        let _ = value.setattr("state_subcode", subcode.as_str());
+        let _ = value.setattr("state_diagnostic", py.None());
+    });
+    error
+}
 
 fn core() -> PyResult<MutexGuard<'static, Option<ae_runtime::AstrRuntime>>> {
     let mutex = CORE.get_or_init(|| Mutex::new(None));
@@ -67,7 +83,9 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
         }
         ae_runtime::RuntimeError::UnsupportedEvent(_) => ("UNSUPPORTED_EVENT", error.to_string()),
         ae_runtime::RuntimeError::Closed => ("CLOSED", error.to_string()),
-        ae_runtime::RuntimeError::InvalidNeuralState => ("INVALID_NEURAL_STATE", error.to_string()),
+        ae_runtime::RuntimeError::InvalidNeuralState(subcode) => {
+            return invalid_neural_state_error(*subcode)
+        }
         ae_runtime::RuntimeError::InvalidPerceptionProposal => {
             ("INVALID_PERCEPTION_PROPOSAL", error.to_string())
         }
@@ -97,6 +115,38 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
 
 fn closed_schema(message: String) -> PyErr {
     NativeCoreError::new_err(format!("CLOSED_SCHEMA::{message}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ae_contracts::StateSubcodeV1;
+
+    #[test]
+    fn invalid_neural_state_messages_are_exact_closed_set() {
+        let cases = [
+            (
+                StateSubcodeV1::FieldStateInvalid,
+                "INVALID_NEURAL_STATE::FIELD_STATE_INVALID",
+            ),
+            (
+                StateSubcodeV1::Aesem3RetiredCompensationNonzero,
+                "INVALID_NEURAL_STATE::AESEM3_RETIRED_COMPENSATION_NONZERO",
+            ),
+            (
+                StateSubcodeV1::SnapshotWireInvalid,
+                "INVALID_NEURAL_STATE::SNAPSHOT_WIRE_INVALID",
+            ),
+            (
+                StateSubcodeV1::UnknownInvalidNeuralState,
+                "INVALID_NEURAL_STATE::UNKNOWN_INVALID_NEURAL_STATE",
+            ),
+        ];
+
+        for (subcode, expected) in cases {
+            assert_eq!(invalid_neural_state_message(subcode), expected);
+        }
+    }
 }
 
 fn strict_lower_hex(value: &serde_json::Value, expected_chars: usize) -> bool {

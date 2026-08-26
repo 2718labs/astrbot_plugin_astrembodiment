@@ -28,8 +28,8 @@ use ae_contracts::{
     hex, perception_dimension_values, wire, ActionContract, CanonicalEvent, CausalRef,
     CommitStatus, Digest, GenesisManifestProposal, GenesisReceipt, GenesisStatus, Id128,
     InvariantResiduals, NativeTelemetryReceiptV1, PerceptionProposalV1, PersonaGenesisRequest,
-    PersonalityVector, ScopeRef, SemanticEstimate, TransitionReceipt, TransitionReceiptV2,
-    UserStimulus,
+    PersonalityVector, ScopeRef, SemanticEstimate, StateSubcodeV1, TransitionReceipt,
+    TransitionReceiptV2, UserStimulus,
 };
 use ae_neurofield::{
     graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
@@ -68,7 +68,7 @@ pub enum RuntimeError {
     #[error("runtime is closed")]
     Closed,
     #[error("invalid neural state")]
-    InvalidNeuralState,
+    InvalidNeuralState(StateSubcodeV1),
     #[error("invalid closed semantic perception proposal")]
     InvalidPerceptionProposal,
     #[error("invalid semantic perception scope")]
@@ -87,6 +87,12 @@ pub enum RuntimeError {
     ContextCommitMissing,
     #[error("context projection does not match its committed integrity fence")]
     ContextCommitIntegrity,
+}
+
+impl RuntimeError {
+    pub const fn invalid_neural_state(subcode: StateSubcodeV1) -> Self {
+        Self::InvalidNeuralState(subcode)
+    }
 }
 
 #[derive(Debug)]
@@ -460,7 +466,9 @@ impl AstrRuntime {
                     &identity.development_seed_digest,
                 );
                 if !field.validate() || !graph.validate() {
-                    return Err(RuntimeError::InvalidNeuralState);
+                    return Err(RuntimeError::invalid_neural_state(
+                        StateSubcodeV1::BaselineStateInvalid,
+                    ));
                 }
                 let initial_snapshot_digest = state_digest(&field, &effective.formula_digest);
                 let graph_digest = graph_digest(&graph);
@@ -914,7 +922,9 @@ impl AstrRuntime {
             &child_identity.development_seed_digest,
         );
         if !field.validate() || !graph.validate() {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::BaselineStateInvalid,
+            ));
         }
         let initial_snapshot_digest = state_digest(&field, &parent_receipt.formula_digest);
         let initial_graph_digest = graph_digest(&graph);
@@ -1266,7 +1276,9 @@ impl AstrRuntime {
             .read_snapshot(semantic_scope, revision)?
             .ok_or(RuntimeError::LegacyUnattested)?;
         if snapshot.state_digest != receipt.state_after {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::SnapshotAttestationMismatch,
+            ));
         }
         if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
             let (field, graph, _) = semantic::decode_semantic_snapshot_v2(
@@ -1430,7 +1442,9 @@ impl AstrRuntime {
         if (node_observability.counts.changed_node_count > 0)
             != expected_semantic_receipt.semantic_vector.state_changed
         {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::SemanticClosureInvalid,
+            ));
         }
         let expression_projection =
             semantic::expression_projection_from_field_v1(&after, row.revision)?;
@@ -1509,7 +1523,9 @@ impl AstrRuntime {
             &development_seed_digest,
         );
         if !baseline_field.validate() || !baseline_graph.validate() {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::BaselineStateInvalid,
+            ));
         }
         let formula_digest = semantic::phase0_semantic_formula_digest_v1(&genesis_formula_digest)?;
         let estimator_digest = proposal.estimator_digest_v1(scope);
@@ -1605,7 +1621,9 @@ impl AstrRuntime {
         if (node_observability.counts.changed_node_count > 0)
             != semantic_vector_receipt.semantic_vector.state_changed
         {
-            return Err(RuntimeError::InvalidNeuralState);
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::SemanticClosureInvalid,
+            ));
         }
         let state_bytes = semantic::encode_semantic_snapshot_v3(
             &formula_digest,
@@ -1621,9 +1639,12 @@ impl AstrRuntime {
             &receipt,
         )?;
 
-        let relation_scope_token = semantic_storage_scope
-            .relation_token
-            .ok_or(RuntimeError::InvalidNeuralState)?;
+        let relation_scope_token =
+            semantic_storage_scope
+                .relation_token
+                .ok_or(RuntimeError::invalid_neural_state(
+                    StateSubcodeV1::RelationScopeMissing,
+                ))?;
         let context_receipt =
             Self::committed_context_receipt(&event, relation_scope_token, next_revision)?;
         let previous_context = self

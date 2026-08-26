@@ -14,6 +14,47 @@ use std::fmt;
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
+/// Closed, content-free classification for an `INVALID_NEURAL_STATE` rejection.
+///
+/// This type is deliberately not serialized into any receipt, snapshot, or
+/// persistence record. It only crosses the native error boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StateSubcodeV1 {
+    BaselineStateInvalid,
+    FieldStateInvalid,
+    GraphStateInvalid,
+    DynamicsInvalid,
+    SemanticClosureInvalid,
+    SnapshotWireInvalid,
+    SnapshotAttestationMismatch,
+    Aesem3RetiredCompensationNonzero,
+    RelationScopeMissing,
+    UnknownInvalidNeuralState,
+}
+
+impl StateSubcodeV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BaselineStateInvalid => "BASELINE_STATE_INVALID",
+            Self::FieldStateInvalid => "FIELD_STATE_INVALID",
+            Self::GraphStateInvalid => "GRAPH_STATE_INVALID",
+            Self::DynamicsInvalid => "DYNAMICS_INVALID",
+            Self::SemanticClosureInvalid => "SEMANTIC_CLOSURE_INVALID",
+            Self::SnapshotWireInvalid => "SNAPSHOT_WIRE_INVALID",
+            Self::SnapshotAttestationMismatch => "SNAPSHOT_ATTESTATION_MISMATCH",
+            Self::Aesem3RetiredCompensationNonzero => "AESEM3_RETIRED_COMPENSATION_NONZERO",
+            Self::RelationScopeMissing => "RELATION_SCOPE_MISSING",
+            Self::UnknownInvalidNeuralState => "UNKNOWN_INVALID_NEURAL_STATE",
+        }
+    }
+}
+
+impl fmt::Display for StateSubcodeV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Frozen Phase-0 native dynamics identity.  The runtime and durable Store
 /// both derive formula digests here so a persisted transition cannot label an
 /// arbitrary digest as this formula.
