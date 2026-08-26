@@ -105,6 +105,9 @@ impl RuntimeError {
             Self::InvalidNeuralState(StateSubcodeV1::FieldStateInvalid) => {
                 SemanticFieldMigrationSubcodeV1::RefusedRange
             }
+            Self::Store(StoreError::FieldMigrationBackup { .. }) => {
+                SemanticFieldMigrationSubcodeV1::BackupFailed
+            }
             Self::Store(StoreError::Io { context, .. })
                 if context.starts_with("field migration backup")
                     || context.starts_with("opening field migration backup")
@@ -1575,9 +1578,13 @@ impl AstrRuntime {
                     let raw = value.raw();
                     raw >= 0 && i128::from(raw) <= theoretical_limit
                 });
-            if !p_and_e_in_theoretical_domain
-                || state_digest(&snapshot_field, input.legacy_formula_digest)
-                    != state_digest(&replay.next_field, input.legacy_formula_digest)
+            if !p_and_e_in_theoretical_domain {
+                return Err(RuntimeError::invalid_neural_state(
+                    StateSubcodeV1::FieldStateInvalid,
+                ));
+            }
+            if state_digest(&snapshot_field, input.legacy_formula_digest)
+                != state_digest(&replay.next_field, input.legacy_formula_digest)
                 || graph_digest(&snapshot_graph) != graph_digest(&replay_graph)
                 || receipt.state_before != state_digest(&replay_field, input.legacy_formula_digest)
                 || receipt.state_after
@@ -2749,6 +2756,148 @@ mod tests {
         }
     }
 
+    fn legacy_field_upgrade_bundle_for_test(
+        runtime: &mut AstrRuntime,
+        history: &LegacyAesem2History,
+        scope: &ScopeRef,
+        proposal: &PerceptionProposalV1,
+    ) -> ContinuityCommitBundleV1 {
+        let (semantic_storage_scope, manifest_digest, development_seed_digest, baseline_field) = {
+            let hot = runtime.hot_for(scope).expect("legacy state rebinds");
+            let (baseline_field, _) = initial_state_from_manifest(
+                &hot.identity.manifest,
+                &hot.formula_digest,
+                &hot.identity.development_seed_digest,
+            );
+            (
+                hot.semantic_storage_scope.clone(),
+                hot.identity.manifest_digest,
+                hot.identity.development_seed_digest,
+                baseline_field,
+            )
+        };
+        let Some((normalized, normalization)) =
+            semantic::normalize_legacy_aesem2_field_domain_v1(&history.latest_field)
+                .expect("overflowing test field normalizes")
+        else {
+            panic!("fixture has a field-domain overflow");
+        };
+        let estimator_digest = proposal.estimator_digest_v1(scope);
+        let event = semantic_event(&semantic_storage_scope, proposal, estimator_digest);
+        let event_digest = wire::event_digest(&event);
+        let prepared = semantic::prepare_semantic_transition_v2(
+            &normalized,
+            &baseline_field,
+            &history.latest_graph,
+            &manifest_digest,
+            &development_seed_digest,
+            proposal,
+        )
+        .expect("normalized candidate proposal is valid");
+        let state_before = state_digest(&normalized, &history.phase0_formula_digest);
+        let state_after = state_digest(&prepared.next_field, &history.phase0_formula_digest);
+        let graph_before = graph_digest(&history.latest_graph);
+        let graph_after = graph_digest(&prepared.next_graph);
+        let telemetry_receipt = semantic_telemetry_v1::prepare_native_telemetry_v1(
+            history.phase0_formula_digest,
+            history.semantic_scope,
+            event_digest,
+            estimator_digest,
+            proposal.base_revision,
+            proposal.base_revision + 1,
+            state_before,
+            state_after,
+            graph_before,
+            graph_after,
+            &prepared.local_by_region,
+            &prepared.dynamics,
+            &prepared.full_vector_load,
+        )
+        .expect("candidate telemetry closes");
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: history.phase0_formula_digest,
+            scope_digest: history.semantic_scope,
+            event_digest,
+            authority_digest: authority_projection_digest(&event),
+            base_revision: proposal.base_revision,
+            next_revision: proposal.base_revision + 1,
+            state_before,
+            state_after,
+            graph_after,
+            action_contract: None,
+            active_nodes: prepared.active_nodes,
+            active_edges: prepared.dynamics.propagated_edge_count,
+            residuals: telemetry_receipt.residuals.clone(),
+            status: CommitStatus::Committed,
+        };
+        let state_bytes = semantic::encode_semantic_snapshot_v3(
+            &history.phase0_formula_digest,
+            &prepared.next_field,
+            &prepared.next_graph,
+            &telemetry_receipt,
+        )
+        .expect("candidate AESEM3 snapshot encodes");
+        let relation_scope_token = semantic_storage_scope
+            .relation_token
+            .expect("semantic lane owns a relation token");
+        let context_receipt = AstrRuntime::committed_context_receipt(
+            &event,
+            relation_scope_token,
+            receipt.next_revision,
+        )
+        .expect("candidate context receipt closes");
+        let previous_context = runtime
+            .store
+            .read_context_commit(&history.semantic_scope, &relation_scope_token)
+            .expect("read legacy context");
+        let context_projection = project_committed_receipt(
+            previous_context
+                .as_ref()
+                .map(|row| row.canonical_state_bytes.as_slice()),
+            &context_receipt,
+        )
+        .expect("candidate context projection closes");
+        let canonical_context_state = context_projection.canonical_state_bytes();
+        let upgrade =
+            LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                &receipt,
+                history.latest_state_digest,
+                history.latest_graph_digest,
+                history.legacy_formula_digest,
+                history.latest_chain_digest,
+                AstrRuntime::legacy_field_domain_metadata(normalization),
+            );
+        let delta_bytes = upgrade.canonical_bytes();
+        ContinuityCommitBundleV1 {
+            envelope: CommitEnvelope {
+                event_kind: wire::event_kind_name(&event).to_owned(),
+                event_bytes: wire::encode_event(&event),
+                receipt: receipt.clone(),
+                chain_seed: history.latest_chain_digest,
+                delta_bytes: delta_bytes.clone(),
+            },
+            snapshot: SnapshotCommitV1 {
+                state_digest: state_after,
+                state_bytes,
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest: graph_before,
+                graph_digest: graph_after,
+                formula_digest: history.phase0_formula_digest,
+                delta_bytes,
+                replay_state_bytes: prepared.next_graph.canonical_bytes(),
+            },
+            context: ContextCommitV1 {
+                relation_scope_token,
+                relation_hmac: context_projection.relation_hmac(),
+                source_continuum_revision: receipt.next_revision,
+                context_digest: ae_store::continuity_context_digest(&canonical_context_state),
+                canonical_state_bytes: canonical_context_state,
+            },
+        }
+    }
+
     #[test]
     fn store_refuses_caller_supplied_field_migration_metadata_without_overflow() {
         let dir = temp_dir("field-domain-store-red");
@@ -2788,6 +2937,36 @@ mod tests {
         bundle.graph.delta_bytes = forged_bytes;
 
         assert!(runtime.store.commit_continuity_bundle(&bundle).is_err());
+    }
+
+    #[test]
+    fn store_refuses_canonical_but_unrelated_incoming_field_migration_context() {
+        let dir = temp_dir("field-domain-store-context-red");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(84);
+        let scope = request.source.scope_persona_scope();
+        runtime.ensure_genesis(&request).unwrap();
+        let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, true);
+        let proposal = semantic_proposal(&scope, 85, 2);
+        let mut bundle =
+            legacy_field_upgrade_bundle_for_test(&mut runtime, &history, &scope, &proposal);
+        let event = wire::decode_event(&bundle.envelope.event_bytes).unwrap();
+        let detached_receipt = AstrRuntime::committed_context_receipt(
+            &event,
+            bundle.context.relation_scope_token,
+            bundle.envelope.receipt.next_revision,
+        )
+        .unwrap();
+        let detached_projection = project_committed_receipt(None, &detached_receipt).unwrap();
+        let detached_state = detached_projection.canonical_state_bytes();
+        bundle.context.relation_hmac = detached_projection.relation_hmac();
+        bundle.context.context_digest = ae_store::continuity_context_digest(&detached_state);
+        bundle.context.canonical_state_bytes = detached_state;
+
+        assert!(matches!(
+            runtime.store.commit_continuity_bundle(&bundle),
+            Err(StoreError::ContinuityFence("field_upgrade_context"))
+        ));
     }
 
     #[test]

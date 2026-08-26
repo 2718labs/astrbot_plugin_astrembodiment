@@ -31,7 +31,10 @@ pub use legacy_discovery::{
 mod semantic_field_attestation;
 
 use ae_authority::authority_projection_digest;
-use ae_context_projector::ContextProjectionStateV1;
+use ae_context_projector::{
+    project_committed_receipt, ContextProjectionStateV1, DeliveryOutcome as ContextDeliveryOutcome,
+    ReceiptCommitStatus, ReceiptEnvelopeV1, ValidatedCommittedReceiptV1,
+};
 use ae_continuum::{CommitEnvelope, JournalRow};
 use ae_contracts::{
     phase0_canonical_formula_digest_v1, wire, CanonicalEvent, CommitStatus, Digest,
@@ -68,6 +71,7 @@ const LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1: &[u8] =
     b"astr-embodiment/legacy-semantic-formula-upgrade-v1";
 const LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_ID_DOMAIN_V1: &[u8] =
     b"astr-embodiment/legacy-semantic-field-domain-upgrade-v1";
+const FIELD_MIGRATION_BACKUP_MANIFEST_MAGIC_V2: &[u8] = b"AE-FMP2\0";
 pub const JOINT_MAX_LINEAR_FXP6_V1: u8 = 1;
 pub const LEGACY_FIELD_FXP6_SCALE: u32 = 1_000_000;
 const AESEM2_SNAPSHOT_MAGIC: &[u8] = b"AESEM2\0";
@@ -115,6 +119,8 @@ pub enum StoreError {
     SnapshotNotFound,
     #[error("continuity bundle fence failed: {0}")]
     ContinuityFence(&'static str),
+    #[error("field migration backup failed: {context}")]
+    FieldMigrationBackup { context: &'static str },
     #[error("continuity duplicate does not match the complete stored authority")]
     ContinuityDuplicateMismatch,
     #[error("continuity duplicate points at an incomplete authority bundle")]
@@ -455,8 +461,23 @@ struct FieldMigrationPreimageBackupV1 {
     source_graph_digest: Digest,
     incarnation_id: Digest,
     manifest_digest: Digest,
+    package_identity: String,
+    build_identity: String,
+    capture_method: FieldMigrationBackupCaptureMethodV1,
     byte_len: u64,
     sha256: Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum FieldMigrationBackupCaptureMethodV1 {
+    SqliteBackupApi = 1,
+}
+
+impl FieldMigrationBackupCaptureMethodV1 {
+    const fn as_u8(self) -> u8 {
+        self as u8
+    }
 }
 
 impl Phase0FormulaTransitionV1 {
@@ -2353,6 +2374,104 @@ impl Store {
         Ok(())
     }
 
+    fn committed_context_receipt(
+        event: &CanonicalEvent,
+        relation_scope_token: [u8; 16],
+        source_continuum_revision: u64,
+    ) -> Result<ValidatedCommittedReceiptV1, StoreError> {
+        let (event_id, dimensions_fxp6, unresolved_boundary, unresolved_repair, delivery_outcome) =
+            match event {
+                CanonicalEvent::UserStimulus(stimulus) => {
+                    let dimensions = &stimulus.evidence.dimensions;
+                    let bounded = |value: ae_fixed::Fixed| {
+                        value
+                            .raw()
+                            .clamp(0, ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6)
+                    };
+                    (
+                        stimulus.event_id,
+                        [
+                            bounded(dimensions.positive),
+                            bounded(dimensions.affiliation),
+                            bounded(dimensions.harm),
+                            bounded(dimensions.boundary),
+                            bounded(dimensions.repair),
+                            bounded(dimensions.repetition),
+                            bounded(dimensions.new_information),
+                            bounded(dimensions.constraint_instability),
+                            bounded(dimensions.epistemic_conflict),
+                            bounded(dimensions.self_responsibility),
+                            bounded(dimensions.other_responsibility),
+                            bounded(dimensions.hostility),
+                            bounded(dimensions.publicness),
+                            bounded(dimensions.engagement),
+                            bounded(dimensions.rejection),
+                        ],
+                        dimensions.boundary.raw() > 0,
+                        dimensions.repair.raw() > 0,
+                        ContextDeliveryOutcome::Pending,
+                    )
+                }
+                CanonicalEvent::DeliveryOutcome(outcome) => (
+                    outcome.event_id,
+                    [0; 15],
+                    false,
+                    false,
+                    if outcome.delivered {
+                        ContextDeliveryOutcome::Delivered
+                    } else {
+                        ContextDeliveryOutcome::Failed
+                    },
+                ),
+                CanonicalEvent::TimeAdvance(advance) => (
+                    advance.event_id,
+                    [0; 15],
+                    false,
+                    false,
+                    ContextDeliveryOutcome::Pending,
+                ),
+                _ => return Err(StoreError::ContinuityFence("field_upgrade_context")),
+            };
+        ValidatedCommittedReceiptV1::try_from_envelope(ReceiptEnvelopeV1 {
+            commit_status: ReceiptCommitStatus::Committed,
+            event_id,
+            relation_token: relation_scope_token,
+            source_continuum_revision,
+            dimensions_fxp6,
+            unresolved_boundary,
+            unresolved_repair,
+            repetition_increment: 1,
+            delivery_outcome,
+        })
+        .map_err(|_| StoreError::ContinuityFence("field_upgrade_context"))
+    }
+
+    fn context_matches_projection(
+        context: &ContextCommitV1,
+        previous_context_state: Option<&[u8]>,
+        event: &CanonicalEvent,
+        relation_scope_token: [u8; 16],
+        source_continuum_revision: u64,
+        fence: &'static str,
+    ) -> Result<Vec<u8>, StoreError> {
+        Self::context_closes(context)?;
+        let receipt =
+            Self::committed_context_receipt(event, relation_scope_token, source_continuum_revision)
+                .map_err(|_| StoreError::ContinuityFence(fence))?;
+        let expected = project_committed_receipt(previous_context_state, &receipt)
+            .map_err(|_| StoreError::ContinuityFence(fence))?;
+        let expected_bytes = expected.canonical_state_bytes();
+        if context.relation_scope_token != relation_scope_token
+            || context.source_continuum_revision != source_continuum_revision
+            || context.relation_hmac != expected.relation_hmac()
+            || context.context_digest != continuity_context_digest(&expected_bytes)
+            || context.canonical_state_bytes != expected_bytes
+        {
+            return Err(StoreError::ContinuityFence(fence));
+        }
+        Ok(expected_bytes)
+    }
+
     fn attest_field_domain_upgrade_tx(
         tx: &Transaction<'_>,
         input: &LegacySemanticFormulaUpgradeInput<'_>,
@@ -2379,6 +2498,7 @@ impl Store {
         let mut replay_field = identity.baseline_field.clone();
         let replay_graph = identity.baseline_graph.clone();
         let mut chain_seed = identity.initial_snapshot_digest;
+        let mut replay_context_state: Option<Vec<u8>> = None;
         let mut latest_snapshot: Option<semantic_field_attestation::DecodedSemanticSnapshotV2> =
             None;
         for revision in 1..=input.current_revision {
@@ -2398,7 +2518,7 @@ impl Store {
             {
                 return Err(StoreError::ContinuityFence("semantic_history_event"));
             }
-            let ae_contracts::CanonicalEvent::UserStimulus(stimulus) = event else {
+            let ae_contracts::CanonicalEvent::UserStimulus(stimulus) = &event else {
                 return Err(StoreError::ContinuityFence("semantic_history_event"));
             };
             if stimulus.scope != *input.event_scope
@@ -2460,12 +2580,14 @@ impl Store {
                 revision,
             )?
             .ok_or(StoreError::ContinuityFence("semantic_history_context"))?;
-            if context.relation_scope_token != relation_scope_token
-                || context.source_continuum_revision != revision
-            {
-                return Err(StoreError::ContinuityFence("semantic_history_context"));
-            }
-            Self::context_closes(&context)?;
+            let expected_context_bytes = Self::context_matches_projection(
+                &context,
+                replay_context_state.as_deref(),
+                &event,
+                relation_scope_token,
+                revision,
+                "semantic_history_context",
+            )?;
             let replay = semantic_field_attestation::replay_legacy_aesem2_transition_v1(
                 &replay_field,
                 &identity.baseline_field,
@@ -2487,6 +2609,7 @@ impl Store {
             }
             replay_field = replay.next_field;
             chain_seed = row.chain_digest;
+            replay_context_state = Some(expected_context_bytes);
             latest_snapshot = Some(snapshot);
         }
         let latest_snapshot =
@@ -2540,18 +2663,47 @@ impl Store {
         if incoming_graph != input.bundle.graph.replay_state_bytes {
             return Err(StoreError::ContinuityFence("field_upgrade_graph"));
         }
-        if input.bundle.context.relation_scope_token != relation_scope_token
-            || input.bundle.context.source_continuum_revision != input.receipt.next_revision
-        {
-            return Err(StoreError::ContinuityFence("field_upgrade_context"));
-        }
-        Self::context_closes(&input.bundle.context)?;
+        Self::context_matches_projection(
+            &input.bundle.context,
+            replay_context_state.as_deref(),
+            input.event,
+            relation_scope_token,
+            input.receipt.next_revision,
+            "field_upgrade_context",
+        )?;
         Ok(AttestedFieldDomainUpgradeV1 { upgrade, identity })
     }
 
+    fn field_migration_backup_package_identity() -> String {
+        format!("{}@{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+    }
+
+    fn field_migration_backup_build_identity() -> String {
+        format!(
+            "{}@{};target={}-{};manifest=AE-FMP2",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
+    }
+
     fn field_migration_backup_manifest(backup: &FieldMigrationPreimageBackupV1) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(8 + (32 * 8) + 17);
-        bytes.extend_from_slice(b"AE-FMP1\0");
+        let package_identity = backup.package_identity.as_bytes();
+        let build_identity = backup.build_identity.as_bytes();
+        let package_len = u8::try_from(package_identity.len())
+            .expect("field migration backup package identity is bounded");
+        let build_len = u8::try_from(build_identity.len())
+            .expect("field migration backup build identity is bounded");
+        let mut bytes = Vec::with_capacity(
+            8 + 3 + package_identity.len() + build_identity.len() + (32 * 8) + 17,
+        );
+        bytes.extend_from_slice(FIELD_MIGRATION_BACKUP_MANIFEST_MAGIC_V2);
+        bytes.push(package_len);
+        bytes.extend_from_slice(package_identity);
+        bytes.push(build_len);
+        bytes.extend_from_slice(build_identity);
+        bytes.push(backup.capture_method.as_u8());
         bytes.extend_from_slice(&backup.migration_id);
         bytes.extend_from_slice(&backup.scope_digest);
         bytes.extend_from_slice(&backup.source_revision.to_le_bytes());
@@ -2701,6 +2853,9 @@ impl Store {
             source_graph_digest: digest_from_blob(&source_graph_digest, "field_backup_graph")?,
             incarnation_id: digest_from_blob(&incarnation_id, "field_backup_incarnation")?,
             manifest_digest: digest_from_blob(&manifest_digest, "field_backup_manifest_digest")?,
+            package_identity: expected.package_identity.clone(),
+            build_identity: expected.build_identity.clone(),
+            capture_method: expected.capture_method,
             byte_len: u64::try_from(byte_len)
                 .map_err(|_| StoreError::ContinuityFence("field_backup_length"))?,
             sha256: digest_from_blob(&sha256, "field_backup_sha256")?,
@@ -2712,6 +2867,9 @@ impl Store {
             || backup.source_graph_digest != expected.source_graph_digest
             || backup.incarnation_id != expected.incarnation_id
             || backup.manifest_digest != expected.manifest_digest
+            || backup.package_identity != expected.package_identity
+            || backup.build_identity != expected.build_identity
+            || backup.capture_method != expected.capture_method
             || manifest_bytes != Self::field_migration_backup_manifest(&backup)
         {
             return Err(StoreError::ContinuityFence("field_backup_record"));
@@ -2736,6 +2894,9 @@ impl Store {
             source_graph_digest: upgrade.source_graph_digest,
             incarnation_id: identity.incarnation_id,
             manifest_digest: identity.manifest_digest,
+            package_identity: Self::field_migration_backup_package_identity(),
+            build_identity: Self::field_migration_backup_build_identity(),
+            capture_method: FieldMigrationBackupCaptureMethodV1::SqliteBackupApi,
             byte_len: 0,
             sha256: [0; 32],
         };
@@ -2775,8 +2936,15 @@ impl Store {
         // competing writers; the complete backup is re-hashed before any
         // authority row is inserted below.
         let source =
-            Connection::open_with_flags(database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        source.backup(rusqlite::DatabaseName::Main, &database_partial, None)?;
+            Connection::open_with_flags(database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|_| StoreError::FieldMigrationBackup {
+                    context: "opening read-only authority source",
+                })?;
+        source
+            .backup(rusqlite::DatabaseName::Main, &database_partial, None)
+            .map_err(|_| StoreError::FieldMigrationBackup {
+                context: "capturing authority preimage",
+            })?;
         OpenOptions::new()
             .read(true)
             .write(true)
@@ -4979,5 +5147,41 @@ mod tests {
             panic!()
         };
         assert_eq!(nonce, [21; 32]);
+    }
+
+    #[test]
+    fn field_migration_backup_manifest_uses_the_provenance_bound_v2_wire() {
+        let backup = FieldMigrationPreimageBackupV1 {
+            migration_id: [1; 32],
+            scope_digest: [2; 32],
+            source_revision: 7,
+            source_state_digest: [3; 32],
+            source_formula_digest: [4; 32],
+            source_graph_digest: [5; 32],
+            incarnation_id: [6; 32],
+            manifest_digest: [7; 32],
+            package_identity: Store::field_migration_backup_package_identity(),
+            build_identity: Store::field_migration_backup_build_identity(),
+            capture_method: FieldMigrationBackupCaptureMethodV1::SqliteBackupApi,
+            byte_len: 4_096,
+            sha256: [8; 32],
+        };
+
+        let manifest = Store::field_migration_backup_manifest(&backup);
+        assert!(manifest.starts_with(b"AE-FMP2\0"));
+        let package_start = 9;
+        let package_end = package_start + usize::from(manifest[8]);
+        assert_eq!(
+            &manifest[package_start..package_end],
+            backup.package_identity.as_bytes()
+        );
+        let build_len_at = package_end;
+        let build_start = build_len_at + 1;
+        let build_end = build_start + usize::from(manifest[build_len_at]);
+        assert_eq!(
+            &manifest[build_start..build_end],
+            backup.build_identity.as_bytes()
+        );
+        assert_eq!(manifest[build_end], backup.capture_method.as_u8());
     }
 }
