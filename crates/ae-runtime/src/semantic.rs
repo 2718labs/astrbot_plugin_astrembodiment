@@ -3,9 +3,9 @@
 use crate::RuntimeError;
 use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
 use ae_contracts::{
-    phase0_canonical_formula_digest_v1, wire, CommitStatus, NativeTelemetryReceiptV1,
-    PerceptionProposalV1, SemanticVectorFormulaV2, SemanticVectorReceiptV2, StateSubcodeV1,
-    TransitionReceipt, TransitionReceiptV2,
+    phase0_canonical_formula_digest_v1, wire, CommitStatus, EvidenceVector,
+    NativeTelemetryReceiptV1, PerceptionProposalV1, SemanticVectorFormulaV2,
+    SemanticVectorReceiptV2, StateSubcodeV1, TransitionReceipt, TransitionReceiptV2,
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
@@ -22,6 +22,10 @@ const SNAPSHOT_SCHEMA_V2: u16 = 2;
 const SNAPSHOT_MAGIC_V3: &[u8] = b"AESEM3\0";
 const SNAPSHOT_SCHEMA_V3: u16 = 3;
 const EXPRESSION_FXP6_MAX: u32 = 1_000_000;
+/// Frozen predecessor relaxation rate used only to authenticate AESEM2
+/// history.  New writes always use the Phase-0 sparse dynamics below.
+const LEGACY_NEUTRAL_RELAXATION_MAX_RATE: Fixed = Fixed::from_raw(125_000);
+pub(crate) const LEGACY_FIELD_FXP6_SCALE: i64 = 1_000_000;
 const REGION_NAMES: [&str; 9] = [
     "interoception_allostasis",
     "affective_valuation",
@@ -54,6 +58,26 @@ pub(crate) struct PreparedSemanticTransitionV2 {
     pub full_vector_load: FullVectorLoad,
     pub local_by_region: [Fixed; REGION_LAYOUT.len()],
     pub dynamics: PreparedSemanticDynamicsV2,
+}
+
+/// The exact AESEM2 writer is retained solely for deterministic historical
+/// attestation.  It is deliberately not a production write path.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedLegacyAesem2TransitionV1 {
+    pub next_field: NeuralField,
+    pub active_nodes: u32,
+}
+
+/// Aggregate, non-secret facts bound into the one-time field-domain receipt.
+/// These are intentionally not per-node diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LegacyFieldDomainNormalizationV1 {
+    pub source_common_max: i64,
+    pub out_of_range_count: u32,
+    pub potential_out_of_range_count: u32,
+    pub excitation_out_of_range_count: u32,
+    pub signal_mass_before: i128,
+    pub signal_mass_after: i128,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +146,232 @@ pub struct NodeObservabilityProjectionV1 {
     pub counts: NodeObservabilityCountsV1,
     pub residuals: NodeObservabilityResidualsV1,
     pub regions: Vec<NodeObservabilityRegionV1>,
+}
+
+fn legacy_full_vector_component_update(
+    current: Fixed,
+    baseline: Fixed,
+    drive: Fixed,
+    neutral_rate: Fixed,
+) -> Result<(Fixed, Fixed), RuntimeError> {
+    let displacement = current.saturating_sub(baseline);
+    let recovery = displacement
+        .checked_mul(neutral_rate)
+        .ok_or_else(|| invalid_neural_state(StateSubcodeV1::DynamicsInvalid))?;
+    Ok((
+        current.saturating_add(drive).saturating_sub(recovery),
+        recovery,
+    ))
+}
+
+/// Reproduce the frozen AESEM2 writer exactly enough to authenticate every
+/// persisted predecessor transition.  This function intentionally permits
+/// finite P/E values outside the current unit domain; all other validation is
+/// limited to the old writer's shape and proposal rules.
+#[cfg(test)]
+pub(crate) fn prepare_legacy_aesem2_transition_v1(
+    field: &NeuralField,
+    baseline: &NeuralField,
+    proposal: &PerceptionProposalV1,
+) -> Result<PreparedLegacyAesem2TransitionV1, RuntimeError> {
+    proposal
+        .validate_v1()
+        .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
+    replay_legacy_aesem2_transition_v1(
+        field,
+        baseline,
+        &proposal.dimensions,
+        proposal.estimator_confidence,
+    )
+}
+
+pub(crate) fn replay_legacy_aesem2_transition_v1(
+    field: &NeuralField,
+    baseline: &NeuralField,
+    dimensions: &EvidenceVector,
+    estimator_confidence: Fixed,
+) -> Result<PreparedLegacyAesem2TransitionV1, RuntimeError> {
+    if !field.validate()
+        || !baseline.validate()
+        || !(Fixed::ZERO < estimator_confidence && estimator_confidence <= Fixed::ONE)
+    {
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+    }
+    let full_vector_load = assemble_full_vector_load(dimensions)
+        .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
+    if full_vector_load.evaluated_dimension_count != 15
+        || full_vector_load.injected_dimension_count != 15
+    {
+        return Err(RuntimeError::InvalidPerceptionProposal);
+    }
+
+    let mut next_field = field.clone();
+    let mut active_nodes = 0_u32;
+    for (region, &(start, count)) in REGION_LAYOUT.iter().enumerate() {
+        let drive = full_vector_load.evidence_means[region]
+            .checked_mul(estimator_confidence)
+            .ok_or_else(|| invalid_neural_state(StateSubcodeV1::DynamicsInvalid))?;
+        let neutral_rate = full_vector_load.neutral_means[region]
+            .checked_mul(LEGACY_NEUTRAL_RELAXATION_MAX_RATE)
+            .ok_or_else(|| invalid_neural_state(StateSubcodeV1::DynamicsInvalid))?;
+        let end = start
+            .checked_add(count)
+            .filter(|end| *end <= NEURON_SLOTS)
+            .ok_or_else(|| invalid_neural_state(StateSubcodeV1::DynamicsInvalid))?;
+        for node in start..end {
+            let (next_potential, potential_recovery) = legacy_full_vector_component_update(
+                field.potential[node],
+                baseline.potential[node],
+                drive,
+                neutral_rate,
+            )?;
+            let (next_excitation, excitation_recovery) = legacy_full_vector_component_update(
+                field.excitation[node],
+                baseline.excitation[node],
+                drive,
+                neutral_rate,
+            )?;
+            if drive == Fixed::ZERO
+                && potential_recovery == Fixed::ZERO
+                && excitation_recovery == Fixed::ZERO
+            {
+                continue;
+            }
+            active_nodes = active_nodes
+                .checked_add(1)
+                .ok_or_else(|| invalid_neural_state(StateSubcodeV1::DynamicsInvalid))?;
+            next_field.potential[node] = next_potential;
+            next_field.excitation[node] = next_excitation;
+        }
+    }
+    if !next_field.validate() {
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+    }
+    Ok(PreparedLegacyAesem2TransitionV1 {
+        next_field,
+        active_nodes,
+    })
+}
+
+fn checked_joint_scaled_fxp6(value: i64, common_max: i64) -> Result<i64, RuntimeError> {
+    let numerator = i128::from(value)
+        .checked_mul(i128::from(LEGACY_FIELD_FXP6_SCALE))
+        .ok_or_else(|| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?;
+    let denominator = i128::from(common_max);
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let doubled_remainder = remainder
+        .checked_mul(2)
+        .ok_or_else(|| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?;
+    let rounded = if doubled_remainder > denominator
+        || (doubled_remainder == denominator && quotient % 2 != 0)
+    {
+        quotient
+            .checked_add(1)
+            .ok_or_else(|| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?
+    } else {
+        quotient
+    };
+    let scaled = i64::try_from(rounded)
+        .map_err(|_| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?;
+    if !(0..=LEGACY_FIELD_FXP6_SCALE).contains(&scaled) {
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+    }
+    Ok(scaled)
+}
+
+/// Normalize only the one closed AESEM2 legacy overflow shape.  It never
+/// clamps values and it never mutates its input.  A return value of `None`
+/// means the field is already in the unit domain; every other invalid shape
+/// remains fail-closed under the existing field-state subcode.
+pub(crate) fn normalize_legacy_aesem2_field_domain_v1(
+    field: &NeuralField,
+) -> Result<Option<(NeuralField, LegacyFieldDomainNormalizationV1)>, RuntimeError> {
+    if !field.validate() {
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+    }
+    for values in [
+        &field.inhibition,
+        &field.adaptation,
+        &field.precision,
+        &field.prediction_error,
+        &field.eligibility,
+        &field.metabolic_reserve,
+    ] {
+        if values
+            .iter()
+            .any(|value| !(0..=LEGACY_FIELD_FXP6_SCALE).contains(&value.raw()))
+        {
+            return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+        }
+    }
+
+    let mut common_max = 0_i64;
+    let mut out_of_range_count = 0_u32;
+    let mut potential_out_of_range_count = 0_u32;
+    let mut excitation_out_of_range_count = 0_u32;
+    let mut signal_mass_before = 0_i128;
+    for (values, component_count) in [
+        (&field.potential, &mut potential_out_of_range_count),
+        (&field.excitation, &mut excitation_out_of_range_count),
+    ] {
+        for value in values {
+            let raw = value.raw();
+            if raw < 0 {
+                return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+            }
+            common_max = common_max.max(raw);
+            signal_mass_before = signal_mass_before
+                .checked_add(i128::from(raw))
+                .ok_or_else(|| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?;
+            if raw > LEGACY_FIELD_FXP6_SCALE {
+                *component_count = component_count
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?;
+                out_of_range_count = out_of_range_count
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?;
+            }
+        }
+    }
+    if common_max <= LEGACY_FIELD_FXP6_SCALE {
+        return Ok(None);
+    }
+
+    let mut normalized = field.clone();
+    let mut signal_mass_after = 0_i128;
+    for (source, destination) in [
+        (&field.potential, &mut normalized.potential),
+        (&field.excitation, &mut normalized.excitation),
+    ] {
+        for (before, after) in source.iter().zip(destination.iter_mut()) {
+            let scaled = checked_joint_scaled_fxp6(before.raw(), common_max)?;
+            *after = Fixed::from_raw(scaled);
+            signal_mass_after = signal_mass_after
+                .checked_add(i128::from(scaled))
+                .ok_or_else(|| invalid_neural_state(StateSubcodeV1::FieldStateInvalid))?;
+        }
+    }
+    if !normalized.validate()
+        || normalized
+            .potential
+            .iter()
+            .chain(normalized.excitation.iter())
+            .any(|value| !(0..=LEGACY_FIELD_FXP6_SCALE).contains(&value.raw()))
+    {
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+    }
+    Ok(Some((
+        normalized,
+        LegacyFieldDomainNormalizationV1 {
+            source_common_max: common_max,
+            out_of_range_count,
+            potential_out_of_range_count,
+            excitation_out_of_range_count,
+            signal_mass_before,
+            signal_mass_after,
+        },
+    )))
 }
 
 /// Phase 0 preparation materializes the deterministic graph exactly once and
@@ -967,6 +1217,34 @@ mod tests {
                 StateSubcodeV1::FieldStateInvalid
             ))
         ));
+    }
+
+    #[test]
+    fn legacy_field_domain_joint_max_normalization_is_exact_and_idempotent() {
+        let mut field = NeuralField::zeroed();
+        field.potential[0] = Fixed::from_raw(2_000_000);
+        field.potential[1] = Fixed::from_raw(1_000_000);
+        // These two values exercise ties-to-even without adding a second
+        // scale: 3/2_000_000 rounds to 2, while 1/2_000_000 rounds to 0.
+        field.excitation[0] = Fixed::from_raw(3);
+        field.excitation[1] = Fixed::from_raw(1);
+        let metabolic_before = field.metabolic_reserve.clone();
+
+        let (normalized, metadata) = normalize_legacy_aesem2_field_domain_v1(&field)
+            .unwrap()
+            .expect("finite P/E overflow is the one migratable shape");
+        assert_eq!(metadata.source_common_max, 2_000_000);
+        assert_eq!(metadata.out_of_range_count, 1);
+        assert_eq!(metadata.potential_out_of_range_count, 1);
+        assert_eq!(metadata.excitation_out_of_range_count, 0);
+        assert_eq!(normalized.potential[0], Fixed::ONE);
+        assert_eq!(normalized.potential[1], Fixed::from_raw(500_000));
+        assert_eq!(normalized.excitation[0], Fixed::from_raw(2));
+        assert_eq!(normalized.excitation[1], Fixed::ZERO);
+        assert_eq!(normalized.metabolic_reserve, metabolic_before);
+        assert!(normalize_legacy_aesem2_field_domain_v1(&normalized)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

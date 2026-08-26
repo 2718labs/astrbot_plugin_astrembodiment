@@ -52,8 +52,14 @@ const PHASE0_FORMULA_TRANSITION_KIND_V1: u8 = 1;
 const LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1: &[u8] = b"AE-LSU1\0";
 const LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1: u16 = 1;
 const LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1: u8 = 1;
+const LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_SCHEMA_V1: u16 = 2;
+const LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_KIND_V1: u8 = 2;
 const LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1: &[u8] =
     b"astr-embodiment/legacy-semantic-formula-upgrade-v1";
+const LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_ID_DOMAIN_V1: &[u8] =
+    b"astr-embodiment/legacy-semantic-field-domain-upgrade-v1";
+pub const JOINT_MAX_LINEAR_FXP6_V1: u8 = 1;
+pub const LEGACY_FIELD_FXP6_SCALE: u32 = 1_000_000;
 const AESEM2_SNAPSHOT_MAGIC: &[u8] = b"AESEM2\0";
 const REVISION_RANGE_FENCE: &str = "revision_range";
 
@@ -345,7 +351,25 @@ pub struct LegacySemanticFormulaUpgradeReceiptV1 {
     pub prior_chain_digest: Digest,
     pub from_formula_digest: Digest,
     pub to_formula_digest: Digest,
+    /// Present only for the closed AESEM2 finite-field migration.  Older
+    /// formula-only receipts retain their exact schema-1 bytes.
+    pub field_domain: Option<LegacySemanticFieldDomainUpgradeV1>,
     pub migration_id: Digest,
+}
+
+/// Aggregate facts for the frozen `JOINT_MAX_LINEAR_FXP6_V1` transform.  The
+/// receipt deliberately stores no node index, raw vector, text, scope value,
+/// secret, or filesystem data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegacySemanticFieldDomainUpgradeV1 {
+    pub algorithm: u8,
+    pub fxp6_scale: u32,
+    pub source_common_max: i64,
+    pub out_of_range_count: u32,
+    pub potential_out_of_range_count: u32,
+    pub excitation_out_of_range_count: u32,
+    pub signal_mass_before: i128,
+    pub signal_mass_after: i128,
 }
 
 struct LegacySemanticFormulaUpgradeInput<'a> {
@@ -451,22 +475,48 @@ impl Phase0FormulaTransitionV1 {
 
 impl LegacySemanticFormulaUpgradeReceiptV1 {
     fn expected_migration_id(&self) -> Digest {
-        wire::domain_hash(
-            LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1,
-            &[
-                &self.scope_digest,
-                &self.event_digest,
-                &self.receipt_digest,
-                &self.base_revision.to_le_bytes(),
-                &self.next_revision.to_le_bytes(),
-                &self.source_state_digest,
-                &self.target_state_before,
-                &self.source_graph_digest,
-                &self.prior_chain_digest,
-                &self.from_formula_digest,
-                &self.to_formula_digest,
-            ],
-        )
+        match self.field_domain {
+            None => wire::domain_hash(
+                LEGACY_SEMANTIC_FORMULA_UPGRADE_ID_DOMAIN_V1,
+                &[
+                    &self.scope_digest,
+                    &self.event_digest,
+                    &self.receipt_digest,
+                    &self.base_revision.to_le_bytes(),
+                    &self.next_revision.to_le_bytes(),
+                    &self.source_state_digest,
+                    &self.target_state_before,
+                    &self.source_graph_digest,
+                    &self.prior_chain_digest,
+                    &self.from_formula_digest,
+                    &self.to_formula_digest,
+                ],
+            ),
+            Some(field_domain) => wire::domain_hash(
+                LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_ID_DOMAIN_V1,
+                &[
+                    &self.scope_digest,
+                    &self.event_digest,
+                    &self.receipt_digest,
+                    &self.base_revision.to_le_bytes(),
+                    &self.next_revision.to_le_bytes(),
+                    &self.source_state_digest,
+                    &self.target_state_before,
+                    &self.source_graph_digest,
+                    &self.prior_chain_digest,
+                    &self.from_formula_digest,
+                    &self.to_formula_digest,
+                    &[field_domain.algorithm],
+                    &field_domain.fxp6_scale.to_le_bytes(),
+                    &field_domain.source_common_max.to_le_bytes(),
+                    &field_domain.out_of_range_count.to_le_bytes(),
+                    &field_domain.potential_out_of_range_count.to_le_bytes(),
+                    &field_domain.excitation_out_of_range_count.to_le_bytes(),
+                    &field_domain.signal_mass_before.to_le_bytes(),
+                    &field_domain.signal_mass_after.to_le_bytes(),
+                ],
+            ),
+        }
     }
 
     /// Construct the canonical receipt tied to the regular transition receipt
@@ -492,8 +542,31 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
             prior_chain_digest,
             from_formula_digest,
             to_formula_digest,
+            field_domain: None,
             migration_id: [0; 32],
         };
+        upgrade.migration_id = upgrade.expected_migration_id();
+        upgrade
+    }
+
+    /// Construct the sole receipt shape permitted to carry an authenticated
+    /// AESEM2 field-domain migration with its following Phase-0 event.
+    pub fn from_transition_receipt_with_field_domain(
+        receipt: &TransitionReceipt,
+        source_state_digest: Digest,
+        source_graph_digest: Digest,
+        from_formula_digest: Digest,
+        prior_chain_digest: Digest,
+        field_domain: LegacySemanticFieldDomainUpgradeV1,
+    ) -> Self {
+        let mut upgrade = Self::from_transition_receipt(
+            receipt,
+            source_state_digest,
+            source_graph_digest,
+            from_formula_digest,
+            prior_chain_digest,
+        );
+        upgrade.field_domain = Some(field_domain);
         upgrade.migration_id = upgrade.expected_migration_id();
         upgrade
     }
@@ -501,12 +574,33 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
     /// Canonical opaque bytes persisted with the transition and the upgrade
     /// registry.  No unbound JSON or caller-supplied formula is accepted.
     pub fn canonical_bytes(self) -> Vec<u8> {
+        let has_field_domain = self.field_domain.is_some();
         let mut out = Vec::with_capacity(
-            LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1.len() + 2 + 1 + (32 * 10) + (8 * 2),
+            LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1.len()
+                + 2
+                + 1
+                + (32 * 10)
+                + (8 * 2)
+                + if has_field_domain {
+                    1 + 4 + 8 + (4 * 3) + (16 * 2)
+                } else {
+                    0
+                },
         );
         out.extend_from_slice(LEGACY_SEMANTIC_FORMULA_UPGRADE_MAGIC_V1);
-        out.extend_from_slice(&LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1.to_le_bytes());
-        out.push(LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1);
+        out.extend_from_slice(
+            &(if has_field_domain {
+                LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_SCHEMA_V1
+            } else {
+                LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1
+            })
+            .to_le_bytes(),
+        );
+        out.push(if has_field_domain {
+            LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_KIND_V1
+        } else {
+            LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1
+        });
         for digest in [self.scope_digest, self.event_digest, self.receipt_digest] {
             out.extend_from_slice(&digest);
         }
@@ -519,10 +613,20 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
             self.prior_chain_digest,
             self.from_formula_digest,
             self.to_formula_digest,
-            self.migration_id,
         ] {
             out.extend_from_slice(&digest);
         }
+        if let Some(field_domain) = self.field_domain {
+            out.push(field_domain.algorithm);
+            out.extend_from_slice(&field_domain.fxp6_scale.to_le_bytes());
+            out.extend_from_slice(&field_domain.source_common_max.to_le_bytes());
+            out.extend_from_slice(&field_domain.out_of_range_count.to_le_bytes());
+            out.extend_from_slice(&field_domain.potential_out_of_range_count.to_le_bytes());
+            out.extend_from_slice(&field_domain.excitation_out_of_range_count.to_le_bytes());
+            out.extend_from_slice(&field_domain.signal_mass_before.to_le_bytes());
+            out.extend_from_slice(&field_domain.signal_mass_after.to_le_bytes());
+        }
+        out.extend_from_slice(&self.migration_id);
         out
     }
 
@@ -541,9 +645,11 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
         let kind = reader
             .u8()
             .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
-        if schema_version != LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1
-            || kind != LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1
-        {
+        let is_formula_only = schema_version == LEGACY_SEMANTIC_FORMULA_UPGRADE_SCHEMA_V1
+            && kind == LEGACY_SEMANTIC_FORMULA_UPGRADE_KIND_V1;
+        let is_field_domain = schema_version == LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_SCHEMA_V1
+            && kind == LEGACY_SEMANTIC_FIELD_DOMAIN_UPGRADE_KIND_V1;
+        if !is_formula_only && !is_field_domain {
             return Err(StoreError::ContinuityFence("legacy_upgrade_schema"));
         }
         let scope_digest = reader
@@ -579,6 +685,70 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
         let to_formula_digest = reader
             .digest()
             .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+        let field_domain = if is_field_domain {
+            let algorithm = reader
+                .u8()
+                .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+            let fxp6_scale = reader
+                .u32()
+                .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+            let source_common_max = i64::from_le_bytes(
+                reader
+                    .u64()
+                    .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?
+                    .to_le_bytes(),
+            );
+            let out_of_range_count = reader
+                .u32()
+                .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+            let potential_out_of_range_count = reader
+                .u32()
+                .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+            let excitation_out_of_range_count = reader
+                .u32()
+                .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+            let read_i128 = |reader: &mut wire::Reader<'_>| -> Result<i128, StoreError> {
+                let low = reader
+                    .u64()
+                    .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+                let high = reader
+                    .u64()
+                    .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
+                let mut bytes = [0_u8; 16];
+                bytes[..8].copy_from_slice(&low.to_le_bytes());
+                bytes[8..].copy_from_slice(&high.to_le_bytes());
+                Ok(i128::from_le_bytes(bytes))
+            };
+            let signal_mass_before = read_i128(&mut reader)?;
+            let signal_mass_after = read_i128(&mut reader)?;
+            let field_domain = LegacySemanticFieldDomainUpgradeV1 {
+                algorithm,
+                fxp6_scale,
+                source_common_max,
+                out_of_range_count,
+                potential_out_of_range_count,
+                excitation_out_of_range_count,
+                signal_mass_before,
+                signal_mass_after,
+            };
+            if field_domain.algorithm != JOINT_MAX_LINEAR_FXP6_V1
+                || field_domain.fxp6_scale != LEGACY_FIELD_FXP6_SCALE
+                || field_domain.source_common_max <= i64::from(LEGACY_FIELD_FXP6_SCALE)
+                || field_domain.out_of_range_count == 0
+                || field_domain.out_of_range_count
+                    != field_domain
+                        .potential_out_of_range_count
+                        .checked_add(field_domain.excitation_out_of_range_count)
+                        .ok_or(StoreError::ContinuityFence("legacy_upgrade_field_domain"))?
+                || field_domain.signal_mass_before <= 0
+                || field_domain.signal_mass_after < 0
+            {
+                return Err(StoreError::ContinuityFence("legacy_upgrade_field_domain"));
+            }
+            Some(field_domain)
+        } else {
+            None
+        };
         let migration_id = reader
             .digest()
             .map_err(|_| StoreError::ContinuityFence("legacy_upgrade_decode"))?;
@@ -597,6 +767,7 @@ impl LegacySemanticFormulaUpgradeReceiptV1 {
             prior_chain_digest,
             from_formula_digest,
             to_formula_digest,
+            field_domain,
             migration_id,
         };
         if upgrade.migration_id != upgrade.expected_migration_id() {
@@ -1988,13 +2159,25 @@ impl Store {
         let expected_next_revision = current_revision
             .checked_add(1)
             .ok_or(StoreError::ContinuityFence("revision_overflow"))?;
-        let expected_upgrade = LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
-            receipt,
-            current_state_digest,
-            current_graph_digest,
-            current_formula_digest,
-            prior_chain_digest,
-        );
+        let expected_upgrade = match upgrade.field_domain {
+            Some(field_domain) => {
+                LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                    receipt,
+                    current_state_digest,
+                    current_graph_digest,
+                    current_formula_digest,
+                    prior_chain_digest,
+                    field_domain,
+                )
+            }
+            None => LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
+                receipt,
+                current_state_digest,
+                current_graph_digest,
+                current_formula_digest,
+                prior_chain_digest,
+            ),
+        };
         let source_receipt_is_attested_aesem2 = source_receipt.schema_version == 1
             && source_receipt.status == CommitStatus::Committed
             && source_receipt.action_contract.is_none()

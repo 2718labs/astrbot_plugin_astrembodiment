@@ -36,10 +36,11 @@ use ae_neurofield::{
 };
 use ae_store::{
     phase0_formula_transition_delta_v1, ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1,
-    GenesisCommit, GraphCommitV1, LegacySemanticFormulaUpgradeReceiptV1,
-    RebirthChildStageRequestV1, RebirthCommitPermitV1, RebirthLifecycleError, RebirthPreflightV1,
-    RebirthPrepareRequestV1, RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, SnapshotCommitV1,
-    Store, StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
+    GenesisCommit, GraphCommitV1, LegacySemanticFieldDomainUpgradeV1,
+    LegacySemanticFormulaUpgradeReceiptV1, RebirthChildStageRequestV1, RebirthCommitPermitV1,
+    RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1, RebirthPrepareResponseV1,
+    RebirthResponseEnvelopeV1, SnapshotCommitV1, Store, StoreError, UserAuthorizedRebirthV1,
+    VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1, LEGACY_FIELD_FXP6_SCALE,
     SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -116,6 +117,16 @@ pub struct PerceptionProposalDecisionV1 {
     pub deduplicated: bool,
     pub expression_projection: ExpressionProjectionV1,
     pub availability: SemanticClosureAvailabilityV1,
+    /// Internal, closed migration telemetry.  The Python bridge intentionally
+    /// keeps its established result schema while the native receipt remains
+    /// the durable audit authority.
+    pub field_migration: Option<SemanticFieldMigrationOutcomeV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticFieldMigrationOutcomeV1 {
+    Applied,
+    Replayed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,6 +184,7 @@ type SemanticSnapshot = (
 struct CommittedSemanticDecisionInput<'a> {
     semantic_scope: &'a Digest,
     formula_digest: &'a Digest,
+    legacy_formula_digest: &'a Digest,
     baseline_field: &'a NeuralField,
     baseline_graph: &'a SparseGraph,
     manifest_digest: &'a Digest,
@@ -181,6 +193,19 @@ struct CommittedSemanticDecisionInput<'a> {
     source_digest: Digest,
     proposal: &'a PerceptionProposalV1,
     deduplicated: bool,
+}
+
+struct LegacyAesem2FieldMigrationInput<'a> {
+    semantic_scope: &'a Digest,
+    semantic_storage_scope: &'a ScopeRef,
+    legacy_formula_digest: &'a Digest,
+    baseline_field: &'a NeuralField,
+    baseline_graph: &'a SparseGraph,
+    initial_snapshot_digest: Digest,
+    semantic_revision: u64,
+    source: Option<LegacySemanticUpgradeSource>,
+    field: &'a NeuralField,
+    graph: &'a SparseGraph,
 }
 
 pub struct AstrRuntime {
@@ -1303,6 +1328,173 @@ impl AstrRuntime {
         Ok((field, graph, Some((receipt, telemetry_receipt))))
     }
 
+    fn legacy_field_domain_metadata(
+        normalization: semantic::LegacyFieldDomainNormalizationV1,
+    ) -> LegacySemanticFieldDomainUpgradeV1 {
+        LegacySemanticFieldDomainUpgradeV1 {
+            algorithm: JOINT_MAX_LINEAR_FXP6_V1,
+            fxp6_scale: LEGACY_FIELD_FXP6_SCALE,
+            source_common_max: normalization.source_common_max,
+            out_of_range_count: normalization.out_of_range_count,
+            potential_out_of_range_count: normalization.potential_out_of_range_count,
+            excitation_out_of_range_count: normalization.excitation_out_of_range_count,
+            signal_mass_before: normalization.signal_mass_before,
+            signal_mass_after: normalization.signal_mass_after,
+        }
+    }
+
+    /// Full replay of the only old writer that can be normalized.  The caller
+    /// invokes this only after the latest AESEM2 field proves it needs the
+    /// finite P/E transform; all other legacy states retain the normal strict
+    /// failure behavior.
+    fn attest_legacy_aesem2_field_history(
+        &self,
+        input: &LegacyAesem2FieldMigrationInput<'_>,
+        source: LegacySemanticUpgradeSource,
+    ) -> Result<(), RuntimeError> {
+        if input.semantic_revision == 0
+            || !input.baseline_field.validate()
+            || !input.baseline_graph.validate()
+        {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        let rows = self.store.read_journal(input.semantic_scope)?;
+        if u64::try_from(rows.len()).ok() != Some(input.semantic_revision) {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        let mut replay_field = input.baseline_field.clone();
+        let replay_graph = input.baseline_graph.clone();
+        let mut chain_seed = input.initial_snapshot_digest;
+        for (index, row) in rows.iter().enumerate() {
+            let revision = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            if row.revision != revision || row.base_revision.checked_add(1) != Some(revision) {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let event =
+                wire::decode_event(&row.event_bytes).map_err(|_| RuntimeError::LegacyUnattested)?;
+            if wire::encode_event(&event) != row.event_bytes
+                || wire::event_digest(&event) != row.event_digest
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let CanonicalEvent::UserStimulus(stimulus) = event else {
+                return Err(RuntimeError::LegacyUnattested);
+            };
+            if stimulus.scope != *input.semantic_storage_scope
+                || stimulus.causal.base_revision != row.base_revision
+                || stimulus.evidence.schema_version != PerceptionProposalV1::SCHEMA_VERSION
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let receipt = row
+                .decode_receipt()
+                .map_err(|_| RuntimeError::LegacyUnattested)?;
+            if wire::encode_transition_receipt(&receipt) != row.receipt_bytes
+                || receipt.schema_version != 1
+                || receipt.status != CommitStatus::Committed
+                || receipt.action_contract.is_some()
+                || receipt.scope_digest != *input.semantic_scope
+                || receipt.event_digest != row.event_digest
+                || receipt.formula_digest != *input.legacy_formula_digest
+                || receipt.base_revision != row.base_revision
+                || receipt.next_revision != revision
+                || receipt.authority_digest
+                    != authority_projection_digest(&CanonicalEvent::UserStimulus(stimulus.clone()))
+                || row.chain_digest
+                    != ae_continuum::chain_link(&chain_seed, &row.event_bytes, &row.receipt_bytes)
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let snapshot = self
+                .store
+                .read_snapshot(input.semantic_scope, revision)?
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            if !semantic::snapshot_is_aesem2(&snapshot.state_bytes)
+                || snapshot.state_digest != receipt.state_after
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let (snapshot_field, snapshot_graph, _) = semantic::decode_semantic_snapshot_v2(
+                &snapshot.state_bytes,
+                input.legacy_formula_digest,
+                &receipt.state_after,
+                &receipt.graph_after,
+                &receipt,
+            )?;
+            let replay = semantic::replay_legacy_aesem2_transition_v1(
+                &replay_field,
+                input.baseline_field,
+                &stimulus.evidence.dimensions,
+                stimulus.evidence.estimator_confidence,
+            )?;
+            let theoretical_limit = i128::from(revision)
+                .checked_add(1)
+                .and_then(|value| value.checked_mul(i128::from(semantic::LEGACY_FIELD_FXP6_SCALE)))
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            let p_and_e_in_theoretical_domain = snapshot_field
+                .potential
+                .iter()
+                .chain(snapshot_field.excitation.iter())
+                .all(|value| {
+                    let raw = value.raw();
+                    raw >= 0 && i128::from(raw) <= theoretical_limit
+                });
+            if !p_and_e_in_theoretical_domain
+                || state_digest(&snapshot_field, input.legacy_formula_digest)
+                    != state_digest(&replay.next_field, input.legacy_formula_digest)
+                || graph_digest(&snapshot_graph) != graph_digest(&replay_graph)
+                || receipt.state_before != state_digest(&replay_field, input.legacy_formula_digest)
+                || receipt.state_after
+                    != state_digest(&replay.next_field, input.legacy_formula_digest)
+                || receipt.graph_after != graph_digest(&replay_graph)
+                || receipt.active_nodes != replay.active_nodes
+                || receipt.active_edges != 0
+                || receipt.residuals != InvariantResiduals::default()
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            replay_field = replay.next_field;
+            chain_seed = row.chain_digest;
+        }
+        if state_digest(&replay_field, input.legacy_formula_digest)
+            != state_digest(input.field, input.legacy_formula_digest)
+            || graph_digest(&replay_graph) != graph_digest(input.graph)
+            || state_digest(input.field, input.legacy_formula_digest) != source.source_state_digest
+            || graph_digest(input.graph) != source.source_graph_digest
+            || chain_seed
+                != self
+                    .store
+                    .last_chain_digest(input.semantic_scope)?
+                    .ok_or(RuntimeError::LegacyUnattested)?
+        {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        Ok(())
+    }
+
+    fn normalize_attested_legacy_aesem2_field(
+        &self,
+        input: LegacyAesem2FieldMigrationInput<'_>,
+    ) -> Result<(NeuralField, Option<LegacySemanticFieldDomainUpgradeV1>), RuntimeError> {
+        let Some((normalized, normalization)) =
+            semantic::normalize_legacy_aesem2_field_domain_v1(input.field)?
+        else {
+            return Ok((input.field.clone(), None));
+        };
+        let source = input.source.ok_or(RuntimeError::LegacyUnattested)?;
+        if source.source_formula_digest != *input.legacy_formula_digest {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        self.attest_legacy_aesem2_field_history(&input, source)?;
+        Ok((
+            normalized,
+            Some(Self::legacy_field_domain_metadata(normalization)),
+        ))
+    }
+
     fn semantic_identity_conflict(
         &self,
         semantic_scope: &Digest,
@@ -1328,6 +1520,7 @@ impl AstrRuntime {
         let CommittedSemanticDecisionInput {
             semantic_scope,
             formula_digest,
+            legacy_formula_digest,
             baseline_field,
             baseline_graph,
             manifest_digest,
@@ -1368,6 +1561,7 @@ impl AstrRuntime {
                 revision: row.revision,
                 deduplicated,
                 availability: SemanticClosureAvailabilityV1::UnavailableLegacy,
+                field_migration: None,
             });
         }
         if receipt.event_digest != *event_digest
@@ -1386,6 +1580,33 @@ impl AstrRuntime {
             baseline_graph,
             receipt.base_revision,
         )?;
+        let (before_for_phase0, field_migration) =
+            match semantic::normalize_legacy_aesem2_field_domain_v1(&before)? {
+                None => (before.clone(), None),
+                Some((normalized, normalization)) => {
+                    let upgrade = self
+                        .store
+                        .read_legacy_semantic_formula_upgrade_v1(
+                            semantic_scope,
+                            legacy_formula_digest,
+                            formula_digest,
+                        )?
+                        .ok_or(RuntimeError::LegacyUnattested)?;
+                    if upgrade.base_revision != receipt.base_revision
+                        || upgrade.next_revision != receipt.next_revision
+                        || upgrade.event_digest != *event_digest
+                        || upgrade.source_state_digest
+                            != state_digest(&before, legacy_formula_digest)
+                        || upgrade.source_graph_digest != graph_digest(&before_graph)
+                        || upgrade.target_state_before != receipt.state_before
+                        || upgrade.field_domain
+                            != Some(Self::legacy_field_domain_metadata(normalization))
+                    {
+                        return Err(RuntimeError::LegacyUnattested);
+                    }
+                    (normalized, Some(SemanticFieldMigrationOutcomeV1::Replayed))
+                }
+            };
         let (after, after_graph, telemetry_receipt) = self.semantic_snapshot_at(
             semantic_scope,
             formula_digest,
@@ -1397,7 +1618,7 @@ impl AstrRuntime {
             .map(|(_, receipt)| receipt)
             .ok_or(RuntimeError::LegacyUnattested)?;
         let prepared = semantic::prepare_semantic_transition_v2(
-            &before,
+            &before_for_phase0,
             baseline_field,
             &before_graph,
             manifest_digest,
@@ -1420,7 +1641,7 @@ impl AstrRuntime {
             source_digest,
             receipt.base_revision,
             receipt.next_revision,
-            state_digest(&before, formula_digest),
+            state_digest(&before_for_phase0, formula_digest),
             state_digest(&after, formula_digest),
             graph_digest(&before_graph),
             graph_digest(&after_graph),
@@ -1438,7 +1659,7 @@ impl AstrRuntime {
             perception_nonzero_dimension_count(proposal),
         )?;
         let node_observability =
-            semantic::node_observability_projection_v2(&before, &after, row.revision)?;
+            semantic::node_observability_projection_v2(&before_for_phase0, &after, row.revision)?;
         if (node_observability.counts.changed_node_count > 0)
             != expected_semantic_receipt.semantic_vector.state_changed
         {
@@ -1457,6 +1678,7 @@ impl AstrRuntime {
             deduplicated,
             expression_projection,
             availability: SemanticClosureAvailabilityV1::Available,
+            field_migration,
         })
     }
 
@@ -1540,6 +1762,7 @@ impl AstrRuntime {
             return self.committed_semantic_decision(CommittedSemanticDecisionInput {
                 semantic_scope: &semantic_scope,
                 formula_digest: &formula_digest,
+                legacy_formula_digest: &genesis_formula_digest,
                 baseline_field: &baseline_field,
                 baseline_graph: &baseline_graph,
                 manifest_digest: &manifest_digest,
@@ -1560,8 +1783,22 @@ impl AstrRuntime {
             });
         }
 
+        let (field_for_phase0, field_domain_upgrade) = self
+            .normalize_attested_legacy_aesem2_field(LegacyAesem2FieldMigrationInput {
+                semantic_scope: &semantic_scope,
+                semantic_storage_scope: &semantic_storage_scope,
+                legacy_formula_digest: &genesis_formula_digest,
+                baseline_field: &baseline_field,
+                baseline_graph: &baseline_graph,
+                initial_snapshot_digest,
+                semantic_revision,
+                source: semantic_legacy_upgrade,
+                field: &field,
+                graph: &graph,
+            })?;
+
         let prepared = semantic::prepare_semantic_transition_v2(
-            &field,
+            &field_for_phase0,
             &baseline_field,
             &graph,
             &manifest_digest,
@@ -1571,7 +1808,7 @@ impl AstrRuntime {
         let next_revision = semantic_revision
             .checked_add(1)
             .ok_or(RuntimeError::SemanticRevisionOverflow)?;
-        let state_before = state_digest(&field, &formula_digest);
+        let state_before = state_digest(&field_for_phase0, &formula_digest);
         let state_after = state_digest(&prepared.next_field, &formula_digest);
         let graph_before = graph_digest(&graph);
         let graph_after = graph_digest(&prepared.next_graph);
@@ -1614,7 +1851,7 @@ impl AstrRuntime {
             nonzero_evidence_dimension_count,
         )?;
         let node_observability = semantic::node_observability_projection_v2(
-            &field,
+            &field_for_phase0,
             &prepared.next_field,
             next_revision,
         )?;
@@ -1688,13 +1925,25 @@ impl AstrRuntime {
             {
                 return Err(RuntimeError::LegacyUnattested);
             }
-            LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
-                &receipt,
-                upgrade_source.source_state_digest,
-                upgrade_source.source_graph_digest,
-                upgrade_source.source_formula_digest,
-                chain_seed,
-            )
+            match field_domain_upgrade {
+                Some(field_domain) => {
+                    LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                        &receipt,
+                        upgrade_source.source_state_digest,
+                        upgrade_source.source_graph_digest,
+                        upgrade_source.source_formula_digest,
+                        chain_seed,
+                        field_domain,
+                    )
+                }
+                None => LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
+                    &receipt,
+                    upgrade_source.source_state_digest,
+                    upgrade_source.source_graph_digest,
+                    upgrade_source.source_formula_digest,
+                    chain_seed,
+                ),
+            }
             .canonical_bytes()
         } else if semantic_revision == 0 && formula_digest != genesis_formula_digest {
             phase0_formula_transition_delta_v1(&receipt, graph_before, genesis_formula_digest)
@@ -1744,6 +1993,8 @@ impl AstrRuntime {
                     deduplicated: false,
                     expression_projection,
                     availability: SemanticClosureAvailabilityV1::Available,
+                    field_migration: field_domain_upgrade
+                        .map(|_| SemanticFieldMigrationOutcomeV1::Applied),
                 })
             }
             Ok((_revision, _)) => {
@@ -1751,6 +2002,7 @@ impl AstrRuntime {
                 self.committed_semantic_decision(CommittedSemanticDecisionInput {
                     semantic_scope: &semantic_scope,
                     formula_digest: &formula_digest,
+                    legacy_formula_digest: &genesis_formula_digest,
                     baseline_field: &baseline_field,
                     baseline_graph: &baseline_graph,
                     manifest_digest: &manifest_digest,
@@ -1773,6 +2025,7 @@ impl AstrRuntime {
                 self.committed_semantic_decision(CommittedSemanticDecisionInput {
                     semantic_scope: &semantic_scope,
                     formula_digest: &formula_digest,
+                    legacy_formula_digest: &genesis_formula_digest,
                     baseline_field: &baseline_field,
                     baseline_graph: &baseline_graph,
                     manifest_digest: &manifest_digest,
@@ -2014,6 +2267,7 @@ mod tests {
         runtime: &mut AstrRuntime,
         request: &PersonaGenesisRequest,
         scope: &ScopeRef,
+        inject_known_legacy_field_overflow: bool,
     ) -> LegacyAesem2History {
         let (
             semantic_scope,
@@ -2021,8 +2275,6 @@ mod tests {
             legacy_formula_digest,
             phase0_formula_digest,
             initial_snapshot_digest,
-            manifest_digest,
-            development_seed_digest,
             baseline_field,
             baseline_graph,
         ) = {
@@ -2034,8 +2286,6 @@ mod tests {
                 semantic::phase0_semantic_formula_digest_v1(&hot.formula_digest)
                     .expect("Phase-0 formula derives"),
                 hot.initial_snapshot_digest,
-                hot.identity.manifest_digest,
-                hot.identity.development_seed_digest,
                 hot.semantic_field.clone(),
                 hot.semantic_graph.clone(),
             )
@@ -2047,30 +2297,45 @@ mod tests {
             .relation_token
             .expect("semantic lane owns a relation token");
         let mut field = baseline_field.clone();
-        let mut graph = baseline_graph.clone();
+        let graph = baseline_graph.clone();
         let mut latest_state_digest = state_digest(&field, &legacy_formula_digest);
         let mut latest_graph_digest = graph_digest(&graph);
         let mut latest_chain_digest = initial_snapshot_digest;
 
         for base_revision in 0..2_u64 {
-            let proposal = semantic_proposal(scope, 90 + base_revision as u8, base_revision);
+            let mut proposal = semantic_proposal(scope, 90 + base_revision as u8, base_revision);
+            if inject_known_legacy_field_overflow {
+                proposal.dimensions = EvidenceVector {
+                    positive: Fixed::ONE,
+                    affiliation: Fixed::ONE,
+                    harm: Fixed::ONE,
+                    boundary: Fixed::ONE,
+                    repair: Fixed::ONE,
+                    repetition: Fixed::ONE,
+                    new_information: Fixed::ONE,
+                    constraint_instability: Fixed::ONE,
+                    epistemic_conflict: Fixed::ONE,
+                    self_responsibility: Fixed::ONE,
+                    other_responsibility: Fixed::ONE,
+                    hostility: Fixed::ONE,
+                    publicness: Fixed::ONE,
+                    engagement: Fixed::ONE,
+                    rejection: Fixed::ONE,
+                };
+                proposal.request_nonce_digest = canonical_request_nonce_digest_v1(scope, &proposal);
+            }
             let estimator_digest = proposal.estimator_digest_v1(scope);
             let event = semantic_event(&semantic_storage_scope, &proposal, estimator_digest);
             let event_digest = wire::event_digest(&event);
-            let prepared = semantic::prepare_semantic_transition_v2(
-                &field,
-                &baseline_field,
-                &graph,
-                &manifest_digest,
-                &development_seed_digest,
-                &proposal,
-            )
-            .expect("predecessor fixture transition is valid");
+            let prepared =
+                semantic::prepare_legacy_aesem2_transition_v1(&field, &baseline_field, &proposal)
+                    .expect("predecessor fixture transition is valid");
             let next_revision = base_revision + 1;
+            let next_field = prepared.next_field;
             let state_before = state_digest(&field, &legacy_formula_digest);
-            let state_after = state_digest(&prepared.next_field, &legacy_formula_digest);
+            let state_after = state_digest(&next_field, &legacy_formula_digest);
             let graph_before = graph_digest(&graph);
-            let graph_after = graph_digest(&prepared.next_graph);
+            let graph_after = graph_digest(&graph);
             let receipt = TransitionReceipt {
                 schema_version: 1,
                 formula_digest: legacy_formula_digest,
@@ -2084,16 +2349,21 @@ mod tests {
                 graph_after,
                 action_contract: None,
                 active_nodes: prepared.active_nodes,
-                active_edges: prepared.dynamics.propagated_edge_count,
+                active_edges: 0,
                 residuals: InvariantResiduals::default(),
                 status: CommitStatus::Committed,
             };
-            let semantic_receipt = semantic::semantic_vector_receipt_v2(&receipt, 15, 15, 0)
-                .expect("frozen semantic receipt closes");
+            let semantic_receipt = semantic::semantic_vector_receipt_v2(
+                &receipt,
+                15,
+                15,
+                perception_nonzero_dimension_count(&proposal),
+            )
+            .expect("frozen semantic receipt closes");
             let state_bytes = semantic::encode_semantic_snapshot_v2_for_test(
                 &legacy_formula_digest,
-                &prepared.next_field,
-                &prepared.next_graph,
+                &next_field,
+                &graph,
                 &semantic_receipt,
             )
             .expect("frozen AESEM2 snapshot encodes");
@@ -2143,7 +2413,7 @@ mod tests {
                     graph_digest: graph_after,
                     formula_digest: legacy_formula_digest,
                     delta_bytes: vec![],
-                    replay_state_bytes: prepared.next_graph.canonical_bytes(),
+                    replay_state_bytes: graph.canonical_bytes(),
                 },
                 context: ContextCommitV1 {
                     relation_scope_token,
@@ -2161,8 +2431,7 @@ mod tests {
             latest_chain_digest = row.chain_digest;
             latest_state_digest = state_after;
             latest_graph_digest = graph_after;
-            field = prepared.next_field;
-            graph = prepared.next_graph;
+            field = next_field;
         }
 
         LegacyAesem2History {
@@ -2730,7 +2999,7 @@ mod tests {
         let (history, original_genesis, legacy_journal, legacy_snapshot) = {
             let mut runtime = AstrRuntime::open(&path).unwrap();
             let original_genesis = runtime.ensure_genesis(&request).unwrap();
-            let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope);
+            let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, false);
             let legacy_journal = runtime.store.read_journal(&history.semantic_scope).unwrap();
             let legacy_snapshot = runtime
                 .store
@@ -2865,6 +3134,102 @@ mod tests {
     }
 
     #[test]
+    fn finite_legacy_aesem2_field_overflow_migrates_with_the_first_real_event() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the field-migration task directory");
+        let dir = root.join(format!(
+            "legacy-aesem2-field-domain-migration-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let request = request(81);
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
+            relation_token: None,
+            session_token: [82; 16],
+        };
+
+        let (history, legacy_journal, legacy_snapshot) = {
+            let mut runtime = AstrRuntime::open(&path).unwrap();
+            runtime.ensure_genesis(&request).unwrap();
+            let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, true);
+            assert!(history.latest_field.potential[0] > Fixed::ONE);
+            assert!(history.latest_field.excitation[0] > Fixed::ONE);
+            let journal = runtime.store.read_journal(&history.semantic_scope).unwrap();
+            let snapshot = runtime
+                .store
+                .read_snapshot(&history.semantic_scope, 2)
+                .unwrap()
+                .expect("overflowing AESEM2 snapshot persists");
+            (history, journal, snapshot)
+        };
+
+        let mut reopened = AstrRuntime::open(&path).unwrap();
+        let proposal = semantic_proposal(&scope, 83, 2);
+        let migrated = reopened
+            .apply_perception_proposal_v1(&scope, &proposal)
+            .expect("known finite legacy overflow must migrate inside r=2 -> r=3");
+
+        assert_eq!(migrated.revision, 3);
+        assert_eq!(migrated.receipt.base_revision, 2);
+        assert_eq!(migrated.receipt.next_revision, 3);
+        assert_eq!(
+            migrated.field_migration,
+            Some(SemanticFieldMigrationOutcomeV1::Applied)
+        );
+        assert_eq!(
+            migrated.receipt.formula_digest,
+            history.phase0_formula_digest
+        );
+        assert_ne!(
+            migrated.receipt.state_before,
+            state_digest(&history.latest_field, &history.phase0_formula_digest)
+        );
+        let after = reopened
+            .store
+            .read_journal(&history.semantic_scope)
+            .unwrap();
+        assert_eq!(after.len(), 3);
+        assert_eq!(&after[..2], legacy_journal.as_slice());
+        assert_eq!(
+            reopened
+                .store
+                .read_snapshot(&history.semantic_scope, 2)
+                .unwrap()
+                .expect("historical snapshot remains immutable")
+                .state_bytes,
+            legacy_snapshot.state_bytes
+        );
+        let upgrade = reopened
+            .store
+            .read_legacy_semantic_formula_upgrade_v1(
+                &history.semantic_scope,
+                &history.legacy_formula_digest,
+                &history.phase0_formula_digest,
+            )
+            .unwrap()
+            .expect("field migration has one durable receipt");
+        assert!(upgrade.field_domain.is_some());
+        drop(reopened);
+        let mut resumed = AstrRuntime::open(&path).unwrap();
+        let deduplicated = resumed
+            .apply_perception_proposal_v1(&scope, &proposal)
+            .expect("the same event replays its normalized precondition");
+        assert!(deduplicated.deduplicated);
+        assert_eq!(
+            deduplicated.field_migration,
+            Some(SemanticFieldMigrationOutcomeV1::Replayed)
+        );
+        assert_eq!(
+            wire::receipt_digest(&deduplicated.receipt),
+            wire::receipt_digest(&migrated.receipt)
+        );
+    }
+
+    #[test]
     fn tampered_legacy_formula_upgrade_receipt_writes_nothing() {
         let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
             .map(std::path::PathBuf::from)
@@ -2880,7 +3245,7 @@ mod tests {
             relation_token: None,
             session_token: [72; 16],
         };
-        let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope);
+        let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, false);
         let tampered_from_formula = [0xa5; 32];
         assert_ne!(tampered_from_formula, history.legacy_formula_digest);
         let bundle = legacy_upgrade_bundle_for_test(
