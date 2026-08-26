@@ -62,6 +62,10 @@ _FIELD_MIGRATION_UNKNOWN = "FIELD_MIGRATION_UNKNOWN"
 _MIGRATION_SUBCODE_MISSING = object()
 
 
+class _InvalidSemanticMigrationSubcode(ValueError):
+    """Raised for a non-null migration telemetry value outside the frozen enum."""
+
+
 def normalize_invalid_neural_state_subcode(value: object) -> str:
     if type(value) is str and value in INVALID_NEURAL_STATE_SUBCODES:
         return value
@@ -354,6 +358,7 @@ SEMANTIC_NATIVE_ERROR_CODES = frozenset(
         "LEASE_CONFLICT",
         "LEASE_IN_FLIGHT",
         "LEGACY_UNATTESTED",
+        "NATIVE_ERROR",
         "POISONED",
         "RETRY_WAIT",
         "SEED_DIGEST_COLLISION",
@@ -1218,7 +1223,12 @@ def _validate_semantic_result(
             raise ValueError("semantic result")
         raw_migration_subcode = payload["migration_subcode"]
         if raw_migration_subcode is not None:
-            migration_subcode = normalize_field_migration_subcode(raw_migration_subcode)
+            if (
+                type(raw_migration_subcode) is not str
+                or raw_migration_subcode not in FIELD_MIGRATION_SUBCODES
+            ):
+                raise _InvalidSemanticMigrationSubcode("semantic migration subcode")
+            migration_subcode = raw_migration_subcode
     else:
         raise ValueError("semantic result")
     revision = payload["revision"]
@@ -1578,6 +1588,10 @@ class NativeBridge:
             return _validate_semantic_result(
                 method(_semantic_closed_json(scope), encoded_proposal),
                 expected_base_revision=proposal["base_revision"],
+            )
+        except _InvalidSemanticMigrationSubcode:
+            return _semantic_degraded(
+                "NATIVE_ERROR", migration_subcode=_FIELD_MIGRATION_UNKNOWN
             )
         except BaseException as exc:
             if isinstance(exc, (TypeError, ValueError, json.JSONDecodeError)):

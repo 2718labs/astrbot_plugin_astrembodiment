@@ -149,7 +149,6 @@ def _is_inspect_display_incarnation_id(value: object) -> bool:
 
 _OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v3"
 _OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
-_MIGRATION_SUBCODE_NOT_APPLICABLE = "NOT_APPLICABLE"
 _OBSERVATORY_DIMENSIONS = (
     "positive",
     "affiliation",
@@ -184,9 +183,9 @@ _OBSERVATORY_EXPRESSION_PROFILE = (
 )
 
 
-def _observatory_migration_subcode(value: object) -> str:
+def _observatory_migration_subcode(value: object) -> str | None:
     if value is None:
-        return _MIGRATION_SUBCODE_NOT_APPLICABLE
+        return None
     return normalize_field_migration_subcode(value)
 
 
@@ -1338,7 +1337,7 @@ class AstrEmbodimentPlugin(Star):
             "node_counts": None,
             "expression_profile_fxp6": None,
             "state_subcode": None,
-            "migration_subcode": _MIGRATION_SUBCODE_NOT_APPLICABLE,
+            "migration_subcode": None,
         }
         profile = cls._expression_profile_from_semantic_outcome(outcome)
         if expression_applied and profile is not None and expression_profile == profile:

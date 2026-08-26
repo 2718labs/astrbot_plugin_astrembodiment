@@ -1689,13 +1689,12 @@ def _v3_test_native_closure_v2() -> dict:
     (
         (None, None),
         ("FIELD_MIGRATION_APPLIED", "FIELD_MIGRATION_APPLIED"),
-        ("untrusted-migration-subcode", "FIELD_MIGRATION_UNKNOWN"),
     ),
 )
-def test_v2_semantic_closure_accepts_only_closed_migration_subcodes(
+def test_v2_semantic_closure_accepts_exact_migration_subcodes(
     wire_subcode: str | None, expected_subcode: str | None
 ) -> None:
-    """Native v2 always emits this field; untrusted values fail closed."""
+    """Native v2 accepts JSON null or one exact frozen migration code."""
 
     closure = _v3_test_native_closure_v2()
     closure["migration_subcode"] = wire_subcode
@@ -1703,6 +1702,19 @@ def test_v2_semantic_closure_accepts_only_closed_migration_subcodes(
     result = bridge_module.validate_semantic_result(closure)
 
     assert result["migration_subcode"] == expected_subcode
+
+
+@pytest.mark.parametrize("wire_subcode", ("untrusted-migration-subcode", 17))
+def test_v2_semantic_closure_rejects_nonnull_unknown_migration_subcodes(
+    wire_subcode: object,
+) -> None:
+    """Unknown non-null native success telemetry must never become a closure."""
+
+    closure = _v3_test_native_closure_v2()
+    closure["migration_subcode"] = wire_subcode
+
+    with pytest.raises(ValueError):
+        bridge_module.validate_semantic_result(closure)
 
 
 def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
@@ -1906,10 +1918,87 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
         "code": "HUMAN_GOLD_UNVERIFIED",
         "calibration_state": "UNVERIFIED_HUMAN_GOLD",
         "expression_state": "APPLIED",
-        "migration_subcode": "NOT_APPLICABLE",
+        "migration_subcode": None,
     }
     assert len(recorder.warning_messages) == 1
     assert recorder.info_messages == []
+
+
+def test_v3_unknown_success_migration_subcode_fails_closed_before_expression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_migration_subcode = "untrusted-migration-subcode private-provider-id"
+
+    class NativeAbi:
+        def semantic_revision_v1(self, _scope_json: str) -> str:
+            return json.dumps(
+                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+            )
+
+        def apply_perception_proposal_v1(
+            self, _scope_json: str, _proposal_json: str
+        ) -> str:
+            closure = _v3_test_native_closure_v2()
+            closure["migration_subcode"] = raw_migration_subcode
+            return json.dumps(closure)
+
+    async def run() -> tuple[dict[str, object], FakeRequest]:
+        context = FakeContext(configured_provider="semantic")
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
+
+        context.llm_generate = generate
+        instance = plugin(
+            FakeConfig(
+                model_settings={"assistant_provider_id": "semantic"},
+                observatory_enabled=False,
+            ),
+            context,
+        )
+        bridge = bridge_module.NativeBridge()
+        bridge._native = NativeAbi()
+        instance._bridge = bridge
+        instance._coordinator = GenesisCoordinator(bridge)
+        scope = _v3_test_scope()
+
+        async def run_genesis(*_args, **_kwargs):
+            return _v3_test_genesis_result(scope)
+
+        instance._run_genesis = run_genesis
+        observed_outcome: dict[str, object] = {}
+        original_preflight = instance._coordinator.preflight_semantic_v3
+
+        async def capture_preflight(**kwargs):
+            result = await original_preflight(**kwargs)
+            observed_outcome.update(result)
+            return result
+
+        instance._coordinator.preflight_semantic_v3 = capture_preflight
+        request = FakeRequest()
+        request.prompt = "请停止并保持边界。"
+        await instance.on_llm_request(FakeEvent(), request)
+        return observed_outcome, request
+
+    recorder = _SemanticRecordingLogger()
+    monkeypatch.setattr(main_module, "logger", recorder)
+    observed_outcome, request = asyncio.run(run())
+
+    assert observed_outcome == {
+        "status": "DEGRADED",
+        "code": "NATIVE_ERROR",
+        "cause_code": "NATIVE_ERROR",
+        "native_stage": "NATIVE_APPLY",
+        "migration_subcode": "FIELD_MIGRATION_UNKNOWN",
+    }
+    semantic_record = getattr(
+        request, "_astrembodiment_semantic_observatory_record_v1", {}
+    )
+    assert semantic_record["expression_state"] == "NOT_ATTEMPTED"
+    assert semantic_record["cause_code"] == "NATIVE_ERROR"
+    assert semantic_record["migration_subcode"] == "FIELD_MIGRATION_UNKNOWN"
+    assert raw_migration_subcode not in "\n".join(recorder.warning_messages)
 
 
 def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
