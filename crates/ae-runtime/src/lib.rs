@@ -12,7 +12,7 @@ mod semantic_telemetry_v1;
 
 pub use semantic::{
     ExpressionProfileFxP6, ExpressionProjectionV1, NodeObservabilityComponentV1,
-    NodeObservabilityCountsV1, NodeObservabilityProjectionV1, NodeObservabilityRegionV1,
+    NodeObservabilityCountsV1, NodeObservabilityProjectionWireV2, NodeObservabilityRegionV1,
     NodeObservabilityResidualStateV1, NodeObservabilityResidualsV1,
 };
 
@@ -168,7 +168,7 @@ pub struct PerceptionProposalDecisionV1 {
     pub receipt: TransitionReceipt,
     pub semantic_vector_receipt: Option<TransitionReceiptV2>,
     pub semantic_telemetry_receipt: Option<NativeTelemetryReceiptV1>,
-    pub node_observability: Option<NodeObservabilityProjectionV1>,
+    pub node_observability: Option<NodeObservabilityProjectionWireV2>,
     pub revision: u64,
     pub deduplicated: bool,
     pub expression_projection: ExpressionProjectionV1,

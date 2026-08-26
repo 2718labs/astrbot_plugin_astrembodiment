@@ -1499,6 +1499,251 @@ impl NativeTelemetryReceiptV1 {
     }
 }
 
+/// Versioned native authority for the aggregate-only node-observability wire.
+///
+/// The opaque id is intentionally declared only by native code. Any
+/// incompatible change advances the whole contract version rather than asking
+/// a host to recompute a schema hash.
+pub const NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA_V1: &str =
+    "astr-embodiment.node-observability-contract-info.v1";
+pub const NODE_OBSERVABILITY_SCHEMA_V2: &str = "astr-embodiment.node-observability.v2";
+pub const NODE_OBSERVABILITY_FORMULA_V1: &str = "spc1-node-observability-v1";
+pub const NODE_OBSERVABILITY_REGION_LAYOUT_V1: &str = "regions-v1";
+pub const NODE_OBSERVABILITY_CONTRACT_ID_V2: &str =
+    "astr-embodiment.node-observability-contract.v2";
+
+/// Native-exported declaration for the currently compiled node-observability
+/// wire. The opaque contract id is native-owned and never copied from a host
+/// literal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeObservabilityContractInfoV1 {
+    pub schema: String,
+    pub contract_id: String,
+    pub node_observability_schema: String,
+}
+
+impl NodeObservabilityContractInfoV1 {
+    pub fn native_v1() -> Self {
+        Self {
+            schema: NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA_V1.to_owned(),
+            contract_id: NODE_OBSERVABILITY_CONTRACT_ID_V2.to_owned(),
+            node_observability_schema: NODE_OBSERVABILITY_SCHEMA_V2.to_owned(),
+        }
+    }
+
+    pub fn validate(&self) -> bool {
+        self.schema == NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA_V1
+            && self.contract_id == NODE_OBSERVABILITY_CONTRACT_ID_V2
+            && self.node_observability_schema == NODE_OBSERVABILITY_SCHEMA_V2
+    }
+}
+
+pub fn node_observability_contract_info_v1() -> NodeObservabilityContractInfoV1 {
+    NodeObservabilityContractInfoV1::native_v1()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum NodeObservabilityResidualStateV1 {
+    NotComputed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeObservabilityResidualsV1 {
+    pub state: NodeObservabilityResidualStateV1,
+    pub formula: Option<String>,
+    pub values_fxp6: Option<[u32; 5]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeObservabilityCountsV1 {
+    pub selected_node_count: u32,
+    pub activated_node_count: u32,
+    pub changed_node_count: u32,
+    pub potential_nonzero_after_count: u32,
+    pub excitation_nonzero_after_count: u32,
+    pub signal_nonzero_after_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeObservabilityComponentV1 {
+    pub before_mean_fxp6: i64,
+    pub after_mean_fxp6: i64,
+    pub delta_mean_fxp6: i64,
+    pub changed_node_count: u32,
+    pub nonzero_after_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeObservabilityRegionV1 {
+    pub region_id: u8,
+    pub region_name: String,
+    pub node_capacity: u32,
+    pub selected_node_count: u32,
+    pub activated_node_count: u32,
+    pub changed_node_count: u32,
+    pub potential: NodeObservabilityComponentV1,
+    pub excitation: NodeObservabilityComponentV1,
+}
+
+/// Native-validated aggregate projection. This is a v2 wire because the
+/// closed v1 projection had no binding to its producer contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeObservabilityProjectionWireV2 {
+    pub schema: String,
+    pub contract_id: String,
+    pub formula: String,
+    pub revision: u64,
+    pub field_node_capacity: u32,
+    pub region_layout: String,
+    pub counts: NodeObservabilityCountsV1,
+    pub residuals: NodeObservabilityResidualsV1,
+    pub regions: Vec<NodeObservabilityRegionV1>,
+}
+
+impl NodeObservabilityProjectionWireV2 {
+    pub fn new(
+        revision: u64,
+        field_node_capacity: u32,
+        counts: NodeObservabilityCountsV1,
+        residuals: NodeObservabilityResidualsV1,
+        regions: Vec<NodeObservabilityRegionV1>,
+    ) -> Self {
+        Self {
+            schema: NODE_OBSERVABILITY_SCHEMA_V2.to_owned(),
+            contract_id: NODE_OBSERVABILITY_CONTRACT_ID_V2.to_owned(),
+            formula: NODE_OBSERVABILITY_FORMULA_V1.to_owned(),
+            revision,
+            field_node_capacity,
+            region_layout: NODE_OBSERVABILITY_REGION_LAYOUT_V1.to_owned(),
+            counts,
+            residuals,
+            regions,
+        }
+    }
+
+    pub fn validate(&self) -> bool {
+        if self.schema != NODE_OBSERVABILITY_SCHEMA_V2
+            || self.formula != NODE_OBSERVABILITY_FORMULA_V1
+            || self.contract_id != NODE_OBSERVABILITY_CONTRACT_ID_V2
+            || self.region_layout != NODE_OBSERVABILITY_REGION_LAYOUT_V1
+            || self.field_node_capacity == 0
+            || self.regions.is_empty()
+            || self.residuals.state != NodeObservabilityResidualStateV1::NotComputed
+            || self.residuals.formula.is_some()
+            || self.residuals.values_fxp6.is_some()
+        {
+            return false;
+        }
+
+        let capacity = self.field_node_capacity;
+        let counts = &self.counts;
+        if [
+            counts.selected_node_count,
+            counts.activated_node_count,
+            counts.changed_node_count,
+            counts.potential_nonzero_after_count,
+            counts.excitation_nonzero_after_count,
+            counts.signal_nonzero_after_count,
+        ]
+        .into_iter()
+        .any(|value| value > capacity)
+            || counts.selected_node_count != counts.changed_node_count
+            || counts.activated_node_count > counts.changed_node_count
+            || counts.signal_nonzero_after_count
+                < counts
+                    .potential_nonzero_after_count
+                    .max(counts.excitation_nonzero_after_count)
+        {
+            return false;
+        }
+
+        let mut selected_total = 0_u64;
+        let mut activated_total = 0_u64;
+        let mut changed_total = 0_u64;
+        let mut potential_nonzero_after_total = 0_u64;
+        let mut excitation_nonzero_after_total = 0_u64;
+        let mut region_capacity_total = 0_u64;
+
+        for (index, region) in self.regions.iter().enumerate() {
+            if u8::try_from(index).ok() != Some(region.region_id)
+                || region.region_name.is_empty()
+                || self.regions[..index]
+                    .iter()
+                    .any(|previous| previous.region_name == region.region_name)
+                || region.node_capacity == 0
+                || [
+                    region.selected_node_count,
+                    region.activated_node_count,
+                    region.changed_node_count,
+                    region.potential.changed_node_count,
+                    region.potential.nonzero_after_count,
+                    region.excitation.changed_node_count,
+                    region.excitation.nonzero_after_count,
+                ]
+                .into_iter()
+                .any(|value| value > region.node_capacity)
+                || region.selected_node_count != region.changed_node_count
+                || region.activated_node_count > region.changed_node_count
+                || region.potential.changed_node_count > region.activated_node_count
+                || region.excitation.changed_node_count > region.activated_node_count
+            {
+                return false;
+            }
+
+            let Some(next_selected_total) =
+                selected_total.checked_add(u64::from(region.selected_node_count))
+            else {
+                return false;
+            };
+            let Some(next_activated_total) =
+                activated_total.checked_add(u64::from(region.activated_node_count))
+            else {
+                return false;
+            };
+            let Some(next_changed_total) =
+                changed_total.checked_add(u64::from(region.changed_node_count))
+            else {
+                return false;
+            };
+            let Some(next_potential_nonzero_after_total) = potential_nonzero_after_total
+                .checked_add(u64::from(region.potential.nonzero_after_count))
+            else {
+                return false;
+            };
+            let Some(next_excitation_nonzero_after_total) = excitation_nonzero_after_total
+                .checked_add(u64::from(region.excitation.nonzero_after_count))
+            else {
+                return false;
+            };
+            let Some(next_region_capacity_total) =
+                region_capacity_total.checked_add(u64::from(region.node_capacity))
+            else {
+                return false;
+            };
+            selected_total = next_selected_total;
+            activated_total = next_activated_total;
+            changed_total = next_changed_total;
+            potential_nonzero_after_total = next_potential_nonzero_after_total;
+            excitation_nonzero_after_total = next_excitation_nonzero_after_total;
+            region_capacity_total = next_region_capacity_total;
+        }
+
+        region_capacity_total == u64::from(capacity)
+            && selected_total == u64::from(counts.selected_node_count)
+            && activated_total == u64::from(counts.activated_node_count)
+            && changed_total == u64::from(counts.changed_node_count)
+            && potential_nonzero_after_total == u64::from(counts.potential_nonzero_after_count)
+            && excitation_nonzero_after_total == u64::from(counts.excitation_nonzero_after_count)
+    }
+}
+
 pub mod wire {
     //! Canonical binary wire codec (fixed layout, little-endian, closed
     //! boundaries). Every struct here has exactly one encoding; a digest is

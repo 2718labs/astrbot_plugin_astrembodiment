@@ -9,8 +9,8 @@
 
 use ae_context_projector::{ContextSummaryV1, DeliveryOutcome as ContextDeliveryOutcome};
 use ae_contracts::{
-    hex, wire, CanonicalEvent, PerceptionProposalV1, PersonaGenesisRequest, ScopeRef,
-    StateSubcodeV1,
+    hex, node_observability_contract_info_v1, wire, CanonicalEvent, PerceptionProposalV1,
+    PersonaGenesisRequest, ScopeRef, StateSubcodeV1,
 };
 use ae_store::{
     RebirthActionV1, RebirthAuditReceiptV1, RebirthOutcomeV1, RebirthPrepareRequestV1,
@@ -337,58 +337,15 @@ fn semantic_vector_receipt_payload(
 }
 
 fn node_observability_payload(
-    node: &ae_runtime::NodeObservabilityProjectionV1,
-) -> serde_json::Value {
-    let residuals = match node.residuals.state {
-        ae_runtime::NodeObservabilityResidualStateV1::NotComputed => {
-            serde_json::json!({"state":"NOT_COMPUTED","formula":null,"values_fxp6":null})
-        }
-    };
-    let regions: Vec<serde_json::Value> = node
-        .regions
-        .iter()
-        .map(|region| {
-            serde_json::json!({
-                "region_id": region.region_id,
-                "region_name": region.region_name,
-                "node_capacity": region.node_capacity,
-                "selected_node_count": region.selected_node_count,
-                "activated_node_count": region.activated_node_count,
-                "changed_node_count": region.changed_node_count,
-                "potential": {
-                    "before_mean_fxp6": region.potential.before_mean_fxp6,
-                    "after_mean_fxp6": region.potential.after_mean_fxp6,
-                    "delta_mean_fxp6": region.potential.delta_mean_fxp6,
-                    "changed_node_count": region.potential.changed_node_count,
-                    "nonzero_after_count": region.potential.nonzero_after_count,
-                },
-                "excitation": {
-                    "before_mean_fxp6": region.excitation.before_mean_fxp6,
-                    "after_mean_fxp6": region.excitation.after_mean_fxp6,
-                    "delta_mean_fxp6": region.excitation.delta_mean_fxp6,
-                    "changed_node_count": region.excitation.changed_node_count,
-                    "nonzero_after_count": region.excitation.nonzero_after_count,
-                },
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "schema": "astr-embodiment.node-observability.v1",
-        "formula": "spc1-node-observability-v1",
-        "revision": node.revision,
-        "field_node_capacity": node.field_node_capacity,
-        "region_layout": "regions-v1",
-        "counts": {
-            "selected_node_count": node.counts.selected_node_count,
-            "activated_node_count": node.counts.activated_node_count,
-            "changed_node_count": node.counts.changed_node_count,
-            "potential_nonzero_after_count": node.counts.potential_nonzero_after_count,
-            "excitation_nonzero_after_count": node.counts.excitation_nonzero_after_count,
-            "signal_nonzero_after_count": node.counts.signal_nonzero_after_count,
-        },
-        "residuals": residuals,
-        "regions": regions,
-    })
+    node: &ae_runtime::NodeObservabilityProjectionWireV2,
+) -> PyResult<serde_json::Value> {
+    if !node.validate() {
+        return Err(NativeCoreError::new_err(
+            "SEMANTIC_CLOSURE_INVALID::node observability projection",
+        ));
+    }
+    serde_json::to_value(node)
+        .map_err(|_| NativeCoreError::new_err("ENCODING::node observability projection"))
 }
 
 /// The two historical digest fields remain in telemetry JSON for wire-shape
@@ -527,7 +484,7 @@ fn semantic_perception_payload(
                 "receipt": receipt,
                 "telemetry_receipt": native_telemetry_payload(telemetry),
                 "semantic_vector_receipt": semantic_vector_receipt_payload(semantic_receipt),
-                "node_observability": node_observability_payload(node),
+                "node_observability": node_observability_payload(node)?,
                 "revision": decision.revision,
                 "deduplicated": decision.deduplicated,
                 "expression_projection": expression_projection,
@@ -978,6 +935,20 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Return the opaque, native-owned node-observability contract declaration.
+/// It carries no field values, identity, or model content.
+#[pyfunction]
+fn contract_info() -> PyResult<String> {
+    let contract = node_observability_contract_info_v1();
+    if !contract.validate() {
+        return Err(NativeCoreError::new_err(
+            "SEMANTIC_CLOSURE_INVALID::node observability contract",
+        ));
+    }
+    serde_json::to_string(&contract)
+        .map_err(|_| NativeCoreError::new_err("ENCODING::node observability contract"))
+}
+
 #[pyfunction]
 fn health() -> String {
     r#"{"status":"g0-ready","formula":"aster-ccn-v1","neuron_slots":16384,"version":"1.0.0"}"#
@@ -1255,6 +1226,7 @@ fn flush_and_close() -> PyResult<()> {
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(version, module)?)?;
+    module.add_function(wrap_pyfunction!(contract_info, module)?)?;
     module.add_function(wrap_pyfunction!(health, module)?)?;
     module.add_function(wrap_pyfunction!(open, module)?)?;
     module.add_function(wrap_pyfunction!(ensure_genesis, module)?)?;

@@ -7,6 +7,10 @@ use ae_contracts::{
     NativeTelemetryReceiptV1, PerceptionProposalV1, SemanticVectorFormulaV2,
     SemanticVectorReceiptV2, StateSubcodeV1, TransitionReceipt, TransitionReceiptV2,
 };
+pub use ae_contracts::{
+    NodeObservabilityComponentV1, NodeObservabilityCountsV1, NodeObservabilityProjectionWireV2,
+    NodeObservabilityRegionV1, NodeObservabilityResidualStateV1, NodeObservabilityResidualsV1,
+};
 use ae_fixed::Fixed;
 use ae_neurofield::{
     develop_graph, graph_digest, state_digest, GraphFormula, NeuralField, SparseGraph, Synapse,
@@ -94,58 +98,6 @@ pub struct ExpressionProfileFxP6 {
 pub struct ExpressionProjectionV1 {
     pub revision: u64,
     pub profile_fxp6: ExpressionProfileFxP6,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeObservabilityResidualStateV1 {
-    NotComputed,
-}
-
-#[derive(Clone, Debug)]
-pub struct NodeObservabilityResidualsV1 {
-    pub state: NodeObservabilityResidualStateV1,
-    pub formula: Option<&'static str>,
-    pub values_fxp6: Option<[u32; 5]>,
-}
-
-#[derive(Clone, Debug)]
-pub struct NodeObservabilityCountsV1 {
-    pub selected_node_count: u32,
-    pub activated_node_count: u32,
-    pub changed_node_count: u32,
-    pub potential_nonzero_after_count: u32,
-    pub excitation_nonzero_after_count: u32,
-    pub signal_nonzero_after_count: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct NodeObservabilityComponentV1 {
-    pub before_mean_fxp6: i64,
-    pub after_mean_fxp6: i64,
-    pub delta_mean_fxp6: i64,
-    pub changed_node_count: u32,
-    pub nonzero_after_count: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct NodeObservabilityRegionV1 {
-    pub region_id: u8,
-    pub region_name: &'static str,
-    pub node_capacity: u32,
-    pub selected_node_count: u32,
-    pub activated_node_count: u32,
-    pub changed_node_count: u32,
-    pub potential: NodeObservabilityComponentV1,
-    pub excitation: NodeObservabilityComponentV1,
-}
-
-#[derive(Clone, Debug)]
-pub struct NodeObservabilityProjectionV1 {
-    pub revision: u64,
-    pub field_node_capacity: u32,
-    pub counts: NodeObservabilityCountsV1,
-    pub residuals: NodeObservabilityResidualsV1,
-    pub regions: Vec<NodeObservabilityRegionV1>,
 }
 
 fn legacy_full_vector_component_update(
@@ -515,7 +467,7 @@ pub(crate) fn node_observability_projection_v2(
     before: &NeuralField,
     after: &NeuralField,
     revision: u64,
-) -> Result<NodeObservabilityProjectionV1, RuntimeError> {
+) -> Result<NodeObservabilityProjectionWireV2, RuntimeError> {
     if !before.validate() || !after.validate() {
         return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
     }
@@ -627,7 +579,7 @@ pub(crate) fn node_observability_projection_v2(
         regions.push(NodeObservabilityRegionV1 {
             region_id: u8::try_from(region)
                 .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?,
-            region_name: REGION_NAMES[region],
+            region_name: REGION_NAMES[region].to_owned(),
             node_capacity: u32::try_from(count)
                 .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?,
             selected_node_count: selected,
@@ -652,11 +604,11 @@ pub(crate) fn node_observability_projection_v2(
     if expected_start != NEURON_SLOTS || regions.len() != REGION_LAYOUT.len() {
         return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
     }
-    Ok(NodeObservabilityProjectionV1 {
+    let projection = NodeObservabilityProjectionWireV2::new(
         revision,
-        field_node_capacity: u32::try_from(NEURON_SLOTS)
+        u32::try_from(NEURON_SLOTS)
             .map_err(|_| invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?,
-        counts: NodeObservabilityCountsV1 {
+        NodeObservabilityCountsV1 {
             selected_node_count: selected_total,
             activated_node_count: activated_total,
             changed_node_count: changed_total,
@@ -664,13 +616,17 @@ pub(crate) fn node_observability_projection_v2(
             excitation_nonzero_after_count: excitation_nonzero_after_total,
             signal_nonzero_after_count: signal_nonzero_after_total,
         },
-        residuals: NodeObservabilityResidualsV1 {
+        NodeObservabilityResidualsV1 {
             state: NodeObservabilityResidualStateV1::NotComputed,
             formula: None,
             values_fxp6: None,
         },
         regions,
-    })
+    );
+    if !projection.validate() {
+        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
+    }
+    Ok(projection)
 }
 
 fn region_expression_signal_fxp6(field: &NeuralField, region: usize) -> Result<u32, RuntimeError> {
@@ -1196,6 +1152,48 @@ mod tests {
             estimator_confidence: Fixed::ONE,
             protocol_version: PerceptionProposalV1::PROTOCOL_VERSION,
             request_nonce_digest: [3; 32],
+        }
+    }
+
+    #[test]
+    fn typed_node_wire_accepts_every_native_component_change() {
+        let before = NeuralField::zeroed();
+        for component in [
+            "potential",
+            "excitation",
+            "inhibition",
+            "adaptation",
+            "precision",
+            "prediction_error",
+            "eligibility",
+            "metabolic_reserve",
+        ] {
+            let mut after = before.clone();
+            match component {
+                "potential" => after.potential[0] = Fixed::ONE,
+                "excitation" => after.excitation[0] = Fixed::ONE,
+                "inhibition" => after.inhibition[0] = Fixed::ONE,
+                "adaptation" => after.adaptation[0] = Fixed::ONE,
+                "precision" => after.precision[0] = Fixed::ONE,
+                "prediction_error" => after.prediction_error[0] = Fixed::ONE,
+                "eligibility" => after.eligibility[0] = Fixed::ONE,
+                "metabolic_reserve" => after.metabolic_reserve[0] = Fixed::ZERO,
+                _ => unreachable!("fixed native component witness"),
+            }
+
+            let projection = node_observability_projection_v2(&before, &after, 7)
+                .expect("valid field witness must project");
+            assert!(projection.validate(), "{component}");
+            assert_eq!(projection.counts.selected_node_count, 1, "{component}");
+            assert_eq!(projection.counts.changed_node_count, 1, "{component}");
+            assert_eq!(
+                projection.counts.activated_node_count,
+                u32::from(matches!(
+                    component,
+                    "potential" | "excitation" | "inhibition"
+                )),
+                "{component}"
+            );
         }
     }
 
