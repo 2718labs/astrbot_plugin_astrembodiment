@@ -201,23 +201,83 @@ def test_bound_scope_reuses_durable_identity_without_calling_genesis():
         bridge = BoundBridge()
         instance._bridge = bridge
         instance._coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
+        bound_keys: list[str] = []
+
+        class BindingRecorder:
+            def bind_semantic_key(self, key: str) -> None:
+                bound_keys.append(key)
 
         async def resolve(*_args, **_kwargs):
             return "persona-a", {"prompt": "already durable"}, "conversation"
 
         instance.resolve_effective_persona = resolve
         result = await instance._run_genesis(
-            FakeEvent(), FakeRequest(), apply_stimulus=True
+            FakeEvent(),
+            FakeRequest(),
+            apply_stimulus=True,
+            transport_context=BindingRecorder(),  # type: ignore[arg-type]
         )
-        return bridge, result
+        return bridge, result, bound_keys, instance
 
-    bridge, result = asyncio.run(run())
-    decision, _scope, _session, _seq, _turn, base_revision = result
+    bridge, result, bound_keys, instance = asyncio.run(run())
+    decision, scope, session_key, seq, _turn, base_revision = result
     assert bridge.genesis_calls == 0
     assert bridge.apply_calls == 1
     assert base_revision == 14
+    assert bound_keys == [instance._semantic_request_key(scope, session_key, seq)]
     assert decision["incarnation_id"] == durable_incarnation_id
     assert decision["seed_code"] == "AE-S1-0123456789ABCDEF"
+
+
+def test_first_genesis_binds_auxiliary_context_once_to_its_final_turn_key():
+    class AdvancingBridge:
+        loaded = True
+
+        def __init__(self) -> None:
+            self.revision = 0
+
+        def inspect(self, _scope: str) -> dict[str, object]:
+            return {"bound": self.revision > 0, "revision": self.revision}
+
+    class AdvancingCoordinator:
+        async def ensure_genesis(self, **_kwargs: object) -> dict[str, object]:
+            bridge.revision = 7
+            return {}
+
+        async def first_turn(self, **_kwargs: object) -> dict[str, object]:
+            return {"schema": "astrembodiment.decision.v1", "revision": 7}
+
+    class BindingRecorder:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        def bind_semantic_key(self, key: str) -> None:
+            self.keys.append(key)
+
+    async def run():
+        instance = plugin()
+        recorder = BindingRecorder()
+        instance._bridge = bridge
+        instance._coordinator = AdvancingCoordinator()  # type: ignore[assignment]
+
+        async def resolve(*_args, **_kwargs):
+            return "persona-a", {"prompt": "new durable persona"}, "conversation"
+
+        instance.resolve_effective_persona = resolve
+        result = await instance._run_genesis(
+            FakeEvent(),
+            FakeRequest(),
+            apply_stimulus=True,
+            transport_context=recorder,  # type: ignore[arg-type]
+        )
+        return instance, recorder, result
+
+    bridge = AdvancingBridge()
+    instance, recorder, result = asyncio.run(run())
+    _decision, scope, session_key, seq, _turn, base_revision = result
+
+    assert base_revision == 7
+    assert recorder.keys == [instance._semantic_request_key(scope, session_key, seq)]
 
 
 def test_explicit_assistant_provider_is_used_without_fallback():
@@ -2067,7 +2127,7 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
     assert recorder.warning_messages[0] == (
         "AstrEmbodiment semantic transport failure: "
         "code=ESTIMATOR_UNAVAILABLE transport_subcode=PROVIDER_CALL_FAILED "
-        "attempted=True attempt_count=2"
+        "attempted=true attempt_count=2"
     )
     assert len(recorder.warning_messages) == 2
     assert recorder.info_messages == []

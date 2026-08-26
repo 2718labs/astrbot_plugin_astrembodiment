@@ -83,8 +83,14 @@ _SEMANTIC_FAILURE_CODES = (
 class GenesisCoordinator:
     """Owns no brain state: only in-flight futures and turn bookkeeping."""
 
-    def __init__(self, bridge: NativeBridge) -> None:
+    def __init__(
+        self,
+        bridge: NativeBridge,
+        *,
+        transport_warning: Callable[[Mapping[str, Any]], None] | None = None,
+    ) -> None:
         self._bridge = bridge
+        self._transport_warning = transport_warning
         self._inflight: dict[str, asyncio.Future] = {}
         self._committed: dict[str, dict[str, Any]] = {}
         self._applied: dict[str, dict[str, Any]] = {}
@@ -464,6 +470,16 @@ class GenesisCoordinator:
                 context_summary=context_summary,
                 estimator=estimator,
             )
+            if (
+                result.get("code") == "ESTIMATOR_UNAVAILABLE"
+                and self._transport_warning is not None
+            ):
+                try:
+                    self._transport_warning(result)
+                except Exception:
+                    pass
+                else:
+                    result["_transport_warning_emitted"] = True
             if self._cacheable_semantic_result(result):
                 self._semantic_results[key] = copy.deepcopy(result)
             return result

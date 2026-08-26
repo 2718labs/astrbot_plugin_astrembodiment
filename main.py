@@ -309,7 +309,10 @@ class AstrEmbodimentPlugin(Star):
         self.config = config if config is not None else AstrBotConfig()
         self._config_values = dict(config or {})
         self._bridge = NativeBridge()
-        self._coordinator = GenesisCoordinator(self._bridge)
+        self._coordinator = GenesisCoordinator(
+            self._bridge,
+            transport_warning=self._emit_transport_failure_warning,
+        )
         self._auxiliary_transport = AuxiliaryProviderTransport(
             context=self.context,
             configured_provider=self._configured_auxiliary_provider,
@@ -1316,6 +1319,22 @@ class AstrEmbodimentPlugin(Star):
             outcome.get("attempt_count"),
         )
 
+    def _emit_transport_failure_warning(self, outcome: Mapping[str, Any]) -> None:
+        """Emit the owner-only, content-free semantic transport diagnostic."""
+
+        if outcome.get("code") != "ESTIMATOR_UNAVAILABLE":
+            return
+        transport_meta = self._transport_meta_for_outcome(outcome)
+        attempted = "true" if transport_meta.attempted else "false"
+        logger.warning(
+            "AstrEmbodiment semantic transport failure: "
+            "code=ESTIMATOR_UNAVAILABLE transport_subcode=%s attempted=%s "
+            "attempt_count=%d",
+            transport_meta.transport_subcode,
+            attempted,
+            transport_meta.attempt_count,
+        )
+
     @classmethod
     def _semantic_observatory_record(
         cls,
@@ -1471,16 +1490,11 @@ class AstrEmbodimentPlugin(Star):
         )
         native_code = outcome.get("cause_code")
         native_stage = outcome.get("native_stage")
-        transport_meta = self._transport_meta_for_outcome(outcome)
-        if outcome.get("code") == "ESTIMATOR_UNAVAILABLE":
-            logger.warning(
-                "AstrEmbodiment semantic transport failure: "
-                "code=ESTIMATOR_UNAVAILABLE transport_subcode=%s attempted=%s "
-                "attempt_count=%d",
-                transport_meta.transport_subcode,
-                transport_meta.attempted,
-                transport_meta.attempt_count,
-            )
+        if (
+            outcome.get("code") == "ESTIMATOR_UNAVAILABLE"
+            and outcome.get("_transport_warning_emitted") is not True
+        ):
+            self._emit_transport_failure_warning(outcome)
         if (
             type(native_code) is str
             and native_code in SEMANTIC_NATIVE_ERROR_CODES
@@ -1779,6 +1793,32 @@ class AstrEmbodimentPlugin(Star):
         apply_stimulus: bool,
         transport_context: RequestTransportContext | None = None,
     ) -> tuple[dict[str, Any], ScopeTokens, str, int, str | None, int]:
+        """Run Genesis and clear a context created outside the LLM hook."""
+
+        own_transport_context = transport_context is None
+        if transport_context is None:
+            transport_context = self._auxiliary_transport.open_request(
+                umo=getattr(event, "unified_msg_origin", None)
+            )
+        try:
+            return await self._run_genesis_bound(
+                event,
+                request,
+                apply_stimulus=apply_stimulus,
+                transport_context=transport_context,
+            )
+        finally:
+            if own_transport_context:
+                transport_context.close()
+
+    async def _run_genesis_bound(
+        self,
+        event: Any,
+        request: Any = None,
+        *,
+        apply_stimulus: bool,
+        transport_context: RequestTransportContext,
+    ) -> tuple[dict[str, Any], ScopeTokens, str, int, str | None, int]:
         """Resolve the active Persona and run the native Genesis boundary.
 
         The command path uses ``apply_stimulus=False`` so asking for a SeedCode
@@ -1798,13 +1838,6 @@ class AstrEmbodimentPlugin(Star):
         turn_token = None
         base_revision = self._revisions.get(scope.persona_token, 0)
         observed_at_ms = int(time.time() * 1000)
-        if transport_context is None:
-            transport_context = self._auxiliary_transport.open_request(
-                umo=getattr(event, "unified_msg_origin", None)
-            )
-        transport_context.bind_semantic_key(
-            self._semantic_request_key(scope, session_key, seq)
-        )
 
         existing_identity = self._existing_native_identity(scope)
         if existing_identity is not None:
@@ -1814,6 +1847,9 @@ class AstrEmbodimentPlugin(Star):
             base_revision = existing_identity["revision"]
             self._revisions[scope.persona_token] = base_revision
             seq = max(seq, base_revision)
+            transport_context.bind_semantic_key(
+                self._semantic_request_key(scope, session_key, seq)
+            )
             genesis = dict(existing_identity)
             if apply_stimulus:
                 turn_token = turn_id(session_key, seq)
@@ -1836,6 +1872,11 @@ class AstrEmbodimentPlugin(Star):
 
         source = PersonaSourceSnapshot.freeze(
             persona_id=persona_id, persona=persona, selection=selection
+        )
+        # Genesis itself does not consume a user-turn sequence.  Fix this
+        # request's final semantic key before its compiler may use the helper.
+        transport_context.bind_semantic_key(
+            self._semantic_request_key(scope, session_key, seq)
         )
 
         async def generate(**prompt_kwargs: Any) -> Any:
@@ -1864,7 +1905,6 @@ class AstrEmbodimentPlugin(Star):
                 )
                 base_revision = self._native_revision(scope)
                 self._revisions[scope.persona_token] = base_revision
-                seq = max(seq, base_revision)
             turn_token = turn_id(session_key, seq)
             assert turn_token is not None
             decision = await self._coordinator.first_turn(
@@ -2017,15 +2057,20 @@ class AstrEmbodimentPlugin(Star):
             if context_summary is None:
                 semantic_outcome = {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
             else:
+                semantic_request_key = self._semantic_request_key(
+                    scope, session_key, seq
+                )
+                # Normal request flow binds the final key inside _run_genesis.
+                # Test/migration adapters can replace that method, so bind only
+                # when no final key exists yet; never rebind a live request.
+                if not transport_context.is_bound_to_semantic_key(semantic_request_key):
+                    transport_context.bind_semantic_key(semantic_request_key)
                 semantic_turn = FrozenTurn(
                     scope=scope,
                     event_id=event_id(f"{session_key}#{seq}"),
                     turn_id=turn_token,
                     base_revision=base_revision,
                     observed_at_ms=int(time.time() * 1000),
-                )
-                transport_context.bind_semantic_key(
-                    self._semantic_request_key(scope, session_key, seq)
                 )
 
                 async def semantic_estimator(

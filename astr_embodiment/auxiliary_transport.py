@@ -178,6 +178,16 @@ class RequestTransportContext:
                 "UNKNOWN_TRANSPORT_FAILURE", False, 0
             )
 
+    def is_bound_to_semantic_key(self, request_key: str) -> bool:
+        """Whether this open context already owns exactly ``request_key``."""
+
+        return (
+            not self._closed
+            and type(request_key) is str
+            and self._request_key == request_key
+            and self._resolution_error is None
+        )
+
     def close(self) -> None:
         """Clear every request-local reference without touching other requests."""
 
@@ -210,7 +220,7 @@ class RequestTransportContext:
             prompt=prompt,
             system_prompt=system_prompt,
             attempt_count=1,
-            timeout_seconds=None,
+            deadline=None,
         )
 
     async def _binding_for_request(self) -> AuxiliaryProviderBindingV1:
@@ -347,13 +357,14 @@ class AuxiliaryProviderTransport:
         started = time.monotonic()
         deadline = started + timeout_ms / 1_000
         first_cap = math.ceil(2 * timeout_ms / 3) / 1_000
+        first_deadline = min(deadline, started + first_cap)
         try:
             return await self._generate_once(
                 binding=binding,
                 prompt=prompt,
                 system_prompt=system_prompt,
                 attempt_count=1,
-                timeout_seconds=min(first_cap, max(0.0, deadline - time.monotonic())),
+                deadline=first_deadline,
             )
         except AuxiliaryTransportError as first_error:
             if first_error.meta.transport_subcode not in _RETRYABLE_SUBCODES:
@@ -366,7 +377,7 @@ class AuxiliaryProviderTransport:
                 prompt=prompt,
                 system_prompt=system_prompt,
                 attempt_count=2,
-                timeout_seconds=remaining,
+                deadline=deadline,
             )
 
     async def _generate_once(
@@ -376,7 +387,7 @@ class AuxiliaryProviderTransport:
         prompt: str,
         system_prompt: str,
         attempt_count: int,
-        timeout_seconds: float | None,
+        deadline: float | None,
     ) -> AuxiliaryTransportResultV1:
         try:
             generate = getattr(self._context, "llm_generate", None)
@@ -398,17 +409,18 @@ class AuxiliaryProviderTransport:
                 tools=None,
             )
             if inspect.isawaitable(generated):
-                if timeout_seconds is None:
+                if deadline is None:
                     result = await generated
                 else:
                     result = await asyncio.wait_for(
-                        generated, timeout=max(0.0, timeout_seconds)
+                        generated,
+                        timeout=max(0.0, deadline - time.monotonic()),
                     )
             else:
                 result = generated
         except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
             raise
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise AuxiliaryTransportError(
                 AuxiliaryTransportMetaV1("PROVIDER_CALL_TIMEOUT", True, attempt_count)
             ) from None
@@ -416,6 +428,11 @@ class AuxiliaryProviderTransport:
             raise AuxiliaryTransportError(
                 AuxiliaryTransportMetaV1("PROVIDER_CALL_FAILED", True, attempt_count)
             ) from None
+
+        if deadline is not None and time.monotonic() >= deadline:
+            raise AuxiliaryTransportError(
+                AuxiliaryTransportMetaV1("PROVIDER_CALL_TIMEOUT", True, attempt_count)
+            )
 
         text = self._canonical_response_text(result)
         if text is None:
