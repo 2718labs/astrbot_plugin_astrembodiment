@@ -1798,17 +1798,20 @@ class NativeBridge:
             method = getattr(native, "apply_perception_proposal_v1", None)
             if not callable(method):
                 return _semantic_degraded("NATIVE_SYMBOL_UNAVAILABLE")
+            result = _validate_semantic_result(
+                method(_semantic_closed_json(scope), encoded_proposal),
+                expected_base_revision=proposal["base_revision"],
+            )
+            nodes = result["node_observability"]
+            if nodes is None:
+                return result
             contract_info = getattr(native, "contract_info", None)
             if not callable(contract_info):
                 return _semantic_degraded("NATIVE_SYMBOL_UNAVAILABLE")
             native_contract_id = _validate_node_observability_contract_info(
                 contract_info()
             )
-            result = _validate_semantic_result(
-                method(_semantic_closed_json(scope), encoded_proposal),
-                expected_base_revision=proposal["base_revision"],
-            )
-            if result["node_observability"]["contract_id"] != native_contract_id:
+            if nodes["contract_id"] != native_contract_id:
                 raise ValueError("node observability contract mismatch")
             return result
         except _InvalidSemanticMigrationSubcode:

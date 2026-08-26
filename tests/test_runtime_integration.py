@@ -1883,6 +1883,20 @@ def _v3_test_native_closure_v2() -> dict:
     return closure
 
 
+def _v3_test_native_closure_v2_unavailable_legacy() -> dict:
+    closure = _v3_test_native_closure_v2()
+    closure.update(
+        {
+            "availability": "UNAVAILABLE_LEGACY",
+            "telemetry_receipt": None,
+            "semantic_vector_receipt": None,
+            "node_observability": None,
+            "expression_projection": None,
+        }
+    )
+    return closure
+
+
 def _v3_test_node_observability_contract_info() -> str:
     return json.dumps(
         {
@@ -2019,7 +2033,7 @@ def test_node_observability_rejects_unknown_native_contract_id() -> None:
         bridge_module.validate_semantic_result(closure)
 
 
-def test_native_bridge_fails_closed_before_apply_for_unknown_contract_info_id() -> None:
+def test_native_bridge_fails_closed_for_unknown_contract_info_id() -> None:
     class NativeAbi:
         def __init__(self) -> None:
             self.contract_info_calls = 0
@@ -2039,7 +2053,7 @@ def test_native_bridge_fails_closed_before_apply_for_unknown_contract_info_id() 
             self, _scope_json: str, _proposal_json: str
         ) -> str:
             self.apply_calls += 1
-            raise AssertionError("unknown contract must fail before native apply")
+            return json.dumps(_v3_test_native_closure_v2())
 
     native = NativeAbi()
     bridge = bridge_module.NativeBridge()
@@ -2050,7 +2064,30 @@ def test_native_bridge_fails_closed_before_apply_for_unknown_contract_info_id() 
 
     assert result == {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
     assert native.contract_info_calls == 1
-    assert native.apply_calls == 0
+    assert native.apply_calls == 1
+
+
+def test_native_bridge_accepts_unavailable_legacy_without_contract_info() -> None:
+    class NativeAbi:
+        def __init__(self) -> None:
+            self.apply_calls = 0
+
+        def apply_perception_proposal_v1(
+            self, _scope_json: str, _proposal_json: str
+        ) -> str:
+            self.apply_calls += 1
+            return json.dumps(_v3_test_native_closure_v2_unavailable_legacy())
+
+    native = NativeAbi()
+    bridge = bridge_module.NativeBridge()
+    bridge._native = native
+    scope = _v3_test_scope()
+
+    result = bridge.apply_perception_proposal_v1(scope, _v3_test_proposal(scope))
+
+    assert result["availability"] == "UNAVAILABLE_LEGACY"
+    assert result["node_observability"] is None
+    assert native.apply_calls == 1
 
 
 @pytest.mark.parametrize(
