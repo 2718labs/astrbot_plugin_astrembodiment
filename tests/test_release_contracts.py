@@ -17,6 +17,7 @@ FRESH_WINDOWS_ARTIFACT = "native-wheel-windows"
 FRESH_LINUX_ARTIFACT = "native-wheel-linux"
 NATIVE_API = {
     "version",
+    "contract_info",
     "health",
     "open",
     "ensure_genesis",
@@ -33,6 +34,11 @@ NATIVE_API = {
     "NativeCoreError",
 }
 NATIVE_API_PAYLOAD = b" ".join(marker.encode() for marker in sorted(NATIVE_API))
+
+
+def test_packager_requires_the_contract_info_native_symbol() -> None:
+    packager = (ROOT / "scripts" / "package_plugin.py").read_text(encoding="utf-8")
+    assert '    "contract_info",' in packager
 
 
 def _fresh_wheels_root() -> Path:

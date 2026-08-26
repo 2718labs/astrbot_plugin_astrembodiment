@@ -1309,6 +1309,13 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
 
         def exec_module(self, native):
             native.apply_event = lambda *_args: "{}"
+            native.contract_info = lambda: json.dumps(
+                {
+                    "schema": "astr-embodiment.node-observability-contract-info.v1",
+                    "contract_id": "astr-embodiment.node-observability-contract.v2",
+                    "node_observability_schema": "astr-embodiment.node-observability.v2",
+                }
+            )
             native.ensure_genesis = lambda *_args: "{}"
             native.flush_and_close = lambda: None
             native.health = lambda: "{}"
@@ -1350,6 +1357,14 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
         sys.modules.pop(module_name, None)
         sys.modules.pop(f"{module_name}._native", None)
     assert module.version() == "compat"
+    assert module.contract_info() == json.dumps(
+        {
+            "schema": "astr-embodiment.node-observability-contract-info.v1",
+            "contract_id": "astr-embodiment.node-observability-contract.v2",
+            "node_observability_schema": "astr-embodiment.node-observability.v2",
+        }
+    )
+    assert "contract_info" in module.__all__
     assert issubclass(module.NativeCoreError, RuntimeError)
 
 

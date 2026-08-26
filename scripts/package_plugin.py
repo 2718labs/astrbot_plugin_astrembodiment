@@ -30,6 +30,7 @@ NATIVE_SOURCE_INIT = ROOT / "python" / NATIVE_INIT
 NATIVE_SUFFIXES = (".pyd", ".so")
 NATIVE_API_MARKERS = (
     "version",
+    "contract_info",
     "health",
     "open",
     "ensure_genesis",
