@@ -57,7 +57,7 @@ jobs:
             throw "runner.temp must be set for Rust regressions."
           }
           $taskTemp = Join-Path -Path $env:CI_TASK_ROOT_PARENT -ChildPath "ae-card-r-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}"
-          New-Item -ItemType Directory -LiteralPath $taskTemp -Force | Out-Null
+          New-Item -ItemType Directory -Path $taskTemp -Force | Out-Null
           $env:CODEX_TASK_TEMP = $taskTemp
           $env:AE_CARD_R_TEMP_ROOT = $taskTemp
           cargo test --workspace --locked
@@ -139,7 +139,7 @@ jobs:
             throw "runner.temp must be set for Rust regressions."
           }
           $taskTemp = Join-Path -Path $env:CI_TASK_ROOT_PARENT -ChildPath "ae-card-r-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}"
-          New-Item -ItemType Directory -LiteralPath $taskTemp -Force | Out-Null
+          New-Item -ItemType Directory -Path $taskTemp -Force | Out-Null
           $env:CODEX_TASK_TEMP = $taskTemp
           $env:AE_CARD_R_TEMP_ROOT = $taskTemp
           cargo test --workspace --locked
