@@ -2347,7 +2347,7 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
     assert request.contexts == [{"role": "user", "content": "历史"}]
     assert request.system_prompt.count("AE Affect Expression Context") == 1
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v2", {}
+        request, "_astrembodiment_semantic_observatory_record_v3", {}
     )
     assert {
         key: semantic_record.get(key)
@@ -2361,7 +2361,7 @@ def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expre
             "migration_subcode",
         )
     } == {
-        "schema": "astr-embodiment.semantic-observatory.v2",
+        "schema": "astr-embodiment.semantic-observatory.v3",
         "status": "SUCCESS",
         "code": "SEMANTIC_COMMITTED",
         "reason": None,
@@ -2463,7 +2463,7 @@ def test_v3_unknown_success_migration_subcode_fails_closed_before_expression(
         "attempt_count": 1,
     }
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v2", {}
+        request, "_astrembodiment_semantic_observatory_record_v3", {}
     )
     assert semantic_record["expression_state"] == "NOT_ATTEMPTED"
     assert semantic_record["cause_code"] == "NATIVE_ERROR"
@@ -2514,7 +2514,7 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
     request = asyncio.run(run())
 
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v2", {}
+        request, "_astrembodiment_semantic_observatory_record_v3", {}
     )
     assert {
         key: semantic_record.get(key)
@@ -2528,7 +2528,7 @@ def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
     assert recorder.warning_messages[0] == (
         "AstrEmbodiment semantic transport failure: "
         "code=ESTIMATOR_UNAVAILABLE transport_subcode=PROVIDER_CALL_FAILED "
-        "attempted=true attempt_count=2"
+        "attempted=true attempt_count=1"
     )
     assert len(recorder.warning_messages) == 2
     assert recorder.info_messages == []
@@ -2695,7 +2695,7 @@ def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
     expected_outcome["migration_subcode"] = expected_migration_subcode
     assert observed_outcome == expected_outcome
     semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v2", {}
+        request, "_astrembodiment_semantic_observatory_record_v3", {}
     )
     assert {
         key: semantic_record.get(key)
@@ -2988,7 +2988,7 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
     assert unavailable_native.cursor_calls == 1
     assert unavailable_native.proposal_calls == 0
     unavailable_record = getattr(
-        unavailable_request, "_astrembodiment_semantic_observatory_record_v2", {}
+        unavailable_request, "_astrembodiment_semantic_observatory_record_v3", {}
     )
     assert unavailable_record.get("cause_code") == "SEMANTIC_VECTOR_UNAVAILABLE"
 
@@ -3018,7 +3018,7 @@ def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
                 f"provider prompt missing canonical rule: {fragment}"
             )
     malformed_record = getattr(
-        malformed_request, "_astrembodiment_semantic_observatory_record_v2", {}
+        malformed_request, "_astrembodiment_semantic_observatory_record_v3", {}
     )
     expected_record = {
         "status": "DEGRADED",

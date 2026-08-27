@@ -326,7 +326,7 @@ fn windows_authority_record_is_dpapi_backed_non_reparse_and_acl_locked() {
     );
     assert_eq!(count, 2);
     assert!(!entries.is_null());
-    let entry_result = (|| {
+    {
         let entries =
             unsafe { std::slice::from_raw_parts(entries, usize::try_from(count).unwrap()) };
         let mut saw_user = false;
@@ -351,12 +351,11 @@ fn windows_authority_record_is_dpapi_backed_non_reparse_and_acl_locked() {
             }
         }
         assert!(saw_user && saw_system);
-    })();
+    }
     unsafe {
         LocalFree(entries.cast());
         LocalFree(descriptor.cast());
     }
-    entry_result
 }
 
 #[cfg(windows)]

@@ -4,7 +4,7 @@
 
 AstrEmbodiment 是 AstrBot 的 Rust 原生人格连续性运行时：把当轮互动归约为可验证证据，以持久、可回放、受限的状态影响后续表达倾向，而不保存长期聊天正文。
 
-> **用户话语 → 15 维闭合语义证据 → Rust 原生状态提交 → revision / receipt → 受限表达投影**
+> **用户话语 → 15 维闭合语义证据 → 原生状态原子提交 → 受限表达投影**（每次提交产生 `revision / receipt`，并按闭合因果规则处理。）
 
 本仓库的产品版本合同是 `1.0.0`。版本合同不等于远端已经发布；只有当前正式流程的 release receipt、双平台 fresh build、allowlisted ZIP、SHA-256 与独立复核都成立时，具体制品才可被声称为可发布。
 
@@ -32,7 +32,7 @@ flowchart LR
 
 **A｜能力闭环。**辅助 Provider 只把当前请求归约为封闭的十五维证据，不能直接写神经状态；Rust 核心在验证完整向量、因果基线、状态与容量后，才是生产状态的唯一写者。原始用户文本不写入原生状态库。
 
-**B｜人格连续性。**互动证据可以持续改变原生状态与后续表达倾向；这是可持久、可回放、受限的工程状态，不是主观感受或意识声明。
+**B｜人格连续性。**互动证据可以持续改变原生状态与后续表达倾向；这是可持久、可回放、受限的工程状态，插件升级后继续从持久化原生状态恢复，不等同于意识、主观感受或真实关系。
 
 **C｜可观测证据。**每轮可以用 revision、receipt、去重状态、聚合维度与表达状态审阅闭环；Observatory 旁路只读，不能改写 SeedCode、revision 或神经节点。表达投影只影响当前回复的风格倾向，绝不替换主模型、事实、安全策略、工具策略或权限。
 
@@ -158,7 +158,7 @@ flowchart TB
 
 Observatory 是只读的字段地图，不是调参或写状态入口。当前有两类彼此独立的输出：
 
-- **节点运行观测。**`observatory_enabled=true`（且为原生布尔值）仅控制这类记录的成功简洁摘要；失败警告始终保留。该简洁摘要的字段地图包括十五维、confidence、base revision、revision、receipt/dedup、激活节点/边、残差与 expression 状态。`node_observability_detailed_logging=true`（且为原生布尔值）把这类节点运行记录切换为闭合 JSON 聚合输出，并覆盖成功简洁日志开关。它不控制下述请求语义记录。
+- **节点运行观测。**`observatory_enabled=true`（且为原生布尔值）启用简洁模式，控制这类记录的成功简洁摘要；失败警告始终保留。该简洁摘要的字段地图包括十五维、confidence、base revision、revision、receipt/dedup、激活节点/边、残差与 expression 状态。`node_observability_detailed_logging=true`（且为原生布尔值）启用调试模式，把这类节点运行记录切换为闭合 JSON 聚合输出，并覆盖成功简洁日志开关。它不控制下述请求语义记录。
 - **请求语义观测。**每次请求都会生成一条闭合的语义记录，不受上述两个开关控制。成功记录使用 INFO，降级或失败记录使用 WARN。语义估计超时、不可用或 malformed 时，本轮不提交语义、不回退固定零值，也不尝试表达投影，已有合法状态保持不变。
 
 请求语义记录只展示字段类别；下例折叠了固定槽位和计数对象的内容（字段名与当前实现一致，数值仅示例）。相关数据契约见 [数据契约](docs/engineering/DATA_CONTRACTS.md)。
@@ -198,7 +198,7 @@ Observatory 是只读的字段地图，不是调参或写状态入口。当前�
 
 ## 对接 API
 
-当前对接是进程内接口，不是 HTTP API。README 只列出已经实现的入口类别；payload 细节以源码和数据契约为准。
+当前对接是进程内接口，不是 HTTP API。README 只列出已经实现的入口类别；共享 API 头与 payload 细节以源码和数据契约为准。
 
 - AstrBot hooks：`on_llm_request`、`on_llm_response`、`after_message_sent`；管理命令：`ae`、`ae_seed`。
 - `NativeBridge` 身份与受控重生：`open`、`ensure_genesis`、`prepare_rebirth_v1`、`confirm_rebirth_v1`、`reconcile_seed_config_v1`、`ack_seed_config_writeback_v1`。

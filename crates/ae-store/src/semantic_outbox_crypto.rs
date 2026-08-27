@@ -396,9 +396,8 @@ mod platform {
     use std::fs::OpenOptions;
     use std::io::ErrorKind;
     use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::linux::fs::MetadataExt;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 
     pub(super) fn open_installation_key(
         storage_parent: &Path,
@@ -700,7 +699,7 @@ mod platform {
 
     fn wide(path: &Path) -> Result<Vec<u16>, SemanticOutboxCryptoError> {
         let mut text: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if text.iter().any(|code| *code == 0) {
+        if text.contains(&0) {
             return Err(SemanticOutboxCryptoError::Unavailable);
         }
         text.push(0);
@@ -1266,7 +1265,7 @@ mod platform {
             assert!(alignment > 1);
             let mut storage = vec![0u8; size_of::<TOKEN_USER>() + alignment];
             let offset = (0..alignment)
-                .find(|offset| (storage.as_ptr() as usize + offset) % alignment != 0)
+                .find(|offset| !(storage.as_ptr() as usize + offset).is_multiple_of(alignment))
                 .unwrap();
             let bytes = &mut storage[offset..offset + size_of::<TOKEN_USER>()];
             assert_ne!((bytes.as_ptr() as usize) % alignment, 0);
