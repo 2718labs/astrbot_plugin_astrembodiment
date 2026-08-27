@@ -1325,6 +1325,9 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
             native.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
             native.reconcile_seed_config_v1 = _unreachable_mandatory_native_abi
             native.ack_seed_config_writeback_v1 = _unreachable_mandatory_native_abi
+            native.semantic_outbox_crypto_status_v1 = _unreachable_mandatory_native_abi
+            native.semantic_outbox_seal_v1 = _unreachable_mandatory_native_abi
+            native.semantic_outbox_open_v1 = _unreachable_mandatory_native_abi
             native.semantic_revision_v1 = _unreachable_mandatory_native_abi
             native.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             native.verify_replay = lambda *_args: "{}"
@@ -1365,6 +1368,13 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
         }
     )
     assert "contract_info" in module.__all__
+    for symbol in (
+        "semantic_outbox_crypto_status_v1",
+        "semantic_outbox_seal_v1",
+        "semantic_outbox_open_v1",
+    ):
+        assert callable(getattr(module, symbol))
+        assert symbol in module.__all__
     assert issubclass(module.NativeCoreError, RuntimeError)
 
 
