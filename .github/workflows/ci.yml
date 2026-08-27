@@ -70,6 +70,7 @@ jobs:
           New-Item -ItemType Directory -Path $taskTemp -Force | Out-Null
           $env:CODEX_TASK_TEMP = $taskTemp
           $env:AE_CARD_R_TEMP_ROOT = $taskTemp
+          $env:AE_RC1_TASK_TEMP = $taskTemp
           cargo test --workspace --locked
 
   release-contract:
@@ -152,6 +153,7 @@ jobs:
           New-Item -ItemType Directory -Path $taskTemp -Force | Out-Null
           $env:CODEX_TASK_TEMP = $taskTemp
           $env:AE_CARD_R_TEMP_ROOT = $taskTemp
+          $env:AE_RC1_TASK_TEMP = $taskTemp
           cargo test --workspace --locked
       - name: Run Rust regressions (Linux)
         if: runner.os == 'Linux'
