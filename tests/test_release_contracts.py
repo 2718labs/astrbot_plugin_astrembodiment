@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -109,6 +110,16 @@ def test_runtime_requirements_match_self_contained_archive() -> None:
     ]
     assert install_lines == []
     assert "Native Windows and Linux extensions are bundled" in requirements
+
+
+def test_pyo3_extension_linking_is_owned_by_maturin() -> None:
+    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert cargo["workspace"]["dependencies"]["pyo3"]["features"] == ["abi3-py312"]
+    assert pyproject["build-system"]["build-backend"] == "maturin"
+    assert "maturin>=1.14.1,<2.0" in pyproject["build-system"]["requires"]
+    assert pyproject["tool"]["maturin"]["bindings"] == "pyo3"
 
 
 def test_release_archive_uses_current_native_initializer_and_not_wheels(
