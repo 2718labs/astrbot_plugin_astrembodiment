@@ -240,8 +240,14 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "inputs.tag" not in release
     assert "actions/upload-artifact@" in release
     assert release.count("contents: write") == 1
+    select_target_job = release.split("  select-target:\n", 1)[1].split(
+        "\n  build-native:", 1
+    )[0]
+    assert "permissions:\n      contents: read\n      actions: read" in select_target_job
     publish_job = release.split("  publish-release:\n", 1)[1]
     assert "permissions:\n      contents: write" in publish_job
+    assert "actions: read" not in publish_job
+    assert "actions: write" not in release
     assert "persist-credentials: true" not in publish_job
     assert "persist-credentials: false" in publish_job
     assert "git/tags" in publish_job

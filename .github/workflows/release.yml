@@ -23,6 +23,9 @@ jobs:
   select-target:
     name: Select a current successful master target
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
     outputs:
       eligible: ${{ steps.target.outputs.eligible }}
       target_sha: ${{ steps.target.outputs.target_sha }}
