@@ -67,12 +67,6 @@
 
 - [ ] 仅三个 focused probes：edge source→target、AESEM2 dedup、compensation append/CAS/idempotency/no-expression。
 - [ ] `cargo test -p ae-runtime --test phase0_native_semantic --locked --offline`，预期 3 passed。
-- [ ] G: 隔离编译：
-
-~~~powershell
-$env:CARGO_TARGET_DIR='G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\phase0-build-20260825\cargo-target'
-$env:CARGO_HOME='G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\phase0-build-20260825\cargo-home'
-cargo check --workspace --locked --offline
-~~~
+- [ ] 隔离编译：将 `CARGO_TARGET_DIR` 与 `CARGO_HOME` 指向由执行环境提供的本机临时目录，避免把构建缓存写入仓库；随后运行 `cargo check --workspace --locked --offline`。
 
 - [ ] exit 0；`git diff --name-only` 仅 A 边界；Commit `test(native): verify phase0 semantic closure`。不声称 release acceptance。
