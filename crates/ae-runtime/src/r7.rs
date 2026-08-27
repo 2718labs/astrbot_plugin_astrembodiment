@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+// This is a deliberately unmounted compatibility island.  The release ABI
+// cannot call it, while the retained R7/N1 source stays available for the
+// private Store hydration path and future internal migration work.
+#![allow(dead_code, unused_imports)]
 
 mod private_projection_wire;
 mod r7_atomic_projection;

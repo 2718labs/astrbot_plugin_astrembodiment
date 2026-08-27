@@ -1,50 +1,49 @@
-"""Request-local, closed SPC1 semantic estimation.
+"""Closed V3, request-local semantic estimation for the preview lane.
 
-The estimator is deliberately a small adapter around one provider call.  It
-accepts only the current request text, validates a fixed raw-fxp6 JSON shape,
-and discards the text before a proposal can cross the native boundary.  No
-history, tools, provider transcript, action contract, or free-form text is
-represented by any object in this module.
+This module accepts the frozen current request text only at the provider
+boundary.  It neither accepts nor retains dialogue history, tools, system
+state, provider transcripts, or action contracts.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Mapping
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from types import MappingProxyType
+from typing import Any
 
+from .auxiliary_transport import AuxiliaryTransportMetaV1
+from .context_binding import ContextBindingV1, validate_context_summary
 from .contracts import FrozenTurn, ScopeTokens
-
-FXP6_SCALE = 1_000_000
-
-DIMENSION_NAMES = (
-    "positive",
-    "affiliation",
-    "harm",
-    "boundary",
-    "repair",
-    "repetition",
-    "new_information",
-    "constraint_instability",
-    "epistemic_conflict",
-    "self_responsibility",
-    "other_responsibility",
-    "hostility",
-    "publicness",
-    "engagement",
-    "rejection",
+from .semantic_contract import (
+    DIMENSION_NAMES,
+    FXP6_SCALE,
+    INTENSITY_BOOLEAN,
+    INTENSITY_INTEGER_RANGE,
+    INTENSITY_NON_INTEGRAL_NUMBER,
+    INTENSITY_NULL_DISALLOWED,
+    INTENSITY_STATE_CONSTRAINT,
+    INTENSITY_STRING,
+    PRESENT,
+    STATE_INVALID,
+    UNAVAILABLE,
+    VALUE_OTHER_TYPE,
+    build_dimension_slot_schema,
+    state_intensity_prompt_rules,
+    validate_state_intensity,
 )
 
-LOAD_DIMENSIONS = ("positive", "harm", "boundary", "epistemic_conflict")
-
-# Protocol-oriented aliases kept as immutable tuples.
-SEMANTIC_DIMENSIONS = DIMENSION_NAMES
-LOAD_DIMENSION_NAMES = LOAD_DIMENSIONS
+SEMANTIC_ESTIMATE_V3_SCHEMA = "astr-embodiment.semantic-estimate.v3"
+ESTIMATOR_FORMULA_DIGEST = hashlib.sha256(
+    b"astr-embodiment/semantic-estimate-v3-context-binding-v1"
+).hexdigest()
 
 PROPOSAL_FIELDS = (
     "schema_version",
@@ -57,65 +56,179 @@ PROPOSAL_FIELDS = (
     "protocol_version",
     "request_nonce_digest",
 )
-
-_ESTIMATE_NESTED_FIELDS = frozenset({"dimensions", "estimator_confidence"})
-_ESTIMATE_FLAT_FIELDS = frozenset((*DIMENSION_NAMES, "estimator_confidence"))
+_ESTIMATE_V3_FIELDS = frozenset({"schema", "dimensions"})
+_DIMENSION_V3_FIELDS = frozenset({"state", "intensity_fxp6", "confidence_fxp6"})
+ESTIMATOR_MALFORMED_SUBCODES = frozenset(
+    {
+        "JSON_DECODE",
+        "ROOT_SHAPE",
+        "SCHEMA_VERSION",
+        "DIMENSION_KEYS",
+        "DIMENSION_SLOT_SHAPE",
+        "DIMENSION_VALUE",
+    }
+)
+_DIMENSION_VALUE_CLASSIFICATIONS = frozenset(
+    {
+        INTENSITY_NON_INTEGRAL_NUMBER,
+        "CONFIDENCE_NON_INTEGRAL_NUMBER",
+        INTENSITY_STRING,
+        "CONFIDENCE_STRING",
+        INTENSITY_BOOLEAN,
+        "CONFIDENCE_BOOLEAN",
+        INTENSITY_NULL_DISALLOWED,
+        "CONFIDENCE_NULL",
+        INTENSITY_INTEGER_RANGE,
+        "CONFIDENCE_INTEGER_RANGE",
+        INTENSITY_STATE_CONSTRAINT,
+        VALUE_OTHER_TYPE,
+    }
+)
+_DIMENSION_VALUE_JSON_TYPES = frozenset(
+    {"number", "string", "boolean", "null", "object", "array", "other"}
+)
+_JSON_WHITESPACE = " \t\n\r"
 _NONCE_DOMAIN = b"astr-embodiment/spc1-request-nonce-binding-v1"
 _SCOPE_FIELDS = frozenset(
     {"bot_token", "persona_token", "relation_token", "session_token"}
 )
 
+SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT = (
+    "Evaluate only current_turn_text. The context summary is closed historical "
+    "metadata and must never establish current-turn presence. For every ordered "
+    "dimension, decide state before intensity.\n"
+    f"{state_intensity_prompt_rules()}\n"
+    "Return only a strict JSON object "
+    "matching the supplied schema; do not add prose, explanations, or fields."
+)
 
-class SemanticEstimateError(ValueError):
-    """Fixed, non-echoing estimator validation failure."""
-
-    def __init__(self, code: str = "INVALID_ESTIMATE") -> None:
-        # Never interpolate provider output, request text, or exception text.
-        super().__init__(code)
-        self.code = code
-
-
-class SemanticProposalError(ValueError):
-    """Fixed, non-echoing proposal validation failure."""
-
-    def __init__(self, code: str = "INVALID_PROPOSAL") -> None:
-        super().__init__(code)
-        self.code = code
+_V3_DIMENSION_SCHEMA = build_dimension_slot_schema()
+SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["schema", "dimensions"],
+    "properties": {
+        "schema": {"const": SEMANTIC_ESTIMATE_V3_SCHEMA},
+        "dimensions": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": list(DIMENSION_NAMES),
+            "properties": {
+                name: {"$ref": "#/$defs/dimension"} for name in DIMENSION_NAMES
+            },
+        },
+    },
+    "$defs": {"dimension": _V3_DIMENSION_SCHEMA},
+}
 
 
 @dataclass(frozen=True, slots=True)
-class SemanticEstimate:
-    """A closed fifteen-coordinate raw fixed-point estimate."""
+class DimensionValueDiagnostic:
+    """Safe first-slot metadata for a rejected V3 dimension value."""
 
-    dimensions: dict[str, int]
-    estimator_confidence: int
+    dimension_name: str
+    value_classification: str
+    json_type: str
+    numeric_scalar: int | float | None = None
+    string_length: int | None = None
+    string_sha256: str | None = None
 
-    @property
-    def is_load_noop(self) -> bool:
-        return all(self.dimensions[name] == 0 for name in LOAD_DIMENSIONS)
+    def __post_init__(self) -> None:
+        if (
+            type(self.dimension_name) is not str
+            or self.dimension_name not in DIMENSION_NAMES
+            or self.value_classification not in _DIMENSION_VALUE_CLASSIFICATIONS
+            or self.json_type not in _DIMENSION_VALUE_JSON_TYPES
+        ):
+            raise ValueError("invalid dimension value diagnostic")
+        has_numeric = self.numeric_scalar is not None
+        has_string = self.string_length is not None or self.string_sha256 is not None
+        if has_numeric and has_string:
+            raise ValueError("mixed dimension value diagnostic")
+        if has_numeric:
+            if self.json_type != "number" or not (
+                type(self.numeric_scalar) is int
+                or (
+                    type(self.numeric_scalar) is float
+                    and math.isfinite(self.numeric_scalar)
+                )
+            ):
+                raise ValueError("invalid numeric dimension value diagnostic")
+        elif self.json_type == "number" and has_string:
+            raise ValueError("invalid number dimension value diagnostic")
+        if has_string:
+            if (
+                self.json_type != "string"
+                or type(self.string_length) is not int
+                or self.string_length < 0
+                or type(self.string_sha256) is not str
+                or len(self.string_sha256) != 64
+            ):
+                raise ValueError("invalid string dimension value diagnostic")
+        elif self.json_type == "string":
+            raise ValueError("missing string dimension value diagnostic")
 
-    @property
-    def confidence(self) -> int:
-        return self.estimator_confidence
-
-    def as_json(self) -> dict[str, Any]:
-        return {
-            "dimensions": {
-                name: self.dimensions[name] for name in DIMENSION_NAMES
-            },
-            "estimator_confidence": self.estimator_confidence,
+    def as_json(self) -> dict[str, int | float | str]:
+        result: dict[str, int | float | str] = {
+            "dimension_name": self.dimension_name,
+            "value_classification": self.value_classification,
+            "json_type": self.json_type,
         }
+        if self.numeric_scalar is not None:
+            result["numeric_scalar"] = self.numeric_scalar
+        elif self.string_length is not None and self.string_sha256 is not None:
+            result["string_length"] = self.string_length
+            result["string_sha256"] = self.string_sha256
+        return result
 
 
-# A short alias makes the DTO discoverable without introducing a second shape.
-ClosedSemanticEstimate = SemanticEstimate
+class SemanticEstimateError(ValueError):
+    """Fixed, non-echoing V3 parse/provider failure."""
+
+    def __init__(
+        self,
+        code: str = "ESTIMATOR_MALFORMED",
+        subcode: str | None = None,
+        diagnostic: DimensionValueDiagnostic | None = None,
+        transport_meta: AuxiliaryTransportMetaV1 | None = None,
+    ) -> None:
+        if subcode is not None and subcode not in ESTIMATOR_MALFORMED_SUBCODES:
+            raise ValueError("invalid estimator malformed subcode")
+        if diagnostic is not None and (
+            subcode != "DIMENSION_VALUE"
+            or type(diagnostic) is not DimensionValueDiagnostic
+        ):
+            raise ValueError("invalid estimator dimension value diagnostic")
+        if (
+            transport_meta is not None
+            and type(transport_meta) is not AuxiliaryTransportMetaV1
+        ):
+            raise ValueError("invalid estimator transport metadata")
+        super().__init__(code)
+        self.code = code
+        self.subcode = subcode
+        self.diagnostic = diagnostic
+        self.transport_meta = transport_meta
+
+    def diagnostic_json(self) -> dict[str, int | float | str] | None:
+        if self.diagnostic is None:
+            return None
+        return self.diagnostic.as_json()
 
 
-EstimatorProvider: TypeAlias = Callable[[str], Any | Awaitable[Any]]
+class SemanticProposalError(ValueError):
+    """Fixed, non-echoing closed proposal failure."""
+
+    def __init__(self, code: str = "INVALID_PERCEPTION_PROPOSAL") -> None:
+        super().__init__(code)
+        self.code = code
 
 
-def _invalid_estimate() -> SemanticEstimateError:
-    return SemanticEstimateError()
+def _invalid_estimate(
+    subcode: str,
+    diagnostic: DimensionValueDiagnostic | None = None,
+) -> SemanticEstimateError:
+    return SemanticEstimateError("ESTIMATOR_MALFORMED", subcode, diagnostic)
 
 
 def _invalid_proposal() -> SemanticProposalError:
@@ -123,7 +236,7 @@ def _invalid_proposal() -> SemanticProposalError:
 
 
 def _reject_json_constant(_value: str) -> None:
-    raise ValueError("non-finite number")
+    raise ValueError("json constant")
 
 
 def _pairs_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -135,90 +248,254 @@ def _pairs_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _decode_json_object(value: Any) -> Mapping[str, Any]:
+def _exact_json_fence_candidate(value: str) -> str:
+    """Return a bare JSON candidate or retain a non-exact envelope unchanged."""
+
+    candidate = value.strip(_JSON_WHITESPACE)
+    opening = "```json"
+    if not candidate.startswith(opening):
+        return candidate
+
+    opening_end = len(opening)
+    if candidate[opening_end : opening_end + 2] == "\r\n":
+        body_start = opening_end + 2
+    elif candidate[opening_end : opening_end + 1] == "\n":
+        body_start = opening_end + 1
+    else:
+        return candidate
+
+    if candidate.endswith("\r\n```"):
+        body_end = len(candidate) - 5
+    elif candidate.endswith("\n```"):
+        body_end = len(candidate) - 4
+    else:
+        return candidate
+    if body_end < body_start:
+        return candidate
+    return candidate[body_start:body_end]
+
+
+def _decode_json_object(value: Any) -> dict[str, Any]:
     if type(value) is str:
         try:
-            decoded = json.loads(
-                value,
+            payload = json.loads(
+                _exact_json_fence_candidate(value),
                 parse_constant=_reject_json_constant,
                 object_pairs_hook=_pairs_without_duplicates,
             )
         except (TypeError, ValueError, json.JSONDecodeError):
-            raise _invalid_estimate() from None
+            raise _invalid_estimate("JSON_DECODE") from None
     else:
-        decoded = value
-    if type(decoded) is not dict:
-        raise _invalid_estimate()
-    return decoded
+        payload = value
+    if type(payload) is not dict or any(type(key) is not str for key in payload):
+        raise _invalid_estimate("ROOT_SHAPE")
+    return payload
 
 
 def _is_raw_integer(value: Any) -> bool:
-    # ``bool`` is an ``int`` subclass; exact type is intentional.
     return type(value) is int
 
 
-def _validate_dimension_map(value: Any) -> dict[str, int]:
-    if type(value) is not dict:
-        raise _invalid_estimate()
-    if any(type(key) is not str for key in value) or set(value) != set(DIMENSION_NAMES):
-        raise _invalid_estimate()
-    dimensions: dict[str, int] = {}
-    for name in DIMENSION_NAMES:
-        raw = value.get(name)
-        if not _is_raw_integer(raw) or not 0 <= raw <= FXP6_SCALE:
-            raise _invalid_estimate()
-        dimensions[name] = raw
-    if all(raw == 0 for raw in dimensions.values()):
-        raise _invalid_estimate()
-    return dimensions
+def _json_value_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "boolean"
+    if type(value) is int or type(value) is float:
+        return "number"
+    if type(value) is str:
+        return "string"
+    if type(value) is dict:
+        return "object"
+    if type(value) is list:
+        return "array"
+    return "other"
 
 
-def _validate_confidence(value: Any) -> int:
-    if not _is_raw_integer(value) or not 1 <= value <= FXP6_SCALE:
-        raise _invalid_estimate()
+def _dimension_value_diagnostic(
+    dimension_name: str,
+    value_classification: str,
+    value: Any,
+) -> DimensionValueDiagnostic:
+    json_type = _json_value_type(value)
+    if type(value) is int or (type(value) is float and math.isfinite(value)):
+        return DimensionValueDiagnostic(
+            dimension_name=dimension_name,
+            value_classification=value_classification,
+            json_type=json_type,
+            numeric_scalar=value,
+        )
+    if type(value) is str:
+        return DimensionValueDiagnostic(
+            dimension_name=dimension_name,
+            value_classification=value_classification,
+            json_type=json_type,
+            string_length=len(value),
+            string_sha256=hashlib.sha256(value.encode("utf-8")).hexdigest(),
+        )
+    return DimensionValueDiagnostic(
+        dimension_name=dimension_name,
+        value_classification=value_classification,
+        json_type=json_type,
+    )
+
+
+def _dimension_confidence_failure_v3(value: Any) -> str | None:
+    if type(value) is bool:
+        return "CONFIDENCE_BOOLEAN"
+    if value is None:
+        return "CONFIDENCE_NULL"
+    if type(value) is str:
+        return "CONFIDENCE_STRING"
+    if type(value) is float:
+        return "CONFIDENCE_NON_INTEGRAL_NUMBER"
+    if type(value) is not int:
+        return "VALUE_OTHER_TYPE"
+    if not 0 <= value <= FXP6_SCALE:
+        return "CONFIDENCE_INTEGER_RANGE"
+    return None
+
+
+def _diagnose_dimension_value_v3(
+    dimension_name: str,
+    slot: Mapping[str, Any],
+) -> DimensionValueDiagnostic:
+    state = slot["state"]
+    intensity = slot["intensity_fxp6"]
+    intensity_failure = validate_state_intensity(state, intensity)
+    if intensity_failure == STATE_INVALID:
+        return _dimension_value_diagnostic(
+            dimension_name,
+            VALUE_OTHER_TYPE,
+            state,
+        )
+    if intensity_failure is not None:
+        return _dimension_value_diagnostic(
+            dimension_name,
+            intensity_failure,
+            intensity,
+        )
+    confidence = slot["confidence_fxp6"]
+    confidence_failure = _dimension_confidence_failure_v3(confidence)
+    if confidence_failure is not None:
+        return _dimension_value_diagnostic(
+            dimension_name,
+            confidence_failure,
+            confidence,
+        )
+    return _dimension_value_diagnostic(
+        dimension_name,
+        "VALUE_OTHER_TYPE",
+        state,
+    )
+
+
+def _validate_v3_confidence(value: Any) -> int:
+    if not _is_raw_integer(value) or not 0 <= value <= FXP6_SCALE:
+        raise _invalid_estimate("DIMENSION_VALUE")
     return value
 
 
-def _parse_estimator_output(value: Any) -> SemanticEstimate:
-    """Parse one provider result using the closed SPC1 estimate schema.
+@dataclass(frozen=True, slots=True)
+class DimensionEstimateV3:
+    """One explicit current-turn presence decision."""
 
-    Both the nested wire-shaped form (``dimensions`` plus confidence) and the
-    equivalent flat sixteen-field form are accepted at this local adapter
-    boundary.  The returned representation is always nested and canonical.
-    Every key and number is checked before any value is copied.
-    """
+    state: str
+    intensity_fxp6: int | None
+    confidence_fxp6: int
 
-    if isinstance(value, SemanticEstimate):
-        value = value.as_json()
-    payload = _decode_json_object(value)
-    keys = set(payload)
-    if keys == _ESTIMATE_NESTED_FIELDS:
-        dimensions_payload = payload.get("dimensions")
-        confidence_payload = payload.get("estimator_confidence")
-    elif keys == _ESTIMATE_FLAT_FIELDS:
-        dimensions_payload = {name: payload.get(name) for name in DIMENSION_NAMES}
-        confidence_payload = payload.get("estimator_confidence")
-    else:
-        raise _invalid_estimate()
-    dimensions = _validate_dimension_map(dimensions_payload)
-    confidence = _validate_confidence(confidence_payload)
-    return SemanticEstimate(dimensions=dimensions, estimator_confidence=confidence)
+    def __post_init__(self) -> None:
+        if validate_state_intensity(self.state, self.intensity_fxp6) is not None:
+            raise _invalid_estimate("DIMENSION_VALUE")
+        _validate_v3_confidence(self.confidence_fxp6)
+
+    def as_json(self) -> dict[str, int | str | None]:
+        return {
+            "state": self.state,
+            "intensity_fxp6": self.intensity_fxp6,
+            "confidence_fxp6": self.confidence_fxp6,
+        }
 
 
-def parse_estimator_output(value: Any) -> SemanticEstimate:
-    """Fail closed for hostile mapping implementations as well as bad JSON."""
+@dataclass(frozen=True, slots=True)
+class SemanticEstimateV3:
+    """The complete ordered fifteen-dimension V3 current-turn estimate."""
+
+    dimensions: Mapping[str, DimensionEstimateV3]
+    schema: str = SEMANTIC_ESTIMATE_V3_SCHEMA
+    transport_meta: AuxiliaryTransportMetaV1 | None = None
+
+    def __post_init__(self) -> None:
+        if self.schema != SEMANTIC_ESTIMATE_V3_SCHEMA:
+            raise _invalid_estimate("SCHEMA_VERSION")
+        if (
+            self.transport_meta is not None
+            and type(self.transport_meta) is not AuxiliaryTransportMetaV1
+        ):
+            raise _invalid_estimate("DIMENSION_VALUE")
+        if type(self.dimensions) is not dict or set(self.dimensions) != set(
+            DIMENSION_NAMES
+        ):
+            raise _invalid_estimate("DIMENSION_KEYS")
+        canonical: dict[str, DimensionEstimateV3] = {}
+        for name in DIMENSION_NAMES:
+            dimension = self.dimensions[name]
+            if type(dimension) is not DimensionEstimateV3:
+                raise _invalid_estimate("DIMENSION_VALUE")
+            canonical[name] = dimension
+        object.__setattr__(self, "dimensions", MappingProxyType(canonical))
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "schema": SEMANTIC_ESTIMATE_V3_SCHEMA,
+            "dimensions": {
+                name: self.dimensions[name].as_json() for name in DIMENSION_NAMES
+            },
+        }
+
+
+def _validate_dimension_slots_v3(value: Any) -> dict[str, DimensionEstimateV3]:
+    if type(value) is not dict or set(value) != set(DIMENSION_NAMES):
+        raise _invalid_estimate("DIMENSION_KEYS")
+    dimensions: dict[str, DimensionEstimateV3] = {}
+    for name in DIMENSION_NAMES:
+        slot = value[name]
+        if type(slot) is not dict or set(slot) != _DIMENSION_V3_FIELDS:
+            raise _invalid_estimate("DIMENSION_SLOT_SHAPE")
+        try:
+            dimensions[name] = DimensionEstimateV3(
+                state=slot["state"],
+                intensity_fxp6=slot["intensity_fxp6"],
+                confidence_fxp6=slot["confidence_fxp6"],
+            )
+        except SemanticEstimateError as exc:
+            if exc.subcode != "DIMENSION_VALUE":
+                raise
+            raise _invalid_estimate(
+                "DIMENSION_VALUE",
+                _diagnose_dimension_value_v3(name, slot),
+            ) from None
+    return dimensions
+
+
+def parse_estimator_output_v3(value: Any) -> SemanticEstimateV3:
+    """Parse only the exact V3 closed JSON shape."""
 
     try:
-        return _parse_estimator_output(value)
+        if type(value) is SemanticEstimateV3:
+            value = value.as_json()
+        payload = _decode_json_object(value)
+        if set(payload) != _ESTIMATE_V3_FIELDS:
+            raise _invalid_estimate("ROOT_SHAPE")
+        if payload["schema"] != SEMANTIC_ESTIMATE_V3_SCHEMA:
+            raise _invalid_estimate("SCHEMA_VERSION")
+        return SemanticEstimateV3(
+            dimensions=_validate_dimension_slots_v3(payload["dimensions"])
+        )
     except SemanticEstimateError:
         raise
     except BaseException:
-        raise SemanticEstimateError() from None
-
-
-# Explicit aliases used by callers that prefer validation-oriented naming.
-validate_estimator_output = parse_estimator_output
-parse_semantic_estimate = parse_estimator_output
+        raise _invalid_estimate("DIMENSION_VALUE") from None
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
@@ -235,8 +512,6 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
 
 
 def _canonical_hex(value: Any, bytes_len: int) -> str:
-    """Decode a plain hex token and return a fresh lowercase representation."""
-
     if type(value) is not str or len(value) != bytes_len * 2:
         raise ValueError("hex token")
     try:
@@ -255,24 +530,9 @@ def _canonical_nonzero_hex(value: Any, bytes_len: int) -> str:
     return canonical
 
 
-def _is_hex_token(value: Any, byte_length: int) -> bool:
-    try:
-        _canonical_nonzero_hex(value, byte_length)
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
 def _canonical_scope(scope: ScopeTokens | Mapping[str, Any]) -> ScopeTokens:
-    """Return a plain ``ScopeTokens`` with byte-canonical token strings."""
-
     if type(scope) is ScopeTokens:
-        payload: dict[str, Any] = {
-            "bot_token": scope.bot_token,
-            "persona_token": scope.persona_token,
-            "relation_token": scope.relation_token,
-            "session_token": scope.session_token,
-        }
+        payload: dict[str, Any] = scope.scope_json()
     elif type(scope) is dict:
         payload = scope
     else:
@@ -297,38 +557,22 @@ def _canonical_scope(scope: ScopeTokens | Mapping[str, Any]) -> ScopeTokens:
 
 def _canonical_turn(scope: ScopeTokens, turn: FrozenTurn) -> FrozenTurn:
     canonical_scope = _canonical_scope(scope)
-    if type(turn) is not FrozenTurn:
-        raise _invalid_proposal()
-    try:
-        turn_scope = _canonical_scope(turn.scope)
-    except SemanticProposalError:
-        raise
-    if turn_scope != canonical_scope:
+    if type(turn) is not FrozenTurn or _canonical_scope(turn.scope) != canonical_scope:
         raise _invalid_proposal()
     if type(turn.base_revision) is not int or turn.base_revision < 0:
         raise _invalid_proposal()
     if type(turn.observed_at_ms) is not int or turn.observed_at_ms <= 0:
         raise _invalid_proposal()
     try:
-        event_id = _canonical_nonzero_hex(turn.event_id, 16)
-        turn_id = _canonical_nonzero_hex(turn.turn_id, 16)
+        return FrozenTurn(
+            scope=canonical_scope,
+            event_id=_canonical_nonzero_hex(turn.event_id, 16),
+            turn_id=_canonical_nonzero_hex(turn.turn_id, 16),
+            base_revision=turn.base_revision,
+            observed_at_ms=turn.observed_at_ms,
+        )
     except (TypeError, ValueError):
         raise _invalid_proposal() from None
-    return FrozenTurn(
-        scope=canonical_scope,
-        turn_id=turn_id,
-        event_id=event_id,
-        base_revision=turn.base_revision,
-        observed_at_ms=turn.observed_at_ms,
-    )
-
-
-def _validate_scope(scope: ScopeTokens) -> ScopeTokens:
-    return _canonical_scope(scope)
-
-
-def _validate_turn(scope: ScopeTokens, turn: FrozenTurn) -> FrozenTurn:
-    return _canonical_turn(scope, turn)
 
 
 def make_request_nonce_digest(
@@ -337,33 +581,14 @@ def make_request_nonce_digest(
     *,
     entropy: bytes | None = None,
 ) -> str:
-    """Create the deterministic nonce binding for one frozen request.
+    """Bind scope, event, turn, semantic base revision, and observed time."""
 
-    ``entropy`` remains an accepted, validated keyword for source compatibility
-    with the first SPC1 draft, but it is intentionally not included in the
-    digest.  The bridge must be able to recompute this value from the fixed
-    scope/turn facts alone; a random salt would make an otherwise closed
-    proposal unverifiable at that boundary.
-    """
-
-    canonical_scope = _validate_scope(scope)
-    canonical_turn = _validate_turn(canonical_scope, turn)
-    if entropy is not None and (not isinstance(entropy, bytes) or not entropy):
+    canonical_scope = _canonical_scope(scope)
+    canonical_turn = _canonical_turn(canonical_scope, turn)
+    if entropy is not None and (type(entropy) is not bytes or not entropy):
         raise _invalid_proposal()
-    # Hex tokens are byte identities; canonicalize from decoded bytes so no
-    # overridable ``str.lower`` implementation can alter the bound bytes.
-    scope_binding = {
-        "bot_token": canonical_scope.bot_token,
-        "persona_token": canonical_scope.persona_token,
-        "relation_token": (
-            canonical_scope.relation_token
-            if canonical_scope.relation_token is not None
-            else None
-        ),
-        "session_token": canonical_scope.session_token,
-    }
     binding = {
-        "scope": scope_binding,
+        "scope": canonical_scope.scope_json(),
         "event_id": canonical_turn.event_id,
         "turn_id": canonical_turn.turn_id,
         "base_revision": canonical_turn.base_revision,
@@ -373,30 +598,25 @@ def make_request_nonce_digest(
         _NONCE_DOMAIN + b"\x00" + _canonical_json(binding)
     ).hexdigest()
     if digest == "00" * 32:
-        # Cryptographically unreachable for SHA-256, but preserve the
-        # nonzero contract even if a test replaces the hash implementation.
-        digest = hashlib.sha256(_NONCE_DOMAIN + b"\x01" + _canonical_json(binding)).hexdigest()
+        digest = hashlib.sha256(
+            _NONCE_DOMAIN + b"\x01" + _canonical_json(binding)
+        ).hexdigest()
     return digest
 
 
-request_nonce_digest = make_request_nonce_digest
+def _validate_dimension_map(value: Any) -> dict[str, int]:
+    if type(value) is not dict or set(value) != set(DIMENSION_NAMES):
+        raise _invalid_proposal()
+    dimensions: dict[str, int] = {}
+    for name in DIMENSION_NAMES:
+        item = value[name]
+        if type(item) is not int or not 0 <= item <= FXP6_SCALE:
+            raise _invalid_proposal()
+        dimensions[name] = item
+    return dimensions
 
 
-def _normalise_nonce(value: Any) -> str:
-    try:
-        return _canonical_nonzero_hex(value, 32)
-    except (TypeError, ValueError):
-        raise _invalid_proposal() from None
-
-
-def _scope_from_binding_value(value: ScopeTokens | Mapping[str, Any]) -> ScopeTokens:
-    return _canonical_scope(value)
-
-
-def _validate_nonce_binding(
-    scope: ScopeTokens,
-    payload: Mapping[str, Any],
-) -> None:
+def _validate_proposal_nonce(scope: ScopeTokens, payload: Mapping[str, Any]) -> None:
     turn = FrozenTurn(
         scope=scope,
         event_id=payload["event_id"],
@@ -404,78 +624,10 @@ def _validate_nonce_binding(
         base_revision=payload["base_revision"],
         observed_at_ms=payload["observed_at_ms"],
     )
-    expected = make_request_nonce_digest(scope, turn)
-    actual = payload["request_nonce_digest"]
-    if not hmac.compare_digest(actual, expected):
+    if not hmac.compare_digest(
+        payload["request_nonce_digest"], make_request_nonce_digest(scope, turn)
+    ):
         raise _invalid_proposal()
-
-
-def _validate_perception_proposal(
-    value: Any,
-    *,
-    scope: ScopeTokens | Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Validate and canonicalize the exact native ``PerceptionProposalV1``."""
-
-    if type(value) is str:
-        try:
-            payload = json.loads(
-                value,
-                parse_constant=_reject_json_constant,
-                object_pairs_hook=_pairs_without_duplicates,
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            raise _invalid_proposal() from None
-    else:
-        payload = value
-    if type(payload) is not dict or any(type(key) is not str for key in payload):
-        raise _invalid_proposal()
-    if set(payload) != set(PROPOSAL_FIELDS):
-        raise _invalid_proposal()
-
-    schema = payload.get("schema_version")
-    protocol = payload.get("protocol_version")
-    if not _is_raw_integer(schema) or schema != 1:
-        raise _invalid_proposal()
-    if not _is_raw_integer(protocol) or protocol != 1:
-        raise _invalid_proposal()
-
-    try:
-        event_id = _canonical_nonzero_hex(payload.get("event_id"), 16)
-        turn_id = _canonical_nonzero_hex(payload.get("turn_id"), 16)
-    except (TypeError, ValueError):
-        raise _invalid_proposal() from None
-
-    observed_at_ms = payload.get("observed_at_ms")
-    base_revision = payload.get("base_revision")
-    if not _is_raw_integer(observed_at_ms) or observed_at_ms <= 0:
-        raise _invalid_proposal()
-    if not _is_raw_integer(base_revision) or base_revision < 0:
-        raise _invalid_proposal()
-
-    try:
-        dimensions = _validate_dimension_map(payload.get("dimensions"))
-    except SemanticEstimateError:
-        raise _invalid_proposal() from None
-    try:
-        confidence = _validate_confidence(payload.get("estimator_confidence"))
-    except SemanticEstimateError:
-        raise _invalid_proposal() from None
-    nonce = _normalise_nonce(payload.get("request_nonce_digest"))
-    canonical = {
-        "schema_version": 1,
-        "event_id": event_id,
-        "turn_id": turn_id,
-        "observed_at_ms": observed_at_ms,
-        "base_revision": base_revision,
-        "dimensions": {name: dimensions[name] for name in DIMENSION_NAMES},
-        "estimator_confidence": confidence,
-        "protocol_version": 1,
-        "request_nonce_digest": nonce,
-    }
-    if scope is not None:
-        _validate_nonce_binding(_scope_from_binding_value(scope), canonical)
-    return canonical
 
 
 def validate_perception_proposal(
@@ -483,56 +635,58 @@ def validate_perception_proposal(
     *,
     scope: ScopeTokens | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Fail closed for malformed or adversarial mapping implementations."""
+    """Validate and canonicalize the exact native PerceptionProposalV1 ABI."""
 
     try:
-        return _validate_perception_proposal(value, scope=scope)
+        if type(value) is str:
+            payload = json.loads(
+                value,
+                parse_constant=_reject_json_constant,
+                object_pairs_hook=_pairs_without_duplicates,
+            )
+        else:
+            payload = value
+        if type(payload) is not dict or any(type(key) is not str for key in payload):
+            raise _invalid_proposal()
+        if set(payload) != set(PROPOSAL_FIELDS):
+            raise _invalid_proposal()
+        if payload["schema_version"] != 1 or payload["protocol_version"] != 1:
+            raise _invalid_proposal()
+        if (
+            type(payload["schema_version"]) is not int
+            or type(payload["protocol_version"]) is not int
+        ):
+            raise _invalid_proposal()
+        event_id = _canonical_nonzero_hex(payload["event_id"], 16)
+        turn_id = _canonical_nonzero_hex(payload["turn_id"], 16)
+        observed_at_ms = payload["observed_at_ms"]
+        base_revision = payload["base_revision"]
+        if type(observed_at_ms) is not int or observed_at_ms <= 0:
+            raise _invalid_proposal()
+        if type(base_revision) is not int or base_revision < 0:
+            raise _invalid_proposal()
+        confidence = payload["estimator_confidence"]
+        if type(confidence) is not int or not 1 <= confidence <= FXP6_SCALE:
+            raise _invalid_proposal()
+        nonce = _canonical_nonzero_hex(payload["request_nonce_digest"], 32)
+        canonical = {
+            "schema_version": 1,
+            "event_id": event_id,
+            "turn_id": turn_id,
+            "observed_at_ms": observed_at_ms,
+            "base_revision": base_revision,
+            "dimensions": _validate_dimension_map(payload["dimensions"]),
+            "estimator_confidence": confidence,
+            "protocol_version": 1,
+            "request_nonce_digest": nonce,
+        }
+        if scope is not None:
+            _validate_proposal_nonce(_canonical_scope(scope), canonical)
+        return canonical
     except SemanticProposalError:
         raise
-    except BaseException:
-        raise SemanticProposalError() from None
-
-
-validate_proposal = validate_perception_proposal
-
-
-def build_perception_proposal(
-    *,
-    scope: ScopeTokens,
-    turn: FrozenTurn,
-    estimate: SemanticEstimate | Mapping[str, Any],
-    base_revision: int,
-    nonce_digest: str,
-) -> dict[str, Any]:
-    """Bind a validated local estimate to opaque turn facts for native use."""
-
-    canonical_scope = _validate_scope(scope)
-    canonical_turn = _validate_turn(canonical_scope, turn)
-    if not _is_raw_integer(base_revision) or base_revision < 0:
-        raise _invalid_proposal()
-    if base_revision != canonical_turn.base_revision:
-        raise _invalid_proposal()
-    if isinstance(estimate, SemanticEstimate):
-        canonical_estimate = estimate
-    else:
-        try:
-            canonical_estimate = parse_estimator_output(estimate)
-        except SemanticEstimateError:
-            raise _invalid_proposal() from None
-    proposal = {
-        "schema_version": 1,
-        "event_id": canonical_turn.event_id,
-        "turn_id": canonical_turn.turn_id,
-        "observed_at_ms": canonical_turn.observed_at_ms,
-        "base_revision": base_revision,
-        "dimensions": {
-            name: canonical_estimate.dimensions[name] for name in DIMENSION_NAMES
-        },
-        "estimator_confidence": canonical_estimate.estimator_confidence,
-        "protocol_version": 1,
-        "request_nonce_digest": nonce_digest,
-    }
-    return validate_perception_proposal(proposal, scope=canonical_scope)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise _invalid_proposal() from None
 
 
 def proposal_to_json(
@@ -540,7 +694,7 @@ def proposal_to_json(
     *,
     scope: ScopeTokens | Mapping[str, Any] | None = None,
 ) -> str:
-    """Return canonical closed JSON suitable for the PyO3 boundary."""
+    """Serialize only the canonical, closed shared ABI JSON."""
 
     canonical = validate_perception_proposal(proposal, scope=scope)
     try:
@@ -555,46 +709,124 @@ def proposal_to_json(
         raise _invalid_proposal() from None
 
 
-class SemanticEstimator:
-    """One-call adapter for a request-local provider/estimator function."""
+def build_perception_proposal_v3(
+    *,
+    scope: ScopeTokens,
+    turn: FrozenTurn,
+    estimate: SemanticEstimateV3 | Mapping[str, Any] | str,
+    base_revision: int,
+    nonce_digest: str,
+) -> dict[str, Any]:
+    """Reduce one complete V3 estimate to the shared 15D proposal exactly."""
 
-    def __init__(self, provider: EstimatorProvider) -> None:
-        self._provider = provider
+    try:
+        canonical_scope = _canonical_scope(scope)
+        canonical_turn = _canonical_turn(canonical_scope, turn)
+        if (
+            type(base_revision) is not int
+            or base_revision != canonical_turn.base_revision
+        ):
+            raise _invalid_proposal()
+        canonical_estimate = (
+            estimate
+            if type(estimate) is SemanticEstimateV3
+            else parse_estimator_output_v3(estimate)
+        )
+        dimensions: dict[str, int] = {}
+        confidences: list[int] = []
+        for name in DIMENSION_NAMES:
+            slot = canonical_estimate.dimensions[name]
+            if slot.state == UNAVAILABLE:
+                raise SemanticProposalError("SEMANTIC_VECTOR_UNAVAILABLE")
+            dimensions[name] = slot.intensity_fxp6 if slot.state == PRESENT else 0
+            confidences.append(slot.confidence_fxp6)
+        confidence = min(confidences)
+        if confidence == 0:
+            raise SemanticProposalError("ESTIMATOR_UNCERTAIN")
+        proposal = {
+            "schema_version": 1,
+            "event_id": canonical_turn.event_id,
+            "turn_id": canonical_turn.turn_id,
+            "observed_at_ms": canonical_turn.observed_at_ms,
+            "base_revision": base_revision,
+            "dimensions": dimensions,
+            "estimator_confidence": confidence,
+            "protocol_version": 1,
+            "request_nonce_digest": nonce_digest,
+        }
+        return validate_perception_proposal(proposal, scope=canonical_scope)
+    except SemanticProposalError:
+        raise
+    except SemanticEstimateError as exc:
+        raise SemanticProposalError(exc.code) from None
+    except BaseException:
+        raise _invalid_proposal() from None
 
-    async def estimate(self, request_text: str) -> SemanticEstimate:
-        if not isinstance(request_text, str):
-            raise SemanticEstimateError("ESTIMATOR_MALFORMED")
-        provider = self._provider
-        if not callable(provider):
-            candidate = getattr(provider, "estimate", None)
-            if not callable(candidate):
-                raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE")
-            provider = candidate
+
+def build_contextual_estimator_request(
+    *,
+    request_text: str,
+    binding: ContextBindingV1 | Mapping[str, Any],
+    summary: Any,
+) -> dict[str, Any]:
+    """Build the sole provider mapping after every opaque binding validates."""
+
+    if type(request_text) is not str:
+        raise SemanticEstimateError("EMPTY_REQUEST")
+    try:
+        canonical_summary = validate_context_summary(summary, expected_binding=binding)
+        schema = copy.deepcopy(SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA)
+        return {
+            "current_turn_text": request_text,
+            "system_prompt": SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
+            "structured_schema": schema,
+            "input": {"context_summary": canonical_summary},
+        }
+    except SemanticEstimateError:
+        raise
+    except BaseException:
+        raise SemanticEstimateError("ESTIMATOR_MALFORMED") from None
+
+
+async def estimate_context_bound(
+    provider: Callable[[Mapping[str, Any]], Any] | Any,
+    request_text: str,
+    *,
+    binding: ContextBindingV1 | Mapping[str, Any],
+    summary: Any,
+) -> SemanticEstimateV3:
+    """Call the provider exactly once with only the closed contextual mapping."""
+
+    request = build_contextual_estimator_request(
+        request_text=request_text,
+        binding=binding,
+        summary=summary,
+    )
+    callable_provider = provider
+    if not callable(callable_provider):
         try:
-            # Deliberately pass only the current request text.  No kwargs for
-            # tools/history/context can accidentally cross this seam.
-            result = provider(request_text)
-            if inspect.isawaitable(result):
-                result = await result
-        except asyncio.CancelledError:
+            callable_provider = getattr(callable_provider, "estimate", None)
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
             raise
         except BaseException:
             raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE") from None
-        try:
-            return parse_estimator_output(result)
-        except SemanticEstimateError as exc:
-            if exc.code != "INVALID_ESTIMATE":
-                raise
-            raise SemanticEstimateError("ESTIMATOR_MALFORMED") from None
-
-    async def __call__(self, request_text: str) -> SemanticEstimate:
-        return await self.estimate(request_text)
-
-
-async def estimate_request(
-    provider: EstimatorProvider,
-    request_text: str,
-) -> SemanticEstimate:
-    """Convenience wrapper preserving the one-argument provider boundary."""
-
-    return await SemanticEstimator(provider).estimate(request_text)
+    if not callable(callable_provider):
+        raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE")
+    try:
+        result = callable_provider(request)
+        if inspect.isawaitable(result):
+            result = await result
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+        raise
+    except SemanticEstimateError:
+        raise
+    except BaseException:
+        raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE") from None
+    if type(result) is SemanticEstimateV3:
+        return result
+    try:
+        return parse_estimator_output_v3(result)
+    except SemanticEstimateError as exc:
+        if exc.code == "ESTIMATOR_MALFORMED":
+            raise
+        raise SemanticEstimateError("ESTIMATOR_MALFORMED") from None

@@ -5,49 +5,58 @@
 //! ensure_genesis -> deterministic no-op apply_event -> SQLite commit ->
 //! replay verification. Python cannot reach any of this state directly; the
 //! PyO3 surface exposes only coarse calls.
-//!
-//! The R7 compatibility implementation is deliberately crate-private; it is
-//! not a second production runtime authority.
-//!
-//! ```compile_fail
-//! use ae_runtime::r7::{AstrRuntime, R7PreOutputProjectionInputV1};
-//!
-//! let _ = std::any::TypeId::of::<AstrRuntime>();
-//! let _ = std::any::TypeId::of::<R7PreOutputProjectionInputV1>();
-//! ```
+
+mod n2_native_assembly;
+mod r7;
+mod semantic;
+pub mod semantic_dynamics_v2;
+mod semantic_telemetry_v1;
+
+pub use semantic::{
+    ExpressionProfileFxP6, ExpressionProjectionV1, NodeObservabilityComponentV1,
+    NodeObservabilityCountsV1, NodeObservabilityProjectionWireV2, NodeObservabilityRegionV1,
+    NodeObservabilityResidualStateV1, NodeObservabilityResidualsV1,
+};
 
 use ae_agent::noop_action_contract;
 use ae_authority::authority_projection_digest;
-use ae_continuum::{CommitEnvelope, ReplayReport};
-use ae_contracts::r7::{PerceptionProposalErrorV1, PerceptionProposalV1};
-use ae_contracts::{
-    wire, ActionContract, CanonicalEvent, CommitStatus, Digest, GenesisManifest, GenesisReceipt,
-    GenesisStatus, Id128, InvariantResiduals, PersonaGenesisRequest, ScopeRef, TransitionReceipt,
+use ae_context_projector::{
+    project_committed_receipt, ContextProjectionStateV1, ContextSummaryV1,
+    DeliveryOutcome as ContextDeliveryOutcome, ReceiptCommitStatus, ReceiptEnvelopeV1,
+    ReceiptValidationError, StoreError as ContextProjectorError, ValidatedCommittedReceiptV1,
 };
-use ae_fixed::Fixed;
+use ae_continuum::{CommitEnvelope, ReplayReport};
+use ae_contracts::{
+    hex, perception_dimension_values, wire, ActionContract, AllostaticSetpoints, CanonicalEvent,
+    CausalRef, CommitStatus, Digest, EpistemicPriors, ExpressionPhenotype, GenesisManifestProposal,
+    GenesisReceipt, GenesisStatus, Id128, InvariantResiduals, NativeTelemetryReceiptV1,
+    PerceptionProposalV1, PersonaGenesisRequest, PersonaScopeRef, PersonaSelectionKind,
+    PersonaSourceRef, PersonalityVector, ScopeRef, SemanticEstimate, SocialPriors, StateSubcodeV1,
+    TransitionReceipt, TransitionReceiptV2, UserStimulus,
+};
 use ae_neurofield::{
-    graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph, Synapse,
-    EDGE_CAPACITY, NEURON_SLOTS,
+    graph_digest, initial_state_from_manifest, state_digest, NeuralField, SparseGraph,
 };
 use ae_store::{
-    ClaimOutcome, GenesisCommit, R7PolicyBindingKeyV1, R7PolicyCommitOutcomeV1,
-    R7PolicyValidationContextV1, R7PublicPolicyBundleV1, StatefulCommit, Store, StoreError,
+    phase0_formula_transition_delta_v1, ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1,
+    ContinuityCommitOutcomeV1, GenesisCommit, GraphCommitV1, LegacySemanticFieldDomainUpgradeV1,
+    LegacySemanticFormulaUpgradeReceiptV1, R7PolicyBindingKeyV1, R7PolicyCommitOutcomeV1,
+    R7PolicyValidationContextV1, R7PublicPolicyBundleV1, RebirthChildStageRequestV1,
+    RebirthCommitPermitV1, RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1,
+    RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, SeedClearCommitPermitV1,
+    SeedConfigAckResultV1, SeedConfigLifecycleError, SeedConfigPreflightV1,
+    SeedConfigReconcileRequestV1, SeedConfigReconcileResultV1, SeedConfigStateV1,
+    SeedConfigWritebackAckV1, SemanticOutboxCryptoError, SemanticOutboxCryptoStatusV1,
+    SemanticOutboxCryptoStatusValueV1, SemanticOutboxKeyAuthorityV1, SnapshotCommitV1, Store,
+    StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1,
+    LEGACY_FIELD_FXP6_SCALE, SEMANTIC_LANE_NAMESPACE_DOMAIN_V1, SEMANTIC_OUTBOX_KEY_VERSION_V1,
+    SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1, SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1,
+    SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
 };
-use std::path::Path;
+use sha2::{Digest as Sha2Digest, Sha256};
+use std::path::{Path, PathBuf};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
-
-mod n2_native_assembly;
-/// Native R7 compatibility projection is an implementation detail of the
-/// durable root runtime, never an alternate production authority.
-#[cfg_attr(not(test), allow(dead_code, unused_imports))]
-mod r7;
-
-const CANONICAL_HOT_STATE_MAGIC_V1: [u8; 8] = *b"AEHOTST\0";
-const CANONICAL_HOT_STATE_SCHEMA_V1: u16 = 1;
-const CANONICAL_HOT_STATE_VECTOR_COUNT: usize = 8;
-const SYNAPSE_WIRE_BYTES: usize = 16;
-const R7_SEMANTIC_PERSONA_SCOPE_DOMAIN_V1: &[u8] =
-    b"astr-embodiment/runtime/r7-semantic-persona-scope-v1";
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -55,6 +64,10 @@ pub enum RuntimeError {
     Store(#[from] StoreError),
     #[error("genesis error: {0}")]
     Genesis(#[from] ae_genesis::GenesisError),
+    #[error("rebirth lifecycle error: {0}")]
+    Rebirth(#[from] RebirthLifecycleError),
+    #[error("seed configuration lifecycle error: {0}")]
+    SeedConfig(#[from] SeedConfigLifecycleError),
     #[error("persona genesis is required before production events")]
     PersonaGenesisRequired,
     #[error("event persona does not match the bound incarnation")]
@@ -68,23 +81,90 @@ pub enum RuntimeError {
     #[error("runtime is closed")]
     Closed,
     #[error("invalid neural state")]
-    InvalidNeuralState,
-    #[error("private projection unavailable")]
+    InvalidNeuralState(StateSubcodeV1),
+    #[error("private R7 projection unavailable")]
     PrivateProjectionUnavailable,
-    #[error("invalid perception proposal")]
+    #[error("invalid closed semantic perception proposal")]
     InvalidPerceptionProposal,
-    #[error("invalid perception scope")]
+    #[error("invalid semantic perception scope")]
     InvalidPerceptionScope,
-    #[error("semantic proposal identity conflicts with a committed event")]
+    #[error("semantic event identity conflicts with a committed proposal")]
     SemanticIdentityConflict,
     #[error("semantic revision overflow")]
     SemanticRevisionOverflow,
-    #[error("semantic transition did not change state")]
-    SemanticStateUnchanged,
+    #[error("legacy semantic snapshot has no v2 attestation")]
+    LegacyUnattested,
+    #[error("context receipt validation error: {0}")]
+    ContextReceipt(#[from] ReceiptValidationError),
+    #[error("context projection error: {0}")]
+    ContextProjection(#[from] ContextProjectorError),
+    #[error("committed event is missing its context projection")]
+    ContextCommitMissing,
+    #[error("context projection does not match its committed integrity fence")]
+    ContextCommitIntegrity,
 }
 
+impl RuntimeError {
+    pub const fn invalid_neural_state(subcode: StateSubcodeV1) -> Self {
+        Self::InvalidNeuralState(subcode)
+    }
+
+    /// Coarse, privacy-safe classification for the closed field migration
+    /// lane.  It supplements rather than replaces the established error code
+    /// and `state_subcode` surface.
+    pub fn migration_subcode_v1(&self) -> SemanticFieldMigrationSubcodeV1 {
+        match self {
+            Self::StaleCausalBase { .. } => SemanticFieldMigrationSubcodeV1::ConcurrentStale,
+            Self::LegacyUnattested => SemanticFieldMigrationSubcodeV1::RefusedStructure,
+            Self::InvalidNeuralState(StateSubcodeV1::FieldStateInvalid) => {
+                SemanticFieldMigrationSubcodeV1::RefusedRange
+            }
+            Self::Store(StoreError::FieldMigrationBackup { .. }) => {
+                SemanticFieldMigrationSubcodeV1::BackupFailed
+            }
+            Self::Store(StoreError::Io { context, .. })
+                if context.starts_with("field migration backup")
+                    || context.starts_with("opening field migration backup")
+                    || context.starts_with("reading field migration backup")
+                    || context.starts_with("creating field migration backup")
+                    || context.starts_with("writing field migration backup")
+                    || context.starts_with("syncing field migration backup")
+                    || context.starts_with("finalizing field migration backup") =>
+            {
+                SemanticFieldMigrationSubcodeV1::BackupFailed
+            }
+            Self::Store(StoreError::ContinuityFence(reason))
+                if reason.starts_with("field_backup") =>
+            {
+                SemanticFieldMigrationSubcodeV1::BackupFailed
+            }
+            Self::Store(StoreError::ContinuityFence(
+                "semantic_history_range" | "field_pe_range" | "field_nonpe_range" | "field_shape",
+            )) => SemanticFieldMigrationSubcodeV1::RefusedRange,
+            Self::Store(StoreError::ContinuityFence(
+                "field_transform" | "field_upgrade_transform",
+            )) => SemanticFieldMigrationSubcodeV1::TransformInvalid,
+            Self::Store(StoreError::ContinuityFence("field_upgrade_not_needed")) => {
+                SemanticFieldMigrationSubcodeV1::RefusedSource
+            }
+            Self::Store(StoreError::ContinuityFence(reason))
+                if reason.starts_with("semantic_") || reason.starts_with("field_upgrade") =>
+            {
+                SemanticFieldMigrationSubcodeV1::RefusedStructure
+            }
+            Self::Store(StoreError::Sqlite(_) | StoreError::Io { .. }) => {
+                SemanticFieldMigrationSubcodeV1::StorageFailed
+            }
+            Self::Store(_) => SemanticFieldMigrationSubcodeV1::Unknown,
+            _ => SemanticFieldMigrationSubcodeV1::Unknown,
+        }
+    }
+}
+
+/// Private R7 compatibility failures collapse at the release runtime boundary.
+/// The production semantic lane never receives an R7 wire or a second writer.
 impl From<r7::RuntimeError> for RuntimeError {
-    fn from(_error: r7::RuntimeError) -> Self {
+    fn from(_: r7::RuntimeError) -> Self {
         Self::PrivateProjectionUnavailable
     }
 }
@@ -94,44 +174,74 @@ pub struct ApplyDecision {
     pub contract: ActionContract,
     pub receipt: TransitionReceipt,
     pub revision: u64,
+    pub context_summary: ContextSummaryV1,
     /// True when this exact event had already been applied; the state was not
     /// changed and the returned receipt is the originally committed one.
     pub deduplicated: bool,
 }
 
-/// Closed result of the SPC1 native semantic ingress.  It intentionally has
-/// no action contract, private projection, wire bytes, callback, or payload.
 #[derive(Clone, Debug)]
 pub struct PerceptionProposalDecisionV1 {
     pub receipt: TransitionReceipt,
+    pub semantic_vector_receipt: Option<TransitionReceiptV2>,
+    pub semantic_telemetry_receipt: Option<NativeTelemetryReceiptV1>,
+    pub node_observability: Option<NodeObservabilityProjectionWireV2>,
     pub revision: u64,
     pub deduplicated: bool,
+    pub expression_projection: ExpressionProjectionV1,
+    pub availability: SemanticClosureAvailabilityV1,
+    /// Internal, closed migration telemetry; the bridge projects only the
+    /// fixed aggregate subcode while the native receipt remains durable
+    /// authority.
+    pub field_migration: Option<SemanticFieldMigrationOutcomeV1>,
+    /// Closed migration telemetry.  It never includes a source text, node
+    /// vector/index, scope, SeedCode, path, digest, or other secret.
+    pub migration_subcode: Option<SemanticFieldMigrationSubcodeV1>,
 }
 
-/// Result of the one supported production R7 semantic transition. Its receipt
-/// is always the root canonical receipt that was committed to SQLite. An exact
-/// retry returns no second one-shot wire.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct UserStimulusDecisionV1 {
-    pub(crate) receipt: TransitionReceipt,
-    pub(crate) revision: u64,
-    pub(crate) deduplicated: bool,
-    private_projection_wire: Option<r7::PrivateProjectionPayloadWireV1>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticFieldMigrationOutcomeV1 {
+    Applied,
+    Replayed,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-impl UserStimulusDecisionV1 {
-    pub(crate) fn discard_private_projection_v1(
-        mut self,
-    ) -> Result<Option<r7::PrivateProjectionTransferReceiptV1>, RuntimeError> {
-        let Some(mut wire) = self.private_projection_wire.take() else {
-            return Ok(None);
-        };
-        let transfer = wire
-            .begin_transfer_once_v1()
-            .map_err(|_| RuntimeError::PrivateProjectionUnavailable)?;
-        Ok(Some(r7::discard_private_projection_transfer_v1(transfer)))
+/// Fixed migration classification surface.  New values require a frozen
+/// contract revision; callers must treat unknown text as `Unknown`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticFieldMigrationSubcodeV1 {
+    Applied,
+    Replayed,
+    RefusedSource,
+    RefusedStructure,
+    RefusedRange,
+    TransformInvalid,
+    ConcurrentStale,
+    BackupFailed,
+    StorageFailed,
+    Unknown,
+}
+
+impl SemanticFieldMigrationSubcodeV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "FIELD_MIGRATION_APPLIED",
+            Self::Replayed => "FIELD_MIGRATION_REPLAYED",
+            Self::RefusedSource => "FIELD_MIGRATION_REFUSED_SOURCE",
+            Self::RefusedStructure => "FIELD_MIGRATION_REFUSED_STRUCTURE",
+            Self::RefusedRange => "FIELD_MIGRATION_REFUSED_RANGE",
+            Self::TransformInvalid => "FIELD_MIGRATION_TRANSFORM_INVALID",
+            Self::ConcurrentStale => "FIELD_MIGRATION_CONCURRENT_STALE",
+            Self::BackupFailed => "FIELD_MIGRATION_BACKUP_FAILED",
+            Self::StorageFailed => "FIELD_MIGRATION_STORAGE_FAILED",
+            Self::Unknown => "FIELD_MIGRATION_UNKNOWN",
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticClosureAvailabilityV1 {
+    Available,
+    UnavailableLegacy,
 }
 
 #[derive(Clone, Debug)]
@@ -149,465 +259,226 @@ pub struct InspectReport {
     pub observatory_genesis_unavailable: bool,
 }
 
+/// Outcome of optional R7 public-policy hydration.  Refusal is intentionally
+/// a stable G0-only result so malformed optional compatibility material cannot
+/// mutate the committed personality or the production semantic lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum R7HydrationOutcomeV1 {
-    /// No R7 state was changed; callers continue on the committed G0 lane.
     G0Only,
-    /// The public chain was accepted and durably CAS-recorded.  A later
-    /// producer may construct typed R7 state from this validated boundary.
     Validated { sequence: u64 },
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 struct HotBrain {
     bot_token: Id128,
     persona_token: Id128,
-    /// Legacy G0 events retain the root persona revision lane for compatibility.
-    legacy_persona_scope: Digest,
-    legacy_revision: u64,
-    /// The R7 semantic transition is deliberately separate from the G0 no-op
-    /// lane, while its event bytes and event digest stay root canonical.
     persona_scope: Digest,
     identity: ae_genesis::GenesisIdentity,
     formula_digest: Digest,
     field: NeuralField,
     graph: SparseGraph,
     initial_snapshot_digest: Digest,
+    revision: u64,
+    semantic_scope: Digest,
+    semantic_storage_scope: ScopeRef,
+    semantic_field: NeuralField,
+    semantic_graph: SparseGraph,
     semantic_revision: u64,
+    semantic_legacy_upgrade: Option<LegacySemanticUpgradeSource>,
+}
+
+#[derive(Clone, Copy)]
+struct LegacySemanticUpgradeSource {
+    source_formula_digest: Digest,
+    source_state_digest: Digest,
+    source_graph_digest: Digest,
+    prior_chain_digest: Digest,
+}
+
+type SemanticSnapshot = (
+    NeuralField,
+    SparseGraph,
+    Option<(TransitionReceipt, NativeTelemetryReceiptV1)>,
+);
+
+struct CommittedSemanticDecisionInput<'a> {
+    semantic_scope: &'a Digest,
+    semantic_storage_scope: &'a ScopeRef,
+    formula_digest: &'a Digest,
+    legacy_formula_digest: &'a Digest,
+    baseline_field: &'a NeuralField,
+    baseline_graph: &'a SparseGraph,
+    initial_snapshot_digest: Digest,
+    manifest_digest: &'a Digest,
+    development_seed_digest: &'a Digest,
+    event_digest: &'a Digest,
+    source_digest: Digest,
+    proposal: &'a PerceptionProposalV1,
+    deduplicated: bool,
+}
+
+struct LegacyAesem2FieldMigrationInput<'a> {
+    semantic_scope: &'a Digest,
+    semantic_storage_scope: &'a ScopeRef,
+    legacy_formula_digest: &'a Digest,
+    baseline_field: &'a NeuralField,
+    baseline_graph: &'a SparseGraph,
+    initial_snapshot_digest: Digest,
+    semantic_revision: u64,
+    source: Option<LegacySemanticUpgradeSource>,
+    field: &'a NeuralField,
+    graph: &'a SparseGraph,
 }
 
 pub struct AstrRuntime {
     store: Store,
     hot: Option<HotBrain>,
+    legacy_authority_database: PathBuf,
+    vault_root: PathBuf,
+    semantic_outbox_crypto: SemanticOutboxCryptoLaneV1,
 }
 
-fn fixed_zero_vector() -> InvariantResiduals {
-    InvariantResiduals::default()
+/// The runtime owns the opaque key handle and keeps authority-open failures
+/// isolated to the async lane.  Existing G0/runtime state stays available.
+enum SemanticOutboxCryptoLaneV1 {
+    Ready(SemanticOutboxKeyAuthorityV1),
+    Unavailable,
+    KeyVersionUnsupported,
 }
 
-fn r7_semantic_persona_scope(bot_token: &Id128, persona_token: &Id128) -> Digest {
-    let root_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-    wire::domain_hash(R7_SEMANTIC_PERSONA_SCOPE_DOMAIN_V1, &[&root_persona_scope])
-}
-
-struct HotStateCursor<'a> {
-    bytes: &'a [u8],
-    position: usize,
-}
-
-impl<'a> HotStateCursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
-    }
-
-    fn take(&mut self, count: usize) -> Result<&'a [u8], RuntimeError> {
-        let end = self
-            .position
-            .checked_add(count)
-            .filter(|end| *end <= self.bytes.len())
-            .ok_or(RuntimeError::InvalidNeuralState)?;
-        let value = &self.bytes[self.position..end];
-        self.position = end;
-        Ok(value)
-    }
-
-    fn read_u16(&mut self) -> Result<u16, RuntimeError> {
-        let mut bytes = [0; 2];
-        bytes.copy_from_slice(self.take(2)?);
-        Ok(u16::from_le_bytes(bytes))
-    }
-
-    fn read_u32(&mut self) -> Result<u32, RuntimeError> {
-        let mut bytes = [0; 4];
-        bytes.copy_from_slice(self.take(4)?);
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    fn read_fixed(&mut self) -> Result<Fixed, RuntimeError> {
-        let mut bytes = [0; 8];
-        bytes.copy_from_slice(self.take(8)?);
-        Ok(Fixed::decode(bytes))
-    }
-
-    fn ensure_available(&self, count: usize) -> Result<(), RuntimeError> {
-        self.position
-            .checked_add(count)
-            .filter(|end| *end <= self.bytes.len())
-            .ok_or(RuntimeError::InvalidNeuralState)
-            .map(|_| ())
-    }
-
-    fn is_at_eof(&self) -> bool {
-        self.position == self.bytes.len()
-    }
-}
-
-fn encode_hot_state_v1(
-    formula_digest: &Digest,
-    field: &NeuralField,
-    graph: &SparseGraph,
-) -> Vec<u8> {
-    let field_bytes = [
-        &field.potential,
-        &field.excitation,
-        &field.inhibition,
-        &field.adaptation,
-        &field.precision,
-        &field.prediction_error,
-        &field.eligibility,
-        &field.metabolic_reserve,
-    ]
-    .iter()
-    .try_fold(0usize, |total, values| {
-        values
-            .len()
-            .checked_mul(8)
-            .and_then(|value_bytes| value_bytes.checked_add(4))
-            .and_then(|section_bytes| total.checked_add(section_bytes))
-    })
-    .unwrap_or(0);
-    let graph_bytes = graph
-        .row_offsets
-        .len()
-        .checked_mul(4)
-        .and_then(|row_bytes| row_bytes.checked_add(4))
-        .and_then(|row_section| {
-            graph
-                .edges
-                .len()
-                .checked_mul(SYNAPSE_WIRE_BYTES)
-                .and_then(|edge_bytes| edge_bytes.checked_add(4))
-                .and_then(|edge_section| row_section.checked_add(edge_section))
-        })
-        .unwrap_or(0);
-    let capacity = CANONICAL_HOT_STATE_MAGIC_V1
-        .len()
-        .checked_add(2)
-        .and_then(|header| header.checked_add(formula_digest.len()))
-        .and_then(|header| header.checked_add(field_bytes))
-        .and_then(|header| header.checked_add(graph_bytes))
-        .unwrap_or(0);
-    let mut body = Vec::with_capacity(capacity);
-    body.extend_from_slice(&CANONICAL_HOT_STATE_MAGIC_V1);
-    body.extend_from_slice(&CANONICAL_HOT_STATE_SCHEMA_V1.to_le_bytes());
-    body.extend_from_slice(formula_digest);
-    for values in [
-        &field.potential,
-        &field.excitation,
-        &field.inhibition,
-        &field.adaptation,
-        &field.precision,
-        &field.prediction_error,
-        &field.eligibility,
-        &field.metabolic_reserve,
-    ] {
-        body.extend_from_slice(&(values.len() as u32).to_le_bytes());
-        for value in values {
-            body.extend_from_slice(&value.encode());
+impl SemanticOutboxCryptoLaneV1 {
+    fn open(storage_parent: &Path) -> Self {
+        match SemanticOutboxKeyAuthorityV1::open(storage_parent) {
+            Ok(authority) => Self::Ready(authority),
+            Err(SemanticOutboxCryptoError::KeyVersionUnsupported) => Self::KeyVersionUnsupported,
+            Err(
+                SemanticOutboxCryptoError::Unavailable
+                | SemanticOutboxCryptoError::PayloadAuthFailed,
+            ) => Self::Unavailable,
         }
     }
-    body.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
-    for offset in &graph.row_offsets {
-        body.extend_from_slice(&offset.to_le_bytes());
-    }
-    body.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
-    for edge in &graph.edges {
-        body.extend_from_slice(&edge.target.to_le_bytes());
-        body.extend_from_slice(&edge.weight.to_le_bytes());
-        body.extend_from_slice(&edge.eligibility.to_le_bytes());
-        body.extend_from_slice(&edge.stability.to_le_bytes());
-        body.extend_from_slice(&edge.last_used_epoch.to_le_bytes());
-        body.push(edge.operator_id);
-        body.push(edge.delay_class);
-        body.extend_from_slice(&edge.flags.to_le_bytes());
-    }
-    body
-}
 
-fn decode_hot_state_v1(
-    bytes: &[u8],
-    expected_formula_digest: &Digest,
-    expected_state_digest: &Digest,
-    expected_graph_digest: &Digest,
-) -> Result<(NeuralField, SparseGraph), RuntimeError> {
-    let mut cursor = HotStateCursor::new(bytes);
-    if cursor.take(CANONICAL_HOT_STATE_MAGIC_V1.len())? != CANONICAL_HOT_STATE_MAGIC_V1 {
-        return Err(RuntimeError::InvalidNeuralState);
-    }
-    if cursor.read_u16()? != CANONICAL_HOT_STATE_SCHEMA_V1 {
-        return Err(RuntimeError::InvalidNeuralState);
-    }
-    let mut formula_digest = [0; 32];
-    formula_digest.copy_from_slice(cursor.take(32)?);
-    if &formula_digest != expected_formula_digest {
-        return Err(RuntimeError::InvalidNeuralState);
-    }
-
-    let mut vectors = Vec::with_capacity(CANONICAL_HOT_STATE_VECTOR_COUNT);
-    for _ in 0..CANONICAL_HOT_STATE_VECTOR_COUNT {
-        let count =
-            usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
-        if count != NEURON_SLOTS {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-        cursor.ensure_available(
-            count
-                .checked_mul(8)
-                .ok_or(RuntimeError::InvalidNeuralState)?,
-        )?;
-        let mut values = Vec::with_capacity(count);
-        for _ in 0..count {
-            values.push(cursor.read_fixed()?);
-        }
-        vectors.push(values);
-    }
-
-    let row_count =
-        usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
-    if row_count != NEURON_SLOTS + 1 {
-        return Err(RuntimeError::InvalidNeuralState);
-    }
-    cursor.ensure_available(
-        row_count
-            .checked_mul(4)
-            .ok_or(RuntimeError::InvalidNeuralState)?,
-    )?;
-    let mut row_offsets = Vec::with_capacity(row_count);
-    for _ in 0..row_count {
-        row_offsets.push(cursor.read_u32()?);
-    }
-
-    let edge_count =
-        usize::try_from(cursor.read_u32()?).map_err(|_| RuntimeError::InvalidNeuralState)?;
-    if edge_count > EDGE_CAPACITY {
-        return Err(RuntimeError::InvalidNeuralState);
-    }
-    cursor.ensure_available(
-        edge_count
-            .checked_mul(SYNAPSE_WIRE_BYTES)
-            .ok_or(RuntimeError::InvalidNeuralState)?,
-    )?;
-    let mut edges = Vec::with_capacity(edge_count);
-    for _ in 0..edge_count {
-        let target = cursor.read_u32()?;
-        if usize::try_from(target).map_err(|_| RuntimeError::InvalidNeuralState)? >= NEURON_SLOTS {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-        let mut i16_bytes = [0; 2];
-        i16_bytes.copy_from_slice(cursor.take(2)?);
-        let weight = i16::from_le_bytes(i16_bytes);
-        i16_bytes.copy_from_slice(cursor.take(2)?);
-        let eligibility = i16::from_le_bytes(i16_bytes);
-        let mut u16_bytes = [0; 2];
-        u16_bytes.copy_from_slice(cursor.take(2)?);
-        let stability = u16::from_le_bytes(u16_bytes);
-        u16_bytes.copy_from_slice(cursor.take(2)?);
-        let last_used_epoch = u16::from_le_bytes(u16_bytes);
-        let operator_id = cursor.take(1)?[0];
-        let delay_class = cursor.take(1)?[0];
-        u16_bytes.copy_from_slice(cursor.take(2)?);
-        let flags = u16::from_le_bytes(u16_bytes);
-        edges.push(Synapse {
-            target,
-            weight,
-            eligibility,
-            stability,
-            last_used_epoch,
-            operator_id,
-            delay_class,
-            flags,
-        });
-    }
-    if !cursor.is_at_eof()
-        || row_offsets.first().copied() != Some(0)
-        || !row_offsets.windows(2).all(|pair| pair[0] <= pair[1])
-        || row_offsets
-            .iter()
-            .any(|offset| usize::try_from(*offset).map_or(true, |value| value > edge_count))
-    {
-        return Err(RuntimeError::InvalidNeuralState);
-    }
-
-    let mut vectors = vectors.into_iter();
-    let field = NeuralField {
-        potential: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        excitation: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        inhibition: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        adaptation: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        precision: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        prediction_error: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        eligibility: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-        metabolic_reserve: vectors.next().ok_or(RuntimeError::InvalidNeuralState)?,
-    };
-    let graph = SparseGraph { row_offsets, edges };
-    if !field.validate()
-        || !graph.validate()
-        || state_digest(&field, expected_formula_digest) != *expected_state_digest
-        || graph_digest(&graph) != *expected_graph_digest
-    {
-        return Err(RuntimeError::InvalidNeuralState);
-    }
-    Ok((field, graph))
-}
-
-fn encode_legacy_g0_state_1_0_4(field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for values in [
-        &field.potential,
-        &field.excitation,
-        &field.inhibition,
-        &field.adaptation,
-        &field.precision,
-        &field.prediction_error,
-        &field.eligibility,
-        &field.metabolic_reserve,
-    ] {
-        bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
-        for value in values {
-            bytes.extend_from_slice(&value.encode());
-        }
-    }
-    bytes.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
-    for offset in &graph.row_offsets {
-        bytes.extend_from_slice(&offset.to_le_bytes());
-    }
-    bytes.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
-    bytes
-}
-
-fn decode_root_g0_snapshot_v1(
-    bytes: &[u8],
-    formula_digest: &Digest,
-    expected_state_digest: &Digest,
-    expected_graph_digest: &Digest,
-    genesis_manifest: &GenesisManifest,
-    development_seed_digest: &Digest,
-) -> Result<(NeuralField, SparseGraph), RuntimeError> {
-    match decode_hot_state_v1(
-        bytes,
-        formula_digest,
-        expected_state_digest,
-        expected_graph_digest,
-    ) {
-        Ok(state) => Ok(state),
-        Err(RuntimeError::InvalidNeuralState)
-            if !bytes.starts_with(&CANONICAL_HOT_STATE_MAGIC_V1) =>
-        {
-            let (field, graph) = initial_state_from_manifest(
-                genesis_manifest,
-                formula_digest,
-                development_seed_digest,
-            );
-            if !field.validate()
-                || !graph.validate()
-                || state_digest(&field, formula_digest) != *expected_state_digest
-                || graph_digest(&graph) != *expected_graph_digest
-                || bytes != encode_legacy_g0_state_1_0_4(&field, &graph)
-            {
-                return Err(RuntimeError::InvalidNeuralState);
-            }
-            Ok((field, graph))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn canonical_event_from_r7(
-    event: &ae_contracts::r7::CanonicalEvent,
-) -> Result<CanonicalEvent, r7::RuntimeError> {
-    let ae_contracts::r7::CanonicalEvent::UserStimulus(stimulus) = event else {
-        return Err(r7::RuntimeError::UnsupportedEvent);
-    };
-    Ok(CanonicalEvent::UserStimulus(ae_contracts::UserStimulus {
-        event_id: stimulus.event_id,
-        scope: ScopeRef {
-            bot_token: stimulus.scope.bot_token,
-            persona_token: stimulus.scope.persona_token,
-            relation_token: stimulus.scope.relation_token,
-            session_token: stimulus.scope.session_token,
-        },
-        causal: ae_contracts::CausalRef {
-            turn_id: stimulus.causal.turn_id,
-            action_id: stimulus.causal.action_id,
-            delivery_id: stimulus.causal.delivery_id,
-            claim_id: stimulus.causal.claim_id,
-            base_revision: stimulus.causal.base_revision,
-        },
-        observed_at_ms: stimulus.observed_at_ms,
-        evidence: ae_contracts::SemanticEstimate {
-            schema_version: stimulus.evidence.schema_version,
-            dimensions: ae_contracts::EvidenceVector {
-                positive: stimulus.evidence.dimensions.positive,
-                affiliation: stimulus.evidence.dimensions.affiliation,
-                harm: stimulus.evidence.dimensions.harm,
-                boundary: stimulus.evidence.dimensions.boundary,
-                repair: stimulus.evidence.dimensions.repair,
-                repetition: stimulus.evidence.dimensions.repetition,
-                new_information: stimulus.evidence.dimensions.new_information,
-                constraint_instability: stimulus.evidence.dimensions.constraint_instability,
-                epistemic_conflict: stimulus.evidence.dimensions.epistemic_conflict,
-                self_responsibility: stimulus.evidence.dimensions.self_responsibility,
-                other_responsibility: stimulus.evidence.dimensions.other_responsibility,
-                hostility: stimulus.evidence.dimensions.hostility,
-                publicness: stimulus.evidence.dimensions.publicness,
-                engagement: stimulus.evidence.dimensions.engagement,
-                rejection: stimulus.evidence.dimensions.rejection,
+    const fn status_v1(&self) -> SemanticOutboxCryptoStatusV1 {
+        SemanticOutboxCryptoStatusV1 {
+            status: match self {
+                Self::Ready(authority) => authority.ready_status_v1().status,
+                Self::Unavailable => SemanticOutboxCryptoStatusValueV1::Unavailable,
+                Self::KeyVersionUnsupported => {
+                    SemanticOutboxCryptoStatusValueV1::KeyVersionUnsupported
+                }
             },
-            estimator_confidence: stimulus.evidence.estimator_confidence,
-            estimator_digest: stimulus.evidence.estimator_digest,
-        },
-    }))
-}
+            key_version: SEMANTIC_OUTBOX_KEY_VERSION_V1,
+        }
+    }
 
-fn r7_scope_from_root(scope: &ScopeRef) -> ae_contracts::r7::ScopeRef {
-    ae_contracts::r7::ScopeRef {
-        bot_token: scope.bot_token,
-        persona_token: scope.persona_token,
-        relation_token: scope.relation_token,
-        session_token: scope.session_token,
+    fn seal_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        match self {
+            Self::Ready(authority) => authority.seal_v1(key_version, caller_aad, plaintext),
+            Self::Unavailable => Err(SemanticOutboxCryptoError::Unavailable),
+            Self::KeyVersionUnsupported => Err(SemanticOutboxCryptoError::KeyVersionUnsupported),
+        }
+    }
+
+    fn open_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        envelope: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        match self {
+            Self::Ready(authority) => authority.open_v1(key_version, caller_aad, envelope),
+            Self::Unavailable => Err(SemanticOutboxCryptoError::Unavailable),
+            Self::KeyVersionUnsupported => Err(SemanticOutboxCryptoError::KeyVersionUnsupported),
+        }
     }
 }
 
-fn r7_perception_event(
-    scope: &ScopeRef,
-    proposal: &PerceptionProposalV1,
-    estimator_digest: Digest,
-) -> ae_contracts::r7::CanonicalEvent {
-    ae_contracts::r7::CanonicalEvent::UserStimulus(ae_contracts::r7::UserStimulus {
-        event_id: proposal.event_id,
-        scope: r7_scope_from_root(scope),
-        causal: ae_contracts::r7::CausalRef {
-            turn_id: proposal.turn_id,
-            action_id: None,
-            delivery_id: None,
-            claim_id: None,
-            base_revision: proposal.base_revision,
-        },
-        observed_at_ms: proposal.observed_at_ms,
-        evidence: ae_contracts::r7::SemanticEstimate {
-            schema_version: proposal.schema_version,
-            dimensions: ae_contracts::r7::EvidenceVector {
-                positive: proposal.dimensions.positive,
-                affiliation: proposal.dimensions.affiliation,
-                harm: proposal.dimensions.harm,
-                boundary: proposal.dimensions.boundary,
-                repair: proposal.dimensions.repair,
-                repetition: proposal.dimensions.repetition,
-                new_information: proposal.dimensions.new_information,
-                constraint_instability: proposal.dimensions.constraint_instability,
-                epistemic_conflict: proposal.dimensions.epistemic_conflict,
-                self_responsibility: proposal.dimensions.self_responsibility,
-                other_responsibility: proposal.dimensions.other_responsibility,
-                hostility: proposal.dimensions.hostility,
-                publicness: proposal.dimensions.publicness,
-                engagement: proposal.dimensions.engagement,
-                rejection: proposal.dimensions.rejection,
-            },
-            estimator_confidence: proposal.estimator_confidence,
-            estimator_digest,
-        },
-    })
+fn continuity_scope(scope: &ScopeRef) -> Digest {
+    wire::persona_scope_digest(
+        &scope.bot_token,
+        &scope.persona_token,
+        scope.relation_token.as_ref(),
+    )
+}
+
+fn persona_scope_ref(bot_token: Id128, persona_token: Id128) -> ScopeRef {
+    ScopeRef {
+        bot_token,
+        persona_token,
+        relation_token: None,
+        session_token: [0; 16],
+    }
+}
+
+const REQUEST_NONCE_BINDING_DOMAIN_V1: &[u8] = b"astr-embodiment/spc1-request-nonce-binding-v1";
+
+fn canonical_request_nonce_digest_v1(scope: &ScopeRef, proposal: &PerceptionProposalV1) -> Digest {
+    let relation_token = scope
+        .relation_token
+        .as_ref()
+        .map(|token| format!("\"{}\"", hex::encode16(token)))
+        .unwrap_or_else(|| "null".to_owned());
+    let scope_json = format!(
+        "{{\"bot_token\":\"{}\",\"persona_token\":\"{}\",\"relation_token\":{},\"session_token\":\"{}\"}}",
+        hex::encode16(&scope.bot_token),
+        hex::encode16(&scope.persona_token),
+        relation_token,
+        hex::encode16(&scope.session_token),
+    );
+    let binding_json = format!(
+        "{{\"base_revision\":{},\"event_id\":\"{}\",\"observed_at_ms\":{},\"scope\":{},\"turn_id\":\"{}\"}}",
+        proposal.base_revision,
+        hex::encode16(&proposal.event_id),
+        proposal.observed_at_ms,
+        scope_json,
+        hex::encode16(&proposal.turn_id),
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(REQUEST_NONCE_BINDING_DOMAIN_V1);
+    hasher.update([0]);
+    hasher.update(binding_json.as_bytes());
+    let digest: Digest = hasher.finalize().into();
+    if digest != [0; 32] {
+        return digest;
+    }
+    let mut fallback = Sha256::new();
+    fallback.update(REQUEST_NONCE_BINDING_DOMAIN_V1);
+    fallback.update([1]);
+    fallback.update(binding_json.as_bytes());
+    fallback.finalize().into()
+}
+
+fn request_nonce_binding_matches_v1(scope: &ScopeRef, proposal: &PerceptionProposalV1) -> bool {
+    canonical_request_nonce_digest_v1(scope, proposal)
+        .ct_eq(&proposal.request_nonce_digest)
+        .into()
+}
+
+fn semantic_storage_scope(
+    bot_token: Id128,
+    persona_token: Id128,
+    incarnation_id: &Digest,
+    formula_digest: &Digest,
+) -> ScopeRef {
+    let root_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
+    let binding = wire::domain_hash(
+        SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
+        &[&root_scope, incarnation_id, formula_digest],
+    );
+    let mut relation_token = [0; 16];
+    relation_token.copy_from_slice(&binding[..16]);
+    let mut session_token = [0; 16];
+    session_token.copy_from_slice(&binding[16..]);
+    ScopeRef {
+        bot_token,
+        persona_token,
+        relation_token: Some(relation_token),
+        session_token,
+    }
 }
 
 fn validate_perception_scope(scope: &ScopeRef) -> Result<(), RuntimeError> {
@@ -625,37 +496,118 @@ fn validate_perception_scope(scope: &ScopeRef) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn map_perception_proposal_error(_error: PerceptionProposalErrorV1) -> RuntimeError {
-    RuntimeError::InvalidPerceptionProposal
+fn perception_nonzero_dimension_count(proposal: &PerceptionProposalV1) -> u8 {
+    perception_dimension_values(&proposal.dimensions)
+        .into_iter()
+        .filter(|value| *value != ae_fixed::Fixed::ZERO)
+        .count() as u8
 }
 
-fn map_semantic_prepare_error(error: r7::RuntimeError) -> RuntimeError {
-    match error {
-        r7::RuntimeError::InvalidNeuralField
-        | r7::RuntimeError::InvalidSparseGraph
-        | r7::RuntimeError::NativeFormulaDigestMismatch => RuntimeError::InvalidNeuralState,
-        r7::RuntimeError::InvalidUserStimulus | r7::RuntimeError::InvalidSemanticEstimate => {
-            RuntimeError::InvalidPerceptionProposal
-        }
-        r7::RuntimeError::NativeStateUnchanged => RuntimeError::SemanticStateUnchanged,
-        r7::RuntimeError::RevisionOverflow => RuntimeError::SemanticRevisionOverflow,
-        r7::RuntimeError::UnsupportedEvent => RuntimeError::UnsupportedEvent("user_stimulus"),
-        _ => RuntimeError::InvalidPerceptionProposal,
+fn semantic_event(
+    storage_scope: &ScopeRef,
+    proposal: &PerceptionProposalV1,
+    estimator_digest: Digest,
+) -> CanonicalEvent {
+    CanonicalEvent::UserStimulus(UserStimulus {
+        event_id: proposal.event_id,
+        scope: storage_scope.clone(),
+        causal: CausalRef {
+            turn_id: proposal.turn_id,
+            action_id: None,
+            delivery_id: None,
+            claim_id: None,
+            base_revision: proposal.base_revision,
+        },
+        observed_at_ms: proposal.observed_at_ms,
+        evidence: SemanticEstimate {
+            schema_version: proposal.schema_version,
+            dimensions: proposal.dimensions.clone(),
+            estimator_confidence: proposal.estimator_confidence,
+            estimator_digest,
+        },
+    })
+}
+
+fn fully_confident_personality() -> PersonalityVector {
+    PersonalityVector {
+        baseline_warmth: ae_fixed::Fixed::ONE,
+        baseline_patience: ae_fixed::Fixed::ONE,
+        sensitivity: ae_fixed::Fixed::ONE,
+        irritability: ae_fixed::Fixed::ONE,
+        composure: ae_fixed::Fixed::ONE,
+        epistemic_pride: ae_fixed::Fixed::ONE,
+        epistemic_openness: ae_fixed::Fixed::ONE,
+        boundary_strength: ae_fixed::Fixed::ONE,
+        forgiveness: ae_fixed::Fixed::ONE,
+        attachment_propensity: ae_fixed::Fixed::ONE,
+        expression_drive: ae_fixed::Fixed::ONE,
+        curiosity: ae_fixed::Fixed::ONE,
+    }
+}
+
+fn seed_clear_trait(intent_id: &Digest, label: &[u8]) -> ae_fixed::Fixed {
+    let digest = wire::domain_hash(
+        b"astr-embodiment/seed-config-clear-neutral-trait-v1",
+        &[intent_id, label],
+    );
+    let sample = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    // Keep the regenerated baseline inside the ordinary [0.15, 0.85] range.
+    // It is born from the dedicated seed-clear intent rather than from any
+    // parent phenotype, semantic state, dialogue or context history.
+    ae_fixed::Fixed::from_raw(150_000 + i64::from(sample % 700_001))
+}
+
+fn seed_clear_personality_from_intent(permit: &SeedClearCommitPermitV1) -> PersonalityVector {
+    PersonalityVector {
+        baseline_warmth: seed_clear_trait(&permit.intent_id, b"baseline_warmth"),
+        baseline_patience: seed_clear_trait(&permit.intent_id, b"baseline_patience"),
+        sensitivity: seed_clear_trait(&permit.intent_id, b"sensitivity"),
+        irritability: seed_clear_trait(&permit.intent_id, b"irritability"),
+        composure: seed_clear_trait(&permit.intent_id, b"composure"),
+        epistemic_pride: seed_clear_trait(&permit.intent_id, b"epistemic_pride"),
+        epistemic_openness: seed_clear_trait(&permit.intent_id, b"epistemic_openness"),
+        boundary_strength: seed_clear_trait(&permit.intent_id, b"boundary_strength"),
+        forgiveness: seed_clear_trait(&permit.intent_id, b"forgiveness"),
+        attachment_propensity: seed_clear_trait(&permit.intent_id, b"attachment_propensity"),
+        expression_drive: seed_clear_trait(&permit.intent_id, b"expression_drive"),
+        curiosity: seed_clear_trait(&permit.intent_id, b"curiosity"),
     }
 }
 
 impl AstrRuntime {
     pub fn open(path: &Path) -> Result<Self, RuntimeError> {
+        let legacy_authority_database = path.to_path_buf();
+        let storage_parent = path.parent().ok_or(RebirthLifecycleError::LocatorInvalid)?;
+        std::fs::create_dir_all(storage_parent).map_err(|source| {
+            RuntimeError::Store(StoreError::Io {
+                context: "creating runtime storage directory",
+                source,
+            })
+        })?;
+        let vault_root = storage_parent.join("continuity-vault");
+        let lifecycle = VaultLifecycle::open(&vault_root)?;
+        let store = match lifecycle.vault_mode_v1()? {
+            VaultMode::Unborn => Store::open(path)?,
+            VaultMode::Ready => Store::open(&lifecycle.current_authority_database_path()?)?,
+            VaultMode::Migrating
+            | VaultMode::RecoveryRequired
+            | VaultMode::ReadOnlyRecovery
+            | VaultMode::WriteRefusedIncompatible => {
+                return Err(RebirthLifecycleError::BootstrapConflict.into())
+            }
+        };
+        let semantic_outbox_crypto = SemanticOutboxCryptoLaneV1::open(storage_parent);
         Ok(Self {
-            store: Store::open(path)?,
+            store,
             hot: None,
+            legacy_authority_database,
+            vault_root,
+            semantic_outbox_crypto,
         })
     }
 
-    /// Explicit post-G0, pre-R7 public-material boundary.  Missing, malformed,
-    /// stale, revoked, conflicting, or persistence-failed material collapses
-    /// to deterministic G0-only behavior; `hot` and committed G0 rows are not
-    /// touched on those paths.
+    /// Hydrate optional, validated R7 policy material without creating an
+    /// alternate semantic writer.  Missing material remains G0-only.
     pub fn hydrate_r7_public_policy(
         &mut self,
         key: &R7PolicyBindingKeyV1,
@@ -664,16 +616,16 @@ impl AstrRuntime {
         self.hydrate_r7_public_policy_with_context(key, bundle, None)
     }
 
+    /// Context-bound variant of [`Self::hydrate_r7_public_policy`].  Every
+    /// failure is a non-mutating G0-only result; only Store's policy CAS may
+    /// persist the isolated compatibility record.
     pub fn hydrate_r7_public_policy_with_context(
         &mut self,
         key: &R7PolicyBindingKeyV1,
         bundle: Option<&R7PublicPolicyBundleV1>,
         context: Option<&R7PolicyValidationContextV1>,
     ) -> Result<R7HydrationOutcomeV1, RuntimeError> {
-        let Some(bundle) = bundle else {
-            return Ok(R7HydrationOutcomeV1::G0Only);
-        };
-        let Some(context) = context else {
+        let (Some(bundle), Some(context)) = (bundle, context) else {
             return Ok(R7HydrationOutcomeV1::G0Only);
         };
         let committed = match self
@@ -711,165 +663,99 @@ impl AstrRuntime {
         }
     }
 
-    /// Rust-only additive R7 ingress.  It takes the authority's closed typed
-    /// source and returns only its opaque, one-shot decision capability.
-    /// Python keeps its unchanged G0 compatibility surface and has no route
-    /// to this method, a raw wire, or a source-state mutation API.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn apply_user_stimulus_with_private_projection_wire_v1(
-        &mut self,
-        event: &ae_contracts::r7::CanonicalEvent,
-        input: &r7::R7PreOutputProjectionInputV1,
-    ) -> Result<UserStimulusDecisionV1, RuntimeError> {
-        let root_event = canonical_event_from_r7(event)?;
-        let CanonicalEvent::UserStimulus(stimulus) = &root_event else {
-            unreachable!("the R7 conversion admits only user stimuli");
-        };
-        let scope = stimulus.scope.clone();
-        let (
-            hot_bot_token,
-            hot_persona_token,
-            semantic_persona_scope,
-            semantic_revision,
-            formula_digest,
-            manifest_digest,
-            initial_snapshot_digest,
-            field,
-            graph,
-        ) = {
-            let hot = self.hot_for(&scope)?;
-            (
-                hot.bot_token,
-                hot.persona_token,
-                hot.persona_scope,
-                hot.semantic_revision,
-                hot.formula_digest,
-                hot.identity.manifest_digest,
-                hot.initial_snapshot_digest,
-                hot.field.clone(),
-                hot.graph.clone(),
-            )
-        };
-        if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
-            return Err(RuntimeError::GenesisManifestMismatch);
-        }
+    /// Report only the fixed async-crypto readiness surface; no key material,
+    /// protection location, or metadata leaves the native runtime.
+    pub fn semantic_outbox_crypto_status_v1(&self) -> SemanticOutboxCryptoStatusV1 {
+        self.semantic_outbox_crypto.status_v1()
+    }
 
-        let event_bytes = wire::encode_event(&root_event);
-        let event_digest = wire::event_digest(&root_event);
-        let contract =
-            noop_action_contract(&manifest_digest, &event_digest, stimulus.causal.turn_id);
-        if let Some(row) = self
-            .store
-            .lookup_event(&semantic_persona_scope, &event_digest)?
+    /// Seal one async payload through the installation-scoped native handle.
+    pub fn semantic_outbox_seal_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        if caller_aad.len() > SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1
+            || plaintext.len() > SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1
         {
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            return Ok(UserStimulusDecisionV1 {
-                receipt,
-                revision: row.revision,
-                deduplicated: true,
-                private_projection_wire: None,
-            });
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
         }
-        if stimulus.causal.base_revision != semantic_revision {
-            return Err(RuntimeError::StaleCausalBase {
-                expected: semantic_revision,
-                actual: stimulus.causal.base_revision,
-            });
+        let envelope = self
+            .semantic_outbox_crypto
+            .seal_v1(key_version, caller_aad, plaintext)?;
+        if envelope.len() > SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1 {
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
         }
+        Ok(envelope)
+    }
 
-        let prepared = r7::prepare_production_user_stimulus_transition_v1(
-            event,
-            &field,
-            &graph,
-            semantic_revision,
-        )?;
-        let next_revision = semantic_revision
-            .checked_add(1)
-            .ok_or(r7::RuntimeError::RevisionOverflow)?;
-        let state_before = state_digest(&field, &formula_digest);
-        let state_after = state_digest(&prepared.next_field, &formula_digest);
-        if state_before == state_after {
-            return Err(r7::RuntimeError::NativeStateUnchanged.into());
+    /// Authenticate and open one async payload through the same opaque handle.
+    pub fn semantic_outbox_open_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        envelope: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        if caller_aad.len() > SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1
+            || envelope.len() > SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1
+        {
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
         }
-        let graph_after = graph_digest(&graph);
-        let authority_digest = authority_projection_digest(&root_event);
-        let projection_scope = wire::scope_digest(&scope);
-        let wire = r7::compile_and_validate_production_private_projection_wire_v1(
-            event,
-            next_revision,
-            state_after,
-            projection_scope,
-            event_digest,
-            authority_digest,
-            input,
-        )?;
-        let state_bytes = encode_hot_state_v1(&formula_digest, &prepared.next_field, &graph);
-        let _ = decode_hot_state_v1(&state_bytes, &formula_digest, &state_after, &graph_after)?;
-        let receipt = TransitionReceipt {
-            schema_version: 1,
-            formula_digest,
-            scope_digest: semantic_persona_scope,
-            event_digest,
-            authority_digest,
-            base_revision: semantic_revision,
-            next_revision,
-            state_before,
-            state_after,
-            graph_after,
-            action_contract: Some(wire::action_contract_digest(&contract)),
-            active_nodes: prepared.active_nodes,
-            active_edges: graph.edges.len() as u32,
-            residuals: fixed_zero_vector(),
-            status: CommitStatus::Committed,
-        };
-        let chain_seed = self
-            .store
-            .last_chain_digest(&semantic_persona_scope)?
-            .unwrap_or(initial_snapshot_digest);
-        let commit = StatefulCommit {
-            journal: CommitEnvelope {
-                event_kind: wire::event_kind_name(&root_event).to_owned(),
-                event_bytes,
-                receipt: receipt.clone(),
-                chain_seed,
-                delta_bytes: vec![],
-            },
-            state_bytes,
-        };
+        let plaintext = self
+            .semantic_outbox_crypto
+            .open_v1(key_version, caller_aad, envelope)?;
+        if plaintext.len() > SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1 {
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
+        }
+        Ok(plaintext)
+    }
 
-        match self.store.commit_stateful_journal(&commit) {
-            Ok((revision, _row)) => {
-                if let Some(hot) = self.hot.as_mut() {
-                    hot.field = prepared.next_field;
-                    hot.graph = graph;
-                    hot.semantic_revision = revision;
-                }
-                Ok(UserStimulusDecisionV1 {
-                    receipt,
-                    revision,
-                    deduplicated: false,
-                    private_projection_wire: Some(wire),
-                })
+    fn lifecycle(&self) -> Result<VaultLifecycle, RuntimeError> {
+        Ok(VaultLifecycle::open(&self.vault_root)?)
+    }
+
+    /// Select the Store named by the lifecycle owner, never by deriving or
+    /// mutating locator state in runtime.  The old connection is flushed
+    /// before it is dropped so bootstrap and explicit rebirth cannot lose a
+    /// committed authority to a WAL-only view.
+    fn reopen_authoritative_store(
+        &mut self,
+        lifecycle: &VaultLifecycle,
+        scope: &ScopeRef,
+    ) -> Result<(), RuntimeError> {
+        self.store.flush()?;
+        let database = lifecycle.current_authority_database_path()?;
+        let store = Store::open(&database)?;
+        self.store = store;
+        self.hot = None;
+        self.bind_hot(scope.bot_token, scope.persona_token)
+    }
+
+    /// The legacy direct Store becomes lifecycle authority only after it has
+    /// already committed a real Genesis.  A Ready vault is selected through
+    /// its owner; every recovery or incompatible state fails closed rather
+    /// than falling back to the legacy file or manufacturing a birth.
+    fn select_rebirth_authority(
+        &mut self,
+        scope: &ScopeRef,
+    ) -> Result<VaultLifecycle, RuntimeError> {
+        let lifecycle = self.lifecycle()?;
+        match lifecycle.vault_mode_v1()? {
+            VaultMode::Unborn => {
+                self.store.flush()?;
+                lifecycle.bootstrap_legacy_store_v1(&self.legacy_authority_database)?;
             }
-            Err(StoreError::DuplicateEvent(revision)) => {
-                let row = self
-                    .store
-                    .lookup_event(&semantic_persona_scope, &event_digest)?
-                    .ok_or(RuntimeError::RetryWait)?;
-                let receipt = row
-                    .decode_receipt()
-                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-                Ok(UserStimulusDecisionV1 {
-                    receipt,
-                    revision,
-                    deduplicated: true,
-                    private_projection_wire: None,
-                })
+            VaultMode::Ready => {}
+            VaultMode::Migrating
+            | VaultMode::RecoveryRequired
+            | VaultMode::ReadOnlyRecovery
+            | VaultMode::WriteRefusedIncompatible => {
+                return Err(RebirthLifecycleError::BootstrapConflict.into())
             }
-            Err(other) => Err(RuntimeError::Store(other)),
         }
+        self.reopen_authoritative_store(&lifecycle, scope)?;
+        Ok(lifecycle)
     }
 
     // ------------------------------------------------------------- genesis
@@ -902,6 +788,10 @@ impl AstrRuntime {
                     committed.source.scope.bot_token,
                     committed.source.scope.persona_token,
                 )?;
+                self.select_rebirth_authority(&persona_scope_ref(
+                    request.source.scope.bot_token,
+                    request.source.scope.persona_token,
+                ))?;
                 Ok(committed.receipt)
             }
             ClaimOutcome::InFlight => Err(RuntimeError::RetryWait),
@@ -919,7 +809,9 @@ impl AstrRuntime {
                     &identity.development_seed_digest,
                 );
                 if !field.validate() || !graph.validate() {
-                    return Err(RuntimeError::InvalidNeuralState);
+                    return Err(RuntimeError::invalid_neural_state(
+                        StateSubcodeV1::BaselineStateInvalid,
+                    ));
                 }
                 let initial_snapshot_digest = state_digest(&field, &effective.formula_digest);
                 let graph_digest = graph_digest(&graph);
@@ -958,32 +850,46 @@ impl AstrRuntime {
                     compiled_at_ms: effective.observed_at_ms,
                     receipt: receipt.clone(),
                     initial_snapshot_digest,
-                    state_bytes: encode_hot_state_v1(&effective.formula_digest, &field, &graph),
+                    state_bytes: Self::encode_state(&field, &graph),
                     graph_digest,
                 };
 
                 match self.store.commit_genesis(&commit) {
                     Ok(()) => {
+                        let semantic_storage_scope = semantic_storage_scope(
+                            effective.source.scope.bot_token,
+                            effective.source.scope.persona_token,
+                            &identity.incarnation_id,
+                            &effective.formula_digest,
+                        );
+                        let semantic_scope = continuity_scope(&semantic_storage_scope);
+                        let semantic_field = field.clone();
+                        let semantic_graph = graph.clone();
                         self.hot = Some(HotBrain {
                             bot_token: effective.source.scope.bot_token,
                             persona_token: effective.source.scope.persona_token,
-                            legacy_persona_scope: wire::persona_scope_digest(
+                            persona_scope: wire::persona_scope_digest(
                                 &effective.source.scope.bot_token,
                                 &effective.source.scope.persona_token,
                                 None,
-                            ),
-                            legacy_revision: 0,
-                            persona_scope: r7_semantic_persona_scope(
-                                &effective.source.scope.bot_token,
-                                &effective.source.scope.persona_token,
                             ),
                             identity,
                             formula_digest: effective.formula_digest,
                             field,
                             graph,
                             initial_snapshot_digest,
+                            revision: 0,
+                            semantic_scope,
+                            semantic_storage_scope,
+                            semantic_field,
+                            semantic_graph,
                             semantic_revision: 0,
+                            semantic_legacy_upgrade: None,
                         });
+                        self.select_rebirth_authority(&persona_scope_ref(
+                            request.source.scope.bot_token,
+                            request.source.scope.persona_token,
+                        ))?;
                         Ok(receipt)
                     }
                     Err(StoreError::LeaseConflict) => {
@@ -996,6 +902,10 @@ impl AstrRuntime {
                             committed.source.scope.bot_token,
                             committed.source.scope.persona_token,
                         )?;
+                        self.select_rebirth_authority(&persona_scope_ref(
+                            request.source.scope.bot_token,
+                            request.source.scope.persona_token,
+                        ))?;
                         Ok(committed.receipt)
                     }
                     Err(other) => Err(RuntimeError::Store(other)),
@@ -1004,124 +914,146 @@ impl AstrRuntime {
         }
     }
 
+    fn encode_state(field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
+        // G0 snapshot bytes: the canonical fixed-layout field encoding plus
+        // the graph body; nothing else is needed to re-derive every digest.
+        let mut body = Vec::with_capacity(16_384 * 8 * 8 + 65_540);
+        for values in [
+            &field.potential,
+            &field.excitation,
+            &field.inhibition,
+            &field.adaptation,
+            &field.precision,
+            &field.prediction_error,
+            &field.eligibility,
+            &field.metabolic_reserve,
+        ] {
+            body.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                body.extend_from_slice(&value.encode());
+            }
+        }
+        body.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
+        for offset in &graph.row_offsets {
+            body.extend_from_slice(&offset.to_le_bytes());
+        }
+        body.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
+        body
+    }
+
     fn bind_hot(&mut self, bot_token: Id128, persona_token: Id128) -> Result<(), RuntimeError> {
         let committed = self
             .store
             .lookup_bound_genesis(&bot_token, &persona_token)?
             .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        let (field, graph) = initial_state_from_manifest(
+            &committed.manifest,
+            &committed.receipt.formula_digest,
+            &committed.receipt.development_seed_digest,
+        );
         let identity = ae_genesis::GenesisIdentity {
-            manifest: committed.manifest.clone(),
+            manifest: committed.manifest,
             manifest_digest: committed.receipt.manifest_digest,
             seed_code_digest: committed.receipt.seed_code_digest,
             incarnation_id: committed.receipt.incarnation_id,
             development_seed_digest: committed.receipt.development_seed_digest,
         };
-        let legacy_persona_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
-        let persona_scope = r7_semantic_persona_scope(&bot_token, &persona_token);
-        let legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
-        let semantic_revision = self.store.current_revision(&persona_scope)?;
-        self.verify_durable_history_v1(
-            &committed.manifest,
-            &committed.receipt,
-            persona_scope,
-            true,
-        )?;
-        let snapshot = if semantic_revision == 0 {
-            self.store
-                .read_snapshot(&legacy_persona_scope, 0)?
-                .ok_or(RuntimeError::InvalidNeuralState)?
+        let persona_scope = wire::persona_scope_digest(&bot_token, &persona_token, None);
+        let revision = self.store.current_revision(&persona_scope)?;
+        let semantic_storage_scope = semantic_storage_scope(
+            bot_token,
+            persona_token,
+            &identity.incarnation_id,
+            &committed.receipt.formula_digest,
+        );
+        let semantic_scope = continuity_scope(&semantic_storage_scope);
+        let semantic_revision = self.store.current_revision(&semantic_scope)?;
+        let semantic_formula_digest =
+            semantic::phase0_semantic_formula_digest_v1(&committed.receipt.formula_digest)?;
+        let (semantic_field, semantic_graph, semantic_legacy_upgrade) = if semantic_revision == 0 {
+            (field.clone(), graph.clone(), None)
         } else {
-            self.store
-                .read_latest_snapshot(&persona_scope, semantic_revision)?
-                .ok_or(RuntimeError::InvalidNeuralState)?
-        };
-        if snapshot.revision > semantic_revision {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-        let rows = self.store.read_journal(&persona_scope)?;
-        let (expected_state_digest, expected_graph_digest) = if snapshot.revision == 0 {
-            (
-                committed.receipt.initial_snapshot_digest,
-                committed.receipt.graph_digest,
-            )
-        } else {
-            let row = rows
-                .iter()
-                .find(|row| row.revision == snapshot.revision)
-                .ok_or(RuntimeError::InvalidNeuralState)?;
+            let row = self
+                .store
+                .read_journal(&semantic_scope)?
+                .into_iter()
+                .find(|row| row.revision == semantic_revision)
+                .ok_or(RuntimeError::LegacyUnattested)?;
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if row.revision != snapshot.revision
-                || row.base_revision != receipt.base_revision
-                || receipt.formula_digest != committed.receipt.formula_digest
-                || receipt.scope_digest != persona_scope
-                || receipt.next_revision != snapshot.revision
-            {
-                return Err(RuntimeError::InvalidNeuralState);
-            }
-            (receipt.state_after, receipt.graph_after)
-        };
-        if snapshot.state_digest != expected_state_digest {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-        let mut expected_state_before = expected_state_digest;
-        for row in rows.iter().filter(|row| row.revision > snapshot.revision) {
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if row.revision != receipt.next_revision
-                || row.base_revision != receipt.base_revision
-                || receipt.scope_digest != persona_scope
-                || receipt.formula_digest != committed.receipt.formula_digest
-                || receipt.state_before != expected_state_before
-            {
-                return Err(RuntimeError::InvalidNeuralState);
-            }
-            expected_state_before = receipt.state_after;
             let snapshot = self
                 .store
-                .read_snapshot(&persona_scope, row.revision)?
-                .ok_or(RuntimeError::InvalidNeuralState)?;
-            if snapshot.state_digest != receipt.state_after {
-                return Err(RuntimeError::InvalidNeuralState);
+                .read_snapshot(&semantic_scope, semantic_revision)?
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
+                // The frozen AESEM2 decoder is still authoritative for the
+                // historical field and graph.  A fresh proposal may cross
+                // to Phase 0 only through the Store's one-time receipt.
+                if receipt.schema_version != 1
+                    || receipt.status != CommitStatus::Committed
+                    || receipt.action_contract.is_some()
+                    || receipt.scope_digest != semantic_scope
+                    || receipt.formula_digest != committed.receipt.formula_digest
+                    || receipt.next_revision != semantic_revision
+                    || receipt.base_revision.checked_add(1) != Some(semantic_revision)
+                    || snapshot.state_digest != receipt.state_after
+                {
+                    return Err(RuntimeError::LegacyUnattested);
+                }
+                let (legacy_field, legacy_graph, _) = semantic::decode_semantic_snapshot_v2(
+                    &snapshot.state_bytes,
+                    &receipt.formula_digest,
+                    &receipt.state_after,
+                    &receipt.graph_after,
+                    &receipt,
+                )?;
+                (
+                    legacy_field,
+                    legacy_graph,
+                    Some(LegacySemanticUpgradeSource {
+                        source_formula_digest: receipt.formula_digest,
+                        source_state_digest: snapshot.state_digest,
+                        source_graph_digest: receipt.graph_after,
+                        prior_chain_digest: row.chain_digest,
+                    }),
+                )
+            } else {
+                if receipt.schema_version != 1
+                    || receipt.status != CommitStatus::Committed
+                    || receipt.action_contract.is_some()
+                    || receipt.scope_digest != semantic_scope
+                    || receipt.formula_digest != semantic_formula_digest
+                    || receipt.next_revision != semantic_revision
+                {
+                    return Err(RuntimeError::LegacyUnattested);
+                }
+                let (field, graph, _) = semantic::decode_semantic_snapshot_v3(
+                    &snapshot.state_bytes,
+                    &semantic_formula_digest,
+                    &receipt.state_after,
+                    &receipt.graph_after,
+                    &receipt,
+                )?;
+                (field, graph, None)
             }
-            let _ = decode_hot_state_v1(
-                &snapshot.state_bytes,
-                &committed.receipt.formula_digest,
-                &receipt.state_after,
-                &receipt.graph_after,
-            )?;
-        }
-        let (field, graph) = if semantic_revision == 0 {
-            decode_root_g0_snapshot_v1(
-                &snapshot.state_bytes,
-                &committed.receipt.formula_digest,
-                &expected_state_digest,
-                &expected_graph_digest,
-                &committed.manifest,
-                &committed.receipt.development_seed_digest,
-            )?
-        } else {
-            decode_hot_state_v1(
-                &snapshot.state_bytes,
-                &committed.receipt.formula_digest,
-                &expected_state_digest,
-                &expected_graph_digest,
-            )?
         };
         self.hot = Some(HotBrain {
             bot_token,
             persona_token,
-            legacy_persona_scope,
-            legacy_revision,
             persona_scope,
             identity,
             formula_digest: committed.receipt.formula_digest,
             field,
             graph,
             initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
+            revision,
+            semantic_scope,
+            semantic_storage_scope,
+            semantic_field,
+            semantic_graph,
             semantic_revision,
+            semantic_legacy_upgrade,
         });
         Ok(())
     }
@@ -1135,71 +1067,14 @@ impl AstrRuntime {
         if !matches {
             self.bind_hot(scope.bot_token, scope.persona_token)?;
         } else {
-            let (
-                legacy_persona_scope,
-                persona_scope,
-                hot_legacy_revision,
-                hot_semantic_revision,
-                formula_digest,
-                field,
-                graph,
-                genesis_manifest,
-                development_seed_digest,
-            ) = {
+            let (semantic_scope, semantic_revision) = {
                 let hot = self
                     .hot
                     .as_ref()
                     .ok_or(RuntimeError::PersonaGenesisRequired)?;
-                (
-                    hot.legacy_persona_scope,
-                    hot.persona_scope,
-                    hot.legacy_revision,
-                    hot.semantic_revision,
-                    hot.formula_digest,
-                    hot.field.clone(),
-                    hot.graph.clone(),
-                    hot.identity.manifest.clone(),
-                    hot.identity.development_seed_digest,
-                )
+                (hot.semantic_scope, hot.semantic_revision)
             };
-            let store_legacy_revision = self.store.current_revision(&legacy_persona_scope)?;
-            let store_semantic_revision = self.store.current_revision(&persona_scope)?;
-            let mut needs_hydration = hot_legacy_revision != store_legacy_revision
-                || hot_semantic_revision != store_semantic_revision;
-            if !needs_hydration {
-                let snapshot = if store_semantic_revision == 0 {
-                    self.store.read_snapshot(&legacy_persona_scope, 0)?
-                } else {
-                    self.store
-                        .read_latest_snapshot(&persona_scope, store_semantic_revision)?
-                };
-                needs_hydration = match snapshot {
-                    Some(snapshot) => {
-                        snapshot.revision != store_semantic_revision
-                            || snapshot.state_digest != state_digest(&field, &formula_digest)
-                            || (if store_semantic_revision == 0 {
-                                decode_root_g0_snapshot_v1(
-                                    &snapshot.state_bytes,
-                                    &formula_digest,
-                                    &snapshot.state_digest,
-                                    &graph_digest(&graph),
-                                    &genesis_manifest,
-                                    &development_seed_digest,
-                                )
-                            } else {
-                                decode_hot_state_v1(
-                                    &snapshot.state_bytes,
-                                    &formula_digest,
-                                    &snapshot.state_digest,
-                                    &graph_digest(&graph),
-                                )
-                            })
-                            .is_err()
-                    }
-                    None => true,
-                };
-            }
-            if needs_hydration {
+            if self.store.current_revision(&semantic_scope)? != semantic_revision {
                 self.bind_hot(scope.bot_token, scope.persona_token)?;
             }
         }
@@ -1208,150 +1083,464 @@ impl AstrRuntime {
             .ok_or(RuntimeError::PersonaGenesisRequired)
     }
 
-    fn durable_g0_metadata_v1(
+    fn committed_context_receipt(
+        event: &CanonicalEvent,
+        relation_scope_token: Id128,
+        source_continuum_revision: u64,
+    ) -> Result<ValidatedCommittedReceiptV1, RuntimeError> {
+        let (event_id, dimensions_fxp6, unresolved_boundary, unresolved_repair, delivery_outcome) =
+            match event {
+                CanonicalEvent::UserStimulus(stimulus) => {
+                    let dimensions = &stimulus.evidence.dimensions;
+                    let bounded = |value: ae_fixed::Fixed| {
+                        value
+                            .raw()
+                            .clamp(0, ValidatedCommittedReceiptV1::MAX_DIMENSION_FXP6)
+                    };
+                    (
+                        stimulus.event_id,
+                        [
+                            bounded(dimensions.positive),
+                            bounded(dimensions.affiliation),
+                            bounded(dimensions.harm),
+                            bounded(dimensions.boundary),
+                            bounded(dimensions.repair),
+                            bounded(dimensions.repetition),
+                            bounded(dimensions.new_information),
+                            bounded(dimensions.constraint_instability),
+                            bounded(dimensions.epistemic_conflict),
+                            bounded(dimensions.self_responsibility),
+                            bounded(dimensions.other_responsibility),
+                            bounded(dimensions.hostility),
+                            bounded(dimensions.publicness),
+                            bounded(dimensions.engagement),
+                            bounded(dimensions.rejection),
+                        ],
+                        dimensions.boundary.raw() > 0,
+                        dimensions.repair.raw() > 0,
+                        ContextDeliveryOutcome::Pending,
+                    )
+                }
+                CanonicalEvent::DeliveryOutcome(outcome) => (
+                    outcome.event_id,
+                    [0; 15],
+                    false,
+                    false,
+                    if outcome.delivered {
+                        ContextDeliveryOutcome::Delivered
+                    } else {
+                        ContextDeliveryOutcome::Failed
+                    },
+                ),
+                CanonicalEvent::TimeAdvance(advance) => (
+                    advance.event_id,
+                    [0; 15],
+                    false,
+                    false,
+                    ContextDeliveryOutcome::Pending,
+                ),
+                _ => return Err(RuntimeError::UnsupportedEvent(wire::event_kind_name(event))),
+            };
+        Ok(ValidatedCommittedReceiptV1::try_from_envelope(
+            ReceiptEnvelopeV1 {
+                commit_status: ReceiptCommitStatus::Committed,
+                event_id,
+                relation_token: relation_scope_token,
+                source_continuum_revision,
+                dimensions_fxp6,
+                unresolved_boundary,
+                unresolved_repair,
+                repetition_increment: 1,
+                delivery_outcome,
+            },
+        )?)
+    }
+
+    fn context_summary_for_persona_scope(
         &self,
-        legacy_scope: &Digest,
-        legacy_revision: u64,
-        genesis_manifest: &GenesisManifest,
-        genesis_receipt: &GenesisReceipt,
-    ) -> Result<(Digest, Digest, u32, u32), RuntimeError> {
-        // The G0 append path must audit the complete legacy journal before it
-        // asks Store for the current chain tip.  Store's CAS guard verifies
-        // only the supplied tip, so trusting last_chain_digest without this
-        // replay would allow a corrupt row to seed the next append.
-        let current_revision = self.store.current_revision(legacy_scope)?;
-        if current_revision != legacy_revision {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-
-        let rows = self.store.read_journal(legacy_scope)?;
-        let row_count = u64::try_from(rows.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
-        if row_count != current_revision {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-        let report = ae_continuum::verify_replay(genesis_receipt.initial_snapshot_digest, &rows);
-        let last_chain_digest = self.store.last_chain_digest(legacy_scope)?;
-        if !report.ok
-            || report.checked != rows.len()
-            || report.final_revision != current_revision
-            || (current_revision == 0 && last_chain_digest.is_some())
-            || (current_revision > 0 && last_chain_digest != Some(report.final_chain_digest))
-        {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-
-        let snapshot = self
+        persona_scope: &Digest,
+        relation_scope_token: &Id128,
+    ) -> Result<Option<ContextSummaryV1>, RuntimeError> {
+        let Some(row) = self
             .store
-            .read_latest_snapshot(legacy_scope, legacy_revision)?
-            .ok_or(RuntimeError::InvalidNeuralState)?;
-        if snapshot.revision > legacy_revision {
-            return Err(RuntimeError::InvalidNeuralState);
+            .read_context_commit(persona_scope, relation_scope_token)?
+        else {
+            return Ok(None);
+        };
+        if row.scope_digest != *persona_scope || row.relation_scope_token != *relation_scope_token {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        if ae_store::continuity_context_digest(&row.canonical_state_bytes) != row.context_digest {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        let projection =
+            ContextProjectionStateV1::try_from_canonical_state_bytes(&row.canonical_state_bytes)?;
+        if projection.relation_hmac() != row.relation_hmac
+            || projection.summary().source_continuum_revision != row.revision
+        {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        Ok(Some(projection.summary().clone()))
+    }
+
+    /// Return the committed aggregate-only context for the relation selected
+    /// by this scope.  The Store remains the authority: absent or malformed
+    /// bytes never fall back to an in-memory or standalone projector state.
+    pub fn context_summary_for_scope(
+        &mut self,
+        scope: &ScopeRef,
+    ) -> Result<Option<ContextSummaryV1>, RuntimeError> {
+        self.hot_for(scope)?;
+        let continuity_scope = continuity_scope(scope);
+        let relation_scope_token = scope.relation_token.unwrap_or(scope.session_token);
+        self.context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)
+    }
+
+    // ------------------------------------------------------------- rebirth
+
+    /// Build the complete revision-zero child transaction from the currently
+    /// selected parent.  The lifecycle owner supplies both child identity and
+    /// nonce digest through its permit helpers; runtime never retains or
+    /// persists a raw confirmation nonce.
+    fn fresh_child_genesis(
+        &mut self,
+        scope: &ScopeRef,
+        permit: &RebirthCommitPermitV1,
+    ) -> Result<GenesisCommit, RuntimeError> {
+        if permit.scope_token != continuity_scope(scope) {
+            return Err(RebirthLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let committed = self
+            .store
+            .lookup_bound_genesis(&scope.bot_token, &scope.persona_token)?
+            .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        if committed.receipt.incarnation_id != permit.parent_authority.incarnation_id
+            || self.store.current_revision(&permit.scope_token)? != permit.parent_authority.revision
+        {
+            return Err(RebirthLifecycleError::FenceStale.into());
         }
 
-        let mut expected_revision = 0_u64;
-        let mut expected_state = genesis_receipt.initial_snapshot_digest;
-        let mut expected_graph = genesis_receipt.graph_digest;
-        for row in &rows {
-            let next_revision = expected_revision
-                .checked_add(1)
-                .ok_or(RuntimeError::InvalidNeuralState)?;
-            let event = wire::decode_event(&row.event_bytes)
-                .map_err(|_| RuntimeError::InvalidNeuralState)?;
-            let event_kind = wire::event_kind_name(&event);
-            let event_scope = match &event {
-                CanonicalEvent::UserStimulus(value) => &value.scope,
-                CanonicalEvent::DeliveryOutcome(value) => &value.scope,
-                CanonicalEvent::TimeAdvance(value) => &value.scope,
-                _ => return Err(RuntimeError::InvalidNeuralState),
-            };
-            let event_causal_base = match &event {
-                CanonicalEvent::UserStimulus(value) => Some(value.causal.base_revision),
-                CanonicalEvent::DeliveryOutcome(value) => Some(value.causal.base_revision),
-                CanonicalEvent::TimeAdvance(_) => None,
-                _ => unreachable!(),
-            };
-            let event_scope_digest = wire::persona_scope_digest(
-                &event_scope.bot_token,
-                &event_scope.persona_token,
-                None,
-            );
-            let event_digest = wire::event_digest(&event);
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            let turn_id = match &event {
-                CanonicalEvent::UserStimulus(value) => value.causal.turn_id,
-                CanonicalEvent::DeliveryOutcome(value) => value.causal.turn_id,
-                CanonicalEvent::TimeAdvance(value) => value.event_id,
-                _ => unreachable!(),
-            };
-            let expected_contract =
-                noop_action_contract(&genesis_receipt.manifest_digest, &event_digest, turn_id);
-            if row.revision != next_revision
-                || row.event_kind != event_kind
-                || receipt.next_revision != row.revision
-                || row.base_revision != receipt.base_revision
-                || receipt.base_revision != expected_revision
-                || event_causal_base
-                    .map(|base_revision| base_revision != expected_revision)
-                    .unwrap_or(false)
-                || row.scope_digest != *legacy_scope
-                || receipt.scope_digest != *legacy_scope
-                || event_scope_digest != *legacy_scope
-                || event_digest != row.event_digest
-                || receipt.event_digest != row.event_digest
-                || receipt.formula_digest != genesis_receipt.formula_digest
-                || receipt.state_before != expected_state
-                || receipt.state_after != expected_state
-                || receipt.graph_after != expected_graph
-                || receipt.schema_version != 1
-                || receipt.status != CommitStatus::Committed
-                || receipt.action_contract != Some(wire::action_contract_digest(&expected_contract))
-                || receipt.authority_digest != authority_projection_digest(&event)
-                || receipt.residuals != fixed_zero_vector()
-            {
-                return Err(RuntimeError::InvalidNeuralState);
-            }
-            expected_revision = row.revision;
-            expected_state = receipt.state_after;
-            expected_graph = receipt.graph_after;
+        let compiled_at_ms = committed.born_at_ms;
+        let parent_receipt = committed.receipt;
+        let source = committed.source;
+        let mut manifest = committed.manifest;
+        if wire::manifest_body_digest(&manifest) != parent_receipt.manifest_digest {
+            return Err(RebirthLifecycleError::ChildInvalid.into());
         }
-        if expected_revision != legacy_revision || snapshot.state_digest != expected_state {
-            return Err(RuntimeError::InvalidNeuralState);
+        // The durable manifest body deliberately excludes its self-digest;
+        // restore the receipt-attested digest before comparing it to a freshly
+        // derived GenesisIdentity.
+        manifest.manifest_digest = parent_receipt.manifest_digest;
+        let child_nonce_digest = VaultLifecycle::child_genesis_nonce_digest_for_permit(permit);
+        let child_request = PersonaGenesisRequest {
+            source: source.clone(),
+            proposal: GenesisManifestProposal {
+                schema_version: manifest.schema_version,
+                source: source.clone(),
+                traits: manifest.traits.clone(),
+                trait_confidence: fully_confident_personality(),
+                expression: manifest.expression.clone(),
+                allostasis: manifest.allostasis.clone(),
+                epistemic: manifest.epistemic.clone(),
+                social: manifest.social.clone(),
+                compiler_protocol_digest: parent_receipt.compiler_protocol_digest,
+                compiler_model_digest: parent_receipt.compiler_model_digest,
+            },
+            formula_digest: parent_receipt.formula_digest,
+            incarnation_nonce: child_nonce_digest,
+            parent_incarnation_id: Some(permit.parent_authority.incarnation_id),
+            observed_at_ms: compiled_at_ms,
+        };
+        let child_identity =
+            ae_genesis::derive_identity(&child_request, &ae_genesis::GenesisPrior::default())?;
+        if child_identity.manifest != manifest
+            || child_identity.seed_code_digest != parent_receipt.seed_code_digest
+            || child_identity.incarnation_id == permit.parent_authority.incarnation_id
+        {
+            return Err(RebirthLifecycleError::ChildInvalid.into());
+        }
+        let (field, graph) = initial_state_from_manifest(
+            &child_identity.manifest,
+            &parent_receipt.formula_digest,
+            &child_identity.development_seed_digest,
+        );
+        if !field.validate() || !graph.validate() {
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::BaselineStateInvalid,
+            ));
+        }
+        let initial_snapshot_digest = state_digest(&field, &parent_receipt.formula_digest);
+        let initial_graph_digest = graph_digest(&graph);
+        let receipt = GenesisReceipt {
+            schema_version: 1,
+            seed_code_digest: child_identity.seed_code_digest,
+            manifest_digest: child_identity.manifest_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest: parent_receipt.formula_digest,
+            persona_source_digest: parent_receipt.persona_source_digest,
+            compiler_protocol_digest: parent_receipt.compiler_protocol_digest,
+            compiler_model_digest: parent_receipt.compiler_model_digest,
+            development_seed_digest: child_identity.development_seed_digest,
+            initial_snapshot_digest,
+            graph_digest: initial_graph_digest,
+            equilibrium_residual: ae_fixed::Fixed::ZERO,
+            energy_residual: ae_fixed::Fixed::ZERO,
+            capacity_residual: ae_fixed::Fixed::ZERO,
+            sample_fit_residual: ae_fixed::Fixed::ZERO,
+            status: GenesisStatus::Committed,
+        };
+        Ok(GenesisCommit {
+            scope_key: ae_genesis::genesis_scope_key(
+                &source.scope.bot_token,
+                &source.scope.persona_token,
+                &source.source_digest,
+                &parent_receipt.formula_digest,
+            ),
+            // Store owns child lease allocation and overwrites this field
+            // while staging its non-authoritative candidate generation.
+            lease_epoch: 0,
+            nonce_digest: child_nonce_digest,
+            manifest_body: wire::encode_manifest_body(&child_identity.manifest),
+            seed_code_digest: child_identity.seed_code_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest: parent_receipt.formula_digest,
+            source,
+            compiler_protocol_digest: parent_receipt.compiler_protocol_digest,
+            compiler_model_digest: parent_receipt.compiler_model_digest,
+            compiled_at_ms,
+            receipt,
+            initial_snapshot_digest,
+            state_bytes: Self::encode_state(&field, &graph),
+            graph_digest: initial_graph_digest,
+            manifest: child_identity.manifest,
+        })
+    }
+
+    /// Build a fresh, neutral seed-clear child without reading the parent's
+    /// modeled phenotype, semantic lane, context lane or history.  The sole
+    /// retained inputs are the Bot/Persona scope, the runtime formula and the
+    /// Rust-owned seed-clear permit.  A permit-derived baseline is used only
+    /// to make the new Manifest/SeedCode distinct; no parent model is copied.
+    fn fresh_seed_clear_child_genesis(
+        &mut self,
+        scope: &ScopeRef,
+        permit: &SeedClearCommitPermitV1,
+    ) -> Result<GenesisCommit, RuntimeError> {
+        if permit.scope_token != continuity_scope(scope) {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let committed = self
+            .store
+            .lookup_bound_genesis(&scope.bot_token, &scope.persona_token)?
+            .ok_or(RuntimeError::PersonaGenesisRequired)?;
+        if committed.receipt.incarnation_id != permit.parent_authority.incarnation_id
+            || committed.receipt.seed_code_digest != permit.parent_seed_code_digest
+            || self.store.current_revision(&permit.scope_token)? != permit.parent_authority.revision
+        {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
         }
 
-        // G0 snapshots are rooted at Genesis.  The audited no-op rows must
-        // preserve the Genesis graph, so decode against the recomputed graph
-        // digest rather than any semantic hot state.
-        let (field, graph) = decode_root_g0_snapshot_v1(
-            &snapshot.state_bytes,
-            &genesis_receipt.formula_digest,
-            &snapshot.state_digest,
-            &expected_graph,
-            genesis_manifest,
-            &genesis_receipt.development_seed_digest,
-        )?;
-        let decoded_graph_digest = graph_digest(&graph);
-        if decoded_graph_digest != expected_graph {
-            return Err(RuntimeError::InvalidNeuralState);
+        let source = PersonaSourceRef {
+            scope: PersonaScopeRef {
+                bot_token: scope.bot_token,
+                persona_token: scope.persona_token,
+            },
+            source_digest: wire::domain_hash(
+                b"astr-embodiment/seed-config-clear-source-v1",
+                &[&permit.intent_id],
+            ),
+            capability_digest: wire::domain_hash(
+                b"astr-embodiment/seed-config-clear-capability-v1",
+                &[&permit.intent_id],
+            ),
+            selection: PersonaSelectionKind::Conversation,
+            prompt_chars: 0,
+            begin_dialog_count: 0,
+            mood_dialog_count: 0,
+        };
+        let compiler_protocol_digest = wire::domain_hash(
+            b"astr-embodiment/seed-config-clear-compiler-protocol-v1",
+            &[&permit.intent_id],
+        );
+        let compiler_model_digest = wire::domain_hash(
+            b"astr-embodiment/seed-config-clear-compiler-model-v1",
+            &[&permit.intent_id],
+        );
+        let child_nonce_digest =
+            VaultLifecycle::seed_clear_child_genesis_nonce_digest_for_permit(permit);
+        let formula_digest = committed.receipt.formula_digest;
+        let child_request = PersonaGenesisRequest {
+            source: source.clone(),
+            proposal: GenesisManifestProposal {
+                schema_version: 1,
+                source: source.clone(),
+                traits: seed_clear_personality_from_intent(permit),
+                trait_confidence: fully_confident_personality(),
+                expression: ExpressionPhenotype::default(),
+                allostasis: AllostaticSetpoints::default(),
+                epistemic: EpistemicPriors::default(),
+                social: SocialPriors::default(),
+                compiler_protocol_digest,
+                compiler_model_digest,
+            },
+            formula_digest,
+            incarnation_nonce: child_nonce_digest,
+            parent_incarnation_id: Some(permit.parent_authority.incarnation_id),
+            observed_at_ms: permit.created_at_ms,
+        };
+        let child_identity =
+            ae_genesis::derive_identity(&child_request, &ae_genesis::GenesisPrior::default())?;
+        if child_identity.seed_code_digest == permit.parent_seed_code_digest
+            || child_identity.incarnation_id == permit.parent_authority.incarnation_id
+        {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
         }
-        let active_nodes = field.active_node_count();
-        let active_edges =
-            u32::try_from(graph.edges.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
-        for row in &rows {
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.active_nodes != active_nodes || receipt.active_edges != active_edges {
-                return Err(RuntimeError::InvalidNeuralState);
+        let (field, graph) = initial_state_from_manifest(
+            &child_identity.manifest,
+            &formula_digest,
+            &child_identity.development_seed_digest,
+        );
+        if !field.validate() || !graph.validate() {
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::BaselineStateInvalid,
+            ));
+        }
+        let initial_snapshot_digest = state_digest(&field, &formula_digest);
+        let initial_graph_digest = graph_digest(&graph);
+        let receipt = GenesisReceipt {
+            schema_version: 1,
+            seed_code_digest: child_identity.seed_code_digest,
+            manifest_digest: child_identity.manifest_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest,
+            persona_source_digest: source.source_digest,
+            compiler_protocol_digest,
+            compiler_model_digest,
+            development_seed_digest: child_identity.development_seed_digest,
+            initial_snapshot_digest,
+            graph_digest: initial_graph_digest,
+            equilibrium_residual: ae_fixed::Fixed::ZERO,
+            energy_residual: ae_fixed::Fixed::ZERO,
+            capacity_residual: ae_fixed::Fixed::ZERO,
+            sample_fit_residual: ae_fixed::Fixed::ZERO,
+            status: GenesisStatus::Committed,
+        };
+        Ok(GenesisCommit {
+            scope_key: ae_genesis::genesis_scope_key(
+                &source.scope.bot_token,
+                &source.scope.persona_token,
+                &source.source_digest,
+                &formula_digest,
+            ),
+            lease_epoch: 0,
+            nonce_digest: child_nonce_digest,
+            manifest_body: wire::encode_manifest_body(&child_identity.manifest),
+            seed_code_digest: child_identity.seed_code_digest,
+            incarnation_id: child_identity.incarnation_id,
+            formula_digest,
+            source,
+            compiler_protocol_digest,
+            compiler_model_digest,
+            compiled_at_ms: permit.created_at_ms,
+            receipt,
+            initial_snapshot_digest,
+            state_bytes: Self::encode_state(&field, &graph),
+            graph_digest: initial_graph_digest,
+            manifest: child_identity.manifest,
+        })
+    }
+
+    /// First explicit destructive action: create only a durable challenge.
+    /// The caller's scope token must exactly name the active lifecycle lane.
+    pub fn prepare_rebirth_v1(
+        &mut self,
+        scope: &ScopeRef,
+        request: &RebirthPrepareRequestV1,
+    ) -> Result<RebirthPrepareResponseV1, RuntimeError> {
+        if request.scope_token != continuity_scope(scope) {
+            return Err(RebirthLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        Ok(lifecycle.prepare_rebirth(request.clone())?)
+    }
+
+    /// Second explicit destructive action: preflight/replay in the lifecycle
+    /// owner, stage exactly one complete child, then atomically switch its
+    /// authority.  A replay is returned before child staging.
+    pub fn confirm_rebirth_v1(
+        &mut self,
+        scope: &ScopeRef,
+        confirmation: &UserAuthorizedRebirthV1,
+    ) -> Result<RebirthResponseEnvelopeV1, RuntimeError> {
+        if confirmation.scope_token != continuity_scope(scope) {
+            return Err(RebirthLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        match lifecycle.preflight_rebirth_confirmation(confirmation)? {
+            RebirthPreflightV1::Replayed(envelope) => Ok(envelope),
+            RebirthPreflightV1::Stage(permit) => {
+                let genesis = self.fresh_child_genesis(scope, &permit)?;
+                let child = lifecycle
+                    .stage_rebirth_child_v1(&permit, RebirthChildStageRequestV1 { genesis })?;
+                let envelope = lifecycle.commit_rebirth(&permit, &child)?;
+                self.reopen_authoritative_store(&lifecycle, scope)?;
+                Ok(envelope)
             }
         }
-        Ok((
-            snapshot.state_digest,
-            decoded_graph_digest,
-            active_nodes,
-            active_edges,
-        ))
+    }
+
+    /// Reconcile one tri-state seed configuration observation through the
+    /// dedicated Rust lifecycle.  There is no manual `confirmed` path here:
+    /// only an active native mirror plus an explicit empty observation can
+    /// yield the private seed-clear stage permit.
+    pub fn reconcile_seed_config_v1(
+        &mut self,
+        scope: &ScopeRef,
+        request: &SeedConfigReconcileRequestV1,
+    ) -> Result<SeedConfigReconcileResultV1, RuntimeError> {
+        if request.scope_token != continuity_scope(scope) {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        match lifecycle.reconcile_seed_config_preflight_v1(request)? {
+            SeedConfigPreflightV1::Result(result) => {
+                if matches!(
+                    result.state,
+                    SeedConfigStateV1::RebirthCommitted | SeedConfigStateV1::RebirthReplayed
+                ) {
+                    self.reopen_authoritative_store(&lifecycle, scope)?;
+                }
+                Ok(result)
+            }
+            SeedConfigPreflightV1::Stage(permit) => {
+                let genesis = self.fresh_seed_clear_child_genesis(scope, &permit)?;
+                let child = lifecycle
+                    .stage_seed_clear_child_v1(&permit, RebirthChildStageRequestV1 { genesis })?;
+                let result = lifecycle.commit_seed_clear_v1(&permit, &child)?;
+                self.reopen_authoritative_store(&lifecycle, scope)?;
+                Ok(result)
+            }
+        }
+    }
+
+    /// Activate only the durable pending mirror selected by the lifecycle
+    /// owner.  A stale token is a non-destructive result, never a fallback.
+    pub fn ack_seed_config_writeback_v1(
+        &mut self,
+        scope: &ScopeRef,
+        request: &SeedConfigWritebackAckV1,
+    ) -> Result<SeedConfigAckResultV1, RuntimeError> {
+        if request.scope_token != continuity_scope(scope) {
+            return Err(SeedConfigLifecycleError::FenceStale.into());
+        }
+        self.hot_for(scope)?;
+        let lifecycle = self.select_rebirth_authority(scope)?;
+        Ok(lifecycle.ack_seed_config_writeback_v1(request)?)
     }
 
     // --------------------------------------------------------------- events
@@ -1388,38 +1577,31 @@ impl AstrRuntime {
         let (
             hot_bot_token,
             hot_persona_token,
-            legacy_persona_scope,
-            legacy_revision,
             formula_digest,
             manifest_digest,
             initial_snapshot_digest,
+            state_before,
+            graph_after,
+            snapshot_state_bytes,
+            graph_replay_state_bytes,
+            active_nodes,
+            active_edges,
         ) = {
             let hot = self.hot_for(scope)?;
             (
                 hot.bot_token,
                 hot.persona_token,
-                hot.legacy_persona_scope,
-                hot.legacy_revision,
                 hot.formula_digest,
                 hot.identity.manifest_digest,
                 hot.initial_snapshot_digest,
+                state_digest(&hot.field, &hot.formula_digest),
+                graph_digest(&hot.graph),
+                Self::encode_state(&hot.field, &hot.graph),
+                hot.graph.canonical_bytes(),
+                hot.field.active_node_count(),
+                hot.graph.edges.len() as u32,
             )
         };
-        let committed = self
-            .store
-            .lookup_bound_genesis(&hot_bot_token, &hot_persona_token)?
-            .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        if committed.receipt.formula_digest != formula_digest
-            || committed.receipt.initial_snapshot_digest != initial_snapshot_digest
-        {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-        let (state_before, graph_after, active_nodes, active_edges) = self.durable_g0_metadata_v1(
-            &legacy_persona_scope,
-            legacy_revision,
-            &committed.manifest,
-            &committed.receipt,
-        )?;
         let event_scope = match event {
             CanonicalEvent::UserStimulus(e) => &e.scope,
             CanonicalEvent::DeliveryOutcome(e) => &e.scope,
@@ -1430,6 +1612,11 @@ impl AstrRuntime {
         {
             return Err(RuntimeError::GenesisManifestMismatch);
         }
+        let relation_scope_token = event_scope
+            .relation_token
+            .unwrap_or(event_scope.session_token);
+        let continuity_scope = continuity_scope(event_scope);
+        let current_revision = self.store.current_revision(&continuity_scope)?;
 
         let event_bytes = wire::encode_event(event);
         let event_digest = wire::event_digest(event);
@@ -1438,17 +1625,18 @@ impl AstrRuntime {
 
         // Idempotency: an event that was already applied is never applied
         // twice; the original receipt is returned unchanged.
-        if let Some(row) = self
-            .store
-            .lookup_event(&legacy_persona_scope, &event_digest)?
-        {
+        if let Some(row) = self.store.lookup_event(&continuity_scope, &event_digest)? {
             let receipt = row
                 .decode_receipt()
                 .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            let context_summary = self
+                .context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)?
+                .ok_or(RuntimeError::ContextCommitMissing)?;
             return Ok(ApplyDecision {
                 contract,
                 receipt,
                 revision: row.revision,
+                context_summary,
                 deduplicated: true,
             });
         }
@@ -1456,12 +1644,12 @@ impl AstrRuntime {
         let causal_base = match event {
             CanonicalEvent::UserStimulus(e) => e.causal.base_revision,
             CanonicalEvent::DeliveryOutcome(e) => e.causal.base_revision,
-            CanonicalEvent::TimeAdvance(_) => legacy_revision,
+            CanonicalEvent::TimeAdvance(_) => current_revision,
             _ => unreachable!(),
         };
-        if causal_base != legacy_revision {
+        if causal_base != current_revision {
             return Err(RuntimeError::StaleCausalBase {
-                expected: legacy_revision,
+                expected: current_revision,
                 actual: causal_base,
             });
         }
@@ -1470,19 +1658,47 @@ impl AstrRuntime {
         let receipt = TransitionReceipt {
             schema_version: 1,
             formula_digest,
-            scope_digest: legacy_persona_scope,
+            scope_digest: continuity_scope,
             event_digest,
             authority_digest,
-            base_revision: legacy_revision,
-            next_revision: legacy_revision + 1,
+            base_revision: current_revision,
+            next_revision: current_revision + 1,
             state_before,
             state_after: state_before,
             graph_after,
             action_contract: Some(contract_digest),
             active_nodes,
             active_edges,
-            residuals: fixed_zero_vector(),
+            residuals: InvariantResiduals::default(),
             status: CommitStatus::Committed,
+        };
+
+        let context_receipt =
+            Self::committed_context_receipt(event, relation_scope_token, receipt.next_revision)?;
+        let previous_context = self
+            .store
+            .read_context_commit(&continuity_scope, &relation_scope_token)?;
+        if previous_context.is_some()
+            && self
+                .context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)?
+                .is_none()
+        {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        let context_projection = project_committed_receipt(
+            previous_context
+                .as_ref()
+                .map(|row| row.canonical_state_bytes.as_slice()),
+            &context_receipt,
+        )?;
+        let context_summary = context_projection.summary().clone();
+        let canonical_context_state = context_projection.canonical_state_bytes();
+        let context_commit = ContextCommitV1 {
+            relation_scope_token,
+            relation_hmac: context_projection.relation_hmac(),
+            source_continuum_revision: receipt.next_revision,
+            context_digest: ae_store::continuity_context_digest(&canonical_context_state),
+            canonical_state_bytes: canonical_context_state,
         };
 
         // An empty journal is the normal first-turn case: start the chain at
@@ -1490,40 +1706,58 @@ impl AstrRuntime {
         // event; ``Ok(None)`` is not evidence that Genesis is missing.
         let chain_seed = self
             .store
-            .last_chain_digest(&legacy_persona_scope)?
+            .last_chain_digest(&continuity_scope)?
             .unwrap_or(initial_snapshot_digest);
         let envelope = CommitEnvelope {
             event_kind: wire::event_kind_name(event).to_string(),
             event_bytes,
-            receipt,
+            receipt: receipt.clone(),
             chain_seed,
             delta_bytes: vec![],
         };
+        let bundle = ContinuityCommitBundleV1 {
+            envelope,
+            snapshot: SnapshotCommitV1 {
+                state_digest: state_before,
+                state_bytes: snapshot_state_bytes,
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest: graph_after,
+                graph_digest: graph_after,
+                formula_digest,
+                delta_bytes: vec![],
+                replay_state_bytes: graph_replay_state_bytes,
+            },
+            context: context_commit,
+        };
 
-        match self.store.commit_journal(&envelope) {
-            Ok((revision, _row)) => {
+        match self.store.commit_continuity_bundle(&bundle) {
+            Ok(ContinuityCommitOutcomeV1::Inserted { revision, .. }) => {
                 if let Some(hot) = self.hot.as_mut() {
-                    hot.legacy_revision = revision;
+                    if hot.persona_scope == continuity_scope {
+                        hot.revision = revision;
+                    }
                 }
-                Ok(ApplyDecision {
-                    contract,
-                    receipt: envelope.receipt,
-                    revision,
-                    deduplicated: false,
-                })
-            }
-            Err(StoreError::DuplicateEvent(revision)) => {
-                let row = self
-                    .store
-                    .lookup_event(&legacy_persona_scope, &event_digest)?
-                    .ok_or(RuntimeError::RetryWait)?;
-                let receipt = row
-                    .decode_receipt()
-                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
                 Ok(ApplyDecision {
                     contract,
                     receipt,
                     revision,
+                    context_summary,
+                    deduplicated: false,
+                })
+            }
+            Ok(ContinuityCommitOutcomeV1::ExistingIdentical { revision, row }) => {
+                let receipt = row
+                    .decode_receipt()
+                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+                let context_summary = self
+                    .context_summary_for_persona_scope(&continuity_scope, &relation_scope_token)?
+                    .ok_or(RuntimeError::ContextCommitMissing)?;
+                Ok(ApplyDecision {
+                    contract,
+                    receipt,
+                    revision,
+                    context_summary,
                     deduplicated: true,
                 })
             }
@@ -1531,17 +1765,899 @@ impl AstrRuntime {
         }
     }
 
+    fn semantic_snapshot_at(
+        &self,
+        semantic_scope: &Digest,
+        formula_digest: &Digest,
+        baseline_field: &NeuralField,
+        baseline_graph: &SparseGraph,
+        revision: u64,
+    ) -> Result<SemanticSnapshot, RuntimeError> {
+        if revision == 0 {
+            return Ok((baseline_field.clone(), baseline_graph.clone(), None));
+        }
+        let row = self
+            .store
+            .read_journal(semantic_scope)?
+            .into_iter()
+            .find(|row| row.revision == revision)
+            .ok_or(RuntimeError::LegacyUnattested)?;
+        let receipt = row
+            .decode_receipt()
+            .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+        if row.scope_digest != *semantic_scope
+            || row.base_revision != receipt.base_revision
+            || receipt.schema_version != 1
+            || receipt.status != CommitStatus::Committed
+            || receipt.action_contract.is_some()
+            || receipt.scope_digest != *semantic_scope
+            || receipt.next_revision != revision
+            || receipt.base_revision.checked_add(1) != Some(revision)
+        {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        let snapshot = self
+            .store
+            .read_snapshot(semantic_scope, revision)?
+            .ok_or(RuntimeError::LegacyUnattested)?;
+        if snapshot.state_digest != receipt.state_after {
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::SnapshotAttestationMismatch,
+            ));
+        }
+        if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
+            let (field, graph, _) = semantic::decode_semantic_snapshot_v2(
+                &snapshot.state_bytes,
+                &receipt.formula_digest,
+                &receipt.state_after,
+                &receipt.graph_after,
+                &receipt,
+            )?;
+            return Ok((field, graph, None));
+        }
+        if receipt.formula_digest != *formula_digest {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        let (field, graph, telemetry_receipt) = semantic::decode_semantic_snapshot_v3(
+            &snapshot.state_bytes,
+            formula_digest,
+            &receipt.state_after,
+            &receipt.graph_after,
+            &receipt,
+        )?;
+        Ok((field, graph, Some((receipt, telemetry_receipt))))
+    }
+
+    fn legacy_field_domain_metadata(
+        normalization: semantic::LegacyFieldDomainNormalizationV1,
+    ) -> LegacySemanticFieldDomainUpgradeV1 {
+        LegacySemanticFieldDomainUpgradeV1 {
+            algorithm: JOINT_MAX_LINEAR_FXP6_V1,
+            fxp6_scale: LEGACY_FIELD_FXP6_SCALE,
+            source_common_max: normalization.source_common_max,
+            out_of_range_count: normalization.out_of_range_count,
+            potential_out_of_range_count: normalization.potential_out_of_range_count,
+            excitation_out_of_range_count: normalization.excitation_out_of_range_count,
+            signal_mass_before: normalization.signal_mass_before,
+            signal_mass_after: normalization.signal_mass_after,
+        }
+    }
+
+    /// Full replay of the only old writer that can be normalized.  The caller
+    /// invokes this only after the latest AESEM2 field proves it needs the
+    /// finite P/E transform; all other legacy states retain the normal strict
+    /// failure behavior.
+    fn attest_legacy_aesem2_field_history(
+        &self,
+        input: &LegacyAesem2FieldMigrationInput<'_>,
+        source: LegacySemanticUpgradeSource,
+    ) -> Result<(), RuntimeError> {
+        if input.semantic_revision == 0
+            || !input.baseline_field.validate()
+            || !input.baseline_graph.validate()
+        {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        let mut rows = self.store.read_journal(input.semantic_scope)?;
+        // A deduplicated request can arrive after the migration's own r+1
+        // commit (or after later Phase-0 history).  Only the immutable AESEM2
+        // source prefix r=1..source_revision is replayed here; the caller
+        // separately closes the replayed r+1 receipt below.
+        rows.retain(|row| row.revision <= input.semantic_revision);
+        if u64::try_from(rows.len()).ok() != Some(input.semantic_revision) {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        let mut replay_field = input.baseline_field.clone();
+        let replay_graph = input.baseline_graph.clone();
+        let mut chain_seed = input.initial_snapshot_digest;
+        let relation_scope_token = input
+            .semantic_storage_scope
+            .relation_token
+            .ok_or(RuntimeError::LegacyUnattested)?;
+        let mut replay_context_state: Option<Vec<u8>> = None;
+        for (index, row) in rows.iter().enumerate() {
+            let revision = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            if row.revision != revision || row.base_revision.checked_add(1) != Some(revision) {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let event =
+                wire::decode_event(&row.event_bytes).map_err(|_| RuntimeError::LegacyUnattested)?;
+            if wire::encode_event(&event) != row.event_bytes
+                || wire::event_digest(&event) != row.event_digest
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let CanonicalEvent::UserStimulus(stimulus) = event else {
+                return Err(RuntimeError::LegacyUnattested);
+            };
+            if stimulus.scope != *input.semantic_storage_scope
+                || stimulus.causal.base_revision != row.base_revision
+                || stimulus.evidence.schema_version != PerceptionProposalV1::SCHEMA_VERSION
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let receipt = row
+                .decode_receipt()
+                .map_err(|_| RuntimeError::LegacyUnattested)?;
+            if wire::encode_transition_receipt(&receipt) != row.receipt_bytes
+                || receipt.schema_version != 1
+                || receipt.status != CommitStatus::Committed
+                || receipt.action_contract.is_some()
+                || receipt.scope_digest != *input.semantic_scope
+                || receipt.event_digest != row.event_digest
+                || receipt.formula_digest != *input.legacy_formula_digest
+                || receipt.base_revision != row.base_revision
+                || receipt.next_revision != revision
+                || receipt.authority_digest
+                    != authority_projection_digest(&CanonicalEvent::UserStimulus(stimulus.clone()))
+                || row.chain_digest
+                    != ae_continuum::chain_link(&chain_seed, &row.event_bytes, &row.receipt_bytes)
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let snapshot = self
+                .store
+                .read_snapshot(input.semantic_scope, revision)?
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            if !semantic::snapshot_is_aesem2(&snapshot.state_bytes)
+                || snapshot.state_digest != receipt.state_after
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let (snapshot_field, snapshot_graph, _) = semantic::decode_semantic_snapshot_v2(
+                &snapshot.state_bytes,
+                input.legacy_formula_digest,
+                &receipt.state_after,
+                &receipt.graph_after,
+                &receipt,
+            )?;
+            let graph_commit = self
+                .store
+                .read_graph_commit_at_revision_v1(input.semantic_scope, revision)?
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            if graph_commit.base_graph_digest != graph_digest(&replay_graph)
+                || graph_commit.graph_digest != graph_digest(&snapshot_graph)
+                || graph_commit.formula_digest != *input.legacy_formula_digest
+                || !graph_commit.delta_bytes.is_empty()
+                || graph_commit.replay_state_bytes != snapshot_graph.canonical_bytes()
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let context = self
+                .store
+                .read_context_commit_at_revision_v1(
+                    input.semantic_scope,
+                    &relation_scope_token,
+                    revision,
+                )?
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            let expected_context_receipt = Self::committed_context_receipt(
+                &CanonicalEvent::UserStimulus(stimulus.clone()),
+                relation_scope_token,
+                revision,
+            )?;
+            let expected_context = project_committed_receipt(
+                replay_context_state.as_deref(),
+                &expected_context_receipt,
+            )?;
+            let expected_context_bytes = expected_context.canonical_state_bytes();
+            if context.relation_scope_token != relation_scope_token
+                || context.source_continuum_revision != revision
+                || context.relation_hmac != expected_context.relation_hmac()
+                || context.canonical_state_bytes != expected_context_bytes
+                || context.context_digest
+                    != ae_store::continuity_context_digest(&expected_context_bytes)
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            let replay = semantic::replay_legacy_aesem2_transition_v1(
+                &replay_field,
+                input.baseline_field,
+                &stimulus.evidence.dimensions,
+                stimulus.evidence.estimator_confidence,
+            )?;
+            let theoretical_limit = i128::from(revision)
+                .checked_add(1)
+                .and_then(|value| value.checked_mul(i128::from(semantic::LEGACY_FIELD_FXP6_SCALE)))
+                .ok_or(RuntimeError::LegacyUnattested)?;
+            let p_and_e_in_theoretical_domain = snapshot_field
+                .potential
+                .iter()
+                .chain(snapshot_field.excitation.iter())
+                .all(|value| {
+                    let raw = value.raw();
+                    raw >= 0 && i128::from(raw) <= theoretical_limit
+                });
+            if !p_and_e_in_theoretical_domain {
+                return Err(RuntimeError::invalid_neural_state(
+                    StateSubcodeV1::FieldStateInvalid,
+                ));
+            }
+            if state_digest(&snapshot_field, input.legacy_formula_digest)
+                != state_digest(&replay.next_field, input.legacy_formula_digest)
+                || graph_digest(&snapshot_graph) != graph_digest(&replay_graph)
+                || receipt.state_before != state_digest(&replay_field, input.legacy_formula_digest)
+                || receipt.state_after
+                    != state_digest(&replay.next_field, input.legacy_formula_digest)
+                || receipt.graph_after != graph_digest(&replay_graph)
+                || receipt.active_nodes != replay.active_nodes
+                || receipt.active_edges != 0
+                || receipt.residuals != InvariantResiduals::default()
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            replay_field = replay.next_field;
+            chain_seed = row.chain_digest;
+            replay_context_state = Some(expected_context_bytes);
+        }
+        if state_digest(&replay_field, input.legacy_formula_digest)
+            != state_digest(input.field, input.legacy_formula_digest)
+            || graph_digest(&replay_graph) != graph_digest(input.graph)
+            || state_digest(input.field, input.legacy_formula_digest) != source.source_state_digest
+            || graph_digest(input.graph) != source.source_graph_digest
+            || chain_seed != source.prior_chain_digest
+        {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        Ok(())
+    }
+
+    fn normalize_attested_legacy_aesem2_field(
+        &self,
+        input: LegacyAesem2FieldMigrationInput<'_>,
+    ) -> Result<(NeuralField, Option<LegacySemanticFieldDomainUpgradeV1>), RuntimeError> {
+        let Some((normalized, normalization)) =
+            semantic::normalize_legacy_aesem2_field_domain_v1(input.field)?
+        else {
+            return Ok((input.field.clone(), None));
+        };
+        let source = input.source.ok_or(RuntimeError::LegacyUnattested)?;
+        if source.source_formula_digest != *input.legacy_formula_digest {
+            return Err(RuntimeError::LegacyUnattested);
+        }
+        self.attest_legacy_aesem2_field_history(&input, source)?;
+        Ok((
+            normalized,
+            Some(Self::legacy_field_domain_metadata(normalization)),
+        ))
+    }
+
+    fn semantic_identity_conflict(
+        &self,
+        semantic_scope: &Digest,
+        event_id: &Id128,
+        event_digest: &Digest,
+    ) -> Result<bool, RuntimeError> {
+        for row in self.store.read_journal(semantic_scope)? {
+            let event = wire::decode_event(&row.event_bytes)
+                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+            if let CanonicalEvent::UserStimulus(stimulus) = event {
+                if stimulus.event_id == *event_id && row.event_digest != *event_digest {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn committed_semantic_decision(
+        &self,
+        input: CommittedSemanticDecisionInput<'_>,
+    ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
+        let CommittedSemanticDecisionInput {
+            semantic_scope,
+            semantic_storage_scope,
+            formula_digest,
+            legacy_formula_digest,
+            baseline_field,
+            baseline_graph,
+            initial_snapshot_digest,
+            manifest_digest,
+            development_seed_digest,
+            event_digest,
+            source_digest,
+            proposal,
+            deduplicated,
+        } = input;
+        let row = self
+            .store
+            .lookup_event(semantic_scope, event_digest)?
+            .ok_or(RuntimeError::RetryWait)?;
+        let receipt = row
+            .decode_receipt()
+            .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
+        let snapshot = self
+            .store
+            .read_snapshot(semantic_scope, row.revision)?
+            .ok_or(RuntimeError::LegacyUnattested)?;
+        if semantic::snapshot_is_aesem2(&snapshot.state_bytes) {
+            let (legacy_field, _, _) = semantic::decode_semantic_snapshot_v2(
+                &snapshot.state_bytes,
+                &receipt.formula_digest,
+                &receipt.state_after,
+                &receipt.graph_after,
+                &receipt,
+            )?;
+            return Ok(PerceptionProposalDecisionV1 {
+                expression_projection: semantic::expression_projection_from_field_v1(
+                    &legacy_field,
+                    row.revision,
+                )?,
+                receipt,
+                semantic_vector_receipt: None,
+                semantic_telemetry_receipt: None,
+                node_observability: None,
+                revision: row.revision,
+                deduplicated,
+                availability: SemanticClosureAvailabilityV1::UnavailableLegacy,
+                field_migration: None,
+                migration_subcode: None,
+            });
+        }
+        if receipt.event_digest != *event_digest
+            || receipt.scope_digest != *semantic_scope
+            || receipt.formula_digest != *formula_digest
+            || receipt.status != CommitStatus::Committed
+            || receipt.action_contract.is_some()
+            || receipt.next_revision != row.revision
+        {
+            return Err(RuntimeError::SemanticIdentityConflict);
+        }
+        let (before, before_graph, _) = self.semantic_snapshot_at(
+            semantic_scope,
+            formula_digest,
+            baseline_field,
+            baseline_graph,
+            receipt.base_revision,
+        )?;
+        let (before_for_phase0, field_migration) =
+            match semantic::normalize_legacy_aesem2_field_domain_v1(&before)? {
+                None => (before.clone(), None),
+                Some((_normalized, normalization)) => {
+                    let upgrade = self
+                        .store
+                        .read_legacy_semantic_formula_upgrade_v1(
+                            semantic_scope,
+                            legacy_formula_digest,
+                            formula_digest,
+                        )?
+                        .ok_or(RuntimeError::LegacyUnattested)?;
+                    if upgrade.base_revision != receipt.base_revision
+                        || upgrade.next_revision != receipt.next_revision
+                        || upgrade.event_digest != *event_digest
+                        || upgrade.source_state_digest
+                            != state_digest(&before, legacy_formula_digest)
+                        || upgrade.source_graph_digest != graph_digest(&before_graph)
+                        || upgrade.target_state_before != receipt.state_before
+                        || upgrade.field_domain
+                            != Some(Self::legacy_field_domain_metadata(normalization))
+                    {
+                        return Err(RuntimeError::LegacyUnattested);
+                    }
+                    // Deduplication is not permission to trust a former
+                    // migration receipt. Re-run the entire immutable AESEM2
+                    // history attestation, then recompute the exact field
+                    // transform from the historic preimage.
+                    let (normalized, reattested) = self.normalize_attested_legacy_aesem2_field(
+                        LegacyAesem2FieldMigrationInput {
+                            semantic_scope,
+                            semantic_storage_scope,
+                            legacy_formula_digest,
+                            baseline_field,
+                            baseline_graph,
+                            initial_snapshot_digest,
+                            semantic_revision: receipt.base_revision,
+                            source: Some(LegacySemanticUpgradeSource {
+                                source_formula_digest: upgrade.from_formula_digest,
+                                source_state_digest: upgrade.source_state_digest,
+                                source_graph_digest: upgrade.source_graph_digest,
+                                prior_chain_digest: upgrade.prior_chain_digest,
+                            }),
+                            field: &before,
+                            graph: &before_graph,
+                        },
+                    )?;
+                    if reattested != upgrade.field_domain {
+                        return Err(RuntimeError::LegacyUnattested);
+                    }
+                    (normalized, Some(SemanticFieldMigrationOutcomeV1::Replayed))
+                }
+            };
+        let (after, after_graph, telemetry_receipt) = self.semantic_snapshot_at(
+            semantic_scope,
+            formula_digest,
+            baseline_field,
+            baseline_graph,
+            row.revision,
+        )?;
+        let telemetry_receipt = telemetry_receipt
+            .map(|(_, receipt)| receipt)
+            .ok_or(RuntimeError::LegacyUnattested)?;
+        let prepared = semantic::prepare_semantic_transition_v2(
+            &before_for_phase0,
+            baseline_field,
+            &before_graph,
+            manifest_digest,
+            development_seed_digest,
+            proposal,
+        )?;
+        if state_digest(&prepared.next_field, formula_digest) != receipt.state_after
+            || graph_digest(&prepared.next_graph) != receipt.graph_after
+            || prepared.active_nodes != receipt.active_nodes
+            || state_digest(&after, formula_digest)
+                != state_digest(&prepared.next_field, formula_digest)
+            || graph_digest(&after_graph) != graph_digest(&prepared.next_graph)
+        {
+            return Err(RuntimeError::SemanticIdentityConflict);
+        }
+        let expected_telemetry = semantic_telemetry_v1::prepare_native_telemetry_v1(
+            *formula_digest,
+            *semantic_scope,
+            *event_digest,
+            source_digest,
+            receipt.base_revision,
+            receipt.next_revision,
+            state_digest(&before_for_phase0, formula_digest),
+            state_digest(&after, formula_digest),
+            graph_digest(&before_graph),
+            graph_digest(&after_graph),
+            &prepared.local_by_region,
+            &prepared.dynamics,
+            &prepared.full_vector_load,
+        )?;
+        if telemetry_receipt != expected_telemetry {
+            return Err(RuntimeError::SemanticIdentityConflict);
+        }
+        let expected_semantic_receipt = semantic::semantic_vector_receipt_v2(
+            &receipt,
+            prepared.full_vector_load.evaluated_dimension_count,
+            prepared.full_vector_load.injected_dimension_count,
+            perception_nonzero_dimension_count(proposal),
+        )?;
+        let node_observability =
+            semantic::node_observability_projection_v2(&before_for_phase0, &after, row.revision)?;
+        if (node_observability.counts.changed_node_count > 0)
+            != expected_semantic_receipt.semantic_vector.state_changed
+        {
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::SemanticClosureInvalid,
+            ));
+        }
+        let expression_projection =
+            semantic::expression_projection_from_field_v1(&after, row.revision)?;
+        Ok(PerceptionProposalDecisionV1 {
+            receipt,
+            semantic_vector_receipt: Some(expected_semantic_receipt),
+            semantic_telemetry_receipt: Some(telemetry_receipt),
+            node_observability: Some(node_observability),
+            revision: row.revision,
+            deduplicated,
+            expression_projection,
+            availability: SemanticClosureAvailabilityV1::Available,
+            field_migration,
+            migration_subcode: field_migration.map(|outcome| match outcome {
+                SemanticFieldMigrationOutcomeV1::Applied => {
+                    SemanticFieldMigrationSubcodeV1::Applied
+                }
+                SemanticFieldMigrationOutcomeV1::Replayed => {
+                    SemanticFieldMigrationSubcodeV1::Replayed
+                }
+            }),
+        })
+    }
+
+    /// Read the independent per-persona semantic cursor. This never aliases
+    /// the ordinary G0 continuity revision.
+    pub fn semantic_revision_v1(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
+        validate_perception_scope(scope)?;
+        Ok(self.hot_for(scope)?.semantic_revision)
+    }
+
+    /// Validate and atomically apply a closed fifteen-dimensional semantic
+    /// proposal. It owns no provider, text, policy, tool, or send authority.
+    pub fn apply_perception_proposal_v1(
+        &mut self,
+        scope: &ScopeRef,
+        proposal: &PerceptionProposalV1,
+    ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
+        validate_perception_scope(scope)?;
+        proposal
+            .validate_v1()
+            .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
+        if !request_nonce_binding_matches_v1(scope, proposal) {
+            return Err(RuntimeError::InvalidPerceptionProposal);
+        }
+        let nonzero_evidence_dimension_count = perception_nonzero_dimension_count(proposal);
+        let (
+            hot_bot_token,
+            hot_persona_token,
+            semantic_scope,
+            semantic_storage_scope,
+            semantic_revision,
+            genesis_formula_digest,
+            initial_snapshot_digest,
+            manifest,
+            manifest_digest,
+            development_seed_digest,
+            field,
+            graph,
+            semantic_legacy_upgrade,
+        ) = {
+            let hot = self.hot_for(scope)?;
+            (
+                hot.bot_token,
+                hot.persona_token,
+                hot.semantic_scope,
+                hot.semantic_storage_scope.clone(),
+                hot.semantic_revision,
+                hot.formula_digest,
+                hot.initial_snapshot_digest,
+                hot.identity.manifest.clone(),
+                hot.identity.manifest_digest,
+                hot.identity.development_seed_digest,
+                hot.semantic_field.clone(),
+                hot.semantic_graph.clone(),
+                hot.semantic_legacy_upgrade,
+            )
+        };
+        if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
+            return Err(RuntimeError::GenesisManifestMismatch);
+        }
+        let (baseline_field, baseline_graph) = initial_state_from_manifest(
+            &manifest,
+            &genesis_formula_digest,
+            &development_seed_digest,
+        );
+        if !baseline_field.validate() || !baseline_graph.validate() {
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::BaselineStateInvalid,
+            ));
+        }
+        let formula_digest = semantic::phase0_semantic_formula_digest_v1(&genesis_formula_digest)?;
+        let estimator_digest = proposal.estimator_digest_v1(scope);
+        let event = semantic_event(&semantic_storage_scope, proposal, estimator_digest);
+        let event_digest = wire::event_digest(&event);
+
+        if self
+            .store
+            .lookup_event(&semantic_scope, &event_digest)?
+            .is_some()
+        {
+            return self.committed_semantic_decision(CommittedSemanticDecisionInput {
+                semantic_scope: &semantic_scope,
+                semantic_storage_scope: &semantic_storage_scope,
+                formula_digest: &formula_digest,
+                legacy_formula_digest: &genesis_formula_digest,
+                baseline_field: &baseline_field,
+                baseline_graph: &baseline_graph,
+                initial_snapshot_digest,
+                manifest_digest: &manifest_digest,
+                development_seed_digest: &development_seed_digest,
+                event_digest: &event_digest,
+                source_digest: estimator_digest,
+                proposal,
+                deduplicated: true,
+            });
+        }
+        if self.semantic_identity_conflict(&semantic_scope, &proposal.event_id, &event_digest)? {
+            return Err(RuntimeError::SemanticIdentityConflict);
+        }
+        if proposal.base_revision != semantic_revision {
+            return Err(RuntimeError::StaleCausalBase {
+                expected: semantic_revision,
+                actual: proposal.base_revision,
+            });
+        }
+
+        let (field_for_phase0, field_domain_upgrade) = self
+            .normalize_attested_legacy_aesem2_field(LegacyAesem2FieldMigrationInput {
+                semantic_scope: &semantic_scope,
+                semantic_storage_scope: &semantic_storage_scope,
+                legacy_formula_digest: &genesis_formula_digest,
+                baseline_field: &baseline_field,
+                baseline_graph: &baseline_graph,
+                initial_snapshot_digest,
+                semantic_revision,
+                source: semantic_legacy_upgrade,
+                field: &field,
+                graph: &graph,
+            })?;
+
+        let prepared = semantic::prepare_semantic_transition_v2(
+            &field_for_phase0,
+            &baseline_field,
+            &graph,
+            &manifest_digest,
+            &development_seed_digest,
+            proposal,
+        )?;
+        let next_revision = semantic_revision
+            .checked_add(1)
+            .ok_or(RuntimeError::SemanticRevisionOverflow)?;
+        let state_before = state_digest(&field_for_phase0, &formula_digest);
+        let state_after = state_digest(&prepared.next_field, &formula_digest);
+        let graph_before = graph_digest(&graph);
+        let graph_after = graph_digest(&prepared.next_graph);
+        let telemetry_receipt = semantic_telemetry_v1::prepare_native_telemetry_v1(
+            formula_digest,
+            semantic_scope,
+            event_digest,
+            estimator_digest,
+            semantic_revision,
+            next_revision,
+            state_before,
+            state_after,
+            graph_before,
+            graph_after,
+            &prepared.local_by_region,
+            &prepared.dynamics,
+            &prepared.full_vector_load,
+        )?;
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest,
+            scope_digest: semantic_scope,
+            event_digest,
+            authority_digest: authority_projection_digest(&event),
+            base_revision: semantic_revision,
+            next_revision,
+            state_before,
+            state_after,
+            graph_after,
+            action_contract: None,
+            active_nodes: prepared.active_nodes,
+            active_edges: prepared.dynamics.propagated_edge_count,
+            residuals: telemetry_receipt.residuals.clone(),
+            status: CommitStatus::Committed,
+        };
+        let semantic_vector_receipt = semantic::semantic_vector_receipt_v2(
+            &receipt,
+            prepared.full_vector_load.evaluated_dimension_count,
+            prepared.full_vector_load.injected_dimension_count,
+            nonzero_evidence_dimension_count,
+        )?;
+        let node_observability = semantic::node_observability_projection_v2(
+            &field_for_phase0,
+            &prepared.next_field,
+            next_revision,
+        )?;
+        if (node_observability.counts.changed_node_count > 0)
+            != semantic_vector_receipt.semantic_vector.state_changed
+        {
+            return Err(RuntimeError::invalid_neural_state(
+                StateSubcodeV1::SemanticClosureInvalid,
+            ));
+        }
+        let state_bytes = semantic::encode_semantic_snapshot_v3(
+            &formula_digest,
+            &prepared.next_field,
+            &prepared.next_graph,
+            &telemetry_receipt,
+        )?;
+        let _ = semantic::decode_semantic_snapshot_v3(
+            &state_bytes,
+            &formula_digest,
+            &state_after,
+            &graph_after,
+            &receipt,
+        )?;
+
+        let relation_scope_token =
+            semantic_storage_scope
+                .relation_token
+                .ok_or(RuntimeError::invalid_neural_state(
+                    StateSubcodeV1::RelationScopeMissing,
+                ))?;
+        let context_receipt =
+            Self::committed_context_receipt(&event, relation_scope_token, next_revision)?;
+        let previous_context = self
+            .store
+            .read_context_commit(&semantic_scope, &relation_scope_token)?;
+        if previous_context.is_some()
+            && self
+                .context_summary_for_persona_scope(&semantic_scope, &relation_scope_token)?
+                .is_none()
+        {
+            return Err(RuntimeError::ContextCommitIntegrity);
+        }
+        let context_projection = project_committed_receipt(
+            previous_context
+                .as_ref()
+                .map(|row| row.canonical_state_bytes.as_slice()),
+            &context_receipt,
+        )?;
+        let canonical_context_state = context_projection.canonical_state_bytes();
+        let context = ContextCommitV1 {
+            relation_scope_token,
+            relation_hmac: context_projection.relation_hmac(),
+            source_continuum_revision: next_revision,
+            context_digest: ae_store::continuity_context_digest(&canonical_context_state),
+            canonical_state_bytes: canonical_context_state,
+        };
+        let chain_seed = self
+            .store
+            .last_chain_digest(&semantic_scope)?
+            .unwrap_or(initial_snapshot_digest);
+        let formula_transition_delta = if let Some(upgrade_source) = semantic_legacy_upgrade {
+            if semantic_revision == 0
+                || upgrade_source.source_formula_digest != genesis_formula_digest
+                || formula_digest
+                    != semantic::phase0_semantic_formula_digest_v1(
+                        &upgrade_source.source_formula_digest,
+                    )?
+                || state_digest(&field, &upgrade_source.source_formula_digest)
+                    != upgrade_source.source_state_digest
+                || graph_before != upgrade_source.source_graph_digest
+            {
+                return Err(RuntimeError::LegacyUnattested);
+            }
+            match field_domain_upgrade {
+                Some(field_domain) => {
+                    LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                        &receipt,
+                        upgrade_source.source_state_digest,
+                        upgrade_source.source_graph_digest,
+                        upgrade_source.source_formula_digest,
+                        chain_seed,
+                        field_domain,
+                    )
+                }
+                None => LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
+                    &receipt,
+                    upgrade_source.source_state_digest,
+                    upgrade_source.source_graph_digest,
+                    upgrade_source.source_formula_digest,
+                    chain_seed,
+                ),
+            }
+            .canonical_bytes()
+        } else if semantic_revision == 0 && formula_digest != genesis_formula_digest {
+            phase0_formula_transition_delta_v1(&receipt, graph_before, genesis_formula_digest)
+        } else {
+            vec![]
+        };
+        let bundle = ContinuityCommitBundleV1 {
+            envelope: CommitEnvelope {
+                event_kind: wire::event_kind_name(&event).to_owned(),
+                event_bytes: wire::encode_event(&event),
+                receipt: receipt.clone(),
+                chain_seed,
+                delta_bytes: formula_transition_delta.clone(),
+            },
+            snapshot: SnapshotCommitV1 {
+                state_digest: state_after,
+                state_bytes,
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest: graph_before,
+                graph_digest: graph_after,
+                formula_digest,
+                delta_bytes: formula_transition_delta,
+                replay_state_bytes: prepared.next_graph.canonical_bytes(),
+            },
+            context,
+        };
+
+        match self.store.commit_continuity_bundle(&bundle) {
+            Ok(ContinuityCommitOutcomeV1::Inserted { revision, .. })
+                if revision == next_revision =>
+            {
+                let expression_projection =
+                    semantic::expression_projection_from_field_v1(&prepared.next_field, revision)?;
+                if let Some(hot) = self.hot.as_mut() {
+                    if hot.semantic_scope == semantic_scope {
+                        hot.semantic_field = prepared.next_field;
+                        hot.semantic_graph = prepared.next_graph;
+                        hot.semantic_revision = revision;
+                        hot.semantic_legacy_upgrade = None;
+                    }
+                }
+                Ok(PerceptionProposalDecisionV1 {
+                    receipt,
+                    semantic_vector_receipt: Some(semantic_vector_receipt),
+                    semantic_telemetry_receipt: Some(telemetry_receipt),
+                    node_observability: Some(node_observability),
+                    revision,
+                    deduplicated: false,
+                    expression_projection,
+                    availability: SemanticClosureAvailabilityV1::Available,
+                    field_migration: field_domain_upgrade
+                        .map(|_| SemanticFieldMigrationOutcomeV1::Applied),
+                    migration_subcode: field_domain_upgrade
+                        .map(|_| SemanticFieldMigrationSubcodeV1::Applied),
+                })
+            }
+            Ok(ContinuityCommitOutcomeV1::ExistingIdentical { .. }) => {
+                self.bind_hot(scope.bot_token, scope.persona_token)?;
+                self.committed_semantic_decision(CommittedSemanticDecisionInput {
+                    semantic_scope: &semantic_scope,
+                    semantic_storage_scope: &semantic_storage_scope,
+                    formula_digest: &formula_digest,
+                    legacy_formula_digest: &genesis_formula_digest,
+                    baseline_field: &baseline_field,
+                    baseline_graph: &baseline_graph,
+                    initial_snapshot_digest,
+                    manifest_digest: &manifest_digest,
+                    development_seed_digest: &development_seed_digest,
+                    event_digest: &event_digest,
+                    source_digest: estimator_digest,
+                    proposal,
+                    deduplicated: true,
+                })
+            }
+            Ok(ContinuityCommitOutcomeV1::Inserted { revision, .. }) => {
+                Err(RuntimeError::StaleCausalBase {
+                    expected: next_revision,
+                    actual: revision,
+                })
+            }
+            Err(StoreError::StaleRevision { expected, actual }) => {
+                Err(RuntimeError::StaleCausalBase {
+                    expected: actual,
+                    actual: expected,
+                })
+            }
+            Err(error) => Err(RuntimeError::Store(error)),
+        }
+    }
+
     // ------------------------------------------------------------ observatory
 
-    /// Inspect only the public legacy G0 authority lane. The private semantic
-    /// history is never a public observatory selector.
     pub fn inspect(
         &mut self,
         bot_token: &Id128,
         persona_token: &Id128,
     ) -> Result<InspectReport, RuntimeError> {
-        let Some(committed) = self.store.lookup_bound_genesis(bot_token, persona_token)? else {
-            return Ok(InspectReport {
+        let bound = self
+            .store
+            .lookup_bound_genesis(bot_token, persona_token)?
+            .map(|committed| {
+                let persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+                let revision = self.store.current_revision(&persona_scope).unwrap_or(0);
+                let last_chain = self.store.last_chain_digest(&persona_scope).unwrap_or(None);
+                let journal_count = self.store.count_journal().unwrap_or(0);
+                InspectReport {
+                    bound: true,
+                    bot_token: *bot_token,
+                    persona_token: *persona_token,
+                    seed_code: ae_genesis::format_seed_code(&committed.receipt.seed_code_digest),
+                    seed_code_short: ae_genesis::format_short_seed_code(
+                        &committed.receipt.seed_code_digest,
+                    ),
+                    incarnation_id: ae_genesis::format_incarnation_id(
+                        &committed.receipt.incarnation_id,
+                    ),
+                    revision,
+                    initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
+                    last_chain_digest: last_chain,
+                    journal_count,
+                    observatory_genesis_unavailable: false,
+                }
+            })
+            .unwrap_or(InspectReport {
                 bound: false,
                 bot_token: *bot_token,
                 persona_token: *persona_token,
@@ -1554,116 +2670,9 @@ impl AstrRuntime {
                 journal_count: 0,
                 observatory_genesis_unavailable: true,
             });
-        };
-        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-        let legacy_rows = self.store.read_journal(&legacy_persona_scope)?;
-        let journal_count =
-            u64::try_from(legacy_rows.len()).map_err(|_| RuntimeError::InvalidNeuralState)?;
-        Ok(InspectReport {
-            bound: true,
-            bot_token: *bot_token,
-            persona_token: *persona_token,
-            seed_code: ae_genesis::format_seed_code(&committed.receipt.seed_code_digest),
-            seed_code_short: ae_genesis::format_short_seed_code(
-                &committed.receipt.seed_code_digest,
-            ),
-            incarnation_id: ae_genesis::format_incarnation_id(&committed.receipt.incarnation_id),
-            revision: self.store.current_revision(&legacy_persona_scope)?,
-            initial_snapshot_digest: committed.receipt.initial_snapshot_digest,
-            last_chain_digest: self.store.last_chain_digest(&legacy_persona_scope)?,
-            journal_count,
-            observatory_genesis_unavailable: false,
-        })
+        Ok(bound)
     }
 
-    fn verify_durable_history_v1(
-        &self,
-        genesis_manifest: &GenesisManifest,
-        genesis_receipt: &GenesisReceipt,
-        persona_scope: Digest,
-        requires_semantic_snapshots: bool,
-    ) -> Result<ReplayReport, RuntimeError> {
-        let rows = self.store.read_journal(&persona_scope)?;
-        let current_revision = self.store.current_revision(&persona_scope)?;
-        let report = ae_continuum::verify_replay(genesis_receipt.initial_snapshot_digest, &rows);
-        if !report.ok || report.final_revision != current_revision {
-            return Err(RuntimeError::InvalidNeuralState);
-        }
-        let mut expected_state_digest = genesis_receipt.initial_snapshot_digest;
-        let mut expected_graph_digest = genesis_receipt.graph_digest;
-        for row in &rows {
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if row.revision != receipt.next_revision
-                || row.base_revision != receipt.base_revision
-                || receipt.formula_digest != genesis_receipt.formula_digest
-                || receipt.scope_digest != persona_scope
-                || receipt.state_before != expected_state_digest
-            {
-                return Err(RuntimeError::InvalidNeuralState);
-            }
-            expected_state_digest = receipt.state_after;
-            expected_graph_digest = receipt.graph_after;
-            let snapshot = self.store.read_snapshot(&persona_scope, row.revision)?;
-            if requires_semantic_snapshots {
-                let snapshot = snapshot.ok_or(RuntimeError::InvalidNeuralState)?;
-                if snapshot.state_digest != receipt.state_after {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                let _ = decode_hot_state_v1(
-                    &snapshot.state_bytes,
-                    &genesis_receipt.formula_digest,
-                    &receipt.state_after,
-                    &receipt.graph_after,
-                )?;
-            } else if let Some(snapshot) = snapshot {
-                if snapshot.state_digest != receipt.state_after {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                let _ = decode_root_g0_snapshot_v1(
-                    &snapshot.state_bytes,
-                    &genesis_receipt.formula_digest,
-                    &receipt.state_after,
-                    &receipt.graph_after,
-                    genesis_manifest,
-                    &genesis_receipt.development_seed_digest,
-                )?;
-            }
-        }
-        if current_revision > 0 {
-            let latest_snapshot = self
-                .store
-                .read_latest_snapshot(&persona_scope, current_revision)?;
-            if requires_semantic_snapshots {
-                let snapshot = latest_snapshot.ok_or(RuntimeError::InvalidNeuralState)?;
-                if snapshot.state_digest != expected_state_digest {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                let _ = decode_hot_state_v1(
-                    &snapshot.state_bytes,
-                    &genesis_receipt.formula_digest,
-                    &expected_state_digest,
-                    &expected_graph_digest,
-                )?;
-            } else if let Some(snapshot) = latest_snapshot {
-                if snapshot.state_digest != expected_state_digest {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                let _ = decode_root_g0_snapshot_v1(
-                    &snapshot.state_bytes,
-                    &genesis_receipt.formula_digest,
-                    &expected_state_digest,
-                    &expected_graph_digest,
-                    genesis_manifest,
-                    &genesis_receipt.development_seed_digest,
-                )?;
-            }
-        }
-        Ok(report)
-    }
-
-    /// Verify only the public legacy G0 chain.
     pub fn verify_replay(
         &mut self,
         bot_token: &Id128,
@@ -1673,45 +2682,26 @@ impl AstrRuntime {
             .store
             .lookup_bound_genesis(bot_token, persona_token)?
             .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-        self.verify_durable_history_v1(
-            &committed.manifest,
-            &committed.receipt,
-            legacy_persona_scope,
-            false,
-        )
+        let persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
+        let rows = self.store.read_journal(&persona_scope)?;
+        Ok(ae_continuum::verify_replay(
+            committed.receipt.initial_snapshot_digest,
+            &rows,
+        ))
     }
 
-    /// Internal integrity audit for both independent durable histories. It
-    /// returns neither a lane selector nor any projection material.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn audit_durable_histories_v1(
-        &mut self,
-        bot_token: &Id128,
-        persona_token: &Id128,
-    ) -> Result<(), RuntimeError> {
-        let committed = self
-            .store
-            .lookup_bound_genesis(bot_token, persona_token)?
-            .ok_or(RuntimeError::PersonaGenesisRequired)?;
-        let legacy_persona_scope = wire::persona_scope_digest(bot_token, persona_token, None);
-        let semantic_persona_scope = r7_semantic_persona_scope(bot_token, persona_token);
-        for persona_scope in [legacy_persona_scope, semantic_persona_scope] {
-            self.verify_durable_history_v1(
-                &committed.manifest,
-                &committed.receipt,
-                persona_scope,
-                persona_scope == semantic_persona_scope,
+    /// Drain the writer: snapshot the current state, checkpoint WAL and close
+    /// the store. Later calls fail with Closed.
+    pub fn flush_and_close(&mut self) -> Result<(), RuntimeError> {
+        if let Some(hot) = self.hot.take() {
+            let state = state_digest(&hot.field, &hot.formula_digest);
+            self.store.write_snapshot(
+                &hot.persona_scope,
+                hot.revision,
+                &state,
+                &Self::encode_state(&hot.field, &hot.graph),
             )?;
         }
-        Ok(())
-    }
-
-    /// Drain the writer: drop the hot cache, checkpoint WAL and close the
-    /// store. Semantic state was already committed atomically with its journal
-    /// row, so close never writes an independent state truth.
-    pub fn flush_and_close(&mut self) -> Result<(), RuntimeError> {
-        self.hot = None;
         self.store.flush()?;
         Ok(())
     }
@@ -1720,262 +2710,9 @@ impl AstrRuntime {
         matches!(self.store.count_leases(), Err(StoreError::Closed))
     }
 
-    /// Return the public ordinary-G0 causal revision. The production R7
-    /// ingress intentionally uses `HotBrain::semantic_revision` internally,
-    /// so its private semantic lane never leaks into a G0 causal base.
     pub fn current_revision(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
-        let hot = self.hot_for(scope)?;
-        Ok(hot.legacy_revision)
-    }
-
-    /// Return the content-free cursor for the durable semantic lane.  This is
-    /// deliberately separate from the public G0 `current_revision` cursor.
-    pub fn semantic_revision_v1(&mut self, scope: &ScopeRef) -> Result<u64, RuntimeError> {
-        validate_perception_scope(scope)?;
-        let hot = self.hot_for(scope)?;
-        Ok(hot.semantic_revision)
-    }
-
-    fn semantic_event_identity_conflict(
-        &self,
-        semantic_scope: &Digest,
-        event_id: &Id128,
-        event_digest: &Digest,
-    ) -> Result<bool, RuntimeError> {
-        for row in self.store.read_journal(semantic_scope)? {
-            let event = wire::decode_event(&row.event_bytes)
-                .map_err(|_| RuntimeError::InvalidNeuralState)?;
-            if let CanonicalEvent::UserStimulus(stimulus) = event {
-                if stimulus.event_id == *event_id && row.event_digest != *event_digest {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    /// Validate and durably apply one closed SPC1 proposal.  The method owns
-    /// the estimator commitment, reuses the existing semantic field
-    /// preparation seam, and commits only the semantic journal/snapshot.  No
-    /// ActionContract or private projection material is produced.
-    pub fn apply_perception_proposal_v1(
-        &mut self,
-        scope: &ScopeRef,
-        proposal: &PerceptionProposalV1,
-    ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
-        self.apply_perception_proposal_v1_inner(scope, proposal, || {})
-    }
-
-    #[cfg(test)]
-    fn apply_perception_proposal_v1_with_pre_commit_hook(
-        &mut self,
-        scope: &ScopeRef,
-        proposal: &PerceptionProposalV1,
-        before_commit: &mut dyn FnMut(),
-    ) -> Result<PerceptionProposalDecisionV1, RuntimeError> {
-        self.apply_perception_proposal_v1_inner(scope, proposal, before_commit)
-    }
-
-    fn apply_perception_proposal_v1_inner<F>(
-        &mut self,
-        scope: &ScopeRef,
-        proposal: &PerceptionProposalV1,
-        mut before_commit: F,
-    ) -> Result<PerceptionProposalDecisionV1, RuntimeError>
-    where
-        F: FnMut(),
-    {
-        validate_perception_scope(scope)?;
-        proposal
-            .validate_v1()
-            .map_err(map_perception_proposal_error)?;
-
-        let r7_scope = r7_scope_from_root(scope);
-        let estimator_digest = proposal.estimator_digest_v1(&r7_scope);
-        let r7_event = r7_perception_event(scope, proposal, estimator_digest);
-        let root_event = canonical_event_from_r7(&r7_event).map_err(map_semantic_prepare_error)?;
-
-        let (
-            hot_bot_token,
-            hot_persona_token,
-            semantic_persona_scope,
-            semantic_revision,
-            formula_digest,
-            initial_snapshot_digest,
-            field,
-            graph,
-        ) = {
-            let hot = self.hot_for(scope)?;
-            (
-                hot.bot_token,
-                hot.persona_token,
-                hot.persona_scope,
-                hot.semantic_revision,
-                hot.formula_digest,
-                hot.initial_snapshot_digest,
-                hot.field.clone(),
-                hot.graph.clone(),
-            )
-        };
-        if scope.bot_token != hot_bot_token || scope.persona_token != hot_persona_token {
-            return Err(RuntimeError::GenesisManifestMismatch);
-        }
-
-        let event_digest = wire::event_digest(&root_event);
-        if let Some(row) = self
-            .store
-            .lookup_event(&semantic_persona_scope, &event_digest)?
-        {
-            let receipt = row
-                .decode_receipt()
-                .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-            if receipt.action_contract.is_some() {
-                return Err(RuntimeError::SemanticIdentityConflict);
-            }
-            self.bind_hot(scope.bot_token, scope.persona_token)?;
-            return Ok(PerceptionProposalDecisionV1 {
-                receipt,
-                revision: row.revision,
-                deduplicated: true,
-            });
-        }
-        if self.semantic_event_identity_conflict(
-            &semantic_persona_scope,
-            &proposal.event_id,
-            &event_digest,
-        )? {
-            return Err(RuntimeError::SemanticIdentityConflict);
-        }
-        if proposal.base_revision != semantic_revision {
-            return Err(RuntimeError::StaleCausalBase {
-                expected: semantic_revision,
-                actual: proposal.base_revision,
-            });
-        }
-
-        let prepared = r7::prepare_production_user_stimulus_transition_v1(
-            &r7_event,
-            &field,
-            &graph,
-            semantic_revision,
-        )
-        .map_err(map_semantic_prepare_error)?;
-        let next_revision = semantic_revision
-            .checked_add(1)
-            .ok_or(RuntimeError::SemanticRevisionOverflow)?;
-        let state_before = state_digest(&field, &formula_digest);
-        let state_after = state_digest(&prepared.next_field, &formula_digest);
-        if state_before == state_after {
-            return Err(RuntimeError::SemanticStateUnchanged);
-        }
-        let graph_after = graph_digest(&graph);
-        let authority_digest = authority_projection_digest(&root_event);
-        let receipt = TransitionReceipt {
-            schema_version: 1,
-            formula_digest,
-            scope_digest: semantic_persona_scope,
-            event_digest,
-            authority_digest,
-            base_revision: semantic_revision,
-            next_revision,
-            state_before,
-            state_after,
-            graph_after,
-            action_contract: None,
-            active_nodes: prepared.active_nodes,
-            active_edges: graph.edges.len() as u32,
-            residuals: fixed_zero_vector(),
-            status: CommitStatus::Committed,
-        };
-        let state_bytes = encode_hot_state_v1(&formula_digest, &prepared.next_field, &graph);
-        let _ = decode_hot_state_v1(&state_bytes, &formula_digest, &state_after, &graph_after)?;
-        let chain_seed = self
-            .store
-            .last_chain_digest(&semantic_persona_scope)?
-            .unwrap_or(initial_snapshot_digest);
-        let commit = StatefulCommit {
-            journal: CommitEnvelope {
-                event_kind: wire::event_kind_name(&root_event).to_owned(),
-                event_bytes: wire::encode_event(&root_event),
-                receipt: receipt.clone(),
-                chain_seed,
-                delta_bytes: vec![],
-            },
-            state_bytes,
-        };
-
-        before_commit();
-        match self.store.commit_stateful_journal(&commit) {
-            Ok((revision, _row)) => {
-                if let Some(hot) = self.hot.as_mut() {
-                    hot.field = prepared.next_field;
-                    hot.graph = graph;
-                    hot.semantic_revision = revision;
-                }
-                Ok(PerceptionProposalDecisionV1 {
-                    receipt,
-                    revision,
-                    deduplicated: false,
-                })
-            }
-            Err(StoreError::DuplicateEvent(revision)) => {
-                let row = self
-                    .store
-                    .lookup_event(&semantic_persona_scope, &event_digest)?
-                    .ok_or(RuntimeError::RetryWait)?;
-                if row.revision != revision {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                let receipt = row
-                    .decode_receipt()
-                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-                if receipt.action_contract.is_some() {
-                    return Err(RuntimeError::SemanticIdentityConflict);
-                }
-                self.bind_hot(scope.bot_token, scope.persona_token)?;
-                Ok(PerceptionProposalDecisionV1 {
-                    receipt,
-                    revision,
-                    deduplicated: true,
-                })
-            }
-            Err(stale @ StoreError::StaleRevision { .. }) => {
-                let Some(row) = self
-                    .store
-                    .lookup_event(&semantic_persona_scope, &event_digest)?
-                else {
-                    return Err(RuntimeError::Store(stale));
-                };
-                if row.event_digest != event_digest || row.scope_digest != semantic_persona_scope {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                let revision = row.revision;
-                let receipt = row
-                    .decode_receipt()
-                    .map_err(|error| RuntimeError::Store(StoreError::Sqlite(error.to_string())))?;
-                if receipt.action_contract.is_some() {
-                    return Err(RuntimeError::SemanticIdentityConflict);
-                }
-                if receipt.scope_digest != semantic_persona_scope
-                    || receipt.event_digest != event_digest
-                    || receipt.formula_digest != formula_digest
-                    || receipt.schema_version != 1
-                    || receipt.status != CommitStatus::Committed
-                    || receipt.next_revision != revision
-                    || receipt.base_revision >= receipt.next_revision
-                    || receipt.base_revision.checked_add(1) != Some(receipt.next_revision)
-                {
-                    return Err(RuntimeError::InvalidNeuralState);
-                }
-                self.bind_hot(scope.bot_token, scope.persona_token)?;
-                Ok(PerceptionProposalDecisionV1 {
-                    receipt,
-                    revision,
-                    deduplicated: true,
-                })
-            }
-            Err(other) => Err(RuntimeError::Store(other)),
-        }
+        self.hot_for(scope)?;
+        Ok(self.store.current_revision(&continuity_scope(scope))?)
     }
 }
 
@@ -2001,22 +2738,13 @@ mod tests {
     use super::*;
     use ae_contracts::{
         wire, AllostaticSetpoints, CausalRef, EpistemicPriors, EvidenceVector, ExpressionPhenotype,
-        GenesisManifestProposal, PersonaScopeRef, PersonaSelectionKind, PersonaSourceRef,
-        PersonalityVector, SemanticEstimate, SocialPriors, UserStimulus,
+        GenesisManifestProposal, PerceptionProposalV1, PersonaScopeRef, PersonaSelectionKind,
+        PersonaSourceRef, PersonalityVector, SemanticEstimate, SocialPriors, UserStimulus,
     };
     use ae_fixed::Fixed;
+    use ae_store::{SeedConfigAckStateV1, SeedConfigObservationV1, SeedConfigOriginV1};
 
-    #[test]
-    fn private_r7_errors_collapse_to_one_non_payload_root_error() {
-        let error: RuntimeError = r7::RuntimeError::PrivateProjectionWireBindingMismatch {
-            field: "PRIVATE_BINDING_FIELD_SENTINEL",
-        }
-        .into();
-        assert!(matches!(error, RuntimeError::PrivateProjectionUnavailable));
-        assert_eq!(error.to_string(), "private projection unavailable");
-    }
-
-    pub(super) fn request(seed: u8) -> PersonaGenesisRequest {
+    fn request(seed: u8) -> PersonaGenesisRequest {
         let scope = PersonaScopeRef {
             bot_token: [seed; 16],
             persona_token: [seed.wrapping_add(1); 16],
@@ -2090,147 +2818,633 @@ mod tests {
         dir
     }
 
-    fn legacy_g0_snapshot_bytes(field: &NeuralField, graph: &SparseGraph) -> Vec<u8> {
-        // 1.0.4 persisted only the eight fixed field vectors, CSR offsets, and
-        // edge count. It had no codec header, formula digest, or edge bodies.
-        let mut bytes = Vec::new();
-        for values in [
-            &field.potential,
-            &field.excitation,
-            &field.inhibition,
-            &field.adaptation,
-            &field.precision,
-            &field.prediction_error,
-            &field.eligibility,
-            &field.metabolic_reserve,
-        ] {
-            bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
-            for value in values {
-                bytes.extend_from_slice(&value.encode());
+    fn seed_config_request(
+        scope_token: Digest,
+        observation: SeedConfigObservationV1,
+        origin: SeedConfigOriginV1,
+        seed_code: Option<String>,
+        mirror_guard: Option<String>,
+        package_epoch: &str,
+    ) -> SeedConfigReconcileRequestV1 {
+        SeedConfigReconcileRequestV1 {
+            scope_token,
+            observation,
+            origin,
+            seed_code,
+            mirror_guard,
+            previous_observation: None,
+            package_epoch: package_epoch.to_owned(),
+            config_schema_version: 1,
+            host_config_revision: 0,
+        }
+    }
+
+    fn activate_seed_config_mirror(
+        runtime: &mut AstrRuntime,
+        scope: &ScopeRef,
+        package_epoch: &str,
+    ) -> (String, String) {
+        let scope_token = continuity_scope(scope);
+        let native_seed = runtime
+            .inspect(&scope.bot_token, &scope.persona_token)
+            .unwrap()
+            .seed_code;
+        let result = runtime
+            .reconcile_seed_config_v1(
+                scope,
+                &seed_config_request(
+                    scope_token,
+                    SeedConfigObservationV1::PresentNonempty,
+                    SeedConfigOriginV1::PluginWriteback,
+                    Some(native_seed.clone()),
+                    None,
+                    package_epoch,
+                ),
+            )
+            .unwrap();
+        assert_eq!(result.state, SeedConfigStateV1::WriteMirror);
+        let writeback = result.writeback.unwrap();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: writeback.writeback_token,
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+        (native_seed, writeback.mirror_guard)
+    }
+
+    fn semantic_proposal(scope: &ScopeRef, seed: u8, base_revision: u64) -> PerceptionProposalV1 {
+        let mut proposal = PerceptionProposalV1 {
+            schema_version: 1,
+            event_id: [seed; 16],
+            turn_id: [seed.wrapping_add(1); 16],
+            observed_at_ms: 1_700_000_000_200 + u64::from(seed),
+            base_revision,
+            dimensions: EvidenceVector::default(),
+            estimator_confidence: Fixed::ONE,
+            protocol_version: 1,
+            request_nonce_digest: [1; 32],
+        };
+        proposal.request_nonce_digest = canonical_request_nonce_digest_v1(scope, &proposal);
+        proposal
+    }
+
+    struct LegacyAesem2History {
+        semantic_scope: Digest,
+        legacy_formula_digest: Digest,
+        phase0_formula_digest: Digest,
+        latest_field: NeuralField,
+        latest_graph: SparseGraph,
+        latest_state_digest: Digest,
+        latest_graph_digest: Digest,
+        latest_chain_digest: Digest,
+    }
+
+    /// Build a persisted r=2 predecessor lane using the frozen AESEM2 wire
+    /// layout.  It deliberately uses the pre-Phase-0 formula attached to the
+    /// active incarnation and is reopened through the current runtime.
+    fn seed_legacy_aesem2_history(
+        runtime: &mut AstrRuntime,
+        request: &PersonaGenesisRequest,
+        scope: &ScopeRef,
+        inject_known_legacy_field_overflow: bool,
+    ) -> LegacyAesem2History {
+        let (
+            semantic_scope,
+            semantic_storage_scope,
+            legacy_formula_digest,
+            phase0_formula_digest,
+            initial_snapshot_digest,
+            baseline_field,
+            baseline_graph,
+        ) = {
+            let hot = runtime.hot_for(scope).expect("genesis binds hot state");
+            (
+                hot.semantic_scope,
+                hot.semantic_storage_scope.clone(),
+                hot.formula_digest,
+                semantic::phase0_semantic_formula_digest_v1(&hot.formula_digest)
+                    .expect("Phase-0 formula derives"),
+                hot.initial_snapshot_digest,
+                hot.semantic_field.clone(),
+                hot.semantic_graph.clone(),
+            )
+        };
+        assert_eq!(legacy_formula_digest, request.formula_digest);
+        assert_ne!(legacy_formula_digest, phase0_formula_digest);
+
+        let relation_scope_token = semantic_storage_scope
+            .relation_token
+            .expect("semantic lane owns a relation token");
+        let mut field = baseline_field.clone();
+        let graph = baseline_graph.clone();
+        let mut latest_state_digest = state_digest(&field, &legacy_formula_digest);
+        let mut latest_graph_digest = graph_digest(&graph);
+        let mut latest_chain_digest = initial_snapshot_digest;
+
+        for base_revision in 0..2_u64 {
+            let mut proposal = semantic_proposal(scope, 90 + base_revision as u8, base_revision);
+            if inject_known_legacy_field_overflow {
+                proposal.dimensions = EvidenceVector {
+                    positive: Fixed::ONE,
+                    affiliation: Fixed::ONE,
+                    harm: Fixed::ONE,
+                    boundary: Fixed::ONE,
+                    repair: Fixed::ONE,
+                    repetition: Fixed::ONE,
+                    new_information: Fixed::ONE,
+                    constraint_instability: Fixed::ONE,
+                    epistemic_conflict: Fixed::ONE,
+                    self_responsibility: Fixed::ONE,
+                    other_responsibility: Fixed::ONE,
+                    hostility: Fixed::ONE,
+                    publicness: Fixed::ONE,
+                    engagement: Fixed::ONE,
+                    rejection: Fixed::ONE,
+                };
+                proposal.request_nonce_digest = canonical_request_nonce_digest_v1(scope, &proposal);
             }
+            let estimator_digest = proposal.estimator_digest_v1(scope);
+            let event = semantic_event(&semantic_storage_scope, &proposal, estimator_digest);
+            let event_digest = wire::event_digest(&event);
+            let prepared =
+                semantic::prepare_legacy_aesem2_transition_v1(&field, &baseline_field, &proposal)
+                    .expect("predecessor fixture transition is valid");
+            let next_revision = base_revision + 1;
+            let next_field = prepared.next_field;
+            let state_before = state_digest(&field, &legacy_formula_digest);
+            let state_after = state_digest(&next_field, &legacy_formula_digest);
+            let graph_before = graph_digest(&graph);
+            let graph_after = graph_digest(&graph);
+            let receipt = TransitionReceipt {
+                schema_version: 1,
+                formula_digest: legacy_formula_digest,
+                scope_digest: semantic_scope,
+                event_digest,
+                authority_digest: authority_projection_digest(&event),
+                base_revision,
+                next_revision,
+                state_before,
+                state_after,
+                graph_after,
+                action_contract: None,
+                active_nodes: prepared.active_nodes,
+                active_edges: 0,
+                residuals: InvariantResiduals::default(),
+                status: CommitStatus::Committed,
+            };
+            let semantic_receipt = semantic::semantic_vector_receipt_v2(
+                &receipt,
+                15,
+                15,
+                perception_nonzero_dimension_count(&proposal),
+            )
+            .expect("frozen semantic receipt closes");
+            let state_bytes = semantic::encode_semantic_snapshot_v2_for_test(
+                &legacy_formula_digest,
+                &next_field,
+                &graph,
+                &semantic_receipt,
+            )
+            .expect("frozen AESEM2 snapshot encodes");
+            let decoded = semantic::decode_semantic_snapshot_v2(
+                &state_bytes,
+                &legacy_formula_digest,
+                &state_after,
+                &graph_after,
+                &receipt,
+            )
+            .expect("frozen AESEM2 snapshot replays");
+            assert_eq!(
+                state_digest(&decoded.0, &legacy_formula_digest),
+                state_after
+            );
+            assert_eq!(graph_digest(&decoded.1), graph_after);
+
+            let context_receipt =
+                AstrRuntime::committed_context_receipt(&event, relation_scope_token, next_revision)
+                    .expect("legacy context receipt closes");
+            let previous_context = runtime
+                .store
+                .read_context_commit(&semantic_scope, &relation_scope_token)
+                .expect("read predecessor context");
+            let context_projection = project_committed_receipt(
+                previous_context
+                    .as_ref()
+                    .map(|row| row.canonical_state_bytes.as_slice()),
+                &context_receipt,
+            )
+            .expect("legacy context projection closes");
+            let canonical_context_state = context_projection.canonical_state_bytes();
+            let bundle = ContinuityCommitBundleV1 {
+                envelope: CommitEnvelope {
+                    event_kind: wire::event_kind_name(&event).to_owned(),
+                    event_bytes: wire::encode_event(&event),
+                    receipt: receipt.clone(),
+                    chain_seed: latest_chain_digest,
+                    delta_bytes: vec![],
+                },
+                snapshot: SnapshotCommitV1 {
+                    state_digest: state_after,
+                    state_bytes,
+                },
+                graph: GraphCommitV1 {
+                    base_graph_digest: graph_before,
+                    graph_digest: graph_after,
+                    formula_digest: legacy_formula_digest,
+                    delta_bytes: vec![],
+                    replay_state_bytes: graph.canonical_bytes(),
+                },
+                context: ContextCommitV1 {
+                    relation_scope_token,
+                    relation_hmac: context_projection.relation_hmac(),
+                    source_continuum_revision: next_revision,
+                    context_digest: ae_store::continuity_context_digest(&canonical_context_state),
+                    canonical_state_bytes: canonical_context_state,
+                },
+            };
+            let committed = runtime
+                .store
+                .commit_continuity_bundle(&bundle)
+                .expect("frozen AESEM2 authority commits");
+            assert!(matches!(
+                committed,
+                ContinuityCommitOutcomeV1::Inserted { .. }
+            ));
+            assert_eq!(committed.revision(), next_revision);
+            latest_chain_digest = committed.row().chain_digest;
+            latest_state_digest = state_after;
+            latest_graph_digest = graph_after;
+            field = next_field;
         }
-        bytes.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
-        for offset in &graph.row_offsets {
-            bytes.extend_from_slice(&offset.to_le_bytes());
+
+        LegacyAesem2History {
+            semantic_scope,
+            legacy_formula_digest,
+            phase0_formula_digest,
+            latest_field: field,
+            latest_graph: graph,
+            latest_state_digest,
+            latest_graph_digest,
+            latest_chain_digest,
         }
-        bytes.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
-        bytes
+    }
+
+    fn legacy_upgrade_bundle_for_test(
+        runtime: &mut AstrRuntime,
+        history: &LegacyAesem2History,
+        scope: &ScopeRef,
+        proposal: &PerceptionProposalV1,
+        from_formula_digest: Digest,
+    ) -> ContinuityCommitBundleV1 {
+        let (semantic_storage_scope, manifest_digest, development_seed_digest, baseline_field) = {
+            let hot = runtime.hot_for(scope).expect("legacy state rebinds");
+            let (baseline_field, _) = initial_state_from_manifest(
+                &hot.identity.manifest,
+                &hot.formula_digest,
+                &hot.identity.development_seed_digest,
+            );
+            (
+                hot.semantic_storage_scope.clone(),
+                hot.identity.manifest_digest,
+                hot.identity.development_seed_digest,
+                baseline_field,
+            )
+        };
+        let estimator_digest = proposal.estimator_digest_v1(scope);
+        let event = semantic_event(&semantic_storage_scope, proposal, estimator_digest);
+        let event_digest = wire::event_digest(&event);
+        let prepared = semantic::prepare_semantic_transition_v2(
+            &history.latest_field,
+            &baseline_field,
+            &history.latest_graph,
+            &manifest_digest,
+            &development_seed_digest,
+            proposal,
+        )
+        .expect("candidate proposal is valid");
+        let state_before = state_digest(&history.latest_field, &history.phase0_formula_digest);
+        let state_after = state_digest(&prepared.next_field, &history.phase0_formula_digest);
+        let graph_before = graph_digest(&history.latest_graph);
+        let graph_after = graph_digest(&prepared.next_graph);
+        let telemetry_receipt = semantic_telemetry_v1::prepare_native_telemetry_v1(
+            history.phase0_formula_digest,
+            history.semantic_scope,
+            event_digest,
+            estimator_digest,
+            proposal.base_revision,
+            proposal.base_revision + 1,
+            state_before,
+            state_after,
+            graph_before,
+            graph_after,
+            &prepared.local_by_region,
+            &prepared.dynamics,
+            &prepared.full_vector_load,
+        )
+        .expect("candidate telemetry closes");
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: history.phase0_formula_digest,
+            scope_digest: history.semantic_scope,
+            event_digest,
+            authority_digest: authority_projection_digest(&event),
+            base_revision: proposal.base_revision,
+            next_revision: proposal.base_revision + 1,
+            state_before,
+            state_after,
+            graph_after,
+            action_contract: None,
+            active_nodes: prepared.active_nodes,
+            active_edges: prepared.dynamics.propagated_edge_count,
+            residuals: telemetry_receipt.residuals.clone(),
+            status: CommitStatus::Committed,
+        };
+        let state_bytes = semantic::encode_semantic_snapshot_v3(
+            &history.phase0_formula_digest,
+            &prepared.next_field,
+            &prepared.next_graph,
+            &telemetry_receipt,
+        )
+        .expect("candidate AESEM3 snapshot encodes");
+        let relation_scope_token = semantic_storage_scope
+            .relation_token
+            .expect("semantic lane owns a relation token");
+        let context_receipt = AstrRuntime::committed_context_receipt(
+            &event,
+            relation_scope_token,
+            receipt.next_revision,
+        )
+        .expect("candidate context receipt closes");
+        let previous_context = runtime
+            .store
+            .read_context_commit(&history.semantic_scope, &relation_scope_token)
+            .expect("read legacy context");
+        let context_projection = project_committed_receipt(
+            previous_context
+                .as_ref()
+                .map(|row| row.canonical_state_bytes.as_slice()),
+            &context_receipt,
+        )
+        .expect("candidate context projection closes");
+        let canonical_context_state = context_projection.canonical_state_bytes();
+        let upgrade = LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt(
+            &receipt,
+            history.latest_state_digest,
+            history.latest_graph_digest,
+            from_formula_digest,
+            history.latest_chain_digest,
+        );
+        let delta_bytes = upgrade.canonical_bytes();
+        ContinuityCommitBundleV1 {
+            envelope: CommitEnvelope {
+                event_kind: wire::event_kind_name(&event).to_owned(),
+                event_bytes: wire::encode_event(&event),
+                receipt: receipt.clone(),
+                chain_seed: history.latest_chain_digest,
+                delta_bytes: delta_bytes.clone(),
+            },
+            snapshot: SnapshotCommitV1 {
+                state_digest: state_after,
+                state_bytes,
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest: graph_before,
+                graph_digest: graph_after,
+                formula_digest: history.phase0_formula_digest,
+                delta_bytes,
+                replay_state_bytes: prepared.next_graph.canonical_bytes(),
+            },
+            context: ContextCommitV1 {
+                relation_scope_token,
+                relation_hmac: context_projection.relation_hmac(),
+                source_continuum_revision: receipt.next_revision,
+                context_digest: ae_store::continuity_context_digest(&canonical_context_state),
+                canonical_state_bytes: canonical_context_state,
+            },
+        }
+    }
+
+    fn legacy_field_upgrade_bundle_for_test(
+        runtime: &mut AstrRuntime,
+        history: &LegacyAesem2History,
+        scope: &ScopeRef,
+        proposal: &PerceptionProposalV1,
+    ) -> ContinuityCommitBundleV1 {
+        let (semantic_storage_scope, manifest_digest, development_seed_digest, baseline_field) = {
+            let hot = runtime.hot_for(scope).expect("legacy state rebinds");
+            let (baseline_field, _) = initial_state_from_manifest(
+                &hot.identity.manifest,
+                &hot.formula_digest,
+                &hot.identity.development_seed_digest,
+            );
+            (
+                hot.semantic_storage_scope.clone(),
+                hot.identity.manifest_digest,
+                hot.identity.development_seed_digest,
+                baseline_field,
+            )
+        };
+        let Some((normalized, normalization)) =
+            semantic::normalize_legacy_aesem2_field_domain_v1(&history.latest_field)
+                .expect("overflowing test field normalizes")
+        else {
+            panic!("fixture has a field-domain overflow");
+        };
+        let estimator_digest = proposal.estimator_digest_v1(scope);
+        let event = semantic_event(&semantic_storage_scope, proposal, estimator_digest);
+        let event_digest = wire::event_digest(&event);
+        let prepared = semantic::prepare_semantic_transition_v2(
+            &normalized,
+            &baseline_field,
+            &history.latest_graph,
+            &manifest_digest,
+            &development_seed_digest,
+            proposal,
+        )
+        .expect("normalized candidate proposal is valid");
+        let state_before = state_digest(&normalized, &history.phase0_formula_digest);
+        let state_after = state_digest(&prepared.next_field, &history.phase0_formula_digest);
+        let graph_before = graph_digest(&history.latest_graph);
+        let graph_after = graph_digest(&prepared.next_graph);
+        let telemetry_receipt = semantic_telemetry_v1::prepare_native_telemetry_v1(
+            history.phase0_formula_digest,
+            history.semantic_scope,
+            event_digest,
+            estimator_digest,
+            proposal.base_revision,
+            proposal.base_revision + 1,
+            state_before,
+            state_after,
+            graph_before,
+            graph_after,
+            &prepared.local_by_region,
+            &prepared.dynamics,
+            &prepared.full_vector_load,
+        )
+        .expect("candidate telemetry closes");
+        let receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest: history.phase0_formula_digest,
+            scope_digest: history.semantic_scope,
+            event_digest,
+            authority_digest: authority_projection_digest(&event),
+            base_revision: proposal.base_revision,
+            next_revision: proposal.base_revision + 1,
+            state_before,
+            state_after,
+            graph_after,
+            action_contract: None,
+            active_nodes: prepared.active_nodes,
+            active_edges: prepared.dynamics.propagated_edge_count,
+            residuals: telemetry_receipt.residuals.clone(),
+            status: CommitStatus::Committed,
+        };
+        let state_bytes = semantic::encode_semantic_snapshot_v3(
+            &history.phase0_formula_digest,
+            &prepared.next_field,
+            &prepared.next_graph,
+            &telemetry_receipt,
+        )
+        .expect("candidate AESEM3 snapshot encodes");
+        let relation_scope_token = semantic_storage_scope
+            .relation_token
+            .expect("semantic lane owns a relation token");
+        let context_receipt = AstrRuntime::committed_context_receipt(
+            &event,
+            relation_scope_token,
+            receipt.next_revision,
+        )
+        .expect("candidate context receipt closes");
+        let previous_context = runtime
+            .store
+            .read_context_commit(&history.semantic_scope, &relation_scope_token)
+            .expect("read legacy context");
+        let context_projection = project_committed_receipt(
+            previous_context
+                .as_ref()
+                .map(|row| row.canonical_state_bytes.as_slice()),
+            &context_receipt,
+        )
+        .expect("candidate context projection closes");
+        let canonical_context_state = context_projection.canonical_state_bytes();
+        let upgrade =
+            LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                &receipt,
+                history.latest_state_digest,
+                history.latest_graph_digest,
+                history.legacy_formula_digest,
+                history.latest_chain_digest,
+                AstrRuntime::legacy_field_domain_metadata(normalization),
+            );
+        let delta_bytes = upgrade.canonical_bytes();
+        ContinuityCommitBundleV1 {
+            envelope: CommitEnvelope {
+                event_kind: wire::event_kind_name(&event).to_owned(),
+                event_bytes: wire::encode_event(&event),
+                receipt: receipt.clone(),
+                chain_seed: history.latest_chain_digest,
+                delta_bytes: delta_bytes.clone(),
+            },
+            snapshot: SnapshotCommitV1 {
+                state_digest: state_after,
+                state_bytes,
+            },
+            graph: GraphCommitV1 {
+                base_graph_digest: graph_before,
+                graph_digest: graph_after,
+                formula_digest: history.phase0_formula_digest,
+                delta_bytes,
+                replay_state_bytes: prepared.next_graph.canonical_bytes(),
+            },
+            context: ContextCommitV1 {
+                relation_scope_token,
+                relation_hmac: context_projection.relation_hmac(),
+                source_continuum_revision: receipt.next_revision,
+                context_digest: ae_store::continuity_context_digest(&canonical_context_state),
+                canonical_state_bytes: canonical_context_state,
+            },
+        }
     }
 
     #[test]
-    fn legacy_g0_revision_zero_snapshot_reopens_and_continues() {
-        let dir = temp_dir("legacy-g0-r0");
-        let path = dir.join("store.db");
-        let request = request(41);
+    fn store_refuses_caller_supplied_field_migration_metadata_without_overflow() {
+        let dir = temp_dir("field-domain-store-red");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(76);
         let scope = request.source.scope_persona_scope();
-        let legacy_scope = wire::persona_scope_digest(
-            &request.source.scope.bot_token,
-            &request.source.scope.persona_token,
-            None,
+        runtime.ensure_genesis(&request).unwrap();
+        let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, false);
+        let proposal = semantic_proposal(&scope, 79, 2);
+        let mut bundle = legacy_upgrade_bundle_for_test(
+            &mut runtime,
+            &history,
+            &scope,
+            &proposal,
+            history.legacy_formula_digest,
         );
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        let genesis = runtime.ensure_genesis(&request).expect("genesis");
-        let legacy_bytes = {
-            let hot = runtime.hot.as_ref().expect("hot after genesis");
-            legacy_g0_snapshot_bytes(&hot.field, &hot.graph)
-        };
-        runtime
-            .flush_and_close()
-            .expect("close runtime before upgrade");
-        drop(runtime);
+        let forged =
+            LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt_with_field_domain(
+                &bundle.envelope.receipt,
+                history.latest_state_digest,
+                history.latest_graph_digest,
+                history.legacy_formula_digest,
+                history.latest_chain_digest,
+                LegacySemanticFieldDomainUpgradeV1 {
+                    algorithm: JOINT_MAX_LINEAR_FXP6_V1,
+                    fxp6_scale: LEGACY_FIELD_FXP6_SCALE,
+                    source_common_max: 1_000_001,
+                    out_of_range_count: 1,
+                    potential_out_of_range_count: 1,
+                    excitation_out_of_range_count: 0,
+                    signal_mass_before: 1,
+                    signal_mass_after: 1,
+                },
+            );
+        let forged_bytes = forged.canonical_bytes();
+        bundle.envelope.delta_bytes = forged_bytes.clone();
+        bundle.graph.delta_bytes = forged_bytes;
 
-        let mut store = Store::open(&path).expect("open legacy store");
-        store
-            .write_snapshot(
-                &legacy_scope,
-                0,
-                &genesis.initial_snapshot_digest,
-                &legacy_bytes,
-            )
-            .expect("install 1.0.4 revision-zero snapshot");
-        drop(store);
-
-        let mut reopened = AstrRuntime::open(&path).expect("reopen upgraded runtime");
-        reopened
-            .ensure_genesis(&request)
-            .expect("rejoin genesis from a 1.0.4 revision-zero snapshot");
-        let next = reopened
-            .apply_event(&scope, &stimulus(41, 0, 1))
-            .expect("apply after legacy revision-zero upgrade");
-        assert_eq!(next.revision, 1);
-        let replay = reopened
-            .verify_replay(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .expect("replay a 1.0.4 revision-zero snapshot after append");
-        assert!(replay.ok, "{:?}", replay.first_error);
-        reopened
-            .audit_durable_histories_v1(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .expect("audit both histories after a 1.0.4 revision-zero upgrade");
-        reopened.flush_and_close().expect("close upgraded runtime");
-        drop(reopened);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(runtime.store.commit_continuity_bundle(&bundle).is_err());
     }
 
     #[test]
-    fn legacy_g0_revision_one_snapshot_reopens_and_continues() {
-        let dir = temp_dir("legacy-g0-r1");
-        let path = dir.join("store.db");
-        let request = request(42);
+    fn store_refuses_canonical_but_unrelated_incoming_field_migration_context() {
+        let dir = temp_dir("field-domain-store-context-red");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(84);
         let scope = request.source.scope_persona_scope();
-        let legacy_scope = wire::persona_scope_digest(
-            &request.source.scope.bot_token,
-            &request.source.scope.persona_token,
-            None,
-        );
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        runtime.ensure_genesis(&request).expect("genesis");
-        let first = runtime
-            .apply_event(&scope, &stimulus(42, 0, 1))
-            .expect("first G0 event");
-        let legacy_bytes = {
-            let hot = runtime.hot.as_ref().expect("hot after first G0 event");
-            legacy_g0_snapshot_bytes(&hot.field, &hot.graph)
-        };
-        runtime
-            .flush_and_close()
-            .expect("close runtime before upgrade");
-        drop(runtime);
+        runtime.ensure_genesis(&request).unwrap();
+        let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, true);
+        let proposal = semantic_proposal(&scope, 85, 2);
+        let mut bundle =
+            legacy_field_upgrade_bundle_for_test(&mut runtime, &history, &scope, &proposal);
+        let event = wire::decode_event(&bundle.envelope.event_bytes).unwrap();
+        let detached_receipt = AstrRuntime::committed_context_receipt(
+            &event,
+            bundle.context.relation_scope_token,
+            bundle.envelope.receipt.next_revision,
+        )
+        .unwrap();
+        let detached_projection = project_committed_receipt(None, &detached_receipt).unwrap();
+        let detached_state = detached_projection.canonical_state_bytes();
+        bundle.context.relation_hmac = detached_projection.relation_hmac();
+        bundle.context.context_digest = ae_store::continuity_context_digest(&detached_state);
+        bundle.context.canonical_state_bytes = detached_state;
 
-        let mut store = Store::open(&path).expect("open legacy store");
-        store
-            .write_snapshot(&legacy_scope, 1, &first.receipt.state_after, &legacy_bytes)
-            .expect("install 1.0.4 revision-one snapshot");
-        drop(store);
-
-        let mut reopened = AstrRuntime::open(&path).expect("reopen upgraded runtime");
-        reopened
-            .ensure_genesis(&request)
-            .expect("rejoin genesis from a 1.0.4 revision-one snapshot");
-        let replay = reopened
-            .verify_replay(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .expect("replay a 1.0.4 revision-one snapshot");
-        assert!(replay.ok, "{:?}", replay.first_error);
-        reopened
-            .audit_durable_histories_v1(
-                &request.source.scope.bot_token,
-                &request.source.scope.persona_token,
-            )
-            .expect("audit both histories after a 1.0.4 revision-one upgrade");
-        let next = reopened
-            .apply_event(&scope, &stimulus(42, 1, 2))
-            .expect("apply after legacy revision-one upgrade");
-        assert_eq!(next.revision, 2);
-        reopened.flush_and_close().expect("close upgraded runtime");
-        drop(reopened);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(matches!(
+            runtime.store.commit_continuity_bundle(&bundle),
+            Err(StoreError::ContinuityFence("field_upgrade_context"))
+        ));
     }
 
     #[test]
@@ -2270,6 +3484,639 @@ mod tests {
         assert!(!inspect.observatory_genesis_unavailable);
 
         runtime.flush_and_close().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_empty_after_an_acked_mirror_rebirths_only_once() {
+        let dir = temp_dir("seed-config-rebirth");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(101);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let before = runtime
+            .inspect(&scope.bot_token, &scope.persona_token)
+            .unwrap();
+
+        let mirrored = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentNonempty,
+                    origin: SeedConfigOriginV1::PluginWriteback,
+                    seed_code: Some(before.seed_code.clone()),
+                    mirror_guard: None,
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(mirrored.state, SeedConfigStateV1::WriteMirror);
+        let mirror_writeback = mirrored.writeback.unwrap();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    &scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: mirror_writeback.writeback_token,
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+
+        // Ordinary native work advances the revision. The old guard must no
+        // longer authorize a clear; a fresh mirror is acknowledged for the
+        // new authority before the explicit empty observation is considered.
+        assert_eq!(
+            runtime
+                .apply_event(&scope, &stimulus(101, 0, 102))
+                .unwrap()
+                .revision,
+            1
+        );
+        let refreshed = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentNonempty,
+                    origin: SeedConfigOriginV1::PluginWriteback,
+                    seed_code: Some(before.seed_code.clone()),
+                    mirror_guard: None,
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(refreshed.state, SeedConfigStateV1::WriteMirror);
+        let refreshed_writeback = refreshed.writeback.unwrap();
+        let original_guard = refreshed_writeback.mirror_guard.clone();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    &scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: refreshed_writeback.writeback_token,
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+
+        let reborn = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentEmpty,
+                    origin: SeedConfigOriginV1::StartupRead,
+                    seed_code: None,
+                    mirror_guard: Some(original_guard.clone()),
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(reborn.state, SeedConfigStateV1::RebirthCommitted);
+        assert_eq!(reborn.before_revision, Some(1));
+        assert_eq!(reborn.after_revision, Some(0));
+        let child_seed = reborn.writeback.as_ref().unwrap().seed_code.clone();
+        assert_ne!(child_seed, before.seed_code);
+
+        // Simulate a crash after the locator transaction and before Python
+        // can persist/ack the repair. The old raw guard must replay only the
+        // committed child; its new host repair capability is freshly issued.
+        runtime.flush_and_close().unwrap();
+        drop(runtime);
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+
+        let replayed = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &SeedConfigReconcileRequestV1 {
+                    scope_token,
+                    observation: SeedConfigObservationV1::PresentEmpty,
+                    origin: SeedConfigOriginV1::StartupRead,
+                    seed_code: None,
+                    mirror_guard: Some(original_guard.clone()),
+                    previous_observation: None,
+                    package_epoch: "test-epoch".to_owned(),
+                    config_schema_version: 1,
+                    host_config_revision: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(replayed.state, SeedConfigStateV1::RebirthReplayed);
+        let replay_writeback = replayed.writeback.unwrap();
+        assert_eq!(replay_writeback.seed_code, child_seed);
+        assert_ne!(replay_writeback.mirror_guard, original_guard);
+        assert_ne!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            before.seed_code
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_uncertain_upgrade_and_drift_observations_never_rebirth() {
+        let dir = temp_dir("seed-config-reject-gates");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(112);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+
+        // A schema default is an explicit empty value without an active
+        // mirror. It is a repair request, never a destructive intent.
+        assert_eq!(
+            runtime
+                .reconcile_seed_config_v1(
+                    &scope,
+                    &seed_config_request(
+                        scope_token,
+                        SeedConfigObservationV1::PresentEmpty,
+                        SeedConfigOriginV1::StartupRead,
+                        None,
+                        None,
+                        "test-epoch",
+                    ),
+                )
+                .unwrap()
+                .state,
+            SeedConfigStateV1::WriteMirror
+        );
+
+        let (native_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        for (observation, origin, guard_for_request) in [
+            (
+                SeedConfigObservationV1::Missing,
+                SeedConfigOriginV1::StartupRead,
+                None,
+            ),
+            (
+                SeedConfigObservationV1::ReadFailed,
+                SeedConfigOriginV1::StartupRead,
+                None,
+            ),
+            (
+                SeedConfigObservationV1::PresentEmpty,
+                SeedConfigOriginV1::LegacyConfigMigration,
+                Some(guard.clone()),
+            ),
+            (
+                SeedConfigObservationV1::PresentEmpty,
+                SeedConfigOriginV1::PluginWriteback,
+                Some(guard.clone()),
+            ),
+        ] {
+            let result = runtime
+                .reconcile_seed_config_v1(
+                    &scope,
+                    &seed_config_request(
+                        scope_token,
+                        observation,
+                        origin,
+                        None,
+                        guard_for_request,
+                        "test-epoch",
+                    ),
+                )
+                .unwrap();
+            assert_eq!(result.state, SeedConfigStateV1::Deferred);
+            assert_eq!(
+                runtime
+                    .inspect(&scope.bot_token, &scope.persona_token)
+                    .unwrap()
+                    .seed_code,
+                native_seed
+            );
+        }
+
+        // A package update must repair the epoch-bound mirror before any
+        // later clear can be eligible.
+        assert_eq!(
+            runtime
+                .reconcile_seed_config_v1(
+                    &scope,
+                    &seed_config_request(
+                        scope_token,
+                        SeedConfigObservationV1::PresentEmpty,
+                        SeedConfigOriginV1::StartupRead,
+                        None,
+                        Some(guard.clone()),
+                        "test-epoch-updated",
+                    ),
+                )
+                .unwrap()
+                .state,
+            SeedConfigStateV1::WriteMirror
+        );
+        let drift = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &seed_config_request(
+                    scope_token,
+                    SeedConfigObservationV1::PresentNonempty,
+                    SeedConfigOriginV1::PluginWriteback,
+                    Some("AE-S1-HOST-FORGED".to_owned()),
+                    None,
+                    "test-epoch-updated",
+                ),
+            )
+            .unwrap();
+        assert_eq!(drift.state, SeedConfigStateV1::WriteMirror);
+        assert_eq!(drift.writeback.unwrap().seed_code, native_seed);
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            native_seed
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_raw_capabilities_are_not_persisted_in_the_ledger() {
+        let dir = temp_dir("seed-config-private-capability");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(113);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let native_seed = runtime
+            .inspect(&scope.bot_token, &scope.persona_token)
+            .unwrap()
+            .seed_code;
+        let result = runtime
+            .reconcile_seed_config_v1(
+                &scope,
+                &seed_config_request(
+                    scope_token,
+                    SeedConfigObservationV1::PresentNonempty,
+                    SeedConfigOriginV1::PluginWriteback,
+                    Some(native_seed),
+                    None,
+                    "test-epoch",
+                ),
+            )
+            .unwrap();
+        let writeback = result.writeback.unwrap();
+        assert_eq!(
+            runtime
+                .ack_seed_config_writeback_v1(
+                    &scope,
+                    &SeedConfigWritebackAckV1 {
+                        scope_token,
+                        writeback_token: writeback.writeback_token.clone(),
+                        write_succeeded: true,
+                        host_config_revision: 0,
+                    },
+                )
+                .unwrap()
+                .state,
+            SeedConfigAckStateV1::MirrorActive
+        );
+        runtime.flush_and_close().unwrap();
+        drop(runtime);
+
+        let ledger = dir
+            .join("continuity-vault")
+            .join("rebirth_lifecycle.sqlite");
+        let bytes = std::fs::read(ledger).unwrap();
+        for raw in [&writeback.mirror_guard, &writeback.writeback_token] {
+            assert!(
+                !bytes
+                    .windows(raw.len())
+                    .any(|window| window == raw.as_bytes()),
+                "raw seed-config capability reached the durable ledger"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_competing_stagers_switch_once_then_replay() {
+        let dir = temp_dir("seed-config-competing-stagers");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(114);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard.clone()),
+            "test-epoch",
+        );
+        let first = runtime.select_rebirth_authority(&scope).unwrap();
+        let second = runtime.select_rebirth_authority(&scope).unwrap();
+        let first_permit = match first
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        let second_permit = match second
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("same clear did not replay its staging permit")
+            }
+        };
+        assert_eq!(first_permit, second_permit);
+
+        let first_child = first
+            .stage_seed_clear_child_v1(
+                &first_permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &first_permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let second_child = second
+            .stage_seed_clear_child_v1(
+                &second_permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &second_permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(first_child, second_child);
+        assert_eq!(
+            first
+                .commit_seed_clear_v1(&first_permit, &first_child)
+                .unwrap()
+                .state,
+            SeedConfigStateV1::RebirthCommitted
+        );
+        assert!(matches!(
+            second.commit_seed_clear_v1(&second_permit, &second_child),
+            Err(SeedConfigLifecycleError::InFlight)
+        ));
+        let replayed = runtime
+            .reconcile_seed_config_v1(&scope, &empty_request)
+            .unwrap();
+        assert_eq!(replayed.state, SeedConfigStateV1::RebirthReplayed);
+        assert_ne!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+        let ledger = rusqlite::Connection::open(
+            dir.join("continuity-vault")
+                .join("rebirth_lifecycle.sqlite"),
+        )
+        .unwrap();
+        for manual_table in ["rebirth_challenge_v1", "rebirth_receipt_v1"] {
+            let count: u64 = ledger
+                .query_row(&format!("SELECT COUNT(*) FROM {manual_table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "seed clear touched manual rebirth state");
+        }
+
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_parent_fence_stale_does_not_switch_staged_child() {
+        let dir = temp_dir("seed-config-parent-fence");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(115);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let lifecycle = runtime.select_rebirth_authority(&scope).unwrap();
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard),
+            "test-epoch",
+        );
+        let permit = match lifecycle
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        let child = lifecycle
+            .stage_seed_clear_child_v1(
+                &permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .apply_event(&scope, &stimulus(115, 0, 116))
+                .unwrap()
+                .revision,
+            1
+        );
+        assert!(matches!(
+            lifecycle.commit_seed_clear_v1(&permit, &child),
+            Err(SeedConfigLifecycleError::FenceStale)
+        ));
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_precommit_restart_keeps_parent_then_reuses_staged_child() {
+        let dir = temp_dir("seed-config-precommit-restart");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(117);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let lifecycle = runtime.select_rebirth_authority(&scope).unwrap();
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard),
+            "test-epoch",
+        );
+        let permit = match lifecycle
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        lifecycle
+            .stage_seed_clear_child_v1(
+                &permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        // Simulate a process crash after durable child staging but before the
+        // locator transaction: the old generation remains current, and the
+        // retry deterministically finds and commits that one child.
+        runtime.flush_and_close().unwrap();
+        drop(runtime);
+        let mut reopened = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let committed = reopened
+            .reconcile_seed_config_v1(&scope, &empty_request)
+            .unwrap();
+        assert_eq!(committed.state, SeedConfigStateV1::RebirthCommitted);
+        assert_eq!(committed.before_revision, Some(0));
+        assert_eq!(committed.after_revision, Some(0));
+        assert_ne!(
+            reopened
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_config_child_authority_is_rechecked_before_locator_cas() {
+        let dir = temp_dir("seed-config-child-fence");
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(116);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = request.source.scope_persona_scope();
+        let scope_token = continuity_scope(&scope);
+        let (parent_seed, guard) = activate_seed_config_mirror(&mut runtime, &scope, "test-epoch");
+        let lifecycle = runtime.select_rebirth_authority(&scope).unwrap();
+        let empty_request = seed_config_request(
+            scope_token,
+            SeedConfigObservationV1::PresentEmpty,
+            SeedConfigOriginV1::StartupRead,
+            None,
+            Some(guard),
+            "test-epoch",
+        );
+        let permit = match lifecycle
+            .reconcile_seed_config_preflight_v1(&empty_request)
+            .unwrap()
+        {
+            SeedConfigPreflightV1::Stage(permit) => *permit,
+            SeedConfigPreflightV1::Result(_) => {
+                panic!("eligible clear did not yield a stage permit")
+            }
+        };
+        let child = lifecycle
+            .stage_seed_clear_child_v1(
+                &permit,
+                RebirthChildStageRequestV1 {
+                    genesis: runtime
+                        .fresh_seed_clear_child_genesis(&scope, &permit)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let child_database = lifecycle
+            .child_authority_database_path(&child.child_generation_id)
+            .unwrap();
+        let connection = rusqlite::Connection::open(child_database).unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE incarnations SET parent_incarnation_id = ?2
+                     WHERE incarnation_id = ?1",
+                    rusqlite::params![
+                        child.child_authority.incarnation_id.to_vec(),
+                        vec![0_u8; 32],
+                    ],
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+
+        assert!(matches!(
+            lifecycle.commit_seed_clear_v1(&permit, &child),
+            Err(SeedConfigLifecycleError::FenceStale)
+        ));
+        assert_eq!(
+            runtime
+                .inspect(&scope.bot_token, &scope.persona_token)
+                .unwrap()
+                .seed_code,
+            parent_seed
+        );
+
+        drop(runtime);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2475,1280 +4322,525 @@ mod tests {
         assert!(matches!(runtime.store.count_leases(), Ok(1)));
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
-#[cfg(test)]
-mod spc1_native_ingress_red_tests {
-    use super::*;
-    use ae_contracts::r7::{EvidenceVector, PerceptionProposalV1};
-    use ae_contracts::{CausalRef, SemanticEstimate, UserStimulus};
-    use ae_fixed::Fixed;
-    use std::collections::BTreeSet;
+    #[test]
+    fn semantic_neutral_proposal_commits_full_vector_and_same_revision_expression() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the card-R task directory");
+        let dir = root.join(format!("focused-semantic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
 
-    fn scope(seed: u8, session: u8) -> ScopeRef {
-        ScopeRef {
-            bot_token: [seed; 16],
-            persona_token: [seed.wrapping_add(1); 16],
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(41);
+        let genesis = runtime.ensure_genesis(&request).unwrap();
+        let phase0_formula =
+            semantic::phase0_semantic_formula_digest_v1(&request.formula_digest).unwrap();
+        assert_ne!(genesis.formula_digest, phase0_formula);
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
             relation_token: None,
-            session_token: [session; 16],
-        }
-    }
-
-    fn proposal(seed: u8, base_revision: u64) -> PerceptionProposalV1 {
-        PerceptionProposalV1 {
-            schema_version: 1,
-            event_id: [seed; 16],
-            turn_id: [seed.wrapping_add(1); 16],
-            observed_at_ms: 1_700_000_000_000 + u64::from(seed),
-            base_revision,
-            dimensions: EvidenceVector {
-                positive: Fixed::from_raw(200_000 + i64::from(seed)),
-                harm: Fixed::from_raw(100_000),
-                boundary: Fixed::from_raw(150_000),
-                epistemic_conflict: Fixed::from_raw(250_000),
-                ..EvidenceVector::default()
-            },
-            estimator_confidence: Fixed::from_raw(800_000),
-            protocol_version: 1,
-            request_nonce_digest: [seed.wrapping_add(2); 32],
-        }
-    }
-
-    fn set_dimension(proposal: &mut PerceptionProposalV1, index: usize, value: Fixed) {
-        match index {
-            0 => proposal.dimensions.positive = value,
-            1 => proposal.dimensions.affiliation = value,
-            2 => proposal.dimensions.harm = value,
-            3 => proposal.dimensions.boundary = value,
-            4 => proposal.dimensions.repair = value,
-            5 => proposal.dimensions.repetition = value,
-            6 => proposal.dimensions.new_information = value,
-            7 => proposal.dimensions.constraint_instability = value,
-            8 => proposal.dimensions.epistemic_conflict = value,
-            9 => proposal.dimensions.self_responsibility = value,
-            10 => proposal.dimensions.other_responsibility = value,
-            11 => proposal.dimensions.hostility = value,
-            12 => proposal.dimensions.publicness = value,
-            13 => proposal.dimensions.engagement = value,
-            14 => proposal.dimensions.rejection = value,
-            _ => panic!("invalid evidence dimension index"),
-        }
-    }
-
-    fn expected_estimator_digest(
-        proposal: &PerceptionProposalV1,
-        scope: &ae_contracts::r7::ScopeRef,
-    ) -> Digest {
-        let schema_version = proposal.schema_version.to_le_bytes();
-        let values = [
-            proposal.dimensions.positive.encode(),
-            proposal.dimensions.affiliation.encode(),
-            proposal.dimensions.harm.encode(),
-            proposal.dimensions.boundary.encode(),
-            proposal.dimensions.repair.encode(),
-            proposal.dimensions.repetition.encode(),
-            proposal.dimensions.new_information.encode(),
-            proposal.dimensions.constraint_instability.encode(),
-            proposal.dimensions.epistemic_conflict.encode(),
-            proposal.dimensions.self_responsibility.encode(),
-            proposal.dimensions.other_responsibility.encode(),
-            proposal.dimensions.hostility.encode(),
-            proposal.dimensions.publicness.encode(),
-            proposal.dimensions.engagement.encode(),
-            proposal.dimensions.rejection.encode(),
-        ];
-        let confidence = proposal.estimator_confidence.encode();
-        let protocol_version = proposal.protocol_version.to_le_bytes();
-        let base_revision = proposal.base_revision.to_le_bytes();
-        let mut scope_body = Vec::with_capacity(16 * 4 + 1);
-        scope_body.extend_from_slice(&scope.bot_token);
-        scope_body.extend_from_slice(&scope.persona_token);
-        match scope.relation_token {
-            Some(relation) => {
-                scope_body.push(1);
-                scope_body.extend_from_slice(&relation);
-            }
-            None => scope_body.push(0),
-        }
-        scope_body.extend_from_slice(&scope.session_token);
-        let scope_digest = ae_contracts::r7::wire::domain_hash(
-            b"astr-embodiment/semantic-perception-scope-v1",
-            &[&scope_body],
-        );
-        let mut fields: Vec<&[u8]> = Vec::with_capacity(22);
-        fields.push(&schema_version);
-        fields.extend(values.iter().map(|value| value.as_slice()));
-        fields.push(&confidence);
-        fields.push(&protocol_version);
-        fields.push(&proposal.request_nonce_digest);
-        fields.push(&proposal.event_id);
-        fields.push(&scope_digest);
-        fields.push(&proposal.turn_id);
-        fields.push(&base_revision);
-        ae_contracts::r7::wire::domain_hash(PerceptionProposalV1::DIGEST_DOMAIN_V1, &fields)
-    }
-
-    fn database(name: &str) -> std::path::PathBuf {
-        let root = std::path::PathBuf::from(
-            r"G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\test-runs\spc1-native-ingress",
-        );
-        std::fs::create_dir_all(&root).expect("test root");
-        let path = root.join(format!("{name}-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        path
-    }
-
-    fn runtime_for(seed: u8, name: &str) -> (AstrRuntime, ScopeRef) {
-        let path = database(name);
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        let genesis = super::tests::request(seed);
-        runtime.ensure_genesis(&genesis).expect("genesis");
-        (runtime, scope(seed, 90))
-    }
-
-    fn cleanup_database(name: &str) {
-        let root = std::path::PathBuf::from(
-            r"G:\AstrEmbodiment\.codex-task-temp\ae-rc1-takeover-20260821\test-runs\spc1-native-ingress",
-        );
-        let path = root.join(format!("{name}-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(path);
-    }
-
-    fn tamper_legacy_chain_digest(path: &std::path::Path, revision: u64) {
-        let script = r#"
-import sqlite3
-import sys
-path, revision = sys.argv[1], int(sys.argv[2])
-connection = sqlite3.connect(path)
-try:
-    cursor = connection.execute(
-        "UPDATE journal SET chain_digest = ? WHERE logical_revision = ?",
-        (bytes([0xA5]) * 32, revision),
-    )
-    if cursor.rowcount != 1:
-        raise RuntimeError(f"expected one row, got {cursor.rowcount}")
-    connection.commit()
-finally:
-    connection.close()
-"#;
-        let output = std::process::Command::new("python")
-            .args([
-                "-c",
-                script,
-                path.to_str().expect("UTF-8 database path"),
-                &revision.to_string(),
-            ])
-            .output()
-            .expect("launch Python SQLite tamper fixture");
-        assert!(
-            output.status.success(),
-            "SQLite tamper failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn tamper_legacy_event_digest(path: &std::path::Path, revision: u64) {
-        let script = r#"
-import sqlite3
-import sys
-path, revision = sys.argv[1], int(sys.argv[2])
-connection = sqlite3.connect(path)
-try:
-    cursor = connection.execute(
-        "UPDATE journal SET event_digest = ? WHERE logical_revision = ?",
-        (bytes([0xA6]) * 32, revision),
-    )
-    if cursor.rowcount != 1:
-        raise RuntimeError(f"expected one row, got {cursor.rowcount}")
-    connection.commit()
-finally:
-    connection.close()
-"#;
-        let output = std::process::Command::new("python")
-            .args([
-                "-c",
-                script,
-                path.to_str().expect("UTF-8 database path"),
-                &revision.to_string(),
-            ])
-            .output()
-            .expect("launch Python SQLite tamper fixture");
-        assert!(
-            output.status.success(),
-            "SQLite tamper failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn g0_stimulus(seed: u8, revision: u64, session: u8) -> CanonicalEvent {
-        CanonicalEvent::UserStimulus(UserStimulus {
-            event_id: [seed.wrapping_add(10); 16],
-            scope: scope(seed, session),
-            causal: CausalRef {
-                turn_id: [seed.wrapping_add(11); 16],
-                action_id: None,
-                delivery_id: None,
-                claim_id: None,
-                base_revision: revision,
-            },
-            observed_at_ms: 1_700_000_000_100,
-            evidence: SemanticEstimate {
-                schema_version: 1,
-                dimensions: ae_contracts::EvidenceVector::default(),
-                estimator_confidence: Fixed::ZERO,
-                estimator_digest: [0; 32],
-            },
-        })
-    }
-
-    fn install_legacy_row(
-        runtime: &mut AstrRuntime,
-        event: &CanonicalEvent,
-        previous: &TransitionReceipt,
-        base_revision: u64,
-    ) {
-        let event_digest = wire::event_digest(event);
-        let manifest_digest = runtime
-            .hot
-            .as_ref()
-            .expect("hot after genesis")
-            .identity
-            .manifest_digest;
-        let turn_id = match event {
-            CanonicalEvent::UserStimulus(value) => value.causal.turn_id,
-            CanonicalEvent::DeliveryOutcome(value) => value.causal.turn_id,
-            CanonicalEvent::TimeAdvance(value) => value.event_id,
-            _ => unreachable!("G0 fixture event must be supported"),
-        };
-        let receipt = TransitionReceipt {
-            schema_version: 1,
-            formula_digest: previous.formula_digest,
-            scope_digest: previous.scope_digest,
-            event_digest,
-            authority_digest: authority_projection_digest(event),
-            base_revision,
-            next_revision: base_revision + 1,
-            state_before: previous.state_after,
-            state_after: previous.state_after,
-            graph_after: previous.graph_after,
-            action_contract: Some(wire::action_contract_digest(&noop_action_contract(
-                &manifest_digest,
-                &event_digest,
-                turn_id,
-            ))),
-            active_nodes: previous.active_nodes,
-            active_edges: previous.active_edges,
-            residuals: fixed_zero_vector(),
-            status: CommitStatus::Committed,
-        };
-        let chain_seed = runtime
-            .store
-            .last_chain_digest(&previous.scope_digest)
-            .expect("read chain tip")
-            .expect("previous row chain tip");
-        runtime
-            .store
-            .commit_journal(&CommitEnvelope {
-                event_kind: wire::event_kind_name(event).to_owned(),
-                event_bytes: wire::encode_event(event),
-                receipt,
-                chain_seed,
-                delta_bytes: Vec::new(),
-            })
-            .expect("install legacy fixture row");
-    }
-
-    #[test]
-    fn g0_append_rejects_tampered_legacy_chain_and_does_not_append() {
-        let path = database("g0-chain-tamper");
-        let genesis = super::tests::request(151);
-        let request_scope = scope(151, 90);
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        runtime.ensure_genesis(&genesis).expect("genesis");
-        runtime
-            .apply_event(&request_scope, &g0_stimulus(151, 0, 90))
-            .expect("valid first G0 row");
-        assert_eq!(
-            runtime
-                .store
-                .read_journal(&runtime.hot.as_ref().unwrap().legacy_persona_scope)
-                .unwrap()
-                .len(),
-            1
-        );
-        runtime.flush_and_close().expect("close before tamper");
-        drop(runtime);
-
-        tamper_legacy_chain_digest(&path, 1);
-
-        let mut reopened = AstrRuntime::open(&path).expect("reopen tampered runtime");
-        let rows_before = reopened
-            .store
-            .read_journal(&wire::persona_scope_digest(
-                &request_scope.bot_token,
-                &request_scope.persona_token,
-                None,
-            ))
-            .expect("read tampered rows");
-        assert_eq!(rows_before.len(), 1);
-        let next_event = g0_stimulus(151, 1, 90);
-        let result = reopened.apply_event(&request_scope, &next_event);
-        assert!(
-            matches!(result, Err(RuntimeError::InvalidNeuralState)),
-            "tampered chain must fail closed before append: {result:?}"
-        );
-        let rows_after = reopened
-            .store
-            .read_journal(&wire::persona_scope_digest(
-                &request_scope.bot_token,
-                &request_scope.persona_token,
-                None,
-            ))
-            .expect("read rows after rejection");
-        assert_eq!(rows_after, rows_before);
-        drop(reopened);
-        cleanup_database("g0-chain-tamper");
-    }
-
-    #[test]
-    fn g0_append_rejects_tampered_legacy_event_digest_and_does_not_append() {
-        let path = database("g0-event-digest-tamper");
-        let genesis = super::tests::request(153);
-        let request_scope = scope(153, 92);
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        runtime.ensure_genesis(&genesis).expect("genesis");
-        runtime
-            .apply_event(&request_scope, &g0_stimulus(153, 0, 92))
-            .expect("valid first G0 row");
-        runtime.flush_and_close().expect("close before tamper");
-        drop(runtime);
-
-        tamper_legacy_event_digest(&path, 1);
-
-        let mut reopened = AstrRuntime::open(&path).expect("reopen tampered runtime");
-        let legacy_scope = wire::persona_scope_digest(
-            &request_scope.bot_token,
-            &request_scope.persona_token,
-            None,
-        );
-        let rows_before = reopened
-            .store
-            .read_journal(&legacy_scope)
-            .expect("read tampered rows");
-        assert_eq!(rows_before.len(), 1);
-        let result = reopened.apply_event(&request_scope, &g0_stimulus(153, 1, 92));
-        assert!(
-            matches!(result, Err(RuntimeError::InvalidNeuralState)),
-            "tampered event digest must fail closed before append: {result:?}"
-        );
-        let rows_after = reopened
-            .store
-            .read_journal(&legacy_scope)
-            .expect("read rows after rejection");
-        assert_eq!(rows_after, rows_before);
-        drop(reopened);
-        cleanup_database("g0-event-digest-tamper");
-    }
-
-    #[test]
-    fn g0_append_rejects_legacy_event_scope_binding_and_does_not_append() {
-        let path = database("g0-event-scope-tamper");
-        let genesis = super::tests::request(152);
-        let request_scope = scope(152, 91);
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        let genesis_receipt = runtime.ensure_genesis(&genesis).expect("genesis");
-        runtime
-            .apply_event(&request_scope, &g0_stimulus(152, 0, 91))
-            .expect("valid first G0 row");
-
-        let legacy_scope = wire::persona_scope_digest(
-            &request_scope.bot_token,
-            &request_scope.persona_token,
-            None,
-        );
-        let foreign_event = g0_stimulus(202, 1, 91);
-        let foreign_event_digest = wire::event_digest(&foreign_event);
-        let foreign_receipt = TransitionReceipt {
-            schema_version: 1,
-            formula_digest: genesis_receipt.formula_digest,
-            scope_digest: legacy_scope,
-            event_digest: foreign_event_digest,
-            authority_digest: authority_projection_digest(&foreign_event),
-            base_revision: 1,
-            next_revision: 2,
-            state_before: genesis_receipt.initial_snapshot_digest,
-            state_after: genesis_receipt.initial_snapshot_digest,
-            graph_after: genesis_receipt.graph_digest,
-            action_contract: Some([0xC2; 32]),
-            active_nodes: 0,
-            active_edges: 0,
-            residuals: fixed_zero_vector(),
-            status: CommitStatus::Committed,
-        };
-        let chain_seed = runtime
-            .store
-            .last_chain_digest(&legacy_scope)
-            .expect("read chain tip")
-            .expect("first row chain tip");
-        runtime
-            .store
-            .commit_journal(&CommitEnvelope {
-                event_kind: wire::event_kind_name(&foreign_event).to_owned(),
-                event_bytes: wire::encode_event(&foreign_event),
-                receipt: foreign_receipt,
-                chain_seed,
-                delta_bytes: Vec::new(),
-            })
-            .expect("install event-scope-corrupt row");
-        assert_eq!(runtime.store.read_journal(&legacy_scope).unwrap().len(), 2);
-
-        let rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
-        let result = runtime.apply_event(&request_scope, &g0_stimulus(152, 2, 91));
-        assert!(
-            matches!(result, Err(RuntimeError::InvalidNeuralState)),
-            "event scope mismatch must fail closed before append: {result:?}"
-        );
-        let rows_after = runtime.store.read_journal(&legacy_scope).unwrap();
-        assert_eq!(rows_after, rows_before);
-        runtime.flush_and_close().expect("close runtime");
-        drop(runtime);
-        cleanup_database("g0-event-scope-tamper");
-    }
-
-    #[test]
-    fn g0_append_rejects_persisted_event_causal_base_mismatch_and_does_not_append() {
-        let path = database("g0-causal-base-tamper");
-        let seed = 162;
-        let session = 102;
-        let genesis = super::tests::request(seed);
-        let request_scope = scope(seed, session);
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        runtime.ensure_genesis(&genesis).expect("genesis");
-        let first = runtime
-            .apply_event(&request_scope, &g0_stimulus(seed, 0, session))
-            .expect("valid first G0 row");
-
-        let mut causal_event = g0_stimulus(seed, 1, session);
-        if let CanonicalEvent::UserStimulus(value) = &mut causal_event {
-            value.causal.base_revision = 77;
-        }
-        install_legacy_row(&mut runtime, &causal_event, &first.receipt, 1);
-        let legacy_scope = first.receipt.scope_digest;
-        let rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
-        assert_eq!(rows_before.len(), 2);
-
-        let result = runtime.apply_event(&request_scope, &g0_stimulus(seed, 2, session));
-        assert!(
-            matches!(result, Err(RuntimeError::InvalidNeuralState)),
-            "causal-base-mismatched persisted event must fail closed before append: {result:?}"
-        );
-        let rows_after = runtime.store.read_journal(&legacy_scope).unwrap();
-        assert_eq!(rows_after, rows_before);
-        runtime.flush_and_close().expect("close runtime");
-        drop(runtime);
-        cleanup_database("g0-causal-base-tamper");
-    }
-
-    #[test]
-    fn g0_append_rejects_legacy_receipt_shape_variants_and_does_not_append() {
-        type ReceiptMutation = fn(&mut TransitionReceipt);
-
-        fn schema_variant(receipt: &mut TransitionReceipt) {
-            receipt.schema_version = 2;
-        }
-        fn status_variant(receipt: &mut TransitionReceipt) {
-            receipt.status = CommitStatus::Rejected;
-        }
-        fn action_contract_variant(receipt: &mut TransitionReceipt) {
-            receipt.action_contract = None;
-        }
-
-        let variants: [(&str, ReceiptMutation); 3] = [
-            ("schema", schema_variant),
-            ("status", status_variant),
-            ("action-contract", action_contract_variant),
-        ];
-        for (label, mutate) in variants {
-            let database_name = format!("g0-receipt-shape-{label}");
-            let path = database(&database_name);
-            let seed = 154 + u8::try_from(label.len()).expect("small label length");
-            let session = seed.wrapping_add(1);
-            let genesis = super::tests::request(seed);
-            let request_scope = scope(seed, session);
-            let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-            runtime.ensure_genesis(&genesis).expect("genesis");
-            let first = runtime
-                .apply_event(&request_scope, &g0_stimulus(seed, 0, session))
-                .expect("valid first G0 row");
-
-            let second_event = g0_stimulus(seed, 1, session);
-            let second_event_digest = wire::event_digest(&second_event);
-            let manifest_digest = runtime
-                .hot
-                .as_ref()
-                .expect("hot after genesis")
-                .identity
-                .manifest_digest;
-            let second_turn_id = match &second_event {
-                CanonicalEvent::UserStimulus(value) => value.causal.turn_id,
-                _ => unreachable!(),
-            };
-            let mut malformed = TransitionReceipt {
-                schema_version: 1,
-                formula_digest: first.receipt.formula_digest,
-                scope_digest: first.receipt.scope_digest,
-                event_digest: second_event_digest,
-                authority_digest: authority_projection_digest(&second_event),
-                base_revision: 1,
-                next_revision: 2,
-                state_before: first.receipt.state_after,
-                state_after: first.receipt.state_after,
-                graph_after: first.receipt.graph_after,
-                action_contract: Some(wire::action_contract_digest(&noop_action_contract(
-                    &manifest_digest,
-                    &second_event_digest,
-                    second_turn_id,
-                ))),
-                active_nodes: first.receipt.active_nodes,
-                active_edges: first.receipt.active_edges,
-                residuals: fixed_zero_vector(),
-                status: CommitStatus::Committed,
-            };
-            mutate(&mut malformed);
-            let chain_seed = runtime
-                .store
-                .last_chain_digest(&first.receipt.scope_digest)
-                .expect("read chain tip")
-                .expect("first row chain tip");
-            runtime
-                .store
-                .commit_journal(&CommitEnvelope {
-                    event_kind: wire::event_kind_name(&second_event).to_owned(),
-                    event_bytes: wire::encode_event(&second_event),
-                    receipt: malformed,
-                    chain_seed,
-                    delta_bytes: Vec::new(),
-                })
-                .expect("install receipt-shape-corrupt row");
-            let legacy_scope = first.receipt.scope_digest;
-            let rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
-            assert_eq!(rows_before.len(), 2);
-
-            let result = runtime.apply_event(&request_scope, &g0_stimulus(seed, 2, session));
-            assert!(
-                matches!(result, Err(RuntimeError::InvalidNeuralState)),
-                "{label} receipt shape must fail closed before append: {result:?}"
-            );
-            let rows_after = runtime.store.read_journal(&legacy_scope).unwrap();
-            assert_eq!(rows_after, rows_before);
-            runtime.flush_and_close().expect("close runtime");
-            drop(runtime);
-            cleanup_database(&database_name);
-        }
-    }
-
-    #[test]
-    fn perception_proposal_has_a_closed_digest_and_semantic_cursor_api() {
-        let scope = ae_contracts::r7::ScopeRef {
-            bot_token: [31; 16],
-            persona_token: [32; 16],
-            relation_token: None,
-            session_token: [3; 16],
+            session_token: [42; 16],
         };
         let proposal = PerceptionProposalV1 {
             schema_version: 1,
-            event_id: [4; 16],
-            turn_id: [5; 16],
-            observed_at_ms: 1,
+            event_id: [43; 16],
+            turn_id: [44; 16],
+            observed_at_ms: 1_700_000_000_200,
             base_revision: 0,
-            dimensions: EvidenceVector {
-                positive: Fixed::from_raw(1),
-                ..EvidenceVector::default()
-            },
+            dimensions: EvidenceVector::default(),
             estimator_confidence: Fixed::ONE,
             protocol_version: 1,
-            request_nonce_digest: [6; 32],
+            request_nonce_digest: [
+                0xa8, 0xd3, 0x8b, 0x2c, 0xa2, 0x8a, 0xaf, 0x6d, 0x3a, 0xba, 0xd2, 0x18, 0x20, 0x02,
+                0x16, 0xe6, 0xb5, 0x59, 0x32, 0x40, 0x76, 0x10, 0xa4, 0xf1, 0x61, 0x1b, 0xef, 0x05,
+                0xd6, 0x91, 0x02, 0xe5,
+            ],
         };
-        assert_ne!(proposal.estimator_digest_v1(&scope), [0; 32]);
 
-        let path = database("red");
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        let genesis = super::tests::request(31);
-        runtime.ensure_genesis(&genesis).expect("genesis");
-        let runtime_scope = ScopeRef {
-            bot_token: scope.bot_token,
-            persona_token: scope.persona_token,
-            relation_token: scope.relation_token,
-            session_token: scope.session_token,
-        };
-        assert_eq!(runtime.semantic_revision_v1(&runtime_scope).unwrap(), 0);
-        runtime.flush_and_close().expect("close runtime");
-        drop(runtime);
-        let _ = std::fs::remove_file(&path);
+        let decision = runtime
+            .apply_perception_proposal_v1(&scope, &proposal)
+            .unwrap();
+        assert!(!decision.deduplicated);
+        assert_eq!(decision.revision, 1);
+        assert_eq!(decision.receipt.formula_digest, phase0_formula);
+        assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 1);
+        assert_eq!(decision.receipt.base_revision, 0);
+        assert_eq!(decision.receipt.next_revision, 1);
+        assert_eq!(decision.receipt.status, CommitStatus::Committed);
+
+        let semantic_receipt = decision.semantic_vector_receipt.as_ref().unwrap();
+        assert_eq!(semantic_receipt.next_revision, decision.revision);
+        assert_eq!(semantic_receipt.semantic_vector.dimension_slot_count, 15);
+        assert_eq!(
+            semantic_receipt.semantic_vector.evaluated_dimension_count,
+            15
+        );
+        assert_eq!(
+            semantic_receipt.semantic_vector.injected_dimension_count,
+            15
+        );
+        assert_eq!(
+            semantic_receipt
+                .semantic_vector
+                .nonzero_evidence_dimension_count,
+            0
+        );
+        assert_eq!(
+            semantic_receipt
+                .semantic_vector
+                .neutral_baseline_dimension_count,
+            15
+        );
+        assert_eq!(
+            semantic_receipt.semantic_vector.unavailable_dimension_count,
+            0
+        );
+
+        let journal = runtime
+            .store
+            .read_journal(&semantic_receipt.scope_digest)
+            .unwrap();
+        assert_eq!(journal.len(), 1);
+        let snapshot = runtime
+            .store
+            .read_snapshot(&semantic_receipt.scope_digest, decision.revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.state_digest, semantic_receipt.state_after);
+
+        let expression = &decision.expression_projection;
+        assert_eq!(expression.revision, decision.revision);
+        for value in [
+            expression.profile_fxp6.warmth,
+            expression.profile_fxp6.sensitivity,
+            expression.profile_fxp6.guardedness,
+            expression.profile_fxp6.repair_orientation,
+            expression.profile_fxp6.engagement,
+            expression.profile_fxp6.epistemic_caution,
+        ] {
+            assert!(value <= 1_000_000);
+        }
     }
 
     #[test]
-    fn proposal_json_is_closed_and_fixed_digest_is_scope_bound() {
-        let mut proposal = proposal(41, 0);
-        for (index, raw) in (1..=15).map(|value| value * 10_000).enumerate() {
-            set_dimension(&mut proposal, index, Fixed::from_raw(raw));
-        }
-        proposal.validate_v1().expect("valid proposal");
-        let encoded = serde_json::to_value(&proposal).expect("encode proposal");
-        let keys = encoded
-            .as_object()
-            .expect("proposal object")
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            keys,
-            [
-                "schema_version",
-                "event_id",
-                "turn_id",
-                "observed_at_ms",
-                "base_revision",
-                "dimensions",
-                "estimator_confidence",
-                "protocol_version",
-                "request_nonce_digest",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-        );
-        assert!(encoded["event_id"].is_string());
-        assert!(encoded["request_nonce_digest"].is_string());
-        assert_eq!(
-            encoded["dimensions"]["positive"],
-            serde_json::json!(proposal.dimensions.positive.raw())
-        );
-        let mut unknown = encoded.clone();
-        unknown["unknown"] = serde_json::json!("sentinel");
-        assert!(serde_json::from_value::<PerceptionProposalV1>(unknown).is_err());
-        let mut nested_unknown = encoded.clone();
-        nested_unknown["dimensions"]["unknown"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<PerceptionProposalV1>(nested_unknown).is_err());
-        for invalid_json_number in [serde_json::json!(0.5), serde_json::json!(true)] {
-            let mut invalid = encoded.clone();
-            invalid["dimensions"]["positive"] = invalid_json_number;
-            assert!(serde_json::from_value::<PerceptionProposalV1>(invalid).is_err());
-        }
-        let r7_scope = ae_contracts::r7::ScopeRef {
-            bot_token: [41; 16],
-            persona_token: [42; 16],
+    fn semantic_followup_keeps_formula_and_graph_continuity() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the continuity task directory");
+        let dir = root.join(format!(
+            "focused-semantic-continuity-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(51);
+        let genesis = runtime.ensure_genesis(&request).unwrap();
+        let phase0_formula =
+            semantic::phase0_semantic_formula_digest_v1(&request.formula_digest).unwrap();
+        assert_ne!(genesis.formula_digest, phase0_formula);
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
             relation_token: None,
-            session_token: [90; 16],
+            session_token: [52; 16],
         };
-        let mut other_scope = r7_scope.clone();
-        other_scope.session_token = [91; 16];
-        assert_ne!(
-            proposal.estimator_digest_v1(&r7_scope),
-            proposal.estimator_digest_v1(&other_scope)
-        );
-        let mut changed = proposal.clone();
-        changed.dimensions.rejection = Fixed::from_raw(1);
-        assert_ne!(
-            proposal.estimator_digest_v1(&r7_scope),
-            changed.estimator_digest_v1(&r7_scope)
-        );
+        let first = runtime
+            .apply_perception_proposal_v1(&scope, &semantic_proposal(&scope, 53, 0))
+            .unwrap();
+        let second = runtime
+            .apply_perception_proposal_v1(&scope, &semantic_proposal(&scope, 54, first.revision))
+            .unwrap();
+
+        assert_eq!(first.revision, 1);
+        assert_eq!(second.revision, 2);
+        assert_eq!(second.receipt.base_revision, first.revision);
+        assert_eq!(second.receipt.next_revision, 2);
+        assert_eq!(first.receipt.formula_digest, phase0_formula);
+        assert_eq!(second.receipt.formula_digest, first.receipt.formula_digest);
+        assert_eq!(second.receipt.state_before, first.receipt.state_after);
+
+        let first_telemetry = first.semantic_telemetry_receipt.as_ref().unwrap();
+        let second_telemetry = second.semantic_telemetry_receipt.as_ref().unwrap();
         assert_eq!(
-            proposal.estimator_digest_v1(&r7_scope),
-            expected_estimator_digest(&proposal, &r7_scope)
+            second_telemetry.formula_digest,
+            first_telemetry.formula_digest
         );
-        assert_eq!(
-            proposal.estimator_digest_v1(&r7_scope),
-            [
-                0x40, 0x54, 0x37, 0x53, 0x26, 0xa6, 0x5e, 0xa9, 0x36, 0xe6, 0x5d, 0x79, 0x04, 0xac,
-                0xcc, 0x9e, 0x50, 0x51, 0x80, 0x45, 0x0b, 0xcd, 0xc0, 0x63, 0x45, 0x27, 0x8f, 0x37,
-                0xa4, 0xd3, 0x39, 0xa0,
-            ]
-        );
-        let mut all_one = proposal.clone();
-        for index in 0..15 {
-            set_dimension(&mut all_one, index, Fixed::ONE);
-        }
-        all_one.estimator_confidence = Fixed::ONE;
-        all_one.validate_v1().expect("inclusive one boundary");
-        let mut high_confidence = all_one.clone();
-        high_confidence.estimator_confidence = Fixed::from_raw(1_000_001);
-        assert!(high_confidence.validate_v1().is_err());
-        for index in 0..15 {
-            let mut negative = all_one.clone();
-            set_dimension(&mut negative, index, Fixed::from_raw(-1));
-            assert!(negative.validate_v1().is_err());
-            let mut high = all_one.clone();
-            set_dimension(&mut high, index, Fixed::from_raw(1_000_001));
-            assert!(high.validate_v1().is_err());
-        }
+        assert_eq!(second_telemetry.graph_before, first_telemetry.graph_after);
+
+        let journal = runtime
+            .store
+            .read_journal(&first.receipt.scope_digest)
+            .unwrap();
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal[1].decode_receipt().unwrap(), second.receipt);
+        assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 2);
     }
 
     #[test]
-    fn semantic_commit_is_durable_idempotent_and_isolated_from_g0() {
-        let path = database("lifecycle");
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        let genesis = super::tests::request(51);
-        runtime.ensure_genesis(&genesis).expect("genesis");
-        let request_scope = scope(51, 90);
-        assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
-        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 0);
+    fn legacy_aesem2_revision_two_upgrades_once_without_reset_or_rebirth() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the legacy-upgrade task directory");
+        let dir = root.join(format!("legacy-aesem2-upgrade-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let request = request(61);
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
+            relation_token: None,
+            session_token: [62; 16],
+        };
 
-        let first_proposal = proposal(61, 0);
-        let first = runtime
-            .apply_perception_proposal_v1(&request_scope, &first_proposal)
-            .expect("first semantic commit");
-        assert_eq!(first.revision, 1);
-        assert!(!first.deduplicated);
-        assert_eq!(first.receipt.action_contract, None);
-        assert_ne!(first.receipt.state_before, first.receipt.state_after);
-        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
-        assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
-        let semantic_scope =
-            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
-        let semantic_rows_after_first = runtime
-            .store
-            .read_journal(&semantic_scope)
-            .expect("semantic rows");
-        let semantic_snapshot_after_first = runtime
-            .store
-            .read_snapshot(&semantic_scope, 1)
-            .expect("semantic snapshot")
-            .expect("revision one snapshot");
+        let (history, original_genesis, legacy_journal, legacy_snapshot) = {
+            let mut runtime = AstrRuntime::open(&path).unwrap();
+            let original_genesis = runtime.ensure_genesis(&request).unwrap();
+            let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, false);
+            let legacy_journal = runtime.store.read_journal(&history.semantic_scope).unwrap();
+            let legacy_snapshot = runtime
+                .store
+                .read_snapshot(&history.semantic_scope, 2)
+                .unwrap()
+                .expect("r=2 AESEM2 snapshot persists");
+            assert_eq!(legacy_journal.len(), 2);
+            assert!(semantic::snapshot_is_aesem2(&legacy_snapshot.state_bytes));
+            (history, original_genesis, legacy_journal, legacy_snapshot)
+        };
 
-        let retry = runtime
-            .apply_perception_proposal_v1(&request_scope, &first_proposal)
-            .expect("exact retry");
-        assert!(retry.deduplicated);
-        assert_eq!(retry.receipt, first.receipt);
-        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
-
-        let mut modified = first_proposal.clone();
-        modified.dimensions.positive = Fixed::from_raw(300_000);
-        assert!(matches!(
-            runtime.apply_perception_proposal_v1(&request_scope, &modified),
-            Err(RuntimeError::SemanticIdentityConflict)
-        ));
-        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
-
-        let mut changed_turn = first_proposal.clone();
-        changed_turn.turn_id = [99; 16];
-        assert!(matches!(
-            runtime.apply_perception_proposal_v1(&request_scope, &changed_turn),
-            Err(RuntimeError::SemanticIdentityConflict)
-        ));
-        let alternate_session = scope(51, 91);
-        assert!(matches!(
-            runtime.apply_perception_proposal_v1(&alternate_session, &first_proposal),
-            Err(RuntimeError::SemanticIdentityConflict)
-        ));
-        let stale = proposal(64, 0);
-        assert!(matches!(
-            runtime.apply_perception_proposal_v1(&request_scope, &stale),
-            Err(RuntimeError::StaleCausalBase {
-                expected: 1,
-                actual: 0
-            })
-        ));
-        assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 1);
+        let mut reopened = AstrRuntime::open(&path).unwrap();
+        assert_eq!(reopened.semantic_revision_v1(&scope).unwrap(), 2);
+        let upgrade_proposal = semantic_proposal(&scope, 96, 2);
+        let upgraded = reopened
+            .apply_perception_proposal_v1(&scope, &upgrade_proposal)
+            .expect("first fresh proposal upgrades the AESEM2 lane");
+        assert_eq!(upgraded.revision, 3);
+        assert_eq!(upgraded.receipt.base_revision, 2);
+        assert_eq!(upgraded.receipt.next_revision, 3);
         assert_eq!(
-            runtime.store.read_journal(&semantic_scope).unwrap(),
-            semantic_rows_after_first
+            upgraded.receipt.formula_digest,
+            history.phase0_formula_digest
         );
+        assert_eq!(
+            upgraded.receipt.state_before,
+            state_digest(&history.latest_field, &history.phase0_formula_digest)
+        );
+        assert_eq!(
+            upgraded
+                .semantic_telemetry_receipt
+                .as_ref()
+                .expect("upgrade emits current telemetry")
+                .graph_before,
+            history.latest_graph_digest
+        );
+        assert_eq!(
+            graph_digest(&history.latest_graph),
+            history.latest_graph_digest
+        );
+        assert_ne!(upgraded.receipt.state_before, history.latest_state_digest);
+        assert_eq!(reopened.semantic_revision_v1(&scope).unwrap(), 3);
+
+        let after_upgrade = reopened
+            .store
+            .read_journal(&history.semantic_scope)
+            .unwrap();
+        assert_eq!(after_upgrade.len(), 3);
+        assert_eq!(&after_upgrade[..2], legacy_journal.as_slice());
+        assert_eq!(history.legacy_formula_digest, request.formula_digest);
+        assert_eq!(
+            history.latest_chain_digest,
+            legacy_journal
+                .last()
+                .expect("legacy history has a tail")
+                .chain_digest
+        );
+        let upgrade_receipt = reopened
+            .store
+            .read_legacy_semantic_formula_upgrade_v1(
+                &history.semantic_scope,
+                &history.legacy_formula_digest,
+                &history.phase0_formula_digest,
+            )
+            .unwrap()
+            .expect("one explicit legacy-upgrade receipt persists");
+        assert_eq!(upgrade_receipt.base_revision, 2);
+        assert_eq!(upgrade_receipt.next_revision, 3);
+        assert_eq!(upgrade_receipt.event_digest, upgraded.receipt.event_digest);
+        assert_eq!(
+            upgrade_receipt.receipt_digest,
+            wire::receipt_digest(&upgraded.receipt)
+        );
+        assert_eq!(
+            upgrade_receipt.source_state_digest,
+            history.latest_state_digest
+        );
+        assert_eq!(
+            upgrade_receipt.target_state_before,
+            upgraded.receipt.state_before
+        );
+        assert_eq!(
+            upgrade_receipt.source_graph_digest,
+            history.latest_graph_digest
+        );
+        assert_eq!(
+            upgrade_receipt.prior_chain_digest,
+            history.latest_chain_digest
+        );
+        assert_eq!(
+            reopened
+                .store
+                .read_snapshot(&history.semantic_scope, 2)
+                .unwrap()
+                .expect("legacy snapshot remains")
+                .state_bytes,
+            legacy_snapshot.state_bytes
+        );
+        assert_eq!(reopened.ensure_genesis(&request).unwrap(), original_genesis);
+
+        drop(reopened);
+        let mut continued = AstrRuntime::open(&path).unwrap();
+        let deduplicated = continued
+            .apply_perception_proposal_v1(&scope, &upgrade_proposal)
+            .expect("persisted upgrade event deduplicates after reopen");
+        assert!(deduplicated.deduplicated);
+        assert_eq!(deduplicated.revision, 3);
+        assert_eq!(
+            wire::receipt_digest(&deduplicated.receipt),
+            wire::receipt_digest(&upgraded.receipt)
+        );
+        let followup = continued
+            .apply_perception_proposal_v1(&scope, &semantic_proposal(&scope, 97, 3))
+            .expect("current formula continues after the one-time upgrade");
+        assert_eq!(followup.revision, 4);
+        assert_eq!(
+            followup.receipt.formula_digest,
+            history.phase0_formula_digest
+        );
+        assert_eq!(continued.semantic_revision_v1(&scope).unwrap(), 4);
+        assert_eq!(
+            continued
+                .store
+                .read_legacy_semantic_formula_upgrade_v1(
+                    &history.semantic_scope,
+                    &history.legacy_formula_digest,
+                    &history.phase0_formula_digest,
+                )
+                .unwrap(),
+            Some(upgrade_receipt)
+        );
+    }
+
+    #[test]
+    fn finite_legacy_aesem2_field_overflow_migrates_with_the_first_real_event() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the field-migration task directory");
+        let dir = root.join(format!(
+            "legacy-aesem2-field-domain-migration-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.db");
+        let request = request(81);
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
+            relation_token: None,
+            session_token: [82; 16],
+        };
+
+        let (history, legacy_journal, legacy_snapshot) = {
+            let mut runtime = AstrRuntime::open(&path).unwrap();
+            runtime.ensure_genesis(&request).unwrap();
+            let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, true);
+            assert!(history.latest_field.potential[0] > Fixed::ONE);
+            assert!(history.latest_field.excitation[0] > Fixed::ONE);
+            let journal = runtime.store.read_journal(&history.semantic_scope).unwrap();
+            let snapshot = runtime
+                .store
+                .read_snapshot(&history.semantic_scope, 2)
+                .unwrap()
+                .expect("overflowing AESEM2 snapshot persists");
+            (history, journal, snapshot)
+        };
+
+        let mut reopened = AstrRuntime::open(&path).unwrap();
+        let proposal = semantic_proposal(&scope, 83, 2);
+        let migrated = reopened
+            .apply_perception_proposal_v1(&scope, &proposal)
+            .expect("known finite legacy overflow must migrate inside r=2 -> r=3");
+
+        assert_eq!(migrated.revision, 3);
+        assert_eq!(migrated.receipt.base_revision, 2);
+        assert_eq!(migrated.receipt.next_revision, 3);
+        assert_eq!(
+            migrated.field_migration,
+            Some(SemanticFieldMigrationOutcomeV1::Applied)
+        );
+        assert_eq!(
+            migrated.migration_subcode,
+            Some(SemanticFieldMigrationSubcodeV1::Applied)
+        );
+        assert_eq!(
+            migrated.receipt.formula_digest,
+            history.phase0_formula_digest
+        );
+        assert_ne!(
+            migrated.receipt.state_before,
+            state_digest(&history.latest_field, &history.phase0_formula_digest)
+        );
+        let after = reopened
+            .store
+            .read_journal(&history.semantic_scope)
+            .unwrap();
+        assert_eq!(after.len(), 3);
+        assert_eq!(&after[..2], legacy_journal.as_slice());
+        assert_eq!(
+            reopened
+                .store
+                .read_snapshot(&history.semantic_scope, 2)
+                .unwrap()
+                .expect("historical snapshot remains immutable")
+                .state_bytes,
+            legacy_snapshot.state_bytes
+        );
+        let upgrade = reopened
+            .store
+            .read_legacy_semantic_formula_upgrade_v1(
+                &history.semantic_scope,
+                &history.legacy_formula_digest,
+                &history.phase0_formula_digest,
+            )
+            .unwrap()
+            .expect("field migration has one durable receipt");
+        assert!(upgrade.field_domain.is_some());
+        drop(reopened);
+        let mut resumed = AstrRuntime::open(&path).unwrap();
+        let deduplicated = resumed
+            .apply_perception_proposal_v1(&scope, &proposal)
+            .expect("the same event replays its normalized precondition");
+        assert!(deduplicated.deduplicated);
+        assert_eq!(
+            deduplicated.field_migration,
+            Some(SemanticFieldMigrationOutcomeV1::Replayed)
+        );
+        assert_eq!(
+            deduplicated.migration_subcode,
+            Some(SemanticFieldMigrationSubcodeV1::Replayed)
+        );
+        assert_eq!(
+            wire::receipt_digest(&deduplicated.receipt),
+            wire::receipt_digest(&migrated.receipt)
+        );
+    }
+
+    #[test]
+    fn tampered_legacy_formula_upgrade_receipt_writes_nothing() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the legacy-upgrade task directory");
+        let dir = root.join(format!("legacy-aesem2-tamper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(71);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
+            relation_token: None,
+            session_token: [72; 16],
+        };
+        let history = seed_legacy_aesem2_history(&mut runtime, &request, &scope, false);
+        let tampered_from_formula = [0xa5; 32];
+        assert_ne!(tampered_from_formula, history.legacy_formula_digest);
+        let bundle = legacy_upgrade_bundle_for_test(
+            &mut runtime,
+            &history,
+            &scope,
+            &semantic_proposal(&scope, 98, 2),
+            tampered_from_formula,
+        );
+        let before = runtime.store.read_journal(&history.semantic_scope).unwrap();
+        assert_eq!(before.len(), 2);
+
+        assert!(matches!(
+            runtime.store.commit_continuity_bundle(&bundle),
+            Err(StoreError::ContinuityFence("graph_current_formula"))
+        ));
+        assert_eq!(
+            runtime.store.read_journal(&history.semantic_scope).unwrap(),
+            before
+        );
+        assert!(runtime
+            .store
+            .read_snapshot(&history.semantic_scope, 3)
+            .unwrap()
+            .is_none());
+        assert!(runtime
+            .store
+            .read_legacy_semantic_formula_upgrade_v1(
+                &history.semantic_scope,
+                &history.legacy_formula_digest,
+                &history.phase0_formula_digest,
+            )
+            .unwrap()
+            .is_none());
         assert_eq!(
             runtime
                 .store
-                .read_snapshot(&semantic_scope, 1)
-                .unwrap()
-                .expect("revision one snapshot"),
-            semantic_snapshot_after_first
-        );
-
-        let second_proposal = proposal(62, 1);
-        let second = runtime
-            .apply_perception_proposal_v1(&request_scope, &second_proposal)
-            .expect("second semantic commit");
-        assert_eq!(second.revision, 2);
-        assert_ne!(second.receipt.state_after, first.receipt.state_after);
-        assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
-        runtime
-            .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token)
-            .expect("both lanes audit");
-        let inspect = runtime
-            .inspect(&request_scope.bot_token, &request_scope.persona_token)
-            .expect("G0 inspect");
-        assert_eq!(inspect.revision, 0);
-        assert_eq!(inspect.journal_count, 0);
-        let g0_replay = runtime
-            .verify_replay(&request_scope.bot_token, &request_scope.persona_token)
-            .expect("G0 replay");
-        assert_eq!(g0_replay.checked, 0);
-        runtime.flush_and_close().expect("close");
-        drop(runtime);
-
-        let mut reopened = AstrRuntime::open(&path).expect("reopen");
-        assert_eq!(reopened.semantic_revision_v1(&request_scope).unwrap(), 2);
-        assert_eq!(reopened.current_revision(&request_scope).unwrap(), 0);
-        reopened
-            .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token)
-            .expect("reopened semantic and G0 replay");
-        let third = reopened
-            .apply_perception_proposal_v1(&request_scope, &proposal(63, 2))
-            .expect("post-reopen semantic commit");
-        assert_eq!(third.revision, 3);
-        assert_eq!(reopened.current_revision(&request_scope).unwrap(), 0);
-        reopened.flush_and_close().expect("close reopened");
-        drop(reopened);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn shared_runtime_instances_reconcile_semantic_hydration_and_continue() {
-        let path = database("shared-runtime");
-        let genesis = super::tests::request(91);
-        let request_scope = scope(91, 190);
-        let mut first_runtime = AstrRuntime::open(&path).expect("open first runtime");
-        first_runtime.ensure_genesis(&genesis).expect("genesis");
-        let mut second_runtime = AstrRuntime::open(&path).expect("open second runtime");
-        assert_eq!(
-            second_runtime
-                .semantic_revision_v1(&request_scope)
-                .expect("second runtime initial cursor"),
-            0
-        );
-
-        let first_proposal = proposal(101, 0);
-        let first = first_runtime
-            .apply_perception_proposal_v1(&request_scope, &first_proposal)
-            .expect("first runtime commit");
-        assert_eq!(first.revision, 1);
-        assert_eq!(
-            second_runtime
-                .semantic_revision_v1(&request_scope)
-                .expect("second runtime reconciles durable cursor"),
-            1
-        );
-
-        let duplicate = second_runtime
-            .apply_perception_proposal_v1(&request_scope, &first_proposal)
-            .expect("second runtime exact retry");
-        assert!(duplicate.deduplicated);
-        assert_eq!(duplicate.revision, 1);
-        assert_eq!(duplicate.receipt, first.receipt);
-
-        let second_proposal = proposal(102, 1);
-        let second = second_runtime
-            .apply_perception_proposal_v1(&request_scope, &second_proposal)
-            .expect("second runtime continues from hydrated winner");
-        assert_eq!(second.revision, 2);
-        assert!(!second.deduplicated);
-        assert_eq!(
-            second_runtime
-                .semantic_revision_v1(&request_scope)
-                .expect("second runtime final cursor"),
+                .current_revision(&history.semantic_scope)
+                .unwrap(),
             2
         );
-        assert_eq!(
-            first_runtime
-                .semantic_revision_v1(&request_scope)
-                .expect("first runtime reconciles second commit"),
-            2
-        );
-        first_runtime
-            .flush_and_close()
-            .expect("close first runtime");
-        second_runtime
-            .flush_and_close()
-            .expect("close second runtime");
-        drop(first_runtime);
-        drop(second_runtime);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn stale_exact_proposal_resolves_to_the_persisted_winner() {
-        let path = database("stale-exact-race");
-        let genesis = super::tests::request(111);
-        let request_scope = scope(111, 210);
-        let mut winner_runtime = AstrRuntime::open(&path).expect("open winner runtime");
-        winner_runtime.ensure_genesis(&genesis).expect("genesis");
-        let mut loser_runtime = AstrRuntime::open(&path).expect("open loser runtime");
-        assert_eq!(
-            loser_runtime
-                .semantic_revision_v1(&request_scope)
-                .expect("loser initial cursor"),
-            0
-        );
+    fn semantic_nonce_binding_mismatch_is_rejected_without_semantic_write() {
+        let root = std::env::var_os("AE_CARD_R_TEMP_ROOT")
+            .map(std::path::PathBuf::from)
+            .expect("AE_CARD_R_TEMP_ROOT must name the nonce-binding task directory");
+        let dir = root.join(format!("focused-semantic-nonce-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
 
-        let candidate = proposal(121, 0);
-        let mut winner = None;
-        let mut commit_winner = || {
-            winner = Some(
-                winner_runtime
-                    .apply_perception_proposal_v1(&request_scope, &candidate)
-                    .expect("winner commit"),
-            );
-        };
-        let resolved = loser_runtime
-            .apply_perception_proposal_v1_with_pre_commit_hook(
-                &request_scope,
-                &candidate,
-                &mut commit_winner,
-            )
-            .expect("stale exact proposal resolves to winner");
-        let winner = winner.expect("winner decision");
-        assert!(!winner.deduplicated);
-        assert!(resolved.deduplicated);
-        assert_eq!(resolved.revision, winner.revision);
-        assert_eq!(resolved.receipt, winner.receipt);
-        assert_eq!(resolved.receipt.action_contract, None);
-        assert_eq!(
-            loser_runtime
-                .semantic_revision_v1(&request_scope)
-                .expect("loser hydrated cursor"),
-            winner.revision
-        );
-
-        loser_runtime.flush_and_close().expect("close loser");
-        winner_runtime.flush_and_close().expect("close winner");
-        drop(loser_runtime);
-        drop(winner_runtime);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn stale_different_proposal_preserves_cas_error_and_revision() {
-        let path = database("stale-different-race");
-        let genesis = super::tests::request(112);
-        let request_scope = scope(112, 211);
-        let mut winner_runtime = AstrRuntime::open(&path).expect("open winner runtime");
-        winner_runtime.ensure_genesis(&genesis).expect("genesis");
-        let mut loser_runtime = AstrRuntime::open(&path).expect("open loser runtime");
-        assert_eq!(
-            loser_runtime.semantic_revision_v1(&request_scope).unwrap(),
-            0
-        );
-
-        let winner_proposal = proposal(122, 0);
-        let stale_proposal = proposal(123, 0);
-        let mut commit_winner = || {
-            winner_runtime
-                .apply_perception_proposal_v1(&request_scope, &winner_proposal)
-                .expect("winner commit");
-        };
-        let error = loser_runtime
-            .apply_perception_proposal_v1_with_pre_commit_hook(
-                &request_scope,
-                &stale_proposal,
-                &mut commit_winner,
-            )
-            .expect_err("different event must remain stale");
-        assert!(matches!(
-            error,
-            RuntimeError::Store(StoreError::StaleRevision {
-                expected: 0,
-                actual: 1
-            })
-        ));
-        let semantic_scope =
-            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
-        let winner_event = canonical_event_from_r7(&r7_perception_event(
-            &request_scope,
-            &winner_proposal,
-            winner_proposal.estimator_digest_v1(&r7_scope_from_root(&request_scope)),
-        ))
-        .expect("winner event");
-        let winner_digest = wire::event_digest(&winner_event);
-        assert_eq!(
-            loser_runtime
-                .store
-                .current_revision(&semantic_scope)
-                .expect("durable semantic cursor"),
-            1
-        );
-        let rows = loser_runtime
-            .store
-            .read_journal(&semantic_scope)
-            .expect("semantic rows");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].event_digest, winner_digest);
-
-        loser_runtime.flush_and_close().expect("close loser");
-        winner_runtime.flush_and_close().expect("close winner");
-        drop(loser_runtime);
-        drop(winner_runtime);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn g0_receipt_metadata_is_identical_after_semantic_hydration() {
-        let (mut clean_runtime, clean_scope) = runtime_for(131, "g0-clean-metadata");
-        let (mut semantic_runtime, semantic_scope) = runtime_for(131, "g0-semantic-metadata");
-        assert_eq!(clean_scope, semantic_scope);
-
-        let baseline_event = g0_stimulus(131, 0, 90);
-        clean_runtime
-            .apply_event(&clean_scope, &baseline_event)
-            .expect("clean baseline G0 event");
-        semantic_runtime
-            .apply_event(&semantic_scope, &baseline_event)
-            .expect("semantic baseline G0 event");
-        semantic_runtime
-            .apply_perception_proposal_v1(&semantic_scope, &proposal(141, 0))
-            .expect("semantic commit");
-        let mut event = g0_stimulus(131, 1, 90);
-        if let CanonicalEvent::UserStimulus(stimulus) = &mut event {
-            stimulus.event_id = [142; 16];
-            stimulus.causal.turn_id = [143; 16];
-        }
-        let clean = clean_runtime
-            .apply_event(&clean_scope, &event)
-            .expect("clean G0 event");
-        let after_semantic = semantic_runtime
-            .apply_event(&semantic_scope, &event)
-            .expect("G0 event after semantic hydration");
-
-        assert_eq!(
-            after_semantic.receipt.state_before,
-            clean.receipt.state_before
-        );
-        assert_eq!(
-            after_semantic.receipt.state_after,
-            clean.receipt.state_after
-        );
-        assert_eq!(
-            after_semantic.receipt.graph_after,
-            clean.receipt.graph_after
-        );
-        assert_eq!(
-            after_semantic.receipt.active_nodes,
-            clean.receipt.active_nodes
-        );
-        assert_eq!(
-            after_semantic.receipt.active_edges,
-            clean.receipt.active_edges
-        );
-
-        clean_runtime
-            .flush_and_close()
-            .expect("close clean runtime");
-        semantic_runtime
-            .flush_and_close()
-            .expect("close semantic runtime");
-        drop(clean_runtime);
-        drop(semantic_runtime);
-        cleanup_database("g0-clean-metadata");
-        cleanup_database("g0-semantic-metadata");
-    }
-
-    #[test]
-    fn durable_audit_rejects_tampered_state_before_continuity() {
-        let path = database("tampered-state-before");
-        let genesis = super::tests::request(93);
-        let request_scope = scope(93, 192);
-        let mut runtime = AstrRuntime::open(&path).expect("open runtime");
-        let genesis_receipt = runtime.ensure_genesis(&genesis).expect("genesis");
-        drop(runtime);
-
-        let mut store = Store::open(&path).expect("open store");
-        let semantic_scope =
-            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
-        let legacy_scope = wire::persona_scope_digest(
-            &request_scope.bot_token,
-            &request_scope.persona_token,
-            None,
-        );
-        let genesis_snapshot = store
-            .read_snapshot(&legacy_scope, 0)
-            .expect("read genesis snapshot")
-            .expect("genesis snapshot");
-        let event = CanonicalEvent::TimeAdvance(ae_contracts::TimeAdvance {
-            event_id: [111; 16],
-            scope: request_scope.clone(),
-            elapsed_ms: 1,
-        });
-        let receipt = TransitionReceipt {
-            schema_version: 1,
-            formula_digest: genesis_receipt.formula_digest,
-            scope_digest: semantic_scope,
-            event_digest: wire::event_digest(&event),
-            authority_digest: authority_projection_digest(&event),
-            base_revision: 0,
-            next_revision: 1,
-            state_before: [0xA5; 32],
-            state_after: genesis_receipt.initial_snapshot_digest,
-            graph_after: genesis_receipt.graph_digest,
-            action_contract: None,
-            active_nodes: 0,
-            active_edges: 0,
-            residuals: fixed_zero_vector(),
-            status: CommitStatus::Committed,
-        };
-        store
-            .commit_stateful_journal(&StatefulCommit {
-                journal: CommitEnvelope {
-                    event_kind: wire::event_kind_name(&event).to_owned(),
-                    event_bytes: wire::encode_event(&event),
-                    receipt,
-                    chain_seed: genesis_receipt.initial_snapshot_digest,
-                    delta_bytes: Vec::new(),
-                },
-                state_bytes: genesis_snapshot.state_bytes,
-            })
-            .expect("install tampered but otherwise self-consistent row");
-        drop(store);
-
-        let mut reopened = AstrRuntime::open(&path).expect("reopen tampered runtime");
-        assert!(
-            reopened
-                .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token,)
-                .is_err(),
-            "audit must reject a state-before chain break"
-        );
-        drop(reopened);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn invalid_proposals_fail_closed_without_advancing_semantic_cursor() {
-        let (mut runtime, request_scope) = runtime_for(71, "invalid");
-        let base = proposal(81, 0);
-        let semantic_scope =
-            r7_semantic_persona_scope(&request_scope.bot_token, &request_scope.persona_token);
-        let legacy_scope = wire::persona_scope_digest(
-            &request_scope.bot_token,
-            &request_scope.persona_token,
-            None,
-        );
-        let semantic_rows_before = runtime.store.read_journal(&semantic_scope).unwrap();
-        let legacy_rows_before = runtime.store.read_journal(&legacy_scope).unwrap();
-        assert!(semantic_rows_before.is_empty());
-        assert!(legacy_rows_before.is_empty());
-        let mut invalid = Vec::new();
-        let mut schema = base.clone();
-        schema.schema_version = 2;
-        invalid.push(schema);
-        let mut protocol = base.clone();
-        protocol.protocol_version = 2;
-        invalid.push(protocol);
-        let mut zero_vector = base.clone();
-        zero_vector.dimensions = EvidenceVector::default();
-        invalid.push(zero_vector);
-        let mut four_load_noop = base.clone();
-        four_load_noop.dimensions = EvidenceVector {
-            affiliation: Fixed::ONE,
-            ..EvidenceVector::default()
-        };
-        invalid.push(four_load_noop);
-        let mut negative = base.clone();
-        negative.dimensions.positive = Fixed::from_raw(-1);
-        invalid.push(negative);
-        let mut out_of_range = base.clone();
-        out_of_range.dimensions.positive = Fixed::from_raw(1_000_001);
-        invalid.push(out_of_range);
-        let mut zero_confidence = base.clone();
-        zero_confidence.estimator_confidence = Fixed::ZERO;
-        invalid.push(zero_confidence);
-        let mut zero_nonce = base.clone();
-        zero_nonce.request_nonce_digest = [0; 32];
-        invalid.push(zero_nonce);
-        let mut zero_event = base.clone();
-        zero_event.event_id = [0; 16];
-        invalid.push(zero_event);
-        let mut zero_turn = base.clone();
-        zero_turn.turn_id = [0; 16];
-        invalid.push(zero_turn);
-        let mut zero_observed_at = base.clone();
-        zero_observed_at.observed_at_ms = 0;
-        invalid.push(zero_observed_at);
-        let mut stale = base.clone();
-        stale.base_revision = 9;
-        invalid.push(stale);
-
-        for candidate in invalid {
-            assert!(runtime
-                .apply_perception_proposal_v1(&request_scope, &candidate)
-                .is_err());
-            assert_eq!(runtime.semantic_revision_v1(&request_scope).unwrap(), 0);
-            assert_eq!(runtime.current_revision(&request_scope).unwrap(), 0);
-            assert_eq!(
-                runtime.store.read_journal(&semantic_scope).unwrap(),
-                semantic_rows_before
-            );
-            assert_eq!(
-                runtime.store.read_journal(&legacy_scope).unwrap(),
-                legacy_rows_before
-            );
-            assert!(runtime
-                .store
-                .read_snapshot(&semantic_scope, 1)
-                .unwrap()
-                .is_none());
-        }
-        let invalid_scope = ScopeRef {
-            bot_token: [0; 16],
-            persona_token: request_scope.persona_token,
+        let mut runtime = AstrRuntime::open(&dir.join("store.db")).unwrap();
+        let request = request(41);
+        runtime.ensure_genesis(&request).unwrap();
+        let scope = ScopeRef {
+            bot_token: request.source.scope.bot_token,
+            persona_token: request.source.scope.persona_token,
             relation_token: None,
-            session_token: request_scope.session_token,
+            session_token: [42; 16],
         };
+        let canonical = PerceptionProposalV1 {
+            schema_version: 1,
+            event_id: [43; 16],
+            turn_id: [44; 16],
+            observed_at_ms: 1_700_000_000_200,
+            base_revision: 0,
+            dimensions: EvidenceVector::default(),
+            estimator_confidence: Fixed::ONE,
+            protocol_version: 1,
+            request_nonce_digest: [
+                0xa8, 0xd3, 0x8b, 0x2c, 0xa2, 0x8a, 0xaf, 0x6d, 0x3a, 0xba, 0xd2, 0x18, 0x20, 0x02,
+                0x16, 0xe6, 0xb5, 0x59, 0x32, 0x40, 0x76, 0x10, 0xa4, 0xf1, 0x61, 0x1b, 0xef, 0x05,
+                0xd6, 0x91, 0x02, 0xe5,
+            ],
+        };
+        let mut mismatched = canonical.clone();
+        mismatched.request_nonce_digest = [0x01; 32];
+        assert_ne!(
+            mismatched.request_nonce_digest,
+            canonical.request_nonce_digest
+        );
+
+        assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 0);
         assert!(matches!(
-            runtime.semantic_revision_v1(&invalid_scope),
-            Err(RuntimeError::InvalidPerceptionScope)
+            runtime.apply_perception_proposal_v1(&scope, &mismatched),
+            Err(RuntimeError::InvalidPerceptionProposal)
         ));
-        runtime
-            .audit_durable_histories_v1(&request_scope.bot_token, &request_scope.persona_token)
-            .expect("failed proposals leave both histories valid");
-        runtime.flush_and_close().expect("close");
-        drop(runtime);
-        let _ = std::fs::remove_file(database("invalid"));
+        assert_eq!(runtime.semantic_revision_v1(&scope).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-// Former external R7/scaffold consumers are compiled here so private runtime
-// coverage remains active without preserving a public alternate authority.
-#[cfg(test)]
-include!("../tests/user_stimulus_state_transition.rs");
-#[cfg(test)]
-include!("../tests/durable_semantic_authority.rs");
-#[cfg(test)]
-include!("../tests/astrbot_v4273_tool_private_boundary.rs");
-#[cfg(test)]
-include!("../tests/lark_public_effect_boundary.rs");
-#[cfg(test)]
-include!("../../ae-organism-runtime/tests/support/private_projection_runtime.rs");
-#[cfg(test)]
-include!("../../ae-organism-runtime/tests/committed_semantic_projection_path.rs");
-#[cfg(test)]
-include!("../../ae-organism-runtime/tests/private_projection_payload_producer.rs");
-
-#[cfg(test)]
-mod internal_user_stimulus_state_transition_tests {
-    user_stimulus_state_transition_test_contents!();
-}
-
-#[cfg(test)]
-mod internal_durable_semantic_authority_tests {
-    durable_semantic_authority_test_contents!();
-}
-
-#[cfg(test)]
-mod internal_astrbot_v4273_tool_private_boundary_tests {
-    astrbot_v4273_tool_private_boundary_test_contents!();
-}
-
-#[cfg(test)]
-mod internal_lark_public_effect_boundary_tests {
-    lark_public_effect_boundary_test_contents!();
-}
-
-#[cfg(test)]
-#[allow(dead_code, unused_imports)]
-mod internal_committed_semantic_projection_path_tests {
-    committed_semantic_projection_path_test_contents!();
-}
-
-#[cfg(test)]
-#[allow(dead_code, unused_imports)]
-mod internal_private_projection_payload_producer_tests {
-    private_projection_payload_producer_test_contents!();
 }

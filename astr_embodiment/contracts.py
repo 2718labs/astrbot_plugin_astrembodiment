@@ -121,38 +121,6 @@ def build_user_stimulus_json(
     }
 
 
-def build_perception_proposal_json(
-    *,
-    scope: ScopeTokens,
-    turn: FrozenTurn,
-    estimate: object,
-    base_revision: int,
-    nonce_digest: str,
-) -> dict:
-    """Build the additive closed SPC1 proposal envelope.
-
-    The implementation lives in :mod:`semantic_estimator`; this lazy adapter
-    keeps contracts.py as the public DTO seam without importing the bridge or
-    changing the existing G0 ``build_user_stimulus_json`` behavior.
-    """
-
-    from .semantic_estimator import build_perception_proposal
-
-    return build_perception_proposal(
-        scope=scope,
-        turn=turn,
-        estimate=estimate,
-        base_revision=base_revision,
-        nonce_digest=nonce_digest,
-    )
-
-
-# Descriptive aliases for callers that use the protocol name rather than the
-# wire helper name.  They all return the same one closed proposal shape.
-build_semantic_proposal_json = build_perception_proposal_json
-build_perception_proposal = build_perception_proposal_json
-
-
 def build_delivery_outcome_json(
     *,
     scope: ScopeTokens,

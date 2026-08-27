@@ -99,13 +99,21 @@ try:
     _native_module = _load_native()
 
     apply_event = _native_module.apply_event
-    apply_perception_proposal_v1 = _native_module.apply_perception_proposal_v1
+    contract_info = _native_module.contract_info
     ensure_genesis = _native_module.ensure_genesis
     flush_and_close = _native_module.flush_and_close
     health = _native_module.health
     inspect = _native_module.inspect
     open = _native_module.open
+    prepare_rebirth_v1 = _native_module.prepare_rebirth_v1
+    confirm_rebirth_v1 = _native_module.confirm_rebirth_v1
+    reconcile_seed_config_v1 = _native_module.reconcile_seed_config_v1
+    ack_seed_config_writeback_v1 = _native_module.ack_seed_config_writeback_v1
+    semantic_outbox_crypto_status_v1 = _native_module.semantic_outbox_crypto_status_v1
+    semantic_outbox_seal_v1 = _native_module.semantic_outbox_seal_v1
+    semantic_outbox_open_v1 = _native_module.semantic_outbox_open_v1
     semantic_revision_v1 = _native_module.semantic_revision_v1
+    apply_perception_proposal_v1 = _native_module.apply_perception_proposal_v1
     verify_replay = _native_module.verify_replay
     version = _native_module.version
 except (AttributeError, ImportError) as exc:  # pragma: no cover - install failure
@@ -123,14 +131,22 @@ except AttributeError:  # pragma: no cover - compatibility with older wheels
 
 __all__ = [
     "NativeCoreError",
+    "ack_seed_config_writeback_v1",
     "apply_event",
     "apply_perception_proposal_v1",
+    "confirm_rebirth_v1",
+    "contract_info",
     "ensure_genesis",
     "flush_and_close",
     "health",
     "inspect",
     "open",
+    "prepare_rebirth_v1",
+    "reconcile_seed_config_v1",
     "semantic_revision_v1",
+    "semantic_outbox_crypto_status_v1",
+    "semantic_outbox_open_v1",
+    "semantic_outbox_seal_v1",
     "verify_replay",
     "version",
 ]

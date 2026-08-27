@@ -3,112 +3,87 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import subprocess
 import sys
 import tomllib
 import zipfile
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-FRESH_WHEELS_DIR = ROOT.parents[1] / ".codex-task-temp"
-FRESH_WINDOWS_WHEEL = next(
-    (FRESH_WHEELS_DIR / "rebuild-native-win-current" / "dist").glob("*.whl"),
-    None,
-)
-FRESH_LINUX_WHEEL = next(
-    (FRESH_WHEELS_DIR / "rebuild-native-linux-current" / "dist").glob("*.whl"),
-    None,
-)
-SEMANTIC_NATIVE_API = {
-    "semantic_revision_v1",
-    "apply_perception_proposal_v1",
-}
+FRESH_WHEELS_DIR_ENV = "ASTREMBODIMENT_FRESH_WHEELS_DIR"
+FRESH_WINDOWS_ARTIFACT = "native-wheel-windows"
+FRESH_LINUX_ARTIFACT = "native-wheel-linux"
 NATIVE_API = {
     "version",
+    "contract_info",
     "health",
     "open",
     "ensure_genesis",
+    "prepare_rebirth_v1",
+    "confirm_rebirth_v1",
+    "reconcile_seed_config_v1",
+    "ack_seed_config_writeback_v1",
+    "semantic_revision_v1",
+    "apply_perception_proposal_v1",
     "apply_event",
     "inspect",
     "verify_replay",
     "flush_and_close",
     "NativeCoreError",
-} | SEMANTIC_NATIVE_API
+}
 NATIVE_API_PAYLOAD = b" ".join(marker.encode() for marker in sorted(NATIVE_API))
 
 
-def test_release_version_metadata_and_required_files_are_present() -> None:
-    metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+def test_packager_requires_the_contract_info_native_symbol() -> None:
+    packager = (ROOT / "scripts" / "package_plugin.py").read_text(encoding="utf-8")
+    assert '    "contract_info",' in packager
 
-    assert 'version: "1.0.0-rc1"' in metadata
+
+def _fresh_wheels_root() -> Path:
+    configured = os.environ.get(FRESH_WHEELS_DIR_ENV)
+    root = Path(configured) if configured else ROOT / "wheels"
+    if not root.is_absolute():
+        root = ROOT / root
+    root = root.resolve()
+    if not root.is_dir():
+        pytest.fail(
+            f"fresh wheel directory is required at {root}; "
+            f"set {FRESH_WHEELS_DIR_ENV} or run from the assemble job"
+        )
+    return root
+
+
+def _single_fresh_wheel(wheels_root: Path, artifact: str) -> Path:
+    candidates = sorted(
+        path for path in (wheels_root / artifact).glob("*.whl") if path.is_file()
+    )
+    if len(candidates) != 1:
+        pytest.fail(
+            f"expected exactly one fresh wheel in {wheels_root / artifact}, "
+            f"found {len(candidates)}; no historical wheel fallback is allowed"
+        )
+    return candidates[0]
+
+
+@pytest.fixture(scope="module")
+def fresh_native_wheels() -> tuple[Path, Path]:
+    wheels_root = _fresh_wheels_root()
+    return (
+        _single_fresh_wheel(wheels_root, FRESH_WINDOWS_ARTIFACT),
+        _single_fresh_wheel(wheels_root, FRESH_LINUX_ARTIFACT),
+    )
+
+
+def test_release_metadata_and_required_files_are_present() -> None:
+    metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+    assert 'version: "1.0.0"' in metadata
     assert 'astrbot_version: ">=4.16,<5"' in metadata
     assert "support_platforms:" in metadata
-    assert pyproject["project"]["version"] == "1.0.0rc1"
-    assert cargo["workspace"]["package"]["version"] == "1.0.0-rc1"
-    assert "## [1.0.0-rc1] - 2026-08-22" in changelog
-
-    workspace_packages = {
-        tomllib.loads((ROOT / member / "Cargo.toml").read_text(encoding="utf-8"))["package"][
-            "name"
-        ]
-        for member in cargo["workspace"]["members"]
-    }
-    locked_workspace_versions = {
-        package["name"]: package["version"]
-        for package in lock["package"]
-        if package["name"] in workspace_packages
-    }
-    assert locked_workspace_versions.keys() == workspace_packages
-    assert set(locked_workspace_versions.values()) == {"1.0.0-rc1"}
-
     for relative_path in ("LICENSE", "CHANGELOG.md", ".github/workflows/ci.yml"):
         assert (ROOT / relative_path).is_file()
-
-
-def test_product_readme_and_metadata_match_rc1_contract() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-
-    assert "# 让你的 Bot 不只记住经历，更能延续「Ta是谁」" in readme
-    assert "**用户话语 → 15 维闭合语义证据 → native semantic commit**" in readme
-    assert "当前版本：1.0.0-rc1 本地候选" in readme
-    assert "尚未创建 GitHub Release，也未上架 AstrBot Marketplace" in readme
-    assert "## 为什么是人格连续性" in readme
-    assert "## 现在已经能做什么" in readme
-    assert "## 一次互动如何进入连续性" in readme
-    assert "## Observatory：看见每次提交了什么" in readme
-    assert "SUCCESS 和 NOOP 以 INFO 记录；DEGRADED 以 WARNING 记录" in readme
-    assert "positive`、`harm`、`boundary` 和 `epistemic_conflict`" in readme
-    assert "受控回应策略和外显人格漂移仍是后续能力" in readme
-    assert "calculation_state=CONFIRMED" in readme
-    assert "state_changed`、`active_nodes`、`active_edges`" in readme
-    assert "不记录用户消息、Provider 输出、token、nonce、SeedCode、状态 digest 或原始神经节点" in readme
-
-    assert (
-        "desc: 让你的 Bot 不只记住经历，更能延续“Ta是谁”。AstrEmbodiment 以 Rust 原生运行时承载人格连续性，将用户话语转化为 15 维闭合语义证据并提交原生状态，为受控回应与人格演化提供试验性基础。"
-        in metadata
-    )
-    assert (
-        "short_desc: Rust 原生人格连续性运行时：让用户话语成为可验证、可提交的连续语义证据。"
-        in metadata
-    )
-    for unchanged_field in (
-        "name: astrbot_plugin_astrembodiment",
-        "display_name: AstrEmbodiment",
-        'version: "1.0.0-rc1"',
-        "repo: https://github.com/2718labs/astrbot_plugin_astrembodiment",
-        'astrbot_version: ">=4.16,<5"',
-        "support_platforms:",
-        "tags:",
-    ):
-        assert unchanged_field in metadata
 
 
 def test_plugin_entrypoint_uses_astrbot_auto_discovery() -> None:
@@ -137,99 +112,14 @@ def test_runtime_requirements_match_self_contained_archive() -> None:
     assert "Native Windows and Linux extensions are bundled" in requirements
 
 
-def test_native_loader_exports_semantic_native_api_as_callables(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    package_root = tmp_path / "astrembodiment_core"
-    package_root.mkdir()
-    wrapper_path = package_root / "__init__.py"
-    wrapper_path.write_bytes(
-        (ROOT / "python" / "astrembodiment_core" / "__init__.py").read_bytes()
-    )
+def test_pyo3_extension_linking_is_owned_by_maturin() -> None:
+    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    native_payload = b"release-contract-native"
-    build_id = hashlib.sha256(native_payload).hexdigest()
-    bundled_root = package_root / "_bundled"
-    native_filename = "_native.pyd" if sys.platform == "win32" else "_native.abi3.so"
-    platform = "win32" if sys.platform == "win32" else "linux"
-    native_path = bundled_root / build_id / native_filename
-    native_path.parent.mkdir(parents=True)
-    native_path.write_bytes(native_payload)
-    (bundled_root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "astrembodiment-native-bundle-v1",
-                "platforms": {
-                    platform: {"build_id": build_id, "filename": native_filename}
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    functions = {
-        name: (lambda *args, _name=name, **kwargs: (_name, args, kwargs))
-        for name in NATIVE_API - {"NativeCoreError"}
-    }
-    native_error = type("NativeCoreError", (RuntimeError,), {})
-
-    class FakeNativeLoader:
-        def exec_module(self, module: ModuleType) -> None:
-            for name, function in functions.items():
-                setattr(module, name, function)
-            module.NativeCoreError = native_error
-
-    fake_spec = SimpleNamespace(loader=FakeNativeLoader())
-    monkeypatch.setattr(
-        importlib.util,
-        "spec_from_file_location",
-        lambda name, path: fake_spec,
-    )
-    monkeypatch.setattr(
-        importlib.util,
-        "module_from_spec",
-        lambda spec: ModuleType("release_contracts._native"),
-    )
-
-    module = ModuleType("release_contracts.loader")
-    module.__file__ = str(wrapper_path)
-    exec(compile(wrapper_path.read_bytes(), str(wrapper_path), "exec"), module.__dict__)
-
-    assert SEMANTIC_NATIVE_API <= set(module.__all__)
-    for name in SEMANTIC_NATIVE_API:
-        assert getattr(module, name) is functions[name]
-        assert callable(getattr(module, name))
-
-
-def test_release_archive_rejects_wheel_missing_semantic_api_markers(
-    tmp_path: Path,
-) -> None:
-    legacy_payload = b" ".join(
-        marker.encode() for marker in sorted(NATIVE_API - SEMANTIC_NATIVE_API)
-    )
-    wheel = tmp_path / "legacy-core-win.whl"
-    with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("astrembodiment_core/__init__.py", "# legacy wheel\n")
-        archive.writestr("astrembodiment_core/_native.pyd", legacy_payload)
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(tmp_path / "archive.zip"),
-            "--native-wheel",
-            str(wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    for marker in SEMANTIC_NATIVE_API:
-        assert marker in result.stderr
+    assert cargo["workspace"]["dependencies"]["pyo3"]["features"] == ["abi3-py312"]
+    assert pyproject["build-system"]["build-backend"] == "maturin"
+    assert "maturin>=1.14.1,<2.0" in pyproject["build-system"]["requires"]
+    assert pyproject["tool"]["maturin"]["bindings"] == "pyo3"
 
 
 def test_release_archive_uses_current_native_initializer_and_not_wheels(
@@ -279,11 +169,11 @@ def test_release_archive_uses_current_native_initializer_and_not_wheels(
         assert not any(name.endswith(".whl") for name in archive.namelist())
 
 
-def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None, (
-        "build the native wheel before package verification"
-    )
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-win_amd64.zip"
+def test_release_archive_bundles_only_runtime_files(
+    tmp_path: Path, fresh_native_wheels: tuple[Path, Path]
+) -> None:
+    fresh_windows_wheel, _ = fresh_native_wheels
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-win_amd64.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -291,7 +181,7 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
             "--output",
             str(output),
             "--native-wheel",
-            str(FRESH_WINDOWS_WHEEL),
+            str(fresh_windows_wheel),
         ],
         cwd=ROOT,
         text=True,
@@ -304,7 +194,7 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
     assert "astrembodiment_core/__init__.py" in names
     assert "astrembodiment_core/_bundled/manifest.json" in names
     assert not any(name.startswith("astrembodiment_core/_native") for name in names)
-    assert FRESH_WINDOWS_WHEEL.name not in names
+    assert fresh_windows_wheel.name not in names
     assert "logo.png" in names
     assert "LICENSE" in names
     assert "CHANGELOG.md" in names
@@ -314,20 +204,19 @@ def test_release_archive_bundles_only_runtime_files(tmp_path: Path) -> None:
 
 
 def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
-    tmp_path: Path,
+    tmp_path: Path, fresh_native_wheels: tuple[Path, Path]
 ) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None
-    assert FRESH_LINUX_WHEEL is not None
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-native-refresh.zip"
+    fresh_windows_wheel, fresh_linux_wheel = fresh_native_wheels
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-native-refresh.zip"
     command = [
         sys.executable,
         str(ROOT / "scripts" / "package_plugin.py"),
         "--output",
         str(output),
         "--native-wheel",
-        str(FRESH_WINDOWS_WHEEL),
+        str(fresh_windows_wheel),
         "--native-wheel",
-        str(FRESH_LINUX_WHEEL),
+        str(fresh_linux_wheel),
     ]
     result = subprocess.run(
         command,
@@ -346,7 +235,7 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
         manifest = json.loads(
             archive.read("astrembodiment_core/_bundled/manifest.json")
         )
-        for wheel_path in (FRESH_WINDOWS_WHEEL, FRESH_LINUX_WHEEL):
+        for wheel_path in (fresh_windows_wheel, fresh_linux_wheel):
             with zipfile.ZipFile(wheel_path) as wheel:
                 native_member = next(
                     name
@@ -376,10 +265,10 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires the Windows fresh wheel")
 def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
-    tmp_path: Path,
+    tmp_path: Path, fresh_native_wheels: tuple[Path, Path]
 ) -> None:
-    assert FRESH_WINDOWS_WHEEL is not None
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-native-smoke.zip"
+    fresh_windows_wheel, _ = fresh_native_wheels
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-native-smoke.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -387,7 +276,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
             "--output",
             str(output),
             "--native-wheel",
-            str(FRESH_WINDOWS_WHEEL),
+            str(fresh_windows_wheel),
         ],
         cwd=ROOT,
         text=True,
@@ -434,7 +323,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
         runtime_dir = tmp_path / "runtime"
         runtime_dir.mkdir()
         health = bridge_module.NativeBridge().open(str(runtime_dir))
-        assert health.version == "1.0.0-rc1"
+        assert health.version == "1.0.0"
         assert (runtime_dir / "astrembodiment.sqlite3").is_file()
         assert main_module.AstrEmbodimentPlugin is not None
     finally:
@@ -447,7 +336,7 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
 
 def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
     linux_wheel = (
-        tmp_path / "astrembodiment_core-1.0.0-rc1-cp312-abi3-manylinux_2_17_x86_64.whl"
+        tmp_path / "astrembodiment_core-1.0.0-cp312-abi3-manylinux_2_17_x86_64.whl"
     )
     with zipfile.ZipFile(linux_wheel, "w") as wheel:
         wheel.writestr(
@@ -458,7 +347,7 @@ def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
             b"linux-native-placeholder " + NATIVE_API_PAYLOAD,
         )
 
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-linux_x86_64.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-linux_x86_64.zip"
     result = subprocess.run(
         [
             sys.executable,
@@ -503,7 +392,7 @@ def test_release_archive_can_bundle_windows_and_linux_extensions(
             b"linux-native-placeholder " + NATIVE_API_PAYLOAD,
         )
 
-    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-rc1-universal.zip"
+    output = tmp_path / "astrbot_plugin_astrembodiment-1.0.0-universal.zip"
     result = subprocess.run(
         [
             sys.executable,

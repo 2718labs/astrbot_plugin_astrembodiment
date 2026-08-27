@@ -1,7 +1,7 @@
 # Emotion Injection Observatory Logging Design
 
-Date: 2026-08-22  
-Target: AstrEmbodiment `1.0.0-rc1` candidate  
+Date: 2026-08-22
+Target: AstrEmbodiment `1.0.0-rc1` candidate
 Status: approved direction, implementation pending
 
 ## Context

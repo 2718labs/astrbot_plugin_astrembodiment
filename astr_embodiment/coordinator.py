@@ -11,18 +11,25 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import inspect
-import json
 import secrets
-from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from .auxiliary_transport import (
+    AuxiliaryProviderBindingV1,
+    AuxiliaryTransportMetaV1,
+    not_applicable_transport_meta,
+)
 from .bridge import (
+    ContextProjectionIntegrity,
     GenesisUnavailable,
     NativeBridge,
     RetryWait,
-    validate_semantic_result,
+    SEMANTIC_NATIVE_ERROR_CODES,
+    SEMANTIC_NATIVE_FAILURE_STAGES,
+    normalize_field_migration_subcode,
+    normalize_invalid_neural_state_subcode,
+    validate_context_summary_payload,
 )
 from .contracts import (
     FrozenTurn,
@@ -30,60 +37,134 @@ from .contracts import (
     build_delivery_outcome_json,
     build_user_stimulus_json,
 )
-from .semantic_estimator import (
-    DIMENSION_NAMES,
-    SemanticEstimate,
-    SemanticEstimateError,
-    _canonical_nonzero_hex,
-    build_perception_proposal,
-    make_request_nonce_digest,
-    parse_estimator_output,
-    proposal_to_json,
-)
+from .context_binding import ContextBindingV1, adapt_native_context_summary_v1
 from .persona_genesis import (
     PersonaCompilerMalformed,
     PersonaSourceSnapshot,
     build_closed_request,
     validate_proposal,
 )
+from .semantic_estimator import (
+    ESTIMATOR_FORMULA_DIGEST,
+    ESTIMATOR_MALFORMED_SUBCODES,
+    SemanticEstimateError,
+    SemanticProposalError,
+    build_perception_proposal_v3,
+    estimate_context_bound,
+    make_request_nonce_digest,
+)
+from .semantic_outbox import SemanticOutboxUnavailable
 
 FORMULA_DIGEST = "00" * 32  # placeholder; G2 fills the real FormulaProfile digest
 
 Compiler = Callable[[PersonaSourceSnapshot], Awaitable[dict[str, Any]]]
-PreflightEstimator = Callable[[str], Any]
-
-SEMANTIC_SUCCESS = "SUCCESS"
-SEMANTIC_NOOP = "NOOP"
-SEMANTIC_DEGRADED = "DEGRADED"
+ContextBoundEstimatorProvider = Callable[[Mapping[str, Any]], Any]
 
 _RETRY_WAIT_ATTEMPTS = 40
 _RETRY_WAIT_DELAY_S = 0.05
-_CALCULATION_RESIDUAL_NAMES = (
-    "authority",
-    "continuity",
-    "energy",
-    "renormalization",
-    "capacity",
+_SEMANTIC_FAILURE_CODES = (
+    frozenset(
+        {
+            "EMPTY_REQUEST",
+            "INVALID_TURN",
+            "ESTIMATOR_UNAVAILABLE",
+            "ESTIMATOR_MALFORMED",
+            "SEMANTIC_VECTOR_UNAVAILABLE",
+            "ESTIMATOR_UNCERTAIN",
+            "NATIVE_SYMBOL_UNAVAILABLE",
+            "NATIVE_MALFORMED",
+            "STALE_REVISION",
+            "NATIVE_ERROR",
+            "EXPRESSION_PROJECTION_UNAVAILABLE",
+            "ASYNC_KEY_UNAVAILABLE",
+            "ASYNC_KEY_VERSION_UNSUPPORTED",
+            "ASYNC_PAYLOAD_AUTH_FAILED",
+            "ASYNC_QUEUE_UNAVAILABLE",
+        }
+    )
+    | SEMANTIC_NATIVE_ERROR_CODES
 )
 
 
 class GenesisCoordinator:
     """Owns no brain state: only in-flight futures and turn bookkeeping."""
 
-    def __init__(self, bridge: NativeBridge) -> None:
+    def __init__(
+        self,
+        bridge: NativeBridge,
+        *,
+        transport_warning: Callable[[Mapping[str, Any]], None] | None = None,
+        semantic_outbox: Any | None = None,
+    ) -> None:
         self._bridge = bridge
+        self._transport_warning = transport_warning
         self._inflight: dict[str, asyncio.Future] = {}
         self._committed: dict[str, dict[str, Any]] = {}
         self._applied: dict[str, dict[str, Any]] = {}
-        # SPC1 is a separate request-local lane.  These maps contain only
-        # opaque scope/turn keys and closed outcomes; raw request text is
-        # never retained.
-        self._preflight_inflight: dict[str, asyncio.Future] = {}
-        self._preflight_results: dict[str, dict[str, Any]] = {}
+        self._semantic_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        self._semantic_results: dict[str, dict[str, Any]] = {}
+        self._semantic_outbox: Any | None = semantic_outbox
+        self._semantic_async_required = semantic_outbox is not None
+
+    def configure_semantic_outbox(self, semantic_outbox: Any | None) -> None:
+        """Select the durable semantic lane, including an explicitly disabled one.
+
+        Once the plugin has initialized this route, absence of native key
+        authority is an async-lane result rather than permission to fall back
+        to the former synchronous Provider path.
+        """
+
+        self._semantic_outbox = semantic_outbox
+        self._semantic_async_required = True
 
     @staticmethod
     def _scope_key(scope: ScopeTokens, source_digest: str) -> str:
         return f"{scope.bot_token}:{scope.persona_token}:{source_digest}"
+
+    def prepare_rebirth(
+        self,
+        *,
+        scope: ScopeTokens,
+        expected_incarnation_id: str,
+        expected_revision: int,
+        action: str,
+    ) -> dict[str, Any]:
+        """Forward one explicit D1.5 prepare request without retaining consent.
+
+        The Rust lifecycle owner creates and persists the challenge.  Python
+        deliberately keeps no nonce, receipt, replay, or incarnation state.
+        """
+        return self._bridge.prepare_rebirth_v1(
+            {
+                "scope": scope.scope_json(),
+                "expected_incarnation_id": expected_incarnation_id,
+                "expected_revision": expected_revision,
+                "action": action,
+            }
+        )
+
+    def confirm_rebirth_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Forward the user-supplied confirmation unchanged to D1.5."""
+        return self._bridge.confirm_rebirth_v1(dict(payload))
+
+    def forget_scope(self, scope: ScopeTokens) -> None:
+        """Discard process-local mirrors after a native incarnation changes."""
+        prefix = f"{scope.bot_token}:{scope.persona_token}:"
+        for key in tuple(self._committed):
+            if key.startswith(prefix):
+                self._committed.pop(key, None)
+        for key in tuple(self._applied):
+            if key.startswith(prefix):
+                self._applied.pop(key, None)
+        for key in tuple(self._semantic_results):
+            if key.startswith(prefix):
+                self._semantic_results.pop(key, None)
+        for key in tuple(self._semantic_inflight):
+            if key.startswith(prefix):
+                self._semantic_inflight.pop(key, None)
 
     async def ensure_genesis(
         self,
@@ -231,564 +312,428 @@ class GenesisCoordinator:
         return await self._apply_once(scope, event_id, event)
 
     @staticmethod
-    def _preflight_key(scope: ScopeTokens, turn: FrozenTurn) -> str:
-        """Build a cache key from opaque facts only (never request text)."""
-
-        relation = (
-            _canonical_nonzero_hex(scope.relation_token, 16)
-            if scope.relation_token is not None
-            else "-"
-        )
-        return ":".join(
-            (
-                _canonical_nonzero_hex(scope.bot_token, 16),
-                _canonical_nonzero_hex(scope.persona_token, 16),
-                _canonical_nonzero_hex(scope.session_token, 16),
-                relation,
-                _canonical_nonzero_hex(turn.event_id, 16),
-                _canonical_nonzero_hex(turn.turn_id, 16),
-                str(turn.base_revision),
-                str(turn.observed_at_ms),
-            )
-        )
-
-    @staticmethod
-    def _preflight_estimate_values(
-        estimate: SemanticEstimate | None,
-    ) -> tuple[dict[str, int] | None, int | None]:
-        """Project only a parsed closed estimate into observatory-safe values."""
-
-        if type(estimate) is not SemanticEstimate:
-            return None, None
-        try:
-            dimensions = {
-                name: estimate.dimensions[name] for name in DIMENSION_NAMES
-            }
-            confidence = estimate.estimator_confidence
-            if (
-                set(estimate.dimensions) != set(DIMENSION_NAMES)
-                or type(confidence) is not int
-                or not 1 <= confidence <= 1_000_000
-                or any(
-                    type(value) is not int or not 0 <= value <= 1_000_000
-                    for value in dimensions.values()
-                )
-            ):
-                raise ValueError("closed estimate")
-        except BaseException:
-            return None, None
-        return dimensions, confidence
-
-    @staticmethod
-    def _preflight_calculation(receipt: Any) -> dict[str, Any] | None:
-        """Project a validated native receipt into content-free result values."""
-
-        if type(receipt) is not dict:
-            return None
-        try:
-            state_before = receipt["state_before"]
-            state_after = receipt["state_after"]
-            if type(state_before) is not str or type(state_after) is not str:
-                raise ValueError("state digest")
-            if len(state_before) != 64 or len(state_after) != 64:
-                raise ValueError("state digest")
-            bytes.fromhex(state_before)
-            bytes.fromhex(state_after)
-            if state_before == state_after:
-                raise ValueError("unchanged state")
-            active_nodes = receipt["active_nodes"]
-            active_edges = receipt["active_edges"]
-            if type(active_nodes) is not int or active_nodes < 0:
-                raise ValueError("active nodes")
-            if type(active_edges) is not int or active_edges < 0:
-                raise ValueError("active edges")
-            residuals = receipt["residuals"]
-            if type(residuals) is not dict or set(residuals) != set(
-                _CALCULATION_RESIDUAL_NAMES
-            ):
-                raise ValueError("residuals")
-            closed_residuals: dict[str, int] = {}
-            for name in _CALCULATION_RESIDUAL_NAMES:
-                value = residuals[name]
-                if type(value) is not int or not -(1 << 63) <= value <= (1 << 63) - 1:
-                    raise ValueError("residual")
-                closed_residuals[name] = value
-        except BaseException:
-            return None
-        return {
-            "state_changed": True,
-            "active_nodes": active_nodes,
-            "active_edges": active_edges,
-            "residuals_fxp6": closed_residuals,
-        }
-
-    @classmethod
-    def _preflight_diagnostic(
-        cls,
-        *,
-        stage: str,
-        commit_state: str,
-        values_state: str,
-        estimate: SemanticEstimate | None = None,
-        base_revision: int | None = None,
-        revision: int | None = None,
-        deduplicated: bool | None = None,
-        receipt_status: str | None = None,
-        receipt: Any = None,
-    ) -> dict[str, Any]:
-        dimensions, confidence = cls._preflight_estimate_values(estimate)
-        if dimensions is None:
-            values_state = "UNAVAILABLE"
-        native_calculation = cls._preflight_calculation(receipt)
-        if native_calculation is not None:
-            calculation_state = "CONFIRMED"
-        elif commit_state in {"UNKNOWN", "CONFIRMED_NEW", "CONFIRMED_EXISTING"}:
-            calculation_state = "UNCONFIRMED"
-        else:
-            calculation_state = "NOT_ATTEMPTED"
-        return {
-            "stage": stage,
-            "commit_state": commit_state,
-            "values_state": values_state,
-            "dimensions_fxp6": dimensions,
-            "estimator_confidence_fxp6": confidence,
-            "base_revision": base_revision,
-            "revision": revision,
-            "deduplicated": deduplicated,
-            "receipt_status": receipt_status,
-            "calculation_state": calculation_state,
-            "native_calculation": native_calculation,
-        }
-
-    @classmethod
-    def _preflight_failure(
-        cls,
+    def _semantic_failure(
         code: str,
         *,
-        stage: str = "INTERNAL",
-        commit_state: str = "UNKNOWN",
-        estimate: SemanticEstimate | None = None,
-        base_revision: int | None = None,
+        cause_code: str | None = None,
+        native_stage: str | None = None,
+        state_subcode: object = None,
+        migration_subcode: object = None,
+        transport_meta: AuxiliaryTransportMetaV1 | None = None,
     ) -> dict[str, Any]:
-        return {
-            "status": SEMANTIC_DEGRADED,
-            "code": code,
-            "diagnostic": cls._preflight_diagnostic(
-                stage=stage,
-                commit_state=commit_state,
-                values_state="ESTIMATED_NOT_CONFIRMED",
-                estimate=estimate,
-                base_revision=base_revision,
-            ),
-        }
+        """Return one non-echoing V3 preview failure."""
 
-    @classmethod
-    def _preflight_noop(
-        cls,
-        code: str,
-        *,
-        stage: str,
-        estimate: SemanticEstimate | None = None,
-    ) -> dict[str, Any]:
-        return {
-            "status": SEMANTIC_NOOP,
-            "code": code,
-            "diagnostic": cls._preflight_diagnostic(
-                stage=stage,
-                commit_state="NOT_ATTEMPTED",
-                values_state="ESTIMATED_NOT_COMMITTED",
-                estimate=estimate,
-            ),
-        }
-
-    @staticmethod
-    def _valid_frozen_turn(scope: ScopeTokens, turn: FrozenTurn) -> bool:
-        if type(scope) is not ScopeTokens or type(turn) is not FrozenTurn:
-            return False
-        if type(turn.scope) is not ScopeTokens:
-            return False
-        try:
-            canonical_scope = ScopeTokens(
-                bot_token=_canonical_nonzero_hex(scope.bot_token, 16),
-                persona_token=_canonical_nonzero_hex(scope.persona_token, 16),
-                session_token=_canonical_nonzero_hex(scope.session_token, 16),
-                relation_token=(
-                    _canonical_nonzero_hex(scope.relation_token, 16)
-                    if scope.relation_token is not None
-                    else None
-                ),
-            )
-            turn_scope = ScopeTokens(
-                bot_token=_canonical_nonzero_hex(turn.scope.bot_token, 16),
-                persona_token=_canonical_nonzero_hex(turn.scope.persona_token, 16),
-                session_token=_canonical_nonzero_hex(turn.scope.session_token, 16),
-                relation_token=(
-                    _canonical_nonzero_hex(turn.scope.relation_token, 16)
-                    if turn.scope.relation_token is not None
-                    else None
-                ),
-            )
-        except (TypeError, ValueError):
-            return False
-        if turn_scope != canonical_scope:
-            return False
-        try:
-            _canonical_nonzero_hex(turn.event_id, 16)
-            _canonical_nonzero_hex(turn.turn_id, 16)
-        except (TypeError, ValueError):
-            return False
-        return (
-            type(turn.base_revision) is int
-            and turn.base_revision >= 0
-            and type(turn.observed_at_ms) is int
-            and turn.observed_at_ms > 0
+        if code not in _SEMANTIC_FAILURE_CODES:
+            code = "NATIVE_ERROR"
+        meta = (
+            transport_meta
+            if type(transport_meta) is AuxiliaryTransportMetaV1
+            else not_applicable_transport_meta()
         )
-
-    @staticmethod
-    async def _invoke_preflight_estimator(
-        estimator: PreflightEstimator,
-        request_text: str,
-    ) -> Any:
-        candidate: Any = estimator
-        if not callable(candidate):
-            candidate = getattr(candidate, "estimate", None)
-        if not callable(candidate):
-            raise SemanticEstimateError("ESTIMATOR_UNAVAILABLE")
-        # Exactly one positional argument.  In particular, do not pass tools,
-        # history, contexts, provider payloads, or control-plane kwargs.
-        result = candidate(request_text)
-        if inspect.isawaitable(result):
-            result = await result
+        result: dict[str, Any] = {
+            "status": "DEGRADED",
+            "code": code,
+            **meta.as_json(),
+        }
+        if code in SEMANTIC_NATIVE_ERROR_CODES:
+            result["cause_code"] = code
+            if native_stage in SEMANTIC_NATIVE_FAILURE_STAGES:
+                result["native_stage"] = native_stage
+                if code == "INVALID_NEURAL_STATE" and native_stage == "NATIVE_APPLY":
+                    result["state_subcode"] = normalize_invalid_neural_state_subcode(
+                        state_subcode
+                    )
+                if native_stage == "NATIVE_APPLY":
+                    result["migration_subcode"] = normalize_field_migration_subcode(
+                        migration_subcode
+                    )
+        elif (
+            code == "ESTIMATOR_MALFORMED" and cause_code in ESTIMATOR_MALFORMED_SUBCODES
+        ):
+            result["cause_code"] = cause_code
         return result
 
-    async def preflight_stimulus(
-        self,
+    @staticmethod
+    def _cacheable_semantic_result(result: Mapping[str, Any]) -> bool:
+        """Only a fully committed native receipt may survive request singleflight."""
+
+        if (
+            type(result) is not dict
+            or result.get("status") != "SUCCESS"
+            or result.get("code") != "SEMANTIC_COMMITTED"
+            or result.get("transport_subcode") != "NONE"
+            or result.get("attempted") is not True
+            or result.get("attempt_count") not in {1, 2}
+        ):
+            return False
+        dimensions = result.get("dimensions_fxp6")
+        closure = result.get("semantic_closure")
+        if (
+            type(dimensions) is not dict
+            or type(closure) is not dict
+            or closure.get("schema")
+            not in {
+                "astrembodiment.semantic-perception-closure.v1",
+                "astrembodiment.semantic-perception-closure.v2",
+            }
+            or type(closure.get("revision")) is not int
+            or closure.get("revision") < 0
+            or closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
+            or closure.get("node_observability_state") != "CONFIRMED"
+        ):
+            return False
+        vector = closure.get("semantic_vector_receipt")
+        return (
+            type(vector) is dict
+            and vector.get("dimension_slot_count") == 15
+            and vector.get("evaluated_dimension_count") == 15
+            and vector.get("injected_dimension_count") == 15
+            and vector.get("unavailable_dimension_count") == 0
+        )
+
+    @staticmethod
+    def _semantic_key(scope: ScopeTokens, frozen_turn: FrozenTurn) -> str:
+        return ":".join(
+            (
+                scope.bot_token,
+                scope.persona_token,
+                frozen_turn.event_id,
+                frozen_turn.turn_id,
+            )
+        )
+
+    @staticmethod
+    def _valid_semantic_request(
         scope: ScopeTokens,
         frozen_turn: FrozenTurn,
         request_text: str,
-        estimator: PreflightEstimator,
-    ) -> dict[str, Any]:
-        """Run one request-local SPC1 estimate and, when useful, commit it.
+    ) -> bool:
+        """Validate opaque turn identity before opening the native cursor."""
 
-        This method is intentionally additive: callers may invoke it after
-        Genesis and before the provider while the existing ``first_turn`` and
-        ``apply_stimulus`` G0 paths remain unchanged.  A request key joins
-        concurrent calls and prevents a second estimator invocation even when
-        the second call supplies different text.
-        """
-
-        if not self._valid_frozen_turn(scope, frozen_turn):
-            return self._preflight_failure(
-                "INVALID_TURN", stage="INPUT", commit_state="NOT_ATTEMPTED"
-            )
-        key = self._preflight_key(scope, frozen_turn)
-        previous = self._preflight_results.get(key)
-        if previous is not None:
-            return copy.deepcopy(previous)
-        inflight = self._preflight_inflight.get(key)
-        if inflight is None:
-            task = asyncio.create_task(
-                self._run_preflight(
-                    scope=scope,
-                    frozen_turn=frozen_turn,
-                    request_text=request_text,
-                    estimator=estimator,
-                )
-            )
-            self._preflight_inflight[key] = task
-            task.add_done_callback(
-                lambda completed, request_key=key: self._settle_preflight(
-                    request_key, completed
-                )
-            )
-            inflight = task
-
-        # The owner task is independent from this caller.  Shielding means a
-        # cancelled waiter cannot cancel the shared estimator/native attempt.
+        if type(scope) is not ScopeTokens or type(frozen_turn) is not FrozenTurn:
+            return False
+        if (
+            frozen_turn.scope != scope
+            or type(request_text) is not str
+            or not request_text
+        ):
+            return False
         try:
-            outcome = await asyncio.shield(inflight)
-        except asyncio.CancelledError:
-            if inflight.cancelled():
-                # The shared owner itself was cancelled (for example, an
-                # estimator raised CancelledError); expose the same fixed
-                # outcome that the done callback will cache.  A cancellation
-                # of this caller alone leaves the owner task untouched.
-                return copy.deepcopy(
-                    self._preflight_failure("ESTIMATOR_UNAVAILABLE")
-                )
-            raise
-        except BaseException:
-            # The done callback consumes the task exception and stores a fixed
-            # closed outcome.  Keep this caller fail-closed as well.
-            outcome = self._preflight_failure("NATIVE_ERROR")
-        try:
-            return copy.deepcopy(outcome)
-        except BaseException:
-            return self._preflight_failure("NATIVE_MALFORMED")
+            # The nonce builder performs the exact closed scope/turn validation.
+            make_request_nonce_digest(scope, frozen_turn)
+        except SemanticProposalError:
+            return False
+        return True
 
-    def _settle_preflight(
-        self,
-        key: str,
-        task: asyncio.Future,
-    ) -> None:
-        """Consume a shared task exactly once and cache only a closed result."""
-
-        closed: dict[str, Any] = self._preflight_failure("NATIVE_ERROR")
-        try:
-            try:
-                outcome = task.result()
-            except asyncio.CancelledError:
-                # Never leave a CancelledError as an unobserved Future
-                # exception; a later caller receives the same fixed outcome.
-                outcome = self._preflight_failure("ESTIMATOR_UNAVAILABLE")
-            except BaseException:
-                outcome = self._preflight_failure("NATIVE_ERROR")
-            try:
-                candidate = json.loads(
-                    json.dumps(
-                        outcome,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        allow_nan=False,
-                    )
-                )
-                if type(candidate) is not dict:
-                    raise ValueError("closed outcome")
-                closed = candidate
-            except BaseException:
-                closed = self._preflight_failure("NATIVE_MALFORMED")
-            try:
-                self._preflight_results[key] = copy.deepcopy(closed)
-            except BaseException:
-                self._preflight_results[key] = self._preflight_failure(
-                    "NATIVE_MALFORMED"
-                )
-        except BaseException:
-            # A done callback must never leak provider/native exception details
-            # into the event loop; retain a fixed closed result if possible.
-            try:
-                self._preflight_results[key] = self._preflight_failure(
-                    "NATIVE_MALFORMED"
-                )
-            except BaseException:
-                pass
-        finally:
-            try:
-                if self._preflight_inflight.get(key) is task:
-                    self._preflight_inflight.pop(key, None)
-            except BaseException:
-                pass
-
-    async def _run_preflight(
+    async def preflight_semantic_v3(
         self,
         *,
         scope: ScopeTokens,
         frozen_turn: FrozenTurn,
         request_text: str,
-        estimator: PreflightEstimator,
+        context_summary: Mapping[str, Any],
+        estimator: ContextBoundEstimatorProvider,
+        incarnation_id: str | None = None,
+        provider_binding: AuxiliaryProviderBindingV1 | None = None,
     ) -> dict[str, Any]:
-        """Execute one owned estimator/native attempt for a frozen key."""
-        try:
-            return await self._run_preflight_body(
+        """Run the isolated V3 preview lane at most once for one frozen turn.
+
+        The singleflight key deliberately excludes request text: a concurrent
+        retry with different text joins the first frozen turn instead of
+        producing a second semantic estimate or native proposal.
+        """
+
+        if type(request_text) is not str or not request_text:
+            return self._semantic_failure("EMPTY_REQUEST")
+        if not self._valid_semantic_request(scope, frozen_turn, request_text):
+            return self._semantic_failure("INVALID_TURN")
+        if self._semantic_async_required:
+            return await self._preflight_semantic_outbox_v1(
                 scope=scope,
                 frozen_turn=frozen_turn,
                 request_text=request_text,
-                estimator=estimator,
+                context_summary=context_summary,
+                incarnation_id=incarnation_id,
+                provider_binding=provider_binding,
             )
-        except asyncio.CancelledError:
-            return self._preflight_failure("ESTIMATOR_UNAVAILABLE")
+        key = self._semantic_key(scope, frozen_turn)
+        previous = self._semantic_results.get(key)
+        if previous is not None:
+            return copy.deepcopy(previous)
+        task = self._semantic_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(
+                self._run_semantic_owner_v3(
+                    key=key,
+                    scope=scope,
+                    frozen_turn=frozen_turn,
+                    request_text=request_text,
+                    context_summary=context_summary,
+                    estimator=estimator,
+                )
+            )
+            self._semantic_inflight[key] = task
+        try:
+            result = await asyncio.shield(task)
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
-            return self._preflight_failure("NATIVE_ERROR")
+            result = self._semantic_failure("NATIVE_ERROR")
+        return copy.deepcopy(result)
 
-    async def _run_preflight_body(
+    async def _preflight_semantic_outbox_v1(
         self,
         *,
         scope: ScopeTokens,
         frozen_turn: FrozenTurn,
         request_text: str,
-        estimator: PreflightEstimator,
+        context_summary: Mapping[str, Any],
+        incarnation_id: str | None,
+        provider_binding: AuxiliaryProviderBindingV1 | None,
     ) -> dict[str, Any]:
-        if not isinstance(request_text, str):
-            return self._preflight_failure(
-                "ESTIMATOR_MALFORMED", stage="INPUT", commit_state="NOT_ATTEMPTED"
-            )
-        if not request_text.strip():
-            return self._preflight_noop("EMPTY_REQUEST", stage="INPUT")
-        try:
-            raw_estimate = await self._invoke_preflight_estimator(estimator, request_text)
-        except asyncio.CancelledError:
-            return self._preflight_failure(
-                "ESTIMATOR_UNAVAILABLE",
-                stage="ESTIMATOR",
-                commit_state="NOT_ATTEMPTED",
-            )
-        except SemanticEstimateError as exc:
-            return self._preflight_failure(
-                exc.code
-                if exc.code in {"ESTIMATOR_MALFORMED", "ESTIMATOR_UNAVAILABLE"}
-                else "ESTIMATOR_UNAVAILABLE",
-                stage="ESTIMATOR",
-                commit_state="NOT_ATTEMPTED",
-            )
-        except BaseException:
-            # Provider exception details are deliberately discarded.
-            return self._preflight_failure(
-                "ESTIMATOR_UNAVAILABLE",
-                stage="ESTIMATOR",
-                commit_state="NOT_ATTEMPTED",
-            )
+        """Enqueue first and shield only the foreground observation window."""
 
-        try:
-            estimate = (
-                parse_estimator_output(raw_estimate.as_json())
-                if isinstance(raw_estimate, SemanticEstimate)
-                else parse_estimator_output(raw_estimate)
+        outbox = self._semantic_outbox
+        if outbox is None:
+            return self._semantic_failure("ASYNC_KEY_UNAVAILABLE")
+        if getattr(outbox, "ready", True) is not True:
+            disabled_code = getattr(outbox, "disabled_code", None)
+            return self._semantic_failure(
+                disabled_code
+                if type(disabled_code) is str
+                else "ASYNC_QUEUE_UNAVAILABLE"
             )
-        except BaseException:
-            return self._preflight_failure(
-                "ESTIMATOR_MALFORMED",
-                stage="ESTIMATOR",
-                commit_state="NOT_ATTEMPTED",
-            )
-        try:
-            is_load_noop = estimate.is_load_noop
-        except BaseException:
-            return self._preflight_failure(
-                "ESTIMATOR_MALFORMED",
-                stage="ESTIMATOR",
-                commit_state="NOT_ATTEMPTED",
-            )
-        if is_load_noop:
-            # This is a fixed no-op: no nonce, cursor read, or native commit.
-            return self._preflight_noop(
-                "ZERO_LOAD", stage="ESTIMATOR", estimate=estimate
-            )
+        if (
+            type(incarnation_id) is not str
+            or not incarnation_id
+            or type(provider_binding) is not AuxiliaryProviderBindingV1
+        ):
+            return self._semantic_failure("ASYNC_QUEUE_UNAVAILABLE")
 
-        # The semantic cursor is content-free.  It is read before the proposal
-        # base revision is frozen, so G0's separate revision lane is untouched.
-        try:
-            cursor = self._bridge.semantic_revision_v1(scope.scope_json())
-        except BaseException:
-            return self._preflight_failure(
-                "NATIVE_ERROR",
-                stage="CURSOR",
-                commit_state="NOT_ATTEMPTED",
-                estimate=estimate,
-            )
+        cursor = self._bridge.semantic_revision_v1(scope)
         if type(cursor) is not dict:
-            return self._preflight_failure(
-                "NATIVE_MALFORMED",
-                stage="CURSOR",
-                commit_state="NOT_ATTEMPTED",
-                estimate=estimate,
+            return self._semantic_failure("NATIVE_MALFORMED", native_stage="CURSOR")
+        if cursor.get("status") == "DEGRADED":
+            return self._semantic_failure(
+                str(cursor.get("code", "NATIVE_ERROR")), native_stage="CURSOR"
             )
-        if cursor.get("status") == SEMANTIC_DEGRADED:
-            return self._preflight_failure(
-                cursor.get("code")
-                if type(cursor.get("code")) is str
-                else "NATIVE_ERROR",
-                stage="CURSOR",
-                commit_state="NOT_ATTEMPTED",
-                estimate=estimate,
-            )
-        if set(cursor) != {"schema", "revision"} or cursor.get("schema") != "astrembodiment.semantic-revision.v1":
-            return self._preflight_failure(
-                "NATIVE_MALFORMED",
-                stage="CURSOR",
-                commit_state="NOT_ATTEMPTED",
-                estimate=estimate,
-            )
+        if set(cursor) != {"schema", "revision"}:
+            return self._semantic_failure("NATIVE_MALFORMED", native_stage="CURSOR")
         revision = cursor.get("revision")
         if type(revision) is not int or revision < 0:
-            return self._preflight_failure(
-                "NATIVE_MALFORMED",
-                stage="CURSOR",
-                commit_state="NOT_ATTEMPTED",
-                estimate=estimate,
-            )
-
+            return self._semantic_failure("NATIVE_MALFORMED", native_stage="CURSOR")
+        durable_turn = FrozenTurn(
+            scope=scope,
+            event_id=frozen_turn.event_id,
+            turn_id=frozen_turn.turn_id,
+            base_revision=revision,
+            observed_at_ms=frozen_turn.observed_at_ms,
+        )
         try:
-            bound_turn = replace(frozen_turn, base_revision=revision)
-            nonce = make_request_nonce_digest(scope, bound_turn)
-            proposal = build_perception_proposal(
+            ticket = await outbox.enqueue(
                 scope=scope,
-                turn=bound_turn,
-                estimate=estimate,
-                base_revision=revision,
-                nonce_digest=nonce,
+                frozen_turn=durable_turn,
+                incarnation_id=incarnation_id,
+                protocol_digest=ESTIMATOR_FORMULA_DIGEST,
+                request_text=request_text,
+                context_summary=context_summary,
+                provider_binding=provider_binding,
             )
-            proposal_json = proposal_to_json(proposal, scope=scope)
+            result = await outbox.wait_foreground(ticket)
+        except SemanticOutboxUnavailable as exc:
+            return self._semantic_failure(exc.code)
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
         except BaseException:
-            return self._preflight_failure(
-                "INVALID_PROPOSAL",
-                stage="PROPOSAL",
-                commit_state="NOT_ATTEMPTED",
-                estimate=estimate,
+            return self._semantic_failure("ASYNC_QUEUE_UNAVAILABLE")
+        if not isinstance(result, Mapping):
+            return self._semantic_failure("ASYNC_QUEUE_UNAVAILABLE")
+        copied = copy.deepcopy(dict(result))
+        if (
+            copied.get("status") == "DEFERRED"
+            and copied.get("code") == "DEFERRED_ASYNC"
+        ):
+            return copied
+        if self._cacheable_semantic_result(copied):
+            self._semantic_results[self._semantic_key(scope, durable_turn)] = (
+                copy.deepcopy(copied)
             )
+        return copied
+
+    async def _run_semantic_owner_v3(
+        self,
+        *,
+        key: str,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        context_summary: Mapping[str, Any],
+        estimator: ContextBoundEstimatorProvider,
+    ) -> dict[str, Any]:
+        """Own one semantic task and clear only its matching inflight entry."""
 
         try:
-            native_result = self._bridge.apply_perception_proposal_v1(
-                scope.scope_json(), proposal_json
+            result = await self._run_semantic_v3(
+                scope=scope,
+                frozen_turn=frozen_turn,
+                request_text=request_text,
+                context_summary=context_summary,
+                estimator=estimator,
             )
-        except BaseException:
-            return self._preflight_failure(
-                "NATIVE_ERROR",
-                stage="NATIVE_APPLY",
-                estimate=estimate,
-                base_revision=revision,
-            )
-        if type(native_result) is not dict:
-            return self._preflight_failure(
-                "NATIVE_MALFORMED",
-                stage="RECEIPT",
-                estimate=estimate,
-                base_revision=revision,
-            )
-        if native_result.get("status") == SEMANTIC_DEGRADED:
-            return self._preflight_failure(
-                native_result.get("code")
-                if type(native_result.get("code")) is str
-                else "NATIVE_ERROR",
-                stage="NATIVE_APPLY",
-                estimate=estimate,
-                base_revision=revision,
-            )
-        if native_result == {"status": SEMANTIC_NOOP, "code": "ZERO_LOAD"}:
-            return self._preflight_noop(
-                "ZERO_LOAD", stage="ESTIMATOR", estimate=estimate
-            )
+            if (
+                result.get("code") == "ESTIMATOR_UNAVAILABLE"
+                and self._transport_warning is not None
+            ):
+                try:
+                    self._transport_warning(result)
+                except Exception:  # noqa: BLE001 - best-effort observer boundary
+                    # The observer is optional: ordinary sink failure must not
+                    # change semantic data; the consumer may emit its fallback.
+                    result["_transport_warning_emitted"] = False
+                else:
+                    result["_transport_warning_emitted"] = True
+            if self._cacheable_semantic_result(result):
+                self._semantic_results[key] = copy.deepcopy(result)
+            return result
+        finally:
+            task = asyncio.current_task()
+            if self._semantic_inflight.get(key) is task:
+                self._semantic_inflight.pop(key, None)
+
+    async def _run_semantic_v3(
+        self,
+        *,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        context_summary: Mapping[str, Any],
+        estimator: ContextBoundEstimatorProvider,
+    ) -> dict[str, Any]:
+        """Execute the V3-only path without consulting the G0 zero builder."""
+
         try:
-            native_result = validate_semantic_result(
-                native_result,
-                expected_base_revision=proposal["base_revision"],
+            native_summary = validate_context_summary_payload(context_summary)
+        except BaseException:
+            return self._semantic_failure("NATIVE_MALFORMED")
+
+        cursor = self._bridge.semantic_revision_v1(scope)
+        if type(cursor) is not dict:
+            return self._semantic_failure("NATIVE_MALFORMED")
+        if cursor.get("status") == "DEGRADED":
+            return self._semantic_failure(
+                str(cursor.get("code", "NATIVE_ERROR")), native_stage="CURSOR"
+            )
+        if set(cursor) != {"schema", "revision"}:
+            return self._semantic_failure("NATIVE_MALFORMED")
+        cursor_revision = cursor.get("revision")
+        if type(cursor_revision) is not int or cursor_revision < 0:
+            return self._semantic_failure("NATIVE_MALFORMED")
+
+        semantic_turn = FrozenTurn(
+            scope=scope,
+            event_id=frozen_turn.event_id,
+            turn_id=frozen_turn.turn_id,
+            base_revision=cursor_revision,
+            observed_at_ms=frozen_turn.observed_at_ms,
+        )
+        try:
+            nonce_digest = make_request_nonce_digest(scope, semantic_turn)
+            adapted_summary = adapt_native_context_summary_v1(
+                native_summary,
+                scope=scope,
+                nonce_digest=nonce_digest,
+                estimator_formula_digest=ESTIMATOR_FORMULA_DIGEST,
+            )
+            binding = ContextBindingV1.from_json(adapted_summary["binding"])
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return self._semantic_failure("NATIVE_MALFORMED")
+
+        try:
+            estimate = await estimate_context_bound(
+                estimator,
+                request_text,
+                binding=binding,
+                summary=adapted_summary,
+            )
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except SemanticEstimateError as exc:
+            return self._semantic_failure(
+                exc.code,
+                cause_code=exc.subcode,
+                transport_meta=exc.transport_meta,
             )
         except BaseException:
-            return self._preflight_failure(
-                "NATIVE_MALFORMED",
-                stage="RECEIPT",
+            return self._semantic_failure("ESTIMATOR_UNAVAILABLE")
+
+        transport_meta = (
+            estimate.transport_meta
+            if type(estimate.transport_meta) is AuxiliaryTransportMetaV1
+            else not_applicable_transport_meta()
+        )
+
+        try:
+            proposal = build_perception_proposal_v3(
+                scope=scope,
+                turn=semantic_turn,
                 estimate=estimate,
-                base_revision=revision,
+                base_revision=cursor_revision,
+                nonce_digest=nonce_digest,
+            )
+        except SemanticProposalError as exc:
+            return self._semantic_failure(exc.code, transport_meta=transport_meta)
+        except BaseException:
+            return self._semantic_failure(
+                "ESTIMATOR_MALFORMED", transport_meta=transport_meta
+            )
+
+        closure = self._bridge.apply_perception_proposal_v1(scope, proposal)
+        if type(closure) is not dict:
+            return self._semantic_failure(
+                "NATIVE_MALFORMED", transport_meta=transport_meta
+            )
+        if closure.get("status") == "DEGRADED":
+            return self._semantic_failure(
+                str(closure.get("code", "NATIVE_ERROR")),
+                native_stage="NATIVE_APPLY",
+                state_subcode=closure.get("state_subcode"),
+                migration_subcode=closure.get("migration_subcode"),
+                transport_meta=transport_meta,
+            )
+        if closure.get("schema") not in {
+            "astrembodiment.semantic-perception-closure.v1",
+            "astrembodiment.semantic-perception-closure.v2",
+        }:
+            return self._semantic_failure(
+                "NATIVE_MALFORMED", transport_meta=transport_meta
+            )
+        vector = closure.get("semantic_vector_receipt")
+        if (
+            closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
+            or closure.get("node_observability_state") != "CONFIRMED"
+            or type(vector) is not dict
+            or vector.get("dimension_slot_count") != 15
+            or vector.get("evaluated_dimension_count") != 15
+            or vector.get("injected_dimension_count") != 15
+            or vector.get("unavailable_dimension_count") != 0
+        ):
+            return self._semantic_failure(
+                "SEMANTIC_VECTOR_UNAVAILABLE", transport_meta=transport_meta
+            )
+        if closure.get("expression_projection") is None:
+            return self._semantic_failure(
+                "EXPRESSION_PROJECTION_UNAVAILABLE", transport_meta=transport_meta
             )
         return {
-            "status": SEMANTIC_SUCCESS,
+            "status": "SUCCESS",
             "code": "SEMANTIC_COMMITTED",
-            "proposal": proposal,
-            "result": copy.deepcopy(native_result),
-            "diagnostic": self._preflight_diagnostic(
-                stage="RECEIPT",
-                commit_state=(
-                    "CONFIRMED_EXISTING"
-                    if native_result["deduplicated"]
-                    else "CONFIRMED_NEW"
-                ),
-                values_state="COMMITTED",
-                estimate=estimate,
-                base_revision=proposal["base_revision"],
-                revision=native_result["revision"],
-                deduplicated=native_result["deduplicated"],
-                receipt_status=native_result["receipt"]["status"],
-                receipt=native_result["receipt"],
-            ),
+            "dimensions_fxp6": dict(proposal["dimensions"]),
+            "estimator_confidence_fxp6": proposal["estimator_confidence"],
+            "semantic_closure": copy.deepcopy(closure),
+            "migration_subcode": closure.get("migration_subcode"),
+            **transport_meta.as_json(),
         }
 
     async def apply_delivery(
@@ -828,6 +773,19 @@ class GenesisCoordinator:
             return previous
 
         decision = self._bridge.apply_event(scope.scope_json(), event)
+        if not isinstance(decision, dict):
+            raise ContextProjectionIntegrity(
+                "CONTEXT_PROJECTION", "native decision must be an object"
+            )
+        if decision.get("schema") == "astrembodiment.decision.v1":
+            summary = decision.get("context_summary")
+            if summary is None:
+                raise ContextProjectionIntegrity(
+                    "CONTEXT_PROJECTION",
+                    "native decision is missing its committed context summary",
+                )
+            decision = dict(decision)
+            decision["context_summary"] = validate_context_summary_payload(summary)
         if decision.get("deduplicated"):
             # The native lane had already applied this exact event: reuse the
             # original decision instead of double-applying.
@@ -843,5 +801,5 @@ class GenesisCoordinator:
         self._inflight.clear()
         self._committed.clear()
         self._applied.clear()
-        self._preflight_inflight.clear()
-        self._preflight_results.clear()
+        self._semantic_inflight.clear()
+        self._semantic_results.clear()

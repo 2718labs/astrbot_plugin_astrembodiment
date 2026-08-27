@@ -101,4 +101,3 @@ release ZIPs, GitHub About, or remote state.
    topics, visibility, and other repository settings unchanged.
 3. Read the description back with `gh repo view --json description` and record
    the returned value in G-drive evidence.
-

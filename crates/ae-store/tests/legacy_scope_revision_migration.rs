@@ -34,11 +34,15 @@ struct LegacyFixture {
     b2_revision: u64,
 }
 
-#[derive(Clone, Copy)]
-struct LegacyReceiptSeeds {
-    formula: u8,
-    authority: u8,
-    state: u8,
+struct LegacyJournalRowInput<'a> {
+    scope_digest: &'a Digest,
+    event: &'a CanonicalEvent,
+    base_revision: u64,
+    next_revision: u64,
+    chain_seed: &'a Digest,
+    formula_seed: u8,
+    authority_seed: u8,
+    state_seed: u8,
 }
 
 fn create_legacy_journal_tables(conn: &Connection) -> rusqlite::Result<()> {
@@ -90,26 +94,31 @@ fn create_legacy_journal_tables(conn: &Connection) -> rusqlite::Result<()> {
 
 fn write_legacy_journal_row(
     tx: &Transaction<'_>,
-    scope_digest: &Digest,
-    event: &CanonicalEvent,
-    base_revision: u64,
-    next_revision: u64,
-    chain_seed: &Digest,
-    receipt_seeds: LegacyReceiptSeeds,
+    input: LegacyJournalRowInput<'_>,
 ) -> rusqlite::Result<(Digest, Digest, u64)> {
+    let LegacyJournalRowInput {
+        scope_digest,
+        event,
+        base_revision,
+        next_revision,
+        chain_seed,
+        formula_seed,
+        authority_seed,
+        state_seed,
+    } = input;
     let event_bytes = wire::encode_event(event);
     let event_digest = wire::event_digest(event);
     let receipt = TransitionReceipt {
         schema_version: 1,
-        formula_digest: [receipt_seeds.formula; 32],
+        formula_digest: [formula_seed; 32],
         scope_digest: *scope_digest,
         event_digest,
-        authority_digest: [receipt_seeds.authority; 32],
+        authority_digest: [authority_seed; 32],
         base_revision,
         next_revision,
-        state_before: [receipt_seeds.state; 32],
-        state_after: [receipt_seeds.state.saturating_add(1); 32],
-        graph_after: [receipt_seeds.state.saturating_add(2); 32],
+        state_before: [state_seed; 32],
+        state_after: [state_seed.saturating_add(1); 32],
+        graph_after: [state_seed.saturating_add(2); 32],
         action_contract: None,
         active_nodes: 0,
         active_edges: 0,
@@ -156,54 +165,54 @@ fn create_legacy_scope_fixture(path: &std::path::Path) -> rusqlite::Result<Legac
     let tx = conn.transaction()?;
     let (a1_event_digest, a1_chain, a1_revision) = write_legacy_journal_row(
         &tx,
-        &scope_a,
-        &time_advance(1, 1, 2),
-        0,
-        1,
-        &seed_a,
-        LegacyReceiptSeeds {
-            formula: 41,
-            authority: 51,
-            state: 61,
+        LegacyJournalRowInput {
+            scope_digest: &scope_a,
+            event: &time_advance(1, 1, 2),
+            base_revision: 0,
+            next_revision: 1,
+            chain_seed: &seed_a,
+            formula_seed: 41,
+            authority_seed: 51,
+            state_seed: 61,
         },
     )?;
     let (b1_event_digest, b1_chain, b1_revision) = write_legacy_journal_row(
         &tx,
-        &scope_b,
-        &time_advance(2, 3, 4),
-        0,
-        1,
-        &seed_b,
-        LegacyReceiptSeeds {
-            formula: 42,
-            authority: 52,
-            state: 62,
+        LegacyJournalRowInput {
+            scope_digest: &scope_b,
+            event: &time_advance(2, 3, 4),
+            base_revision: 0,
+            next_revision: 1,
+            chain_seed: &seed_b,
+            formula_seed: 42,
+            authority_seed: 52,
+            state_seed: 62,
         },
     )?;
     let (a2_event_digest, _a2_chain, a2_revision) = write_legacy_journal_row(
         &tx,
-        &scope_a,
-        &time_advance(3, 1, 2),
-        1,
-        2,
-        &a1_chain,
-        LegacyReceiptSeeds {
-            formula: 43,
-            authority: 53,
-            state: 63,
+        LegacyJournalRowInput {
+            scope_digest: &scope_a,
+            event: &time_advance(3, 1, 2),
+            base_revision: 1,
+            next_revision: 2,
+            chain_seed: &a1_chain,
+            formula_seed: 43,
+            authority_seed: 53,
+            state_seed: 63,
         },
     )?;
     let (b2_event_digest, _b2_chain, b2_revision) = write_legacy_journal_row(
         &tx,
-        &scope_b,
-        &time_advance(4, 3, 4),
-        1,
-        2,
-        &b1_chain,
-        LegacyReceiptSeeds {
-            formula: 44,
-            authority: 54,
-            state: 64,
+        LegacyJournalRowInput {
+            scope_digest: &scope_b,
+            event: &time_advance(4, 3, 4),
+            base_revision: 1,
+            next_revision: 2,
+            chain_seed: &b1_chain,
+            formula_seed: 44,
+            authority_seed: 54,
+            state_seed: 64,
         },
     )?;
     tx.commit()?;
