@@ -268,6 +268,20 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "actions: write" not in release
     assert "persist-credentials: true" not in publish_job
     assert "persist-credentials: false" in publish_job
+    publish_setup_python = (
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+    )
+    assert publish_job.count(publish_setup_python) == 1
+    publish_setup = publish_job.split(publish_setup_python, 1)[1].split(
+        "\n      - ", 1
+    )[0]
+    assert 'python-version: "3.12"' in publish_setup
+    publish_setup_index = publish_job.index(publish_setup_python)
+    publish_python_calls = [
+        match.start() for match in re.finditer(r"(?m)^\s*python(?:\s|$)", publish_job)
+    ]
+    assert publish_python_calls
+    assert all(publish_setup_index < call for call in publish_python_calls)
     assert "git/tags" in publish_job
     assert "git/refs" in publish_job
     assert "--force" not in release
