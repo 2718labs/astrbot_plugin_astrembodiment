@@ -260,6 +260,8 @@ mod tests {
 
     #[test]
     fn semantic_outbox_pyo3_shape_rejects_oversize_base64_before_and_after_decode() {
+        Python::initialize();
+
         fn error_code(error: PyErr) -> String {
             Python::attach(|py| error.value(py).getattr("code").unwrap().extract().unwrap())
         }

@@ -19,6 +19,7 @@ const RECORD_MAGIC: &[u8; 8] = b"AE-SOK1\0";
 const RECORD_SCHEMA: u16 = 1;
 const ENVELOPE_MAGIC: &[u8; 8] = b"AE-SOB1\0";
 const ENVELOPE_SCHEMA: u16 = 1;
+#[cfg(windows)]
 const PROTECTION_WINDOWS_DPAPI: u8 = 1;
 #[cfg(target_os = "linux")]
 const PROTECTION_LINUX_FILE: u8 = 2;
@@ -165,6 +166,7 @@ impl SemanticOutboxKeyAuthorityV1 {
 }
 
 struct KeyRecordV1 {
+    #[cfg(windows)]
     installation_id: [u8; 16],
     protection_kind: u8,
     payload: Zeroizing<Vec<u8>>,
@@ -299,7 +301,9 @@ fn parse_record(bytes: &[u8]) -> Result<KeyRecordV1, SemanticOutboxCryptoError> 
     if key_version != SEMANTIC_OUTBOX_KEY_VERSION_V1 {
         return Err(SemanticOutboxCryptoError::KeyVersionUnsupported);
     }
+    #[cfg(windows)]
     let mut installation_id = [0u8; 16];
+    #[cfg(windows)]
     installation_id.copy_from_slice(&bytes[14..30]);
     let protection_kind = bytes[30];
     let payload_len = usize::try_from(read_u32(bytes, 31)?)
@@ -319,6 +323,7 @@ fn parse_record(bytes: &[u8]) -> Result<KeyRecordV1, SemanticOutboxCryptoError> 
         return Err(SemanticOutboxCryptoError::Unavailable);
     }
     Ok(KeyRecordV1 {
+        #[cfg(windows)]
         installation_id,
         protection_kind,
         payload: Zeroizing::new(bytes[payload_start..payload_end].to_vec()),
