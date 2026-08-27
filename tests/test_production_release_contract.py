@@ -241,6 +241,14 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "inputs.tag" not in release
     assert "actions/upload-artifact@" in release
     assert release.count("contents: write") == 1
+    rebuilt_archive = 'rebuilt="dist/.${ARCHIVE_NAME%.zip}.rebuild.zip"'
+    rebuilt_compare = 'cmp --silent "$archive" "$rebuilt"'
+    rebuilt_cleanup = 'rm -f "$rebuilt"'
+    assert rebuilt_archive in release
+    assert rebuilt_compare in release
+    assert rebuilt_cleanup in release
+    assert release.index(rebuilt_archive) < release.index(rebuilt_compare)
+    assert release.index(rebuilt_compare) < release.index(rebuilt_cleanup)
     select_target_job = release.split("  select-target:\n", 1)[1].split(
         "\n  build-native:", 1
     )[0]
