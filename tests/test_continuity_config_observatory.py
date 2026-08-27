@@ -51,6 +51,19 @@ def test_user_visible_semantic_config_uses_fifteen_dimension_wording() -> None:
     assert settings["semantic_estimator_timeout_ms"]["description"] == (
         "十五维语义估计超时（毫秒）"
     )
+    assert settings["semantic_sync_wait_ms"] == {
+        "description": "语义前台等待（毫秒）",
+        "hint": "仅等待同一异步任务的结果；到期后主对话继续并返回 DEFERRED_ASYNC，不取消后台 Provider 调用。",
+        "type": "int",
+        "default": 2000,
+        "minimum": 250,
+        "maximum": 5000,
+    }
+    assert settings["semantic_async_job_ttl_ms"]["default"] == 600000
+    assert settings["semantic_async_total_budget_ms"]["default"] == 150000
+    assert settings["semantic_provider_attempt_cap_ms"]["default"] == 90000
+    assert settings["semantic_worker_concurrency"]["default"] == 2
+    assert settings["semantic_job_lease_ms"]["default"] == 30000
     assert "闭合的十五维语义估计" in settings["assistant_provider_id"]["hint"]
 
 
@@ -88,6 +101,35 @@ class LogRecorder:
 
     def warning(self, message: str, *args: object) -> None:
         self._record("warning", message, *args)
+
+
+def test_deferred_semantic_observatory_is_info_without_expression_injection(
+    monkeypatch,
+) -> None:
+    logs = LogRecorder()
+    monkeypatch.setattr(main_module, "logger", logs)
+    plugin = AstrEmbodimentPlugin(None, {"observatory_enabled": False})
+
+    record = plugin._emit_semantic_observatory(
+        {
+            "status": "DEFERRED",
+            "code": "DEFERRED_ASYNC",
+            "expression_state": "DEFERRED",
+            "transport_subcode": "PROVIDER_CALL_IN_PROGRESS",
+            "attempted": True,
+            "attempt_count": 1,
+            "timing": {"sync_wait_ms": 2000},
+        },
+        expression_applied=False,
+        expression_profile=None,
+    )
+
+    assert record["schema"] == "astr-embodiment.semantic-observatory.v3"
+    assert record["status"] == "DEFERRED"
+    assert record["code"] == "DEFERRED_ASYNC"
+    assert record["expression_state"] == "DEFERRED"
+    assert record["timing"] == {"sync_wait_ms": 2000}
+    assert logs.entries[0][0] == "info"
 
 
 def _outcome() -> dict[str, object]:
@@ -281,7 +323,7 @@ def test_observatory_uses_closed_compact_detailed_and_unmasked_failure(
             "expression_state",
         )
     } == {
-        "schema": "astr-embodiment.semantic-observatory.v2",
+        "schema": "astr-embodiment.semantic-observatory.v3",
         "status": "DEGRADED",
         "code": "EXPRESSION_NOT_ATTEMPTED",
         "reason": "EXPRESSION_NOT_ATTEMPTED",

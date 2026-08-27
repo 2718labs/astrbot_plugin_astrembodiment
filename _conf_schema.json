@@ -58,11 +58,59 @@
       },
       "semantic_estimator_timeout_ms": {
         "description": "十五维语义估计超时（毫秒）",
-        "hint": "一次十五维语义操作的总时间预算；超时后不提交语义、不回退固定零，并记录 EXPRESSION_NOT_ATTEMPTED 警告。",
+        "hint": "旧版兼容字段；仅在尚未设置新 Provider 单次上限时作为一次迁移输入，不会恢复前台同步等待。",
         "type": "int",
         "default": 8000,
         "minimum": 1000,
         "maximum": 15000
+      },
+      "semantic_sync_wait_ms": {
+        "description": "语义前台等待（毫秒）",
+        "hint": "仅等待同一异步任务的结果；到期后主对话继续并返回 DEFERRED_ASYNC，不取消后台 Provider 调用。",
+        "type": "int",
+        "default": 2000,
+        "minimum": 250,
+        "maximum": 5000
+      },
+      "semantic_async_job_ttl_ms": {
+        "description": "语义异步任务存活期（毫秒）",
+        "hint": "默认十分钟；到期会擦除密封请求载荷且不会写入原生状态。",
+        "type": "int",
+        "default": 600000,
+        "minimum": 60000,
+        "maximum": 3600000
+      },
+      "semantic_async_total_budget_ms": {
+        "description": "语义异步总预算（毫秒）",
+        "hint": "限制任务的 Provider 重试窗口；不足以安全重试时任务终止并擦除密封载荷。",
+        "type": "int",
+        "default": 150000,
+        "minimum": 10000,
+        "maximum": 300000
+      },
+      "semantic_provider_attempt_cap_ms": {
+        "description": "语义 Provider 单次上限（毫秒）",
+        "hint": "每个已持久化 Provider attempt 的硬上限；最多两次，重试由 durable outbox 独占。",
+        "type": "int",
+        "default": 90000,
+        "minimum": 5000,
+        "maximum": 120000
+      },
+      "semantic_worker_concurrency": {
+        "description": "语义异步工作并发数",
+        "hint": "不同 Bot 可并行；同一 Bot 始终按入队顺序串行执行。",
+        "type": "int",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 4
+      },
+      "semantic_job_lease_ms": {
+        "description": "语义异步任务租约（毫秒）",
+        "hint": "进程中断后仅过期租约可恢复；旧租约的晚结果不会调用原生提交。",
+        "type": "int",
+        "default": 30000,
+        "minimum": 10000,
+        "maximum": 60000
       }
     },
     "default": {}

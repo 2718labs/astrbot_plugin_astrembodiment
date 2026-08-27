@@ -82,6 +82,7 @@ try:
         build_delivery_outcome_json,
     )
     from .astr_embodiment.coordinator import GenesisCoordinator
+    from .astr_embodiment.semantic_outbox import SemanticOutbox, SemanticOutboxConfig
     from .astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
         PersonaGenesisError,
@@ -125,6 +126,7 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
         build_delivery_outcome_json,
     )
     from astr_embodiment.coordinator import GenesisCoordinator
+    from astr_embodiment.semantic_outbox import SemanticOutbox, SemanticOutboxConfig
     from astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
         PersonaGenesisError,
@@ -276,7 +278,7 @@ _OBSERVATORY_EXPRESSION_STATES = {
     "REJECTED",
     "INJECTION_FAILED",
 }
-_SEMANTIC_OBSERVATORY_SCHEMA = "astr-embodiment.semantic-observatory.v2"
+_SEMANTIC_OBSERVATORY_SCHEMA = "astr-embodiment.semantic-observatory.v3"
 _SEMANTIC_CLOSURE_SCHEMAS = frozenset(
     {
         "astrembodiment.semantic-perception-closure.v1",
@@ -295,6 +297,11 @@ _SEMANTIC_NOT_ATTEMPTED_CAUSES = (
             "NATIVE_MALFORMED",
             "NATIVE_ERROR",
             "EXPRESSION_PROJECTION_UNAVAILABLE",
+            "ASYNC_KEY_UNAVAILABLE",
+            "ASYNC_KEY_VERSION_UNSUPPORTED",
+            "ASYNC_PAYLOAD_AUTH_FAILED",
+            "ASYNC_QUEUE_UNAVAILABLE",
+            "DEFERRED_ASYNC",
         }
     )
     | ESTIMATOR_MALFORMED_SUBCODES
@@ -321,6 +328,7 @@ class AstrEmbodimentPlugin(Star):
             configured_provider=self._configured_auxiliary_provider,
             timeout_ms=self._semantic_estimator_timeout_ms,
         )
+        self._semantic_outbox: SemanticOutbox | None = None
         self._health = None
         self._revisions: dict[str, int] = {}
         self._turn_seq: dict[str, int] = {}
@@ -342,7 +350,7 @@ class AstrEmbodimentPlugin(Star):
         self._expression_injection_marker = "AE Affect Expression Context"
         self._request_expression_attr = "_astrembodiment_expression_injected_v1"
         self._request_semantic_record_attr = (
-            "_astrembodiment_semantic_observatory_record_v2"
+            "_astrembodiment_semantic_observatory_record_v3"
         )
 
     async def initialize(self) -> None:
@@ -364,8 +372,24 @@ class AstrEmbodimentPlugin(Star):
             self._health.neuron_slots,
             self._health.status,
         )
+        self._semantic_outbox = SemanticOutbox(
+            runtime_data_dir=data_dir,
+            bridge=self._bridge,
+            transport=self._auxiliary_transport,
+            config=self._semantic_outbox_config(),
+        )
+        started = await self._semantic_outbox.start()
+        self._coordinator.configure_semantic_outbox(self._semantic_outbox)
+        if not started:
+            logger.warning(
+                "AstrEmbodiment semantic async lane unavailable: code=%s",
+                self._semantic_outbox.disabled_code or "ASYNC_QUEUE_UNAVAILABLE",
+            )
 
     async def terminate(self) -> None:
+        if self._semantic_outbox is not None:
+            await self._semantic_outbox.close()
+            self._semantic_outbox = None
         self._bridge.close()
         self._pending.clear()
         self._seed_receipts.clear()
@@ -554,6 +578,40 @@ class AstrEmbodimentPlugin(Star):
             value
             if type(value) is int and 1_000 <= value <= 15_000
             else DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS
+        )
+
+    def _semantic_outbox_config(self) -> SemanticOutboxConfig:
+        """Read the bounded async queue settings without reviving sync waits."""
+
+        def bounded(name: str, default: int, minimum: int, maximum: int) -> int:
+            value = self._config_value(name, default)
+            return (
+                value if type(value) is int and minimum <= value <= maximum else default
+            )
+
+        legacy_attempt_cap = 90_000
+        legacy_settings = self._config_values.get("model_settings")
+        legacy_raw = (
+            legacy_settings.get("semantic_estimator_timeout_ms")
+            if isinstance(legacy_settings, Mapping)
+            else self._config_values.get("semantic_estimator_timeout_ms")
+        )
+        if type(legacy_raw) is int and 5_000 <= legacy_raw <= 120_000:
+            legacy_attempt_cap = legacy_raw
+        return SemanticOutboxConfig(
+            sync_wait_ms=bounded("semantic_sync_wait_ms", 2_000, 250, 5_000),
+            job_ttl_ms=bounded("semantic_async_job_ttl_ms", 600_000, 60_000, 3_600_000),
+            total_budget_ms=bounded(
+                "semantic_async_total_budget_ms", 150_000, 10_000, 300_000
+            ),
+            provider_attempt_cap_ms=bounded(
+                "semantic_provider_attempt_cap_ms",
+                min(max(legacy_attempt_cap, 5_000), 120_000),
+                5_000,
+                120_000,
+            ),
+            worker_concurrency=bounded("semantic_worker_concurrency", 2, 1, 4),
+            lease_ms=bounded("semantic_job_lease_ms", 30_000, 10_000, 60_000),
         )
 
     @staticmethod
@@ -878,6 +936,52 @@ class AstrEmbodimentPlugin(Star):
             if isinstance(pending, Mapping) and pending.get("scope") == scope:
                 self._pending.pop(turn_token, None)
 
+    async def _scrub_async_outbox_after_rebirth_v1(
+        self,
+        scope: ScopeTokens,
+        old_incarnation_id: str | None,
+    ) -> None:
+        """Scrub durable old-generation jobs before clearing local mirrors."""
+
+        outbox = self._semantic_outbox
+        if outbox is None:
+            return
+        try:
+            await outbox.cancel_rebirth(
+                scope=scope,
+                old_incarnation_id=old_incarnation_id,
+            )
+        except Exception:  # noqa: BLE001 - rebirth itself is already native-final
+            disable = getattr(outbox, "disable", None)
+            if callable(disable):
+                disable("ASYNC_QUEUE_UNAVAILABLE")
+            logger.warning(
+                "AstrEmbodiment semantic async lane disabled after rebirth scrub"
+            )
+
+    def _scrub_async_outbox_after_rebirth_now_v1(
+        self,
+        scope: ScopeTokens,
+        old_incarnation_id: str | None,
+    ) -> None:
+        """Use the synchronous transaction form for the explicit command path."""
+
+        outbox = self._semantic_outbox
+        if outbox is None:
+            return
+        cancel_now = getattr(outbox, "cancel_rebirth_now", None)
+        if not callable(cancel_now):
+            return
+        try:
+            cancel_now(scope=scope, old_incarnation_id=old_incarnation_id)
+        except Exception:  # noqa: BLE001 - native rebirth must not be rolled back
+            disable = getattr(outbox, "disable", None)
+            if callable(disable):
+                disable("ASYNC_QUEUE_UNAVAILABLE")
+            logger.warning(
+                "AstrEmbodiment semantic async lane disabled after rebirth scrub"
+            )
+
     async def _consume_seed_config_startup_v1(
         self,
         scope: ScopeTokens,
@@ -910,6 +1014,14 @@ class AstrEmbodimentPlugin(Star):
         Rust. On host-save failure the native mirror intentionally stays
         pending; this method never rolls the native generation back.
         """
+        previous_receipt = self._seed_receipts.get(scope.persona_token)
+        previous_incarnation = (
+            previous_receipt.get("incarnation_id")
+            if isinstance(previous_receipt, Mapping)
+            else None
+        )
+        if type(previous_incarnation) is not str or not previous_incarnation:
+            previous_incarnation = None
         observation, seed_code, mirror_guard = (
             observation_override
             if observation_override is not None
@@ -990,6 +1102,10 @@ class AstrEmbodimentPlugin(Star):
                 )
 
         if result.get("state") in {"REBIRTH_COMMITTED", "REBIRTH_REPLAYED"}:
+            await self._scrub_async_outbox_after_rebirth_v1(
+                scope,
+                previous_incarnation,
+            )
             self._forget_seed_clear_scope_v1(scope)
         return dict(result)
 
@@ -1584,6 +1700,24 @@ class AstrEmbodimentPlugin(Star):
             outcome.get("attempt_count"),
         )
 
+    @staticmethod
+    def _deferred_timing_for_outcome(
+        outcome: Mapping[str, Any] | Any,
+    ) -> dict[str, int] | None:
+        """Project only the closed foreground wait budget into observability."""
+
+        if not isinstance(outcome, Mapping):
+            return None
+        timing = outcome.get("timing")
+        if (
+            type(timing) is not dict
+            or set(timing) != {"sync_wait_ms"}
+            or type(timing.get("sync_wait_ms")) is not int
+            or not 250 <= int(timing["sync_wait_ms"]) <= 5_000
+        ):
+            return None
+        return {"sync_wait_ms": int(timing["sync_wait_ms"])}
+
     def _emit_transport_failure_warning(self, outcome: Mapping[str, Any]) -> None:
         """Emit the owner-only, content-free semantic transport diagnostic."""
 
@@ -1616,6 +1750,29 @@ class AstrEmbodimentPlugin(Star):
         """
 
         transport_meta = cls._transport_meta_for_outcome(outcome)
+        if (
+            outcome.get("status") == "DEFERRED"
+            and outcome.get("code") == "DEFERRED_ASYNC"
+        ):
+            return {
+                "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
+                "status": "DEFERRED",
+                "code": "DEFERRED_ASYNC",
+                "reason": "SYNC_BUDGET_EXPIRED",
+                "cause_code": None,
+                "expression_state": "DEFERRED",
+                "dimensions_fxp6": None,
+                "estimator_confidence_fxp6": None,
+                "revision": None,
+                "deduplicated": None,
+                "semantic_vector_counts": None,
+                "node_counts": None,
+                "expression_profile_fxp6": None,
+                "state_subcode": None,
+                "migration_subcode": None,
+                "timing": cls._deferred_timing_for_outcome(outcome),
+                **transport_meta.as_json(),
+            }
         empty_record: dict[str, Any] = {
             "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
             "status": "DEGRADED",
@@ -1632,6 +1789,7 @@ class AstrEmbodimentPlugin(Star):
             "expression_profile_fxp6": None,
             "state_subcode": None,
             "migration_subcode": None,
+            "timing": None,
             **transport_meta.as_json(),
         }
         profile = cls._expression_profile_from_semantic_outcome(outcome)
@@ -1708,6 +1866,7 @@ class AstrEmbodimentPlugin(Star):
                     "migration_subcode": _observatory_migration_subcode(
                         closure.get("migration_subcode")
                     ),
+                    "timing": None,
                     **transport_meta.as_json(),
                 }
         if cause_code is None and isinstance(outcome, Mapping):
@@ -1806,7 +1965,7 @@ class AstrEmbodimentPlugin(Star):
                 separators=(",", ":"),
                 allow_nan=False,
             )
-        if record.get("status") == "SUCCESS":
+        if record.get("status") in {"SUCCESS", "DEFERRED"}:
             logger.info(message)
         else:
             logger.warning(message)
@@ -2036,6 +2195,10 @@ class AstrEmbodimentPlugin(Star):
         if response.get("state") in {"COMMITTED", "REPLAYED"}:
             # A new native incarnation invalidates only local mirrors.  No
             # challenge, receipt, nonce, identity, or replay state is cached.
+            self._scrub_async_outbox_after_rebirth_now_v1(
+                scope,
+                expected_incarnation_id,
+            )
             self._coordinator.forget_scope(scope)
             self._revisions.pop(scope.persona_token, None)
             self._seed_receipts.pop(scope.persona_token, None)
@@ -2353,6 +2516,14 @@ class AstrEmbodimentPlugin(Star):
                     observed_at_ms=int(time.time() * 1000),
                 )
 
+                provider_binding = None
+                provider_resolution_error: AuxiliaryTransportError | None = None
+                if self._semantic_outbox is not None and self._semantic_outbox.ready:
+                    try:
+                        provider_binding = await transport_context.resolve_binding()
+                    except AuxiliaryTransportError as exc:
+                        provider_resolution_error = exc
+
                 async def semantic_estimator(
                     request_mapping: Mapping[str, Any],
                 ) -> Any:
@@ -2362,13 +2533,22 @@ class AstrEmbodimentPlugin(Star):
                         transport_context=transport_context,
                     )
 
-                semantic_outcome = await self._coordinator.preflight_semantic_v3(
-                    scope=scope,
-                    frozen_turn=semantic_turn,
-                    request_text=frozen_request_text,
-                    context_summary=context_summary,
-                    estimator=semantic_estimator,
-                )
+                if provider_resolution_error is not None:
+                    semantic_outcome = {
+                        "status": "DEGRADED",
+                        "code": "ESTIMATOR_UNAVAILABLE",
+                        **provider_resolution_error.meta.as_json(),
+                    }
+                else:
+                    semantic_outcome = await self._coordinator.preflight_semantic_v3(
+                        scope=scope,
+                        frozen_turn=semantic_turn,
+                        request_text=frozen_request_text,
+                        context_summary=context_summary,
+                        estimator=semantic_estimator,
+                        incarnation_id=incarnation_id,
+                        provider_binding=provider_binding,
+                    )
             semantic_profile = self._expression_profile_from_semantic_outcome(
                 semantic_outcome
             )

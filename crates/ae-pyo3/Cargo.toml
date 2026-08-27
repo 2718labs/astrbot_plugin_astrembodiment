@@ -17,3 +17,4 @@ ae-genesis.workspace = true
 ae-store.workspace = true
 ae-runtime.workspace = true
 ae-context-projector.workspace = true
+base64.workspace = true

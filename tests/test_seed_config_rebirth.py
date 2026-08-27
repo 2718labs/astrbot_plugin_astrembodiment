@@ -86,6 +86,20 @@ class WarningRecorder:
         self.messages.append(message % args if args else message)
 
 
+class RebirthOutbox:
+    def __init__(self) -> None:
+        self.calls: list[tuple[ScopeTokens, str | None]] = []
+
+    async def cancel_rebirth(
+        self,
+        *,
+        scope: ScopeTokens,
+        old_incarnation_id: str | None,
+    ) -> int:
+        self.calls.append((scope, old_incarnation_id))
+        return 1
+
+
 def test_startup_empty_seed_uses_only_native_seed_clear_reconciliation() -> None:
     config = SavingConfig(seed_code="", seed_mirror_guard_v1="a" * 64)
     bridge = SeedConfigBridge()
@@ -134,6 +148,28 @@ def test_startup_empty_seed_uses_only_native_seed_clear_reconciliation() -> None
             "host_config_revision": 0,
         }
     ]
+
+
+def test_rebirth_scrubs_outbox_before_forgetting_process_local_scope() -> None:
+    config = SavingConfig(seed_code="", seed_mirror_guard_v1="a" * 64)
+    bridge = SeedConfigBridge()
+    outbox = RebirthOutbox()
+    plugin = AstrEmbodimentPlugin(None, config)
+    plugin._bridge = bridge  # type: ignore[assignment]
+    plugin._semantic_outbox = outbox  # type: ignore[assignment]
+    scope = ScopeTokens(
+        bot_token="10" * 16,
+        persona_token="20" * 16,
+        relation_token=None,
+        session_token="30" * 16,
+    )
+    plugin._seed_receipts[scope.persona_token] = {"incarnation_id": "AE-I1-OLD"}
+
+    result = asyncio.run(plugin._reconcile_seed_config_v1(scope, origin="STARTUP_READ"))
+
+    assert result["state"] == "REBIRTH_COMMITTED"
+    assert outbox.calls == [(scope, "AE-I1-OLD")]
+    assert scope.persona_token not in plugin._seed_receipts
 
 
 def test_startup_observation_is_captured_once_not_relabelled_live_mutation() -> None:

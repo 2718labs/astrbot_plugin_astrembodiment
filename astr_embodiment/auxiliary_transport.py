@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -27,13 +26,13 @@ TRANSPORT_SUBCODES = frozenset(
         "PROVIDER_RESOLUTION_FAILED",
         "PROVIDER_NOT_FOUND",
         "HOST_API_UNAVAILABLE",
+        "PROVIDER_CALL_IN_PROGRESS",
         "PROVIDER_CALL_TIMEOUT",
         "PROVIDER_CALL_FAILED",
         "RESPONSE_TEXT_UNAVAILABLE",
         "UNKNOWN_TRANSPORT_FAILURE",
     }
 )
-_RETRYABLE_SUBCODES = frozenset({"PROVIDER_CALL_TIMEOUT", "PROVIDER_CALL_FAILED"})
 _BINDING_SOURCES = frozenset({"CONFIGURED", "LEGACY_COMPAT", "CURRENT_SESSION"})
 
 
@@ -210,10 +209,12 @@ class RequestTransportContext:
             )
         binding = await self._binding_for_request()
         if semantic_operation:
-            return await self._transport._generate_semantic(
+            return await self._transport.generate_bound_once(
                 binding=binding,
                 prompt=prompt,
                 system_prompt=system_prompt,
+                attempt_count=1,
+                timeout_ms=self._transport._validated_timeout_ms(),
             )
         return await self._transport._generate_once(
             binding=binding,
@@ -222,6 +223,16 @@ class RequestTransportContext:
             attempt_count=1,
             deadline=None,
         )
+
+    async def resolve_binding(self) -> AuxiliaryProviderBindingV1:
+        """Resolve one fixed Provider before its identity is native-sealed.
+
+        The returned binding is opaque to observability and contains no model
+        object.  It allows a durable worker to perform exactly one bounded
+        attempt after this request context has been closed.
+        """
+
+        return await self._binding_for_request()
 
     async def _binding_for_request(self) -> AuxiliaryProviderBindingV1:
         if self._closed or self._request_key is None:
@@ -346,39 +357,40 @@ class AuxiliaryProviderTransport:
                 AuxiliaryTransportMetaV1("UNKNOWN_TRANSPORT_FAILURE", False, 0)
             ) from None
 
-    async def _generate_semantic(
+    async def generate_bound_once(
         self,
         *,
         binding: AuxiliaryProviderBindingV1,
         prompt: str,
         system_prompt: str,
+        attempt_count: int,
+        timeout_ms: int,
     ) -> AuxiliaryTransportResultV1:
-        timeout_ms = self._validated_timeout_ms()
-        started = time.monotonic()
-        deadline = started + timeout_ms / 1_000
-        first_cap = math.ceil(2 * timeout_ms / 3) / 1_000
-        first_deadline = min(deadline, started + first_cap)
-        try:
-            return await self._generate_once(
-                binding=binding,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                attempt_count=1,
-                deadline=first_deadline,
+        """Run exactly one bound Provider call; retry ownership is durable.
+
+        The semantic outbox increments its SQLite attempt counter before this
+        call.  Keeping retry policy out of this adapter prevents a foreground
+        timeout or process restart from secretly issuing a third request.
+        """
+
+        if (
+            type(binding) is not AuxiliaryProviderBindingV1
+            or type(attempt_count) is not int
+            or attempt_count not in {1, 2}
+            or type(timeout_ms) is not int
+            or not 1_000 <= timeout_ms <= 120_000
+        ):
+            raise AuxiliaryTransportError(
+                AuxiliaryTransportMetaV1("UNKNOWN_TRANSPORT_FAILURE", False, 0)
             )
-        except AuxiliaryTransportError as first_error:
-            if first_error.meta.transport_subcode not in _RETRYABLE_SUBCODES:
-                raise
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise
-            return await self._generate_once(
-                binding=binding,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                attempt_count=2,
-                deadline=deadline,
-            )
+        deadline = time.monotonic() + timeout_ms / 1_000
+        return await self._generate_once(
+            binding=binding,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            attempt_count=attempt_count,
+            deadline=deadline,
+        )
 
     async def _generate_once(
         self,

@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from .auxiliary_transport import (
+    AuxiliaryProviderBindingV1,
     AuxiliaryTransportMetaV1,
     not_applicable_transport_meta,
 )
@@ -52,6 +53,7 @@ from .semantic_estimator import (
     estimate_context_bound,
     make_request_nonce_digest,
 )
+from .semantic_outbox import SemanticOutboxUnavailable
 
 FORMULA_DIGEST = "00" * 32  # placeholder; G2 fills the real FormulaProfile digest
 
@@ -74,6 +76,10 @@ _SEMANTIC_FAILURE_CODES = (
             "STALE_REVISION",
             "NATIVE_ERROR",
             "EXPRESSION_PROJECTION_UNAVAILABLE",
+            "ASYNC_KEY_UNAVAILABLE",
+            "ASYNC_KEY_VERSION_UNSUPPORTED",
+            "ASYNC_PAYLOAD_AUTH_FAILED",
+            "ASYNC_QUEUE_UNAVAILABLE",
         }
     )
     | SEMANTIC_NATIVE_ERROR_CODES
@@ -88,6 +94,7 @@ class GenesisCoordinator:
         bridge: NativeBridge,
         *,
         transport_warning: Callable[[Mapping[str, Any]], None] | None = None,
+        semantic_outbox: Any | None = None,
     ) -> None:
         self._bridge = bridge
         self._transport_warning = transport_warning
@@ -96,6 +103,19 @@ class GenesisCoordinator:
         self._applied: dict[str, dict[str, Any]] = {}
         self._semantic_inflight: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._semantic_results: dict[str, dict[str, Any]] = {}
+        self._semantic_outbox: Any | None = semantic_outbox
+        self._semantic_async_required = semantic_outbox is not None
+
+    def configure_semantic_outbox(self, semantic_outbox: Any | None) -> None:
+        """Select the durable semantic lane, including an explicitly disabled one.
+
+        Once the plugin has initialized this route, absence of native key
+        authority is an async-lane result rather than permission to fall back
+        to the former synchronous Provider path.
+        """
+
+        self._semantic_outbox = semantic_outbox
+        self._semantic_async_required = True
 
     @staticmethod
     def _scope_key(scope: ScopeTokens, source_digest: str) -> str:
@@ -413,6 +433,8 @@ class GenesisCoordinator:
         request_text: str,
         context_summary: Mapping[str, Any],
         estimator: ContextBoundEstimatorProvider,
+        incarnation_id: str | None = None,
+        provider_binding: AuxiliaryProviderBindingV1 | None = None,
     ) -> dict[str, Any]:
         """Run the isolated V3 preview lane at most once for one frozen turn.
 
@@ -425,6 +447,15 @@ class GenesisCoordinator:
             return self._semantic_failure("EMPTY_REQUEST")
         if not self._valid_semantic_request(scope, frozen_turn, request_text):
             return self._semantic_failure("INVALID_TURN")
+        if self._semantic_async_required:
+            return await self._preflight_semantic_outbox_v1(
+                scope=scope,
+                frozen_turn=frozen_turn,
+                request_text=request_text,
+                context_summary=context_summary,
+                incarnation_id=incarnation_id,
+                provider_binding=provider_binding,
+            )
         key = self._semantic_key(scope, frozen_turn)
         previous = self._semantic_results.get(key)
         if previous is not None:
@@ -449,6 +480,85 @@ class GenesisCoordinator:
         except BaseException:
             result = self._semantic_failure("NATIVE_ERROR")
         return copy.deepcopy(result)
+
+    async def _preflight_semantic_outbox_v1(
+        self,
+        *,
+        scope: ScopeTokens,
+        frozen_turn: FrozenTurn,
+        request_text: str,
+        context_summary: Mapping[str, Any],
+        incarnation_id: str | None,
+        provider_binding: AuxiliaryProviderBindingV1 | None,
+    ) -> dict[str, Any]:
+        """Enqueue first and shield only the foreground observation window."""
+
+        outbox = self._semantic_outbox
+        if outbox is None:
+            return self._semantic_failure("ASYNC_KEY_UNAVAILABLE")
+        if getattr(outbox, "ready", True) is not True:
+            disabled_code = getattr(outbox, "disabled_code", None)
+            return self._semantic_failure(
+                disabled_code
+                if type(disabled_code) is str
+                else "ASYNC_QUEUE_UNAVAILABLE"
+            )
+        if (
+            type(incarnation_id) is not str
+            or not incarnation_id
+            or type(provider_binding) is not AuxiliaryProviderBindingV1
+        ):
+            return self._semantic_failure("ASYNC_QUEUE_UNAVAILABLE")
+
+        cursor = self._bridge.semantic_revision_v1(scope)
+        if type(cursor) is not dict:
+            return self._semantic_failure("NATIVE_MALFORMED", native_stage="CURSOR")
+        if cursor.get("status") == "DEGRADED":
+            return self._semantic_failure(
+                str(cursor.get("code", "NATIVE_ERROR")), native_stage="CURSOR"
+            )
+        if set(cursor) != {"schema", "revision"}:
+            return self._semantic_failure("NATIVE_MALFORMED", native_stage="CURSOR")
+        revision = cursor.get("revision")
+        if type(revision) is not int or revision < 0:
+            return self._semantic_failure("NATIVE_MALFORMED", native_stage="CURSOR")
+        durable_turn = FrozenTurn(
+            scope=scope,
+            event_id=frozen_turn.event_id,
+            turn_id=frozen_turn.turn_id,
+            base_revision=revision,
+            observed_at_ms=frozen_turn.observed_at_ms,
+        )
+        try:
+            ticket = await outbox.enqueue(
+                scope=scope,
+                frozen_turn=durable_turn,
+                incarnation_id=incarnation_id,
+                protocol_digest=ESTIMATOR_FORMULA_DIGEST,
+                request_text=request_text,
+                context_summary=context_summary,
+                provider_binding=provider_binding,
+            )
+            result = await outbox.wait_foreground(ticket)
+        except SemanticOutboxUnavailable as exc:
+            return self._semantic_failure(exc.code)
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return self._semantic_failure("ASYNC_QUEUE_UNAVAILABLE")
+        if not isinstance(result, Mapping):
+            return self._semantic_failure("ASYNC_QUEUE_UNAVAILABLE")
+        copied = copy.deepcopy(dict(result))
+        if (
+            copied.get("status") == "DEFERRED"
+            and copied.get("code") == "DEFERRED_ASYNC"
+        ):
+            return copied
+        if self._cacheable_semantic_result(copied):
+            self._semantic_results[self._semantic_key(scope, durable_turn)] = (
+                copy.deepcopy(copied)
+            )
+        return copied
 
     async def _run_semantic_owner_v3(
         self,

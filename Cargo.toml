@@ -32,6 +32,9 @@ blake3 = "1"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 pyo3 = { version = "0.29.0", features = ["abi3-py312", "extension-module"] }
 getrandom = "0.3.4"
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "alloc"] }
+base64 = "=0.22.1"
+zeroize = "=1.8.1"
 ae-fixed = { path = "crates/ae-fixed" }
 ae-contracts = { path = "crates/ae-contracts" }
 ae-genesis = { path = "crates/ae-genesis" }

@@ -31,6 +31,14 @@ pub use legacy_discovery::{
     discover_legacy, validate_legacy_candidate, verify_candidate, CandidateFences, Discovery,
     DiscoveryRejectCode, DiscoverySources, LegacyCandidate,
 };
+#[allow(unsafe_code)]
+pub mod semantic_outbox_crypto;
+pub use semantic_outbox_crypto::{
+    SemanticOutboxCryptoError, SemanticOutboxCryptoStatusV1, SemanticOutboxCryptoStatusValueV1,
+    SemanticOutboxKeyAuthorityV1, SEMANTIC_OUTBOX_ENVELOPE_OVERHEAD_BYTES_V1,
+    SEMANTIC_OUTBOX_KEY_VERSION_V1, SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1,
+    SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1, SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
+};
 mod semantic_field_attestation;
 
 use ae_authority::authority_projection_digest;

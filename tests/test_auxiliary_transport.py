@@ -105,7 +105,7 @@ def test_transient_semantic_failure_is_not_saved_in_result_cache() -> None:
     assert asyncio.run(run()) == 2
 
 
-def test_semantic_retry_reuses_one_bound_provider_and_stops_after_two_calls() -> None:
+def test_semantic_request_context_executes_one_attempt_without_internal_retry() -> None:
     class Context:
         def __init__(self) -> None:
             self.provider_ids: list[str] = []
@@ -117,11 +117,9 @@ def test_semantic_retry_reuses_one_bound_provider_and_stops_after_two_calls() ->
 
         async def llm_generate(self, **kwargs: object) -> str:
             self.calls.append(str(kwargs["chat_provider_id"]))
-            if len(self.calls) == 1:
-                raise RuntimeError("transient host error")
-            return "closed response"
+            raise RuntimeError("transient host error")
 
-    async def run() -> tuple[Context, object]:
+    async def run() -> tuple[Context, AuxiliaryTransportError]:
         context = Context()
         transport = AuxiliaryProviderTransport(
             context=context,
@@ -130,21 +128,21 @@ def test_semantic_retry_reuses_one_bound_provider_and_stops_after_two_calls() ->
         )
         request = transport.open_request(umo="private-umo")
         request.bind_semantic_key("semantic-key")
-        result = await request.generate(
-            prompt="private prompt",
-            system_prompt="closed system prompt",
-            semantic_operation=True,
-        )
-        return context, result
+        with pytest.raises(AuxiliaryTransportError) as exc_info:
+            await request.generate(
+                prompt="private prompt",
+                system_prompt="closed system prompt",
+                semantic_operation=True,
+            )
+        return context, exc_info.value
 
     context, result = asyncio.run(run())
 
-    assert result.text == "closed response"
-    assert result.meta.transport_subcode == "NONE"
+    assert result.meta.transport_subcode == "PROVIDER_CALL_FAILED"
     assert result.meta.attempted is True
-    assert result.meta.attempt_count == 2
+    assert result.meta.attempt_count == 1
     assert context.provider_ids == ["fixed-private-id"]
-    assert context.calls == ["fixed-private-id", "fixed-private-id"]
+    assert context.calls == ["fixed-private-id"]
 
 
 def test_sync_semantic_response_after_deadline_is_timeout_not_success(

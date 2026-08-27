@@ -17,8 +17,11 @@ use ae_store::{
     RebirthResponseEnvelopeV1, RebirthResponseStateV1, SeedConfigAckStateV1,
     SeedConfigLifecycleError, SeedConfigObservationV1, SeedConfigOriginV1,
     SeedConfigReconcileRequestV1, SeedConfigStateV1, SeedConfigWritebackAckV1,
-    UserAuthorizedRebirthV1,
+    SemanticOutboxCryptoError, SemanticOutboxCryptoStatusV1, SemanticOutboxCryptoStatusValueV1,
+    UserAuthorizedRebirthV1, SEMANTIC_OUTBOX_KEY_VERSION_V1, SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1,
+    SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1, SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -144,6 +147,86 @@ fn closed_schema(message: String) -> PyErr {
     NativeCoreError::new_err(format!("CLOSED_SCHEMA::{message}"))
 }
 
+const OUTBOX_CRYPTO_STATUS_SCHEMA: &str = "astrembodiment.semantic-outbox-crypto-status.v1";
+const OUTBOX_SEAL_REQUEST_SCHEMA: &str = "astrembodiment.semantic-outbox-seal-request.v1";
+const OUTBOX_SEALED_SCHEMA: &str = "astrembodiment.semantic-outbox-sealed.v1";
+const OUTBOX_OPEN_REQUEST_SCHEMA: &str = "astrembodiment.semantic-outbox-open-request.v1";
+const OUTBOX_OPENED_SCHEMA: &str = "astrembodiment.semantic-outbox-opened.v1";
+const OUTBOX_REQUEST_JSON_OVERHEAD_BYTES: usize = 512;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FfiSemanticOutboxSealRequestV1 {
+    schema: String,
+    key_version: u32,
+    aad_b64: String,
+    plaintext_b64: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FfiSemanticOutboxOpenRequestV1 {
+    schema: String,
+    aad_b64: String,
+    envelope_b64: String,
+}
+
+fn async_crypto_error(error: SemanticOutboxCryptoError) -> PyErr {
+    let code = match error {
+        SemanticOutboxCryptoError::Unavailable => "ASYNC_KEY_UNAVAILABLE",
+        SemanticOutboxCryptoError::PayloadAuthFailed => "ASYNC_PAYLOAD_AUTH_FAILED",
+        SemanticOutboxCryptoError::KeyVersionUnsupported => "ASYNC_KEY_VERSION_UNSUPPORTED",
+    };
+    let result = NativeCoreError::new_err(code);
+    Python::attach(|py| {
+        let _ = result.value(py).setattr("code", code);
+    });
+    result
+}
+
+const fn max_canonical_outbox_base64_chars(max_decoded_bytes: usize) -> usize {
+    max_decoded_bytes.saturating_add(2) / 3 * 4
+}
+
+const OUTBOX_SEAL_REQUEST_MAX_JSON_BYTES: usize =
+    max_canonical_outbox_base64_chars(SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1)
+        + max_canonical_outbox_base64_chars(SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1)
+        + OUTBOX_REQUEST_JSON_OVERHEAD_BYTES;
+const OUTBOX_OPEN_REQUEST_MAX_JSON_BYTES: usize =
+    max_canonical_outbox_base64_chars(SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1)
+        + max_canonical_outbox_base64_chars(SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1)
+        + OUTBOX_REQUEST_JSON_OVERHEAD_BYTES;
+
+fn canonical_outbox_base64(
+    value: &str,
+    max_decoded_bytes: usize,
+) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+    if value.len() > max_canonical_outbox_base64_chars(max_decoded_bytes) {
+        return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
+    }
+    let mut decoded = BASE64_STANDARD
+        .decode(value)
+        .map_err(|_| SemanticOutboxCryptoError::PayloadAuthFailed)?;
+    if decoded.len() > max_decoded_bytes || BASE64_STANDARD.encode(&decoded) != value {
+        decoded.fill(0);
+        return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
+    }
+    Ok(decoded)
+}
+
+fn semantic_outbox_status_payload(value: SemanticOutboxCryptoStatusV1) -> serde_json::Value {
+    let status = match value.status {
+        SemanticOutboxCryptoStatusValueV1::Ready => "READY",
+        SemanticOutboxCryptoStatusValueV1::Unavailable => "UNAVAILABLE",
+        SemanticOutboxCryptoStatusValueV1::KeyVersionUnsupported => "KEY_VERSION_UNSUPPORTED",
+    };
+    serde_json::json!({
+        "schema": OUTBOX_CRYPTO_STATUS_SCHEMA,
+        "status": status,
+        "key_version": value.key_version,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +256,68 @@ mod tests {
         for (subcode, expected) in cases {
             assert_eq!(invalid_neural_state_message(subcode), expected);
         }
+    }
+
+    #[test]
+    fn semantic_outbox_pyo3_shape_rejects_oversize_base64_before_and_after_decode() {
+        fn error_code(error: PyErr) -> String {
+            Python::attach(|py| error.value(py).getattr("code").unwrap().extract().unwrap())
+        }
+
+        let aad = BASE64_STANDARD.encode([0u8]);
+        let too_long_before_decode = "A"
+            .repeat(max_canonical_outbox_base64_chars(SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1) + 1);
+        let seal_before_decode = serde_json::json!({
+            "schema": OUTBOX_SEAL_REQUEST_SCHEMA,
+            "key_version": SEMANTIC_OUTBOX_KEY_VERSION_V1,
+            "aad_b64": aad,
+            "plaintext_b64": too_long_before_decode,
+        })
+        .to_string();
+        assert_eq!(
+            error_code(semantic_outbox_seal_v1(&seal_before_decode).unwrap_err()),
+            "ASYNC_PAYLOAD_AUTH_FAILED"
+        );
+
+        let too_large_plaintext =
+            BASE64_STANDARD.encode(vec![0u8; SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1 + 1]);
+        let seal_after_decode = serde_json::json!({
+            "schema": OUTBOX_SEAL_REQUEST_SCHEMA,
+            "key_version": SEMANTIC_OUTBOX_KEY_VERSION_V1,
+            "aad_b64": BASE64_STANDARD.encode([0u8]),
+            "plaintext_b64": too_large_plaintext,
+        })
+        .to_string();
+        assert_eq!(
+            error_code(semantic_outbox_seal_v1(&seal_after_decode).unwrap_err()),
+            "ASYNC_PAYLOAD_AUTH_FAILED"
+        );
+
+        let too_large_aad = BASE64_STANDARD.encode(vec![0u8; SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1 + 1]);
+        let seal_oversized_aad = serde_json::json!({
+            "schema": OUTBOX_SEAL_REQUEST_SCHEMA,
+            "key_version": SEMANTIC_OUTBOX_KEY_VERSION_V1,
+            "aad_b64": too_large_aad,
+            "plaintext_b64": BASE64_STANDARD.encode([0u8]),
+        })
+        .to_string();
+        assert_eq!(
+            error_code(semantic_outbox_seal_v1(&seal_oversized_aad).unwrap_err()),
+            "ASYNC_PAYLOAD_AUTH_FAILED"
+        );
+
+        let too_large_envelope =
+            BASE64_STANDARD.encode(vec![0u8; SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1 + 1]);
+        let open_after_decode = serde_json::json!({
+            "schema": OUTBOX_OPEN_REQUEST_SCHEMA,
+            "aad_b64": BASE64_STANDARD.encode([0u8]),
+            "envelope_b64": too_large_envelope,
+        })
+        .to_string();
+        assert_eq!(
+            error_code(semantic_outbox_open_v1(&open_after_decode).unwrap_err()),
+            "ASYNC_PAYLOAD_AUTH_FAILED"
+        );
     }
 }
 
@@ -1112,6 +1257,104 @@ fn apply_event(scope_json: &str, event_json: &str) -> PyResult<String> {
         .map_err(|error| NativeCoreError::new_err(format!("ENCODING::{error}")))
 }
 
+/// Return the closed availability surface for the native-only async key.
+#[pyfunction]
+fn semantic_outbox_crypto_status_v1() -> PyResult<String> {
+    let unavailable = SemanticOutboxCryptoStatusV1 {
+        status: SemanticOutboxCryptoStatusValueV1::Unavailable,
+        key_version: SEMANTIC_OUTBOX_KEY_VERSION_V1,
+    };
+    let status = match core() {
+        Ok(guard) => guard
+            .as_ref()
+            .map(ae_runtime::AstrRuntime::semantic_outbox_crypto_status_v1)
+            .unwrap_or(unavailable),
+        Err(_) => unavailable,
+    };
+    serde_json::to_string(&semantic_outbox_status_payload(status))
+        .map_err(|_| async_crypto_error(SemanticOutboxCryptoError::Unavailable))
+}
+
+/// Seal one closed async payload without exposing the installation key or its
+/// filesystem/DPAPI representation to Python.
+#[pyfunction]
+fn semantic_outbox_seal_v1(request_json: &str) -> PyResult<String> {
+    if request_json.len() > OUTBOX_SEAL_REQUEST_MAX_JSON_BYTES {
+        return Err(async_crypto_error(
+            SemanticOutboxCryptoError::PayloadAuthFailed,
+        ));
+    }
+    let request: FfiSemanticOutboxSealRequestV1 = serde_json::from_str(request_json)
+        .map_err(|_| async_crypto_error(SemanticOutboxCryptoError::PayloadAuthFailed))?;
+    if request.schema != OUTBOX_SEAL_REQUEST_SCHEMA {
+        return Err(async_crypto_error(
+            SemanticOutboxCryptoError::PayloadAuthFailed,
+        ));
+    }
+    if request.key_version != SEMANTIC_OUTBOX_KEY_VERSION_V1 {
+        return Err(async_crypto_error(
+            SemanticOutboxCryptoError::KeyVersionUnsupported,
+        ));
+    }
+    let aad = canonical_outbox_base64(&request.aad_b64, SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1)
+        .map_err(async_crypto_error)?;
+    let plaintext = canonical_outbox_base64(
+        &request.plaintext_b64,
+        SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
+    )
+    .map_err(async_crypto_error)?;
+    let mut guard =
+        core().map_err(|_| async_crypto_error(SemanticOutboxCryptoError::Unavailable))?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| async_crypto_error(SemanticOutboxCryptoError::Unavailable))?;
+    let envelope = runtime
+        .semantic_outbox_seal_v1(request.key_version, &aad, &plaintext)
+        .map_err(async_crypto_error)?;
+    serde_json::to_string(&serde_json::json!({
+        "schema": OUTBOX_SEALED_SCHEMA,
+        "key_version": SEMANTIC_OUTBOX_KEY_VERSION_V1,
+        "envelope_b64": BASE64_STANDARD.encode(envelope),
+    }))
+    .map_err(|_| async_crypto_error(SemanticOutboxCryptoError::Unavailable))
+}
+
+/// Authenticate and open one closed async envelope.  Malformed base64 and
+/// authenticated-decryption failures intentionally share one stable code.
+#[pyfunction]
+fn semantic_outbox_open_v1(request_json: &str) -> PyResult<String> {
+    if request_json.len() > OUTBOX_OPEN_REQUEST_MAX_JSON_BYTES {
+        return Err(async_crypto_error(
+            SemanticOutboxCryptoError::PayloadAuthFailed,
+        ));
+    }
+    let request: FfiSemanticOutboxOpenRequestV1 = serde_json::from_str(request_json)
+        .map_err(|_| async_crypto_error(SemanticOutboxCryptoError::PayloadAuthFailed))?;
+    if request.schema != OUTBOX_OPEN_REQUEST_SCHEMA {
+        return Err(async_crypto_error(
+            SemanticOutboxCryptoError::PayloadAuthFailed,
+        ));
+    }
+    let aad = canonical_outbox_base64(&request.aad_b64, SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1)
+        .map_err(async_crypto_error)?;
+    let envelope =
+        canonical_outbox_base64(&request.envelope_b64, SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1)
+            .map_err(async_crypto_error)?;
+    let mut guard =
+        core().map_err(|_| async_crypto_error(SemanticOutboxCryptoError::Unavailable))?;
+    let runtime = guard
+        .as_mut()
+        .ok_or_else(|| async_crypto_error(SemanticOutboxCryptoError::Unavailable))?;
+    let plaintext = runtime
+        .semantic_outbox_open_v1(SEMANTIC_OUTBOX_KEY_VERSION_V1, &aad, &envelope)
+        .map_err(async_crypto_error)?;
+    serde_json::to_string(&serde_json::json!({
+        "schema": OUTBOX_OPENED_SCHEMA,
+        "plaintext_b64": BASE64_STANDARD.encode(plaintext),
+    }))
+    .map_err(|_| async_crypto_error(SemanticOutboxCryptoError::Unavailable))
+}
+
 /// Read the closed per-persona semantic-lane cursor. This is intentionally
 /// separate from the legacy G0 continuity revision.
 #[pyfunction]
@@ -1235,6 +1478,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(reconcile_seed_config_v1, module)?)?;
     module.add_function(wrap_pyfunction!(ack_seed_config_writeback_v1, module)?)?;
     module.add_function(wrap_pyfunction!(apply_event, module)?)?;
+    module.add_function(wrap_pyfunction!(semantic_outbox_crypto_status_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(semantic_outbox_seal_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(semantic_outbox_open_v1, module)?)?;
     module.add_function(wrap_pyfunction!(semantic_revision_v1, module)?)?;
     module.add_function(wrap_pyfunction!(apply_perception_proposal_v1, module)?)?;
     module.add_function(wrap_pyfunction!(inspect, module)?)?;

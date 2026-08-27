@@ -7,6 +7,7 @@ or identity directly; every mutation goes through the Rust single writer.
 
 from __future__ import annotations
 
+import base64
 import json
 import platform
 import re
@@ -228,6 +229,25 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
 }
 
 _SEMANTIC_CURSOR_SCHEMA = "astrembodiment.semantic-revision.v1"
+_ASYNC_CRYPTO_STATUS_SCHEMA = "astrembodiment.semantic-outbox-crypto-status.v1"
+_ASYNC_SEAL_REQUEST_SCHEMA = "astrembodiment.semantic-outbox-seal-request.v1"
+_ASYNC_SEALED_SCHEMA = "astrembodiment.semantic-outbox-sealed.v1"
+_ASYNC_OPEN_REQUEST_SCHEMA = "astrembodiment.semantic-outbox-open-request.v1"
+_ASYNC_OPENED_SCHEMA = "astrembodiment.semantic-outbox-opened.v1"
+_ASYNC_CRYPTO_KEY_VERSION = 1
+_ASYNC_CRYPTO_MAX_AAD_BYTES = 4_096
+_ASYNC_CRYPTO_MAX_PLAINTEXT_BYTES = 262_144
+_ASYNC_CRYPTO_ENVELOPE_OVERHEAD_BYTES = 46
+_ASYNC_CRYPTO_MAX_ENVELOPE_BYTES = (
+    _ASYNC_CRYPTO_MAX_PLAINTEXT_BYTES + _ASYNC_CRYPTO_ENVELOPE_OVERHEAD_BYTES
+)
+_ASYNC_CRYPTO_CODES = frozenset(
+    {
+        "ASYNC_KEY_UNAVAILABLE",
+        "ASYNC_PAYLOAD_AUTH_FAILED",
+        "ASYNC_KEY_VERSION_UNSUPPORTED",
+    }
+)
 _SEMANTIC_RESULT_SCHEMA_V1 = "astrembodiment.semantic-perception-closure.v1"
 _SEMANTIC_RESULT_SCHEMA_V2 = "astrembodiment.semantic-perception-closure.v2"
 _SEMANTIC_RESULT_BASE_FIELDS = frozenset(
@@ -918,6 +938,100 @@ def _semantic_closed_json(value: dict[str, Any]) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _canonical_async_crypto_b64(value: object, *, max_decoded_bytes: int) -> str:
+    if type(value) is not str:
+        raise ValueError("async crypto base64")
+    if len(value) > ((max_decoded_bytes + 2) // 3) * 4:
+        raise ValueError("async crypto base64")
+    try:
+        decoded = base64.b64decode(value.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise ValueError("async crypto base64") from exc
+    if (
+        len(decoded) > max_decoded_bytes
+        or base64.b64encode(decoded).decode("ascii") != value
+    ):
+        raise ValueError("async crypto base64")
+    return value
+
+
+def _validate_async_crypto_status(value: Any) -> dict[str, Any]:
+    payload = _semantic_json(value)
+    if set(payload) != {"schema", "status", "key_version"}:
+        raise ValueError("async crypto status")
+    if (
+        payload["schema"] != _ASYNC_CRYPTO_STATUS_SCHEMA
+        or payload["status"] not in {"READY", "UNAVAILABLE", "KEY_VERSION_UNSUPPORTED"}
+        or type(payload["key_version"]) is not int
+        or payload["key_version"] != _ASYNC_CRYPTO_KEY_VERSION
+    ):
+        raise ValueError("async crypto status")
+    return {
+        "schema": _ASYNC_CRYPTO_STATUS_SCHEMA,
+        "status": payload["status"],
+        "key_version": _ASYNC_CRYPTO_KEY_VERSION,
+    }
+
+
+def _validate_async_sealed(value: Any) -> dict[str, Any]:
+    payload = _semantic_json(value)
+    if set(payload) != {"schema", "key_version", "envelope_b64"}:
+        raise ValueError("async crypto sealed")
+    if (
+        payload["schema"] != _ASYNC_SEALED_SCHEMA
+        or type(payload["key_version"]) is not int
+        or payload["key_version"] != _ASYNC_CRYPTO_KEY_VERSION
+    ):
+        raise ValueError("async crypto sealed")
+    return {
+        "schema": _ASYNC_SEALED_SCHEMA,
+        "key_version": _ASYNC_CRYPTO_KEY_VERSION,
+        "envelope_b64": _canonical_async_crypto_b64(
+            payload["envelope_b64"],
+            max_decoded_bytes=_ASYNC_CRYPTO_MAX_ENVELOPE_BYTES,
+        ),
+    }
+
+
+def _validate_async_opened(value: Any) -> dict[str, Any]:
+    payload = _semantic_json(value)
+    if set(payload) != {"schema", "plaintext_b64"}:
+        raise ValueError("async crypto opened")
+    if payload["schema"] != _ASYNC_OPENED_SCHEMA:
+        raise ValueError("async crypto opened")
+    return {
+        "schema": _ASYNC_OPENED_SCHEMA,
+        "plaintext_b64": _canonical_async_crypto_b64(
+            payload["plaintext_b64"],
+            max_decoded_bytes=_ASYNC_CRYPTO_MAX_PLAINTEXT_BYTES,
+        ),
+    }
+
+
+def _async_crypto_code(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    if not isinstance(code, str):
+        code = str(error).partition("::")[0]
+    if code in _ASYNC_CRYPTO_CODES:
+        return code
+    if isinstance(error, (TypeError, ValueError, json.JSONDecodeError)):
+        return "ASYNC_PAYLOAD_AUTH_FAILED"
+    return "ASYNC_KEY_UNAVAILABLE"
+
+
+def _raise_async_crypto(error: BaseException) -> None:
+    code = _async_crypto_code(error)
+    raise NativeCoreError(code, code) from None
+
+
+def _async_crypto_unavailable_status() -> dict[str, Any]:
+    return {
+        "schema": _ASYNC_CRYPTO_STATUS_SCHEMA,
+        "status": "UNAVAILABLE",
+        "key_version": _ASYNC_CRYPTO_KEY_VERSION,
+    }
 
 
 def _semantic_scope_payload(
@@ -1754,6 +1868,80 @@ class NativeBridge:
         except Exception as exc:
             raise _classify(exc) from exc
         return _parse_payload(result)
+
+    def semantic_outbox_crypto_status_v1(self) -> dict[str, Any]:
+        """Return only the closed installation-key readiness surface.
+
+        A missing native symbol, a closed core, or malformed native response is
+        indistinguishable here from an unavailable authority.  This prevents
+        queue callers from receiving a path, DPAPI detail, or key metadata.
+        """
+
+        try:
+            native = self._require()
+            method = getattr(native, "semantic_outbox_crypto_status_v1", None)
+            if not callable(method):
+                return _async_crypto_unavailable_status()
+            return _validate_async_crypto_status(method())
+        except BaseException:
+            return _async_crypto_unavailable_status()
+
+    def semantic_outbox_seal_v1(
+        self,
+        aad_b64: str,
+        plaintext_b64: str,
+        *,
+        key_version: int = _ASYNC_CRYPTO_KEY_VERSION,
+    ) -> dict[str, Any]:
+        """Seal one async payload without logging or retaining its contents."""
+
+        try:
+            if type(key_version) is not int:
+                raise NativeCoreError(
+                    "ASYNC_KEY_VERSION_UNSUPPORTED", "ASYNC_KEY_VERSION_UNSUPPORTED"
+                )
+            request = {
+                "schema": _ASYNC_SEAL_REQUEST_SCHEMA,
+                "key_version": key_version,
+                "aad_b64": _canonical_async_crypto_b64(
+                    aad_b64, max_decoded_bytes=_ASYNC_CRYPTO_MAX_AAD_BYTES
+                ),
+                "plaintext_b64": _canonical_async_crypto_b64(
+                    plaintext_b64,
+                    max_decoded_bytes=_ASYNC_CRYPTO_MAX_PLAINTEXT_BYTES,
+                ),
+            }
+            native = self._require()
+            method = getattr(native, "semantic_outbox_seal_v1", None)
+            if not callable(method):
+                raise NativeCoreError("ASYNC_KEY_UNAVAILABLE", "ASYNC_KEY_UNAVAILABLE")
+            return _validate_async_sealed(method(_semantic_closed_json(request)))
+        except BaseException as exc:
+            _raise_async_crypto(exc)
+
+    def semantic_outbox_open_v1(
+        self, aad_b64: str, envelope_b64: str
+    ) -> dict[str, Any]:
+        """Authenticate and open one async payload without logging its bytes."""
+
+        try:
+            request = {
+                "schema": _ASYNC_OPEN_REQUEST_SCHEMA,
+                "aad_b64": _canonical_async_crypto_b64(
+                    aad_b64, max_decoded_bytes=_ASYNC_CRYPTO_MAX_AAD_BYTES
+                ),
+                "envelope_b64": _canonical_async_crypto_b64(
+                    envelope_b64,
+                    max_decoded_bytes=_ASYNC_CRYPTO_MAX_ENVELOPE_BYTES,
+                ),
+            }
+            native = self._require()
+            method = getattr(native, "semantic_outbox_open_v1", None)
+            if not callable(method):
+                raise NativeCoreError("ASYNC_KEY_UNAVAILABLE", "ASYNC_KEY_UNAVAILABLE")
+            return _validate_async_opened(method(_semantic_closed_json(request)))
+        except BaseException as exc:
+            _raise_async_crypto(exc)
 
     def semantic_revision_v1(
         self, scope_json: ScopeTokens | str | dict[str, Any]

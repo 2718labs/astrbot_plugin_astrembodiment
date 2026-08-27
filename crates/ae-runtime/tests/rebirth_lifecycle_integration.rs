@@ -7,7 +7,8 @@ use ae_fixed::Fixed;
 use ae_runtime::AstrRuntime;
 use ae_store::{
     RebirthActionV1, RebirthOutcomeV1, RebirthPrepareRequestV1, RebirthResponseStateV1,
-    UserAuthorizedRebirthV1,
+    SemanticOutboxCryptoError, UserAuthorizedRebirthV1, SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1,
+    SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1, SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
 };
 use std::path::{Path, PathBuf};
 
@@ -148,4 +149,65 @@ fn rebirth_stages_one_child_then_replays_the_same_receipt_after_reopen() {
 fn clear_active_state_uses_the_same_durable_runtime_commit_lane() {
     let path = task_temp_dir("clear").join("runtime.sqlite3");
     assert_commits_once_and_replays_after_restart(&path, RebirthActionV1::ClearActiveState, 21);
+}
+
+#[test]
+fn rebirth_preserves_the_installation_outbox_key_and_old_envelope() {
+    let path = task_temp_dir("outbox-key").join("runtime.sqlite3");
+    let request = request(31);
+    let scope = scope_for(&request);
+    let mut runtime = AstrRuntime::open(&path).unwrap();
+    let before_record = path
+        .parent()
+        .unwrap()
+        .join(".native-authority")
+        .join("semantic-outbox-key.v1");
+    let record_before = std::fs::read(&before_record).unwrap();
+    let envelope = runtime
+        .semantic_outbox_seal_v1(1, b"rebirth-bound-aad", b"persisted payload")
+        .unwrap();
+
+    let genesis = runtime.ensure_genesis(&request).unwrap();
+    let prepare = prepare_request(&scope, genesis.incarnation_id, RebirthActionV1::Rebirth);
+    let challenge = runtime.prepare_rebirth_v1(&scope, &prepare).unwrap();
+    let confirmation = UserAuthorizedRebirthV1 {
+        scope_token: prepare.scope_token,
+        expected_incarnation_id: prepare.expected_incarnation_id,
+        expected_revision: prepare.expected_revision,
+        request_nonce: challenge.request_nonce,
+        action: prepare.action,
+        confirmed: true,
+    };
+    let committed = runtime.confirm_rebirth_v1(&scope, &confirmation).unwrap();
+    assert_eq!(committed.state, RebirthResponseStateV1::Committed);
+    assert_eq!(std::fs::read(&before_record).unwrap(), record_before);
+    assert_eq!(
+        runtime
+            .semantic_outbox_open_v1(1, b"rebirth-bound-aad", &envelope)
+            .unwrap(),
+        b"persisted payload"
+    );
+}
+
+#[test]
+fn runtime_outbox_public_size_limits_fail_closed() {
+    let path = task_temp_dir("outbox-size-limits").join("runtime.sqlite3");
+    let runtime = AstrRuntime::open(&path).unwrap();
+    let oversized_aad = vec![0u8; SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1 + 1];
+    assert!(matches!(
+        runtime.semantic_outbox_seal_v1(1, &oversized_aad, b"payload"),
+        Err(SemanticOutboxCryptoError::PayloadAuthFailed)
+    ));
+
+    let oversized_plaintext = vec![0u8; SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1 + 1];
+    assert!(matches!(
+        runtime.semantic_outbox_seal_v1(1, b"aad", &oversized_plaintext),
+        Err(SemanticOutboxCryptoError::PayloadAuthFailed)
+    ));
+
+    let oversized_envelope = vec![0u8; SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1 + 1];
+    assert!(matches!(
+        runtime.semantic_outbox_open_v1(1, b"aad", &oversized_envelope),
+        Err(SemanticOutboxCryptoError::PayloadAuthFailed)
+    ));
 }

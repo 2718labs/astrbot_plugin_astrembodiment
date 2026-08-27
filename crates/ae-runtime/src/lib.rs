@@ -42,9 +42,13 @@ use ae_store::{
     RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1, RebirthPrepareResponseV1,
     RebirthResponseEnvelopeV1, SeedClearCommitPermitV1, SeedConfigAckResultV1,
     SeedConfigLifecycleError, SeedConfigPreflightV1, SeedConfigReconcileRequestV1,
-    SeedConfigReconcileResultV1, SeedConfigStateV1, SeedConfigWritebackAckV1, SnapshotCommitV1,
-    Store, StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode,
-    JOINT_MAX_LINEAR_FXP6_V1, LEGACY_FIELD_FXP6_SCALE, SEMANTIC_LANE_NAMESPACE_DOMAIN_V1,
+    SeedConfigReconcileResultV1, SeedConfigStateV1, SeedConfigWritebackAckV1,
+    SemanticOutboxCryptoError, SemanticOutboxCryptoStatusV1, SemanticOutboxCryptoStatusValueV1,
+    SemanticOutboxKeyAuthorityV1, SnapshotCommitV1, Store, StoreError, UserAuthorizedRebirthV1,
+    VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1, LEGACY_FIELD_FXP6_SCALE,
+    SEMANTIC_LANE_NAMESPACE_DOMAIN_V1, SEMANTIC_OUTBOX_KEY_VERSION_V1,
+    SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1, SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1,
+    SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -308,6 +312,67 @@ pub struct AstrRuntime {
     hot: Option<HotBrain>,
     legacy_authority_database: PathBuf,
     vault_root: PathBuf,
+    semantic_outbox_crypto: SemanticOutboxCryptoLaneV1,
+}
+
+/// The runtime owns the opaque key handle and keeps authority-open failures
+/// isolated to the async lane.  Existing G0/runtime state stays available.
+enum SemanticOutboxCryptoLaneV1 {
+    Ready(SemanticOutboxKeyAuthorityV1),
+    Unavailable,
+    KeyVersionUnsupported,
+}
+
+impl SemanticOutboxCryptoLaneV1 {
+    fn open(storage_parent: &Path) -> Self {
+        match SemanticOutboxKeyAuthorityV1::open(storage_parent) {
+            Ok(authority) => Self::Ready(authority),
+            Err(SemanticOutboxCryptoError::KeyVersionUnsupported) => Self::KeyVersionUnsupported,
+            Err(
+                SemanticOutboxCryptoError::Unavailable
+                | SemanticOutboxCryptoError::PayloadAuthFailed,
+            ) => Self::Unavailable,
+        }
+    }
+
+    const fn status_v1(&self) -> SemanticOutboxCryptoStatusV1 {
+        SemanticOutboxCryptoStatusV1 {
+            status: match self {
+                Self::Ready(authority) => authority.ready_status_v1().status,
+                Self::Unavailable => SemanticOutboxCryptoStatusValueV1::Unavailable,
+                Self::KeyVersionUnsupported => {
+                    SemanticOutboxCryptoStatusValueV1::KeyVersionUnsupported
+                }
+            },
+            key_version: SEMANTIC_OUTBOX_KEY_VERSION_V1,
+        }
+    }
+
+    fn seal_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        match self {
+            Self::Ready(authority) => authority.seal_v1(key_version, caller_aad, plaintext),
+            Self::Unavailable => Err(SemanticOutboxCryptoError::Unavailable),
+            Self::KeyVersionUnsupported => Err(SemanticOutboxCryptoError::KeyVersionUnsupported),
+        }
+    }
+
+    fn open_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        envelope: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        match self {
+            Self::Ready(authority) => authority.open_v1(key_version, caller_aad, envelope),
+            Self::Unavailable => Err(SemanticOutboxCryptoError::Unavailable),
+            Self::KeyVersionUnsupported => Err(SemanticOutboxCryptoError::KeyVersionUnsupported),
+        }
+    }
 }
 
 fn continuity_scope(scope: &ScopeRef) -> Digest {
@@ -509,12 +574,62 @@ impl AstrRuntime {
                 return Err(RebirthLifecycleError::BootstrapConflict.into())
             }
         };
+        let semantic_outbox_crypto = SemanticOutboxCryptoLaneV1::open(storage_parent);
         Ok(Self {
             store,
             hot: None,
             legacy_authority_database,
             vault_root,
+            semantic_outbox_crypto,
         })
+    }
+
+    /// Report only the fixed async-crypto readiness surface; no key material,
+    /// protection location, or metadata leaves the native runtime.
+    pub fn semantic_outbox_crypto_status_v1(&self) -> SemanticOutboxCryptoStatusV1 {
+        self.semantic_outbox_crypto.status_v1()
+    }
+
+    /// Seal one async payload through the installation-scoped native handle.
+    pub fn semantic_outbox_seal_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        if caller_aad.len() > SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1
+            || plaintext.len() > SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1
+        {
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
+        }
+        let envelope = self
+            .semantic_outbox_crypto
+            .seal_v1(key_version, caller_aad, plaintext)?;
+        if envelope.len() > SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1 {
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
+        }
+        Ok(envelope)
+    }
+
+    /// Authenticate and open one async payload through the same opaque handle.
+    pub fn semantic_outbox_open_v1(
+        &self,
+        key_version: u32,
+        caller_aad: &[u8],
+        envelope: &[u8],
+    ) -> Result<Vec<u8>, SemanticOutboxCryptoError> {
+        if caller_aad.len() > SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1
+            || envelope.len() > SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1
+        {
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
+        }
+        let plaintext = self
+            .semantic_outbox_crypto
+            .open_v1(key_version, caller_aad, envelope)?;
+        if plaintext.len() > SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1 {
+            return Err(SemanticOutboxCryptoError::PayloadAuthFailed);
+        }
+        Ok(plaintext)
     }
 
     fn lifecycle(&self) -> Result<VaultLifecycle, RuntimeError> {
