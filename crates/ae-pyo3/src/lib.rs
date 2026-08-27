@@ -259,6 +259,32 @@ mod tests {
     }
 
     #[test]
+    fn canonical_outbox_base64_rejects_oversize_before_and_after_decode() {
+        let too_long_before_decode = "A"
+            .repeat(max_canonical_outbox_base64_chars(SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1) + 1);
+        let too_large_plaintext =
+            BASE64_STANDARD.encode(vec![0u8; SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1 + 1]);
+        let too_large_aad = BASE64_STANDARD.encode(vec![0u8; SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1 + 1]);
+        let too_large_envelope =
+            BASE64_STANDARD.encode(vec![0u8; SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1 + 1]);
+        for (value, max_decoded_bytes) in [
+            (
+                too_long_before_decode,
+                SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
+            ),
+            (too_large_plaintext, SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1),
+            (too_large_aad, SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1),
+            (too_large_envelope, SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1),
+        ] {
+            assert!(matches!(
+                canonical_outbox_base64(&value, max_decoded_bytes),
+                Err(SemanticOutboxCryptoError::PayloadAuthFailed)
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn semantic_outbox_pyo3_shape_rejects_oversize_base64_before_and_after_decode() {
         Python::initialize();
 
