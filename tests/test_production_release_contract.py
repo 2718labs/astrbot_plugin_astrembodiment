@@ -344,7 +344,7 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "one annotated ref and one peeled ref" in selector
 
     assert (
-        publish_job.count('git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"') == 1
+        publish_job.count('git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"') == 2
     )
     assert 'if [[ ! -s "$tag_listing" ]]; then' in publish_job
     assert "remote release tag lookup failed" in publish_job
@@ -375,6 +375,21 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "--notes-from-tag" in release_create
     assert '--repo "$GITHUB_REPOSITORY"' not in release_create
 
+    release_state = publish_job.split(
+        "      - name: Create an annotated tag or resume the matching release state\n",
+        1,
+    )[1].split(
+        "      - name: Verify or upload draft assets without replacing existing "
+        "assets\n",
+        1,
+    )[0]
+    assert "observed_tag_object_sha" in release_state
+    assert "release-state did not observe a final annotated tag object" in release_state
+    assert (
+        "printf 'observed_tag_object_sha=%s\\n' \"$current_tag_object_sha\""
+        in release_state
+    )
+
     draft_assets = publish_job.split(
         "      - name: Verify or upload draft assets without replacing existing "
         "assets\n",
@@ -387,6 +402,41 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert draft_assets.count("len(asset_records) != 2") >= 1
     assert draft_assets.index("gh release upload") < draft_assets.index(
         "gh release download"
+    )
+
+    prepublish = publish_job.split("      - name: Publish the verified draft\n", 1)[
+        1
+    ].split(
+        "\n      - name: Verify published assets and report GitHub immutability\n", 1
+    )[0]
+    for required in (
+        "EXPECTED_TAG_OBJECT_SHA: ${{ steps.release-state.outputs."
+        "observed_tag_object_sha }}",
+        'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"',
+        'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"',
+        '"$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1',
+        '"$tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA"',
+        '"$tag_target_sha" != "$TARGET_SHA"',
+        'git fetch --no-tags origin "$tag_ref"',
+        '"$fetch_tag_object_sha" != "$tag_object_sha"',
+        '"$fetch_peeled_sha" != "$TARGET_SHA"',
+        "prepublish-release-state.json",
+        "draft release identity changed before publish",
+        "release stopped being a draft before publish",
+    ):
+        assert required in prepublish
+    prepublish_edit = (
+        'gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false'
+    )
+    assert prepublish_edit in prepublish
+    assert prepublish.index(
+        'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"'
+    ) < prepublish.index(prepublish_edit)
+    assert prepublish.index(
+        'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"'
+    ) < prepublish.index(prepublish_edit)
+    assert prepublish.index("prepublish-release-state.json") < prepublish.index(
+        prepublish_edit
     )
 
     published_assets = publish_job.split(

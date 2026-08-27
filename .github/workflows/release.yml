@@ -804,7 +804,12 @@ jobs:
             cat "$release_error" >&2
             exit 1
           fi
+          if [[ ! "$current_tag_object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release-state did not observe a final annotated tag object" >&2
+            exit 1
+          fi
           printf 'state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+          printf 'observed_tag_object_sha=%s\n' "$current_tag_object_sha" >> "$GITHUB_OUTPUT"
       - name: Verify or upload draft assets without replacing existing assets
         if: steps.release-state.outputs.state == 'DRAFT'
         env:
@@ -932,7 +937,86 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
-        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ steps.release-state.outputs.observed_tag_object_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_TAG_OBJECT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release-state did not provide a final annotated tag object" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          test "$(git rev-parse origin/master)" = "$CONTROL_SHA"
+
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          tag_listing="$RUNNER_TEMP/prepublish-release-tag.txt"
+          tag_object_sha=""
+          tag_target_sha=""
+          tag_ref_count=0
+          peeled_ref_count=0
+          if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
+            echo "prepublish release tag lookup failed" >&2
+            exit 1
+          fi
+          while IFS=$'\t' read -r object_sha remote_ref; do
+            if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "prepublish release tag lookup returned an invalid object id" >&2
+              exit 1
+            fi
+            case "$remote_ref" in
+              "$tag_ref")
+                ((tag_ref_count += 1))
+                tag_object_sha="$object_sha"
+                ;;
+              "${tag_ref}^{}")
+                ((peeled_ref_count += 1))
+                tag_target_sha="$object_sha"
+                ;;
+              *)
+                echo "prepublish release tag lookup returned an unexpected ref" >&2
+                exit 1
+                ;;
+            esac
+          done < "$tag_listing"
+          if [[ "$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1 ||
+                "$tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA" ||
+                "$tag_target_sha" != "$TARGET_SHA" ]]; then
+            echo "release tag drifted before draft publication" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "$tag_ref"
+          fetch_tag_object_sha="$(git rev-parse FETCH_HEAD)"
+          fetch_peeled_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
+                "$fetch_tag_object_sha" != "$tag_object_sha" ||
+                "$fetch_peeled_sha" != "$TARGET_SHA" ]]; then
+            echo "fetched release tag drifted before draft publication" >&2
+            exit 1
+          fi
+          git cat-file -e "$fetch_peeled_sha^{commit}"
+
+          release_state="$RUNNER_TEMP/prepublish-release-state.json"
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable \
+            > "$release_state"
+          python - "$release_state" "$RELEASE_TAG" "$TARGET_SHA" <<'PY'
+          import json
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, target = sys.argv[2:]
+          if release.get("tagName") != tag or release.get("targetCommitish") != target:
+              raise SystemExit("draft release identity changed before publish")
+          if release.get("isDraft") is not True:
+              raise SystemExit("release stopped being a draft before publish")
+          if release.get("isPrerelease") is not False:
+              raise SystemExit("draft release has an unexpected prerelease state")
+          if release.get("isImmutable") is True:
+              raise SystemExit("draft release is unexpectedly immutable")
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
       - name: Verify published assets and report GitHub immutability
         env:
           GH_TOKEN: ${{ github.token }}
