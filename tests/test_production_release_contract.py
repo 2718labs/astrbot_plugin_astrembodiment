@@ -212,7 +212,10 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         "--field tag",
         "refs/heads/master",
         "git fetch origin master",
-        "git tag -a",
+        "actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&per_page=100",
+        "workflow_dispatch requires a successful CI push run for current master",
+        "git/tags",
+        "git/refs",
         "gh release create",
         "--draft",
         "--verify-tag",
@@ -239,22 +242,56 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert release.count("contents: write") == 1
     publish_job = release.split("  publish-release:\n", 1)[1]
     assert "permissions:\n      contents: write" in publish_job
+    assert "persist-credentials: true" not in publish_job
+    assert "persist-credentials: false" in publish_job
+    assert "git/tags" in publish_job
+    assert "git/refs" in publish_job
     assert "--force" not in release
     assert "--clobber" not in release
     assert "publication is intentionally outside this workflow" in release
     assert release.count("python scripts/verify_release_contract.py") >= 3
     assert "needs.select-target.outputs.release_action != 'NOOP'" in release
 
+    selector = release.split(
+        "      - name: Verify trigger provenance, current master, and release state\n",
+        1,
+    )[1].split("\n  build-native:", 1)[0]
+    for required in (
+        'run.get("head_sha") != candidate_sha',
+        'run.get("status") != "completed"',
+        'run.get("conclusion") != "success"',
+        'run.get("event") != "push"',
+        'run.get("head_branch") != "master"',
+        'head_repository.get("full_name") != repository',
+        "published release target does not match its annotated tag",
+        "published release asset set is invalid",
+        "astr-embodiment-published-assets",
+        "gh release download",
+        "sha256sum --check",
+    ):
+        assert required in selector
+    assert selector.count("len(asset_records) != 2") >= 1
+    assert "release_target_sha" in selector
+
     draft_assets = publish_job.split(
-        "      - name: Verify or upload draft assets without replacing existing assets\n",
+        "      - name: Verify or upload draft assets without replacing existing "
+        "assets\n",
         1,
     )[1].split("\n      - name: Publish the verified draft\n", 1)[0]
     assert "gh release upload" in draft_assets
     assert "gh release download" in draft_assets
     assert "cmp --silent" in draft_assets
+    assert "draft release asset set is invalid" in draft_assets
+    assert draft_assets.count("len(asset_records) != 2") >= 1
     assert draft_assets.index("gh release upload") < draft_assets.index(
         "gh release download"
     )
+
+    published_assets = publish_job.split(
+        "      - name: Verify published assets and report GitHub immutability\n", 1
+    )[1]
+    assert "published release asset set is invalid" in published_assets
+    assert published_assets.count("len(asset_records) != 2") >= 1
 
 
 def test_packager_writes_an_allowlisted_zip_sha256_sidecar(tmp_path: Path) -> None:

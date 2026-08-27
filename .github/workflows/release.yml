@@ -98,6 +98,39 @@ jobs:
             exit 1
           fi
 
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            ci_runs="$RUNNER_TEMP/current-master-ci-runs.json"
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&per_page=100" \
+              > "$ci_runs"
+            python - "$ci_runs" "$candidate_sha" "$GITHUB_REPOSITORY" <<'PY'
+          import json
+          import sys
+
+          runs = json.load(open(sys.argv[1], encoding="utf-8")).get("workflow_runs")
+          candidate_sha, repository = sys.argv[2:]
+          if not isinstance(runs, list):
+              raise SystemExit("workflow_dispatch CI query returned an invalid workflow run list")
+          for run in runs:
+              if not isinstance(run, dict):
+                  continue
+              head_repository = run.get("head_repository")
+              if not isinstance(head_repository, dict):
+                  continue
+              if (
+                  run.get("head_sha") != candidate_sha
+                  or run.get("status") != "completed"
+                  or run.get("conclusion") != "success"
+                  or run.get("event") != "push"
+                  or run.get("head_branch") != "master"
+                  or head_repository.get("full_name") != repository
+              ):
+                  continue
+              raise SystemExit(0)
+          raise SystemExit("workflow_dispatch requires a successful CI push run for current master")
+          PY
+          fi
+
           git cat-file -e "$candidate_sha^{commit}"
           git checkout --detach "$candidate_sha"
 
@@ -110,55 +143,115 @@ jobs:
           archive_name="astrbot_plugin_astrembodiment-v${release_version}-win_linux_x86_64.zip"
           checksum_name="${archive_name}.sha256"
           tag_ref="refs/tags/${release_tag}"
-          tag_exists=false
-          if git ls-remote --exit-code --tags origin "$tag_ref" > "$RUNNER_TEMP/release-tag.txt"; then
-            git fetch --no-tags origin "$tag_ref"
-            test "$(git cat-file -t FETCH_HEAD)" = tag
-            test "$(git rev-parse FETCH_HEAD^{commit})" = "$candidate_sha"
-            tag_exists=true
-          fi
+
+          inspect_annotated_tag() {
+            local expected_commit="$1"
+            local require_tag="$2"
+            tag_exists=false
+            if git ls-remote --exit-code --tags origin "$tag_ref" > "$RUNNER_TEMP/release-tag.txt"; then
+              git fetch --no-tags origin "$tag_ref"
+              if [[ "$(git cat-file -t FETCH_HEAD)" != tag ]]; then
+                echo "release tag must be annotated: ${release_tag}" >&2
+                exit 1
+              fi
+              if [[ "$(git rev-parse FETCH_HEAD^{commit})" != "$expected_commit" ]]; then
+                echo "published release target does not match its annotated tag" >&2
+                exit 1
+              fi
+              tag_exists=true
+            elif [[ "$require_tag" == true ]]; then
+              echo "required release tag is missing: ${release_tag}" >&2
+              exit 1
+            fi
+          }
+
+          validate_published_release_assets() {
+            local state_path="$1"
+            python - "$state_path" "$archive_name" "$checksum_name" <<'PY'
+          import json
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          archive_name, checksum_name = sys.argv[2:]
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("published release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {archive_name, checksum_name}
+          if (
+              len(asset_records) != 2
+              or len(asset_names) != len(set(asset_names))
+              or set(asset_names) != expected_assets
+          ):
+              raise SystemExit("published release asset set is invalid")
+          PY
+            local download_dir
+            download_dir="$(mktemp -d "$RUNNER_TEMP/astr-embodiment-published-assets.XXXXXX")"
+            gh release download "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$download_dir" \
+              --pattern "$archive_name"
+            gh release download "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$download_dir" \
+              --pattern "$checksum_name"
+            test -s "$download_dir/${archive_name}"
+            test -s "$download_dir/${checksum_name}"
+            (
+              cd "$download_dir"
+              sha256sum --check "$checksum_name"
+            )
+          }
 
           release_json="$RUNNER_TEMP/release-state.json"
           release_error="$RUNNER_TEMP/release-state.err"
           release_action=PUBLISH
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" \
               > "$release_json" 2> "$release_error"; then
-            if [[ "$tag_exists" != true ]]; then
-              echo "release exists without its remote tag" >&2
-              exit 1
-            fi
-            state="$(python - "$release_json" "$release_tag" "$candidate_sha" "$archive_name" "$checksum_name" <<'PY'
+            state_info="$(python - "$release_json" "$release_tag" "$candidate_sha" <<'PY'
           import json
+          import re
           import sys
 
           release = json.load(open(sys.argv[1], encoding="utf-8"))
-          tag, target, archive_name, checksum_name = sys.argv[2:]
+          tag, candidate_sha = sys.argv[2:]
           if release.get("tag_name") != tag:
               raise SystemExit("existing release tag does not match metadata-derived tag")
-          if release.get("target_commitish") != target:
-              raise SystemExit("existing release target does not match current master")
           if release.get("prerelease") is not False:
               raise SystemExit("production release must not be a prerelease")
+          release_target_sha = release.get("target_commitish")
+          if not isinstance(release_target_sha, str) or re.fullmatch(r"[0-9a-f]{40}", release_target_sha) is None:
+              raise SystemExit("existing release must record a full original release commit")
           if release.get("draft") is True:
+              if release_target_sha != candidate_sha:
+                  raise SystemExit("existing draft release target does not match current master")
               if release.get("immutable") is True:
                   raise SystemExit("existing draft release is unexpectedly immutable")
-              print("RESUME")
+              print(f"RESUME {release_target_sha}")
+          elif release.get("draft") is False:
+              state = "NOOP_WARN" if release.get("immutable") is not True else "NOOP"
+              print(f"{state} {release_target_sha}")
           else:
-              asset_names = {asset.get("name") for asset in release.get("assets", [])}
-              missing = {archive_name, checksum_name} - asset_names
-              if missing:
-                  raise SystemExit(f"published release is missing required assets: {sorted(missing)}")
-              print("NOOP_WARN" if release.get("immutable") is not True else "NOOP")
+              raise SystemExit("existing release has an invalid draft state")
           PY
             )"
+            read -r state release_target_sha <<< "$state_info"
             case "$state" in
               RESUME)
+                inspect_annotated_tag "$candidate_sha" true
                 release_action=RESUME
                 ;;
               NOOP)
+                inspect_annotated_tag "$release_target_sha" true
+                validate_published_release_assets "$release_json"
                 release_action=NOOP
                 ;;
               NOOP_WARN)
+                inspect_annotated_tag "$release_target_sha" true
+                validate_published_release_assets "$release_json"
                 echo "::warning title=GitHub Release immutability unavailable::${release_tag} is already published, but GitHub reports immutable=false. No release asset was changed."
                 release_action=NOOP
                 ;;
@@ -168,6 +261,7 @@ jobs:
                 ;;
             esac
           elif grep -Eq 'HTTP 404|Not Found' "$release_error"; then
+            inspect_annotated_tag "$candidate_sha" false
             if [[ "$tag_exists" == true ]]; then
               release_action=RESUME
             fi
@@ -341,7 +435,7 @@ jobs:
         with:
           ref: ${{ needs.select-target.outputs.target_sha }}
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: astrbot-plugin-${{ needs.select-target.outputs.release_tag }}-release-assets
@@ -384,10 +478,25 @@ jobs:
             test "$(git cat-file -t FETCH_HEAD)" = tag
             test "$(git rev-parse FETCH_HEAD^{commit})" = "$TARGET_SHA"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$RELEASE_TAG" "$TARGET_SHA" -m "Release ${RELEASE_VERSION}"
-            git push origin "$tag_ref"
+            tag_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            tag_object_sha="$(
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+                -f "tag=${RELEASE_TAG}" \
+                -f "message=Release ${RELEASE_VERSION}" \
+                -f "object=${TARGET_SHA}" \
+                -f "type=commit" \
+                -f 'tagger[name]=github-actions[bot]' \
+                -f 'tagger[email]=41898282+github-actions[bot]@users.noreply.github.com' \
+                -f "tagger[date]=${tag_date}" \
+                --jq '.sha'
+            )"
+            [[ "$tag_object_sha" =~ ^[0-9a-f]{40}$ ]]
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=${tag_ref}" \
+              -f "sha=${tag_object_sha}" > /dev/null
+            git fetch --no-tags origin "$tag_ref"
+            test "$(git cat-file -t FETCH_HEAD)" = tag
+            test "$(git rev-parse FETCH_HEAD^{commit})" = "$TARGET_SHA"
           fi
 
           release_json="$RUNNER_TEMP/release-state.json"
@@ -457,8 +566,24 @@ jobs:
               raise SystemExit("release must remain a production draft until assets are verified")
           if release.get("isImmutable") is True:
               raise SystemExit("draft release is unexpectedly immutable")
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("draft release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {pathlib.Path(raw_path).name for raw_path in paths}
+          if (
+              len(asset_records) > 2
+              or len(asset_names) != len(set(asset_names))
+              or not set(asset_names).issubset(expected_assets)
+          ):
+              raise SystemExit("draft release asset set is invalid")
           assets: dict[str, list[dict[str, object]]] = {}
-          for asset in release.get("assets", []):
+          for asset in asset_records:
+              if not isinstance(asset, dict):
+                  raise SystemExit("draft release asset set is invalid")
               assets.setdefault(str(asset.get("name")), []).append(asset)
           for raw_path in paths:
               path = pathlib.Path(raw_path)
@@ -492,8 +617,24 @@ jobs:
               raise SystemExit("release must remain a production draft before publish")
           if release.get("isImmutable") is True:
               raise SystemExit("draft release is unexpectedly immutable")
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("draft release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {pathlib.Path(raw_path).name for raw_path in paths}
+          if (
+              len(asset_records) != 2
+              or len(asset_names) != len(set(asset_names))
+              or set(asset_names) != expected_assets
+          ):
+              raise SystemExit("draft release asset set is invalid")
           assets: dict[str, list[dict[str, object]]] = {}
-          for asset in release.get("assets", []):
+          for asset in asset_records:
+              if not isinstance(asset, dict):
+                  raise SystemExit("draft release asset set is invalid")
               assets.setdefault(str(asset.get("name")), []).append(asset)
           for raw_path in paths:
               path = pathlib.Path(raw_path)
@@ -548,10 +689,20 @@ jobs:
               raise SystemExit("release did not publish")
           if release.get("isPrerelease") is not False:
               raise SystemExit("published release has an unexpected prerelease state")
-          asset_names = {asset.get("name") for asset in release.get("assets", [])}
-          missing = {archive_name, checksum_name} - asset_names
-          if missing:
-              raise SystemExit(f"published release is missing verified assets: {sorted(missing)}")
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("published release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {archive_name, checksum_name}
+          if (
+              len(asset_records) != 2
+              or len(asset_names) != len(set(asset_names))
+              or set(asset_names) != expected_assets
+          ):
+              raise SystemExit("published release asset set is invalid")
           print("true" if release.get("isImmutable") is True else "false")
           PY
           )"
