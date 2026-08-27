@@ -86,7 +86,6 @@ const FIELD_MIGRATION_BACKUP_MANIFEST_MAGIC_V2: &[u8] = b"AE-FMP2\0";
 pub const JOINT_MAX_LINEAR_FXP6_V1: u8 = 1;
 pub const LEGACY_FIELD_FXP6_SCALE: u32 = 1_000_000;
 const AESEM2_SNAPSHOT_MAGIC: &[u8] = b"AESEM2\0";
-const REVISION_RANGE_FENCE: &str = "revision_range";
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -3171,17 +3170,17 @@ fn token_from_blob(bytes: &[u8], fence: &'static str) -> Result<[u8; 16], StoreE
 }
 
 fn revision_from_sqlite(value: i64) -> Result<u64, StoreError> {
-    u64::try_from(value).map_err(|_| StoreError::ContinuityFence(REVISION_RANGE_FENCE))
+    u64::try_from(value).map_err(|_| StoreError::InvalidStoredRevision { revision: value })
 }
 
 fn revision_to_sqlite(value: u64) -> Result<i64, StoreError> {
-    i64::try_from(value).map_err(|_| StoreError::ContinuityFence(REVISION_RANGE_FENCE))
+    i64::try_from(value).map_err(|_| StoreError::RevisionOutOfRange { revision: value })
 }
 
 fn next_sqlite_revision(current: u64) -> Result<(u64, i64), StoreError> {
     let next = current
         .checked_add(1)
-        .ok_or(StoreError::ContinuityFence(REVISION_RANGE_FENCE))?;
+        .ok_or(StoreError::RevisionOutOfRange { revision: u64::MAX })?;
     Ok((next, revision_to_sqlite(next)?))
 }
 
@@ -6920,6 +6919,23 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_revision_conversions_preserve_typed_errors() {
+        let too_large = u64::try_from(i64::MAX).unwrap() + 1;
+        assert!(matches!(
+            revision_from_sqlite(-1),
+            Err(StoreError::InvalidStoredRevision { revision: -1 })
+        ));
+        assert!(matches!(
+            revision_to_sqlite(too_large),
+            Err(StoreError::RevisionOutOfRange { revision }) if revision == too_large
+        ));
+        assert!(matches!(
+            next_sqlite_revision(u64::MAX),
+            Err(StoreError::RevisionOutOfRange { revision: u64::MAX })
+        ));
+    }
+
+    #[test]
     fn sqlite_revision_limit_fails_before_continuity_bundle_writes() {
         let mut store = Store::open_in_memory().unwrap();
         let scope = ScopeRef {
@@ -7020,7 +7036,7 @@ mod tests {
 
         assert!(matches!(
             store.commit_continuity_bundle(&successor),
-            Err(StoreError::ContinuityFence("revision_range"))
+            Err(StoreError::RevisionOutOfRange { revision }) if revision == successor_revision
         ));
         assert_eq!(continuity_row_counts(&store, scope_digest), before);
         assert_eq!(store.current_revision(&scope_digest).unwrap(), revision);
