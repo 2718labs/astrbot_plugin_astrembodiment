@@ -243,7 +243,9 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     select_target_job = release.split("  select-target:\n", 1)[1].split(
         "\n  build-native:", 1
     )[0]
-    assert "permissions:\n      contents: read\n      actions: read" in select_target_job
+    assert (
+        "permissions:\n      contents: read\n      actions: read" in select_target_job
+    )
     publish_job = release.split("  publish-release:\n", 1)[1]
     assert "permissions:\n      contents: write" in publish_job
     assert "actions: read" not in publish_job
