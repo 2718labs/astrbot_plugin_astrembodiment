@@ -1495,6 +1495,29 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
             module.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
             module.reconcile_seed_config_v1 = _unreachable_mandatory_native_abi
             module.ack_seed_config_writeback_v1 = _unreachable_mandatory_native_abi
+            module.semantic_outbox_crypto_status_v1 = lambda: json.dumps(
+                {
+                    "schema": "astrembodiment.semantic-outbox-crypto-status.v1",
+                    "status": "UNAVAILABLE",
+                    "key_version": 1,
+                },
+                sort_keys=True,
+            )
+            module.semantic_outbox_seal_v1 = lambda _request_json: json.dumps(
+                {
+                    "schema": "astrembodiment.semantic-outbox-sealed.v1",
+                    "key_version": 1,
+                    "envelope_b64": "AA==",
+                },
+                sort_keys=True,
+            )
+            module.semantic_outbox_open_v1 = lambda _request_json: json.dumps(
+                {
+                    "schema": "astrembodiment.semantic-outbox-opened.v1",
+                    "plaintext_b64": "e30=",
+                },
+                sort_keys=True,
+            )
             module.semantic_revision_v1 = _unreachable_mandatory_native_abi
             module.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             module.inspect = lambda *_args: "{}"
