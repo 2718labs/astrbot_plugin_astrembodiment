@@ -103,33 +103,39 @@ jobs:
 
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             ci_runs="$RUNNER_TEMP/current-master-ci-runs.json"
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&per_page=100" \
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${candidate_sha}" \
               > "$ci_runs"
             python - "$ci_runs" "$candidate_sha" "$GITHUB_REPOSITORY" <<'PY'
           import json
           import sys
 
-          runs = json.load(open(sys.argv[1], encoding="utf-8")).get("workflow_runs")
+          pages = json.load(open(sys.argv[1], encoding="utf-8"))
           candidate_sha, repository = sys.argv[2:]
-          if not isinstance(runs, list):
-              raise SystemExit("workflow_dispatch CI query returned an invalid workflow run list")
-          for run in runs:
-              if not isinstance(run, dict):
-                  continue
-              head_repository = run.get("head_repository")
-              if not isinstance(head_repository, dict):
-                  continue
-              if (
-                  run.get("head_sha") != candidate_sha
-                  or run.get("status") != "completed"
-                  or run.get("conclusion") != "success"
-                  or run.get("event") != "push"
-                  or run.get("head_branch") != "master"
-                  or head_repository.get("full_name") != repository
-              ):
-                  continue
-              raise SystemExit(0)
+          if not isinstance(pages, list):
+              raise SystemExit("workflow_dispatch CI query returned invalid paginated data")
+          for page in pages:
+              if not isinstance(page, dict):
+                  raise SystemExit("workflow_dispatch CI query returned an invalid page")
+              runs = page.get("workflow_runs")
+              if not isinstance(runs, list):
+                  raise SystemExit("workflow_dispatch CI query returned an invalid workflow run list")
+              for run in runs:
+                  if not isinstance(run, dict):
+                      continue
+                  head_repository = run.get("head_repository")
+                  if not isinstance(head_repository, dict):
+                      continue
+                  if (
+                      run.get("head_sha") != candidate_sha
+                      or run.get("status") != "completed"
+                      or run.get("conclusion") != "success"
+                      or run.get("event") != "push"
+                      or run.get("head_branch") != "master"
+                      or head_repository.get("full_name") != repository
+                  ):
+                      continue
+                  raise SystemExit(0)
           raise SystemExit("workflow_dispatch requires a successful CI push run for current master")
           PY
           fi
@@ -150,22 +156,61 @@ jobs:
           inspect_annotated_tag() {
             local expected_commit="$1"
             local require_tag="$2"
+            local tag_listing="$RUNNER_TEMP/release-tag.txt"
+            local tag_object_sha=""
+            local peeled_commit_sha=""
+            local object_sha=""
+            local remote_ref=""
+            local tag_ref_count=0
+            local peeled_ref_count=0
             tag_exists=false
-            if git ls-remote --exit-code --tags origin "$tag_ref" > "$RUNNER_TEMP/release-tag.txt"; then
-              git fetch --no-tags origin "$tag_ref"
-              if [[ "$(git cat-file -t FETCH_HEAD)" != tag ]]; then
-                echo "release tag must be annotated: ${release_tag}" >&2
-                exit 1
-              fi
-              if [[ "$(git rev-parse FETCH_HEAD^{commit})" != "$expected_commit" ]]; then
-                echo "published release target does not match its annotated tag" >&2
-                exit 1
-              fi
-              tag_exists=true
-            elif [[ "$require_tag" == true ]]; then
-              echo "required release tag is missing: ${release_tag}" >&2
+            if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
+              echo "remote release tag lookup failed" >&2
               exit 1
             fi
+            if [[ ! -s "$tag_listing" ]]; then
+              if [[ "$require_tag" == true ]]; then
+                echo "required release tag is missing: ${release_tag}" >&2
+                exit 1
+              fi
+              return
+            fi
+            while IFS=$'\t' read -r object_sha remote_ref; do
+              if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "remote release tag lookup returned an invalid object id" >&2
+                exit 1
+              fi
+              case "$remote_ref" in
+                "$tag_ref")
+                  ((tag_ref_count += 1))
+                  tag_object_sha="$object_sha"
+                  ;;
+                "${tag_ref}^{}")
+                  ((peeled_ref_count += 1))
+                  peeled_commit_sha="$object_sha"
+                  ;;
+                *)
+                  echo "remote release tag lookup returned an unexpected ref" >&2
+                  exit 1
+                  ;;
+              esac
+            done < "$tag_listing"
+            if [[ "$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1 ]]; then
+              echo "remote release tag lookup must contain one annotated ref and one peeled ref" >&2
+              exit 1
+            fi
+            git fetch --no-tags origin "$tag_ref"
+            if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
+                  "$(git rev-parse FETCH_HEAD)" != "$tag_object_sha" ||
+                  "$(git rev-parse FETCH_HEAD^{commit})" != "$peeled_commit_sha" ]]; then
+              echo "release tag did not resolve to its advertised annotated object" >&2
+              exit 1
+            fi
+            if [[ "$peeled_commit_sha" != "$expected_commit" ]]; then
+              echo "published release target does not match its annotated tag" >&2
+              exit 1
+            fi
+            tag_exists=true
           }
 
           validate_published_release_assets() {
@@ -476,11 +521,59 @@ jobs:
         run: |
           set -euo pipefail
           tag_ref="refs/tags/${RELEASE_TAG}"
-          if git ls-remote --exit-code --tags origin "$tag_ref" > "$RUNNER_TEMP/release-tag.txt"; then
+          inspect_current_annotated_tag() {
+            local tag_listing="$RUNNER_TEMP/release-tag.txt"
+            local tag_object_sha=""
+            local peeled_commit_sha=""
+            local object_sha=""
+            local remote_ref=""
+            local tag_ref_count=0
+            local peeled_ref_count=0
+            tag_exists=false
+            if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
+              echo "remote release tag lookup failed" >&2
+              exit 1
+            fi
+            if [[ ! -s "$tag_listing" ]]; then
+              return
+            fi
+            while IFS=$'\t' read -r object_sha remote_ref; do
+              if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "remote release tag lookup returned an invalid object id" >&2
+                exit 1
+              fi
+              case "$remote_ref" in
+                "$tag_ref")
+                  ((tag_ref_count += 1))
+                  tag_object_sha="$object_sha"
+                  ;;
+                "${tag_ref}^{}")
+                  ((peeled_ref_count += 1))
+                  peeled_commit_sha="$object_sha"
+                  ;;
+                *)
+                  echo "remote release tag lookup returned an unexpected ref" >&2
+                  exit 1
+                  ;;
+              esac
+            done < "$tag_listing"
+            if [[ "$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1 ]]; then
+              echo "remote release tag lookup must contain one annotated ref and one peeled ref" >&2
+              exit 1
+            fi
             git fetch --no-tags origin "$tag_ref"
-            test "$(git cat-file -t FETCH_HEAD)" = tag
-            test "$(git rev-parse FETCH_HEAD^{commit})" = "$TARGET_SHA"
-          else
+            if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
+                  "$(git rev-parse FETCH_HEAD)" != "$tag_object_sha" ||
+                  "$(git rev-parse FETCH_HEAD^{commit})" != "$peeled_commit_sha" ||
+                  "$peeled_commit_sha" != "$TARGET_SHA" ]]; then
+              echo "release tag did not resolve to the selected target" >&2
+              exit 1
+            fi
+            tag_exists=true
+          }
+
+          inspect_current_annotated_tag
+          if [[ "$tag_exists" != true ]]; then
             tag_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             tag_object_sha="$(
               gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
@@ -497,9 +590,11 @@ jobs:
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f "ref=${tag_ref}" \
               -f "sha=${tag_object_sha}" > /dev/null
-            git fetch --no-tags origin "$tag_ref"
-            test "$(git cat-file -t FETCH_HEAD)" = tag
-            test "$(git rev-parse FETCH_HEAD^{commit})" = "$TARGET_SHA"
+            inspect_current_annotated_tag
+            if [[ "$tag_exists" != true ]]; then
+              echo "created release tag was not found on origin" >&2
+              exit 1
+            fi
           fi
 
           release_json="$RUNNER_TEMP/release-state.json"

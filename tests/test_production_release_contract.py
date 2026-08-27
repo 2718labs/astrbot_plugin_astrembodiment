@@ -212,7 +212,8 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         "--field tag",
         "refs/heads/master",
         "git fetch origin master",
-        "actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&per_page=100",
+        "actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${candidate_sha}",
+        "--paginate --slurp",
         "workflow_dispatch requires a successful CI push run for current master",
         "git/tags",
         "git/refs",
@@ -256,6 +257,8 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "git/refs" in publish_job
     assert "--force" not in release
     assert "--clobber" not in release
+    assert "per_page=100" not in release
+    assert "git ls-remote --exit-code" not in release
     assert "publication is intentionally outside this workflow" in release
     assert release.count("python scripts/verify_release_contract.py") >= 3
     assert "needs.select-target.outputs.release_action != 'NOOP'" in release
@@ -280,6 +283,21 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         assert required in selector
     assert selector.count("len(asset_records) != 2") >= 1
     assert "release_target_sha" in selector
+    assert "head_sha=${candidate_sha}" in selector
+    assert "--paginate --slurp" in selector
+    assert 'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"' in selector
+    assert 'if [[ ! -s "$tag_listing" ]]; then' in selector
+    assert "remote release tag lookup failed" in selector
+    assert "remote release tag lookup returned an unexpected ref" in selector
+    assert "one annotated ref and one peeled ref" in selector
+
+    assert (
+        publish_job.count('git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"') == 1
+    )
+    assert 'if [[ ! -s "$tag_listing" ]]; then' in publish_job
+    assert "remote release tag lookup failed" in publish_job
+    assert "remote release tag lookup returned an unexpected ref" in publish_job
+    assert "one annotated ref and one peeled ref" in publish_job
 
     draft_assets = publish_job.split(
         "      - name: Verify or upload draft assets without replacing existing "
