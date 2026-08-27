@@ -211,8 +211,8 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         "--field version",
         "--field tag",
         "refs/heads/master",
-        "git fetch origin master",
-        "actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${candidate_sha}",
+        "git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'",
+        "actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${control_sha}",
         "--paginate --slurp",
         "workflow_dispatch requires a successful CI push run for current master",
         "git/tags",
@@ -231,6 +231,7 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         "release_action=NOOP",
         "release_action=RESUME",
         "release_action=PUBLISH",
+        "release_action=RECOVER_TAG_ONLY",
         "::warning",
     ):
         assert required in release
@@ -291,6 +292,8 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "publication is intentionally outside this workflow" in release
     assert release.count("python scripts/verify_release_contract.py") >= 3
     assert "needs.select-target.outputs.release_action != 'NOOP'" in release
+    assert "control_sha: ${{ steps.target.outputs.control_sha }}" in release
+    assert "tag_object_sha: ${{ steps.target.outputs.tag_object_sha }}" in release
 
     selector = release.split(
         "      - name: Verify trigger provenance, current master, and release state\n",
@@ -312,11 +315,27 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         assert required in selector
     assert selector.count("len(asset_records) != 2") >= 1
     assert "release_target_sha" in selector
+    assert 'control_sha="$candidate_sha"' in selector
+    assert 'target_sha="$control_sha"' in selector
+    assert '"$tag_target_sha" == "$control_sha"' in selector
+    assert 'git merge-base --is-ancestor "$tag_target_sha" "$control_sha"' in selector
+    assert (
+        'require_successful_master_ci "$tag_target_sha" "tag-only recovery"' in selector
+    )
+    assert 'git cat-file -p "$tag_object_sha"' in selector
+    assert "github-actions[bot]" in selector
+    assert 'if message != f"Release {version}":' in selector
+    assert 'git show "${tag_target_sha}:metadata.yaml"' in selector
+    assert "printf 'control_sha=%s\\n' \"$control_sha\"" in selector
+    assert "printf 'target_sha=%s\\n' \"$target_sha\"" in selector
+    assert "printf 'tag_object_sha=%s\\n' \"$tag_object_sha\"" in selector
+    assert "RECOVER_TAG_ONLY" in selector
+    assert "release tag did not resolve to its advertised annotated object" in selector
     assert (
         'cd "$download_dir"\n              sha256sum --check "$checksum_name"'
         in selector
     )
-    assert "head_sha=${candidate_sha}" in selector
+    assert "head_sha=${control_sha}" in selector
     assert "--paginate --slurp" in selector
     assert 'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"' in selector
     assert 'if [[ ! -s "$tag_listing" ]]; then' in selector
@@ -325,7 +344,7 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "one annotated ref and one peeled ref" in selector
 
     assert (
-        publish_job.count('git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"') == 1
+        publish_job.count('git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"') == 2
     )
     assert 'if [[ ! -s "$tag_listing" ]]; then' in publish_job
     assert "remote release tag lookup failed" in publish_job
@@ -337,6 +356,39 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     )
     assert publish_job.count('cd "$download_dir"') >= 2
     assert publish_job.count('sha256sum --check "$CHECKSUM_NAME"') == 3
+    assert "GH_REPO: ${{ github.repository }}" in publish_job
+    assert "CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}" in publish_job
+    assert (
+        "EXPECTED_TAG_OBJECT_SHA: ${{ needs.select-target.outputs.tag_object_sha }}"
+        in publish_job
+    )
+    assert (
+        "RELEASE_ACTION: ${{ needs.select-target.outputs.release_action }}"
+        in publish_job
+    )
+    assert 'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"' in publish_job
+    assert "assert_publish_preconditions" in publish_job
+    assert "release tag drifted after target selection" in publish_job
+    release_create = publish_job.split("gh release create", 1)[1].split(
+        "state=DRAFT", 1
+    )[0]
+    assert "--notes-from-tag" in release_create
+    assert '--repo "$GITHUB_REPOSITORY"' not in release_create
+
+    release_state = publish_job.split(
+        "      - name: Create an annotated tag or resume the matching release state\n",
+        1,
+    )[1].split(
+        "      - name: Verify or upload draft assets without replacing existing "
+        "assets\n",
+        1,
+    )[0]
+    assert "observed_tag_object_sha" in release_state
+    assert "release-state did not observe a final annotated tag object" in release_state
+    assert (
+        "printf 'observed_tag_object_sha=%s\\n' \"$current_tag_object_sha\""
+        in release_state
+    )
 
     draft_assets = publish_job.split(
         "      - name: Verify or upload draft assets without replacing existing "
@@ -350,6 +402,41 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert draft_assets.count("len(asset_records) != 2") >= 1
     assert draft_assets.index("gh release upload") < draft_assets.index(
         "gh release download"
+    )
+
+    prepublish = publish_job.split("      - name: Publish the verified draft\n", 1)[
+        1
+    ].split(
+        "\n      - name: Verify published assets and report GitHub immutability\n", 1
+    )[0]
+    for required in (
+        "EXPECTED_TAG_OBJECT_SHA: ${{ steps.release-state.outputs."
+        "observed_tag_object_sha }}",
+        'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"',
+        'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"',
+        '"$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1',
+        '"$tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA"',
+        '"$tag_target_sha" != "$TARGET_SHA"',
+        'git fetch --no-tags origin "$tag_ref"',
+        '"$fetch_tag_object_sha" != "$tag_object_sha"',
+        '"$fetch_peeled_sha" != "$TARGET_SHA"',
+        "prepublish-release-state.json",
+        "draft release identity changed before publish",
+        "release stopped being a draft before publish",
+    ):
+        assert required in prepublish
+    prepublish_edit = (
+        'gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false'
+    )
+    assert prepublish_edit in prepublish
+    assert prepublish.index(
+        'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"'
+    ) < prepublish.index(prepublish_edit)
+    assert prepublish.index(
+        'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"'
+    ) < prepublish.index(prepublish_edit)
+    assert prepublish.index("prepublish-release-state.json") < prepublish.index(
+        prepublish_edit
     )
 
     published_assets = publish_job.split(

@@ -28,7 +28,9 @@ jobs:
       actions: read
     outputs:
       eligible: ${{ steps.target.outputs.eligible }}
+      control_sha: ${{ steps.target.outputs.control_sha }}
       target_sha: ${{ steps.target.outputs.target_sha }}
+      tag_object_sha: ${{ steps.target.outputs.tag_object_sha }}
       release_version: ${{ steps.target.outputs.release_version }}
       release_tag: ${{ steps.target.outputs.release_tag }}
       archive_name: ${{ steps.target.outputs.archive_name }}
@@ -90,7 +92,7 @@ jobs:
             exit 1
           fi
 
-          git fetch origin master --depth=1
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
           master_sha="$(git rev-parse origin/master)"
           if [[ "$candidate_sha" != "$master_sha" ]]; then
             if [[ "$EVENT_NAME" == "workflow_run" ]]; then
@@ -101,12 +103,15 @@ jobs:
             exit 1
           fi
 
+          control_sha="$candidate_sha"
+          target_sha="$control_sha"
+
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             ci_runs="$RUNNER_TEMP/current-master-ci-runs.json"
             gh api --paginate --slurp \
-              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${candidate_sha}" \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${control_sha}" \
               > "$ci_runs"
-            python - "$ci_runs" "$candidate_sha" "$GITHUB_REPOSITORY" <<'PY'
+            python - "$ci_runs" "$control_sha" "$GITHUB_REPOSITORY" <<'PY'
           import json
           import sys
 
@@ -140,8 +145,8 @@ jobs:
           PY
           fi
 
-          git cat-file -e "$candidate_sha^{commit}"
-          git checkout --detach "$candidate_sha"
+          git cat-file -e "$control_sha^{commit}"
+          git checkout --detach "$control_sha"
 
           release_version="$(python scripts/verify_release_contract.py --field version)"
           release_tag="$(python scripts/verify_release_contract.py --field tag)"
@@ -153,17 +158,62 @@ jobs:
           checksum_name="${archive_name}.sha256"
           tag_ref="refs/tags/${release_tag}"
 
+          require_successful_master_ci() {
+            local required_sha="$1"
+            local purpose="$2"
+            local ci_runs="$RUNNER_TEMP/${purpose// /-}-ci-runs.json"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${required_sha}" \
+              > "$ci_runs"
+            python - "$ci_runs" "$required_sha" "$GITHUB_REPOSITORY" "$purpose" <<'PY'
+          import json
+          import sys
+
+          pages = json.load(open(sys.argv[1], encoding="utf-8"))
+          required_sha, repository, purpose = sys.argv[2:]
+          if not isinstance(pages, list):
+              raise SystemExit(f"{purpose} CI query returned invalid paginated data")
+          for page in pages:
+              if not isinstance(page, dict):
+                  raise SystemExit(f"{purpose} CI query returned an invalid page")
+              runs = page.get("workflow_runs")
+              if not isinstance(runs, list):
+                  raise SystemExit(f"{purpose} CI query returned an invalid workflow run list")
+              for run in runs:
+                  if not isinstance(run, dict):
+                      continue
+                  head_repository = run.get("head_repository")
+                  if not isinstance(head_repository, dict):
+                      continue
+                  if (
+                      run.get("head_sha") != required_sha
+                      or run.get("status") != "completed"
+                      or run.get("conclusion") != "success"
+                      or run.get("event") != "push"
+                      or run.get("head_branch") != "master"
+                      or head_repository.get("full_name") != repository
+                  ):
+                      continue
+                  raise SystemExit(0)
+          raise SystemExit(f"{purpose} requires a successful CI push run for the exact master commit")
+          PY
+          }
+
           inspect_annotated_tag() {
-            local expected_commit="$1"
-            local require_tag="$2"
+            local require_tag="$1"
             local tag_listing="$RUNNER_TEMP/release-tag.txt"
-            local tag_object_sha=""
-            local peeled_commit_sha=""
+            local ls_remote_tag_object_sha=""
+            local ls_remote_peeled_sha=""
+            local fetch_tag_object_sha=""
+            local fetch_peeled_sha=""
             local object_sha=""
             local remote_ref=""
             local tag_ref_count=0
             local peeled_ref_count=0
             tag_exists=false
+            tag_object_sha=""
+            tag_target_sha=""
+            tag_object_file="$RUNNER_TEMP/release-tag-object.txt"
             if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
               echo "remote release tag lookup failed" >&2
               exit 1
@@ -183,11 +233,11 @@ jobs:
               case "$remote_ref" in
                 "$tag_ref")
                   ((tag_ref_count += 1))
-                  tag_object_sha="$object_sha"
+                  ls_remote_tag_object_sha="$object_sha"
                   ;;
                 "${tag_ref}^{}")
                   ((peeled_ref_count += 1))
-                  peeled_commit_sha="$object_sha"
+                  ls_remote_peeled_sha="$object_sha"
                   ;;
                 *)
                   echo "remote release tag lookup returned an unexpected ref" >&2
@@ -200,17 +250,73 @@ jobs:
               exit 1
             fi
             git fetch --no-tags origin "$tag_ref"
+            fetch_tag_object_sha="$(git rev-parse FETCH_HEAD)"
+            fetch_peeled_sha="$(git rev-parse FETCH_HEAD^{commit})"
             if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
-                  "$(git rev-parse FETCH_HEAD)" != "$tag_object_sha" ||
-                  "$(git rev-parse FETCH_HEAD^{commit})" != "$peeled_commit_sha" ]]; then
+                  "$(git cat-file -t "$ls_remote_tag_object_sha")" != tag ||
+                  "$fetch_tag_object_sha" != "$ls_remote_tag_object_sha" ||
+                  "$fetch_peeled_sha" != "$ls_remote_peeled_sha" ]]; then
               echo "release tag did not resolve to its advertised annotated object" >&2
               exit 1
             fi
-            if [[ "$peeled_commit_sha" != "$expected_commit" ]]; then
-              echo "published release target does not match its annotated tag" >&2
+            git cat-file -e "$fetch_peeled_sha^{commit}"
+            tag_object_sha="$ls_remote_tag_object_sha"
+            tag_target_sha="$ls_remote_peeled_sha"
+            git cat-file -p "$tag_object_sha" > "$tag_object_file"
+            tag_exists=true
+          }
+
+          validate_tag_only_recovery() {
+            local target_metadata="$RUNNER_TEMP/tag-only-target-metadata.yaml"
+            if [[ "$tag_exists" != true ]]; then
+              echo "tag-only recovery requires an existing annotated release tag" >&2
               exit 1
             fi
-            tag_exists=true
+            if [[ "$tag_target_sha" == "$control_sha" ]]; then
+              echo "tag-only recovery target must be an older master ancestor" >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$tag_target_sha" "$control_sha"; then
+              echo "tag-only release target is not an ancestor of current master" >&2
+              exit 1
+            fi
+            python - "$tag_object_file" "$release_tag" "$release_version" "$tag_target_sha" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          tag_object = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          tag, version, target = sys.argv[2:]
+          header, separator, message = tag_object.partition("\n\n")
+          header_lines = header.splitlines()
+          expected_tagger = (
+              "tagger github-actions[bot] "
+              "<41898282+github-actions[bot]@users.noreply.github.com> "
+          )
+          if separator != "\n\n" or len(header_lines) != 4:
+              raise SystemExit("tag-only recovery tag object has an invalid header")
+          if header_lines[0] != f"object {target}":
+              raise SystemExit("tag-only recovery tag object target does not match peeled SHA")
+          if header_lines[1] != "type commit" or header_lines[2] != f"tag {tag}":
+              raise SystemExit("tag-only recovery tag object type or name is invalid")
+          if re.fullmatch(re.escape(expected_tagger) + r"\d+ [+-]\d{4}", header_lines[3]) is None:
+              raise SystemExit("tag-only recovery tagger is not github-actions[bot]")
+          if message != f"Release {version}":
+              raise SystemExit("tag-only recovery tag message is invalid")
+          PY
+            git show "${tag_target_sha}:metadata.yaml" > "$target_metadata"
+            python - "$target_metadata" "$release_version" "$release_tag" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          metadata = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          expected_version, expected_tag = sys.argv[2:]
+          match = re.search(r'^version:\s*"([^"]+)"\s*$', metadata, re.MULTILINE)
+          if match is None or match.group(1) != expected_version or f"v{match.group(1)}" != expected_tag:
+              raise SystemExit("tag-only recovery target version and tag do not match current metadata")
+          PY
+            require_successful_master_ci "$tag_target_sha" "tag-only recovery"
           }
 
           validate_published_release_assets() {
@@ -257,15 +363,16 @@ jobs:
           release_json="$RUNNER_TEMP/release-state.json"
           release_error="$RUNNER_TEMP/release-state.err"
           release_action=PUBLISH
+          tag_object_sha=""
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" \
               > "$release_json" 2> "$release_error"; then
-            state_info="$(python - "$release_json" "$release_tag" "$candidate_sha" <<'PY'
+            state_info="$(python - "$release_json" "$release_tag" "$control_sha" <<'PY'
           import json
           import re
           import sys
 
           release = json.load(open(sys.argv[1], encoding="utf-8"))
-          tag, candidate_sha = sys.argv[2:]
+          tag, control_sha = sys.argv[2:]
           if release.get("tag_name") != tag:
               raise SystemExit("existing release tag does not match metadata-derived tag")
           if release.get("prerelease") is not False:
@@ -274,7 +381,7 @@ jobs:
           if not isinstance(release_target_sha, str) or re.fullmatch(r"[0-9a-f]{40}", release_target_sha) is None:
               raise SystemExit("existing release must record a full original release commit")
           if release.get("draft") is True:
-              if release_target_sha != candidate_sha:
+              if release_target_sha != control_sha:
                   raise SystemExit("existing draft release target does not match current master")
               if release.get("immutable") is True:
                   raise SystemExit("existing draft release is unexpectedly immutable")
@@ -289,16 +396,31 @@ jobs:
             read -r state release_target_sha <<< "$state_info"
             case "$state" in
               RESUME)
-                inspect_annotated_tag "$candidate_sha" true
+                inspect_annotated_tag true
+                if [[ "$tag_target_sha" != "$release_target_sha" ]]; then
+                  echo "existing draft release target does not match its annotated tag" >&2
+                  exit 1
+                fi
+                target_sha="$control_sha"
                 release_action=RESUME
                 ;;
               NOOP)
-                inspect_annotated_tag "$release_target_sha" true
+                inspect_annotated_tag true
+                if [[ "$tag_target_sha" != "$release_target_sha" ]]; then
+                  echo "published release target does not match its annotated tag" >&2
+                  exit 1
+                fi
+                target_sha="$tag_target_sha"
                 validate_published_release_assets "$release_json"
                 release_action=NOOP
                 ;;
               NOOP_WARN)
-                inspect_annotated_tag "$release_target_sha" true
+                inspect_annotated_tag true
+                if [[ "$tag_target_sha" != "$release_target_sha" ]]; then
+                  echo "published release target does not match its annotated tag" >&2
+                  exit 1
+                fi
+                target_sha="$tag_target_sha"
                 validate_published_release_assets "$release_json"
                 echo "::warning title=GitHub Release immutability unavailable::${release_tag} is already published, but GitHub reports immutable=false. No release asset was changed."
                 release_action=NOOP
@@ -309,9 +431,11 @@ jobs:
                 ;;
             esac
           elif grep -Eq 'HTTP 404|Not Found' "$release_error"; then
-            inspect_annotated_tag "$candidate_sha" false
+            inspect_annotated_tag false
             if [[ "$tag_exists" == true ]]; then
-              release_action=RESUME
+              validate_tag_only_recovery
+              target_sha="$tag_target_sha"
+              release_action=RECOVER_TAG_ONLY
             fi
           else
             cat "$release_error" >&2
@@ -319,7 +443,9 @@ jobs:
           fi
 
           printf 'eligible=true\n' >> "$GITHUB_OUTPUT"
-          printf 'target_sha=%s\n' "$candidate_sha" >> "$GITHUB_OUTPUT"
+          printf 'control_sha=%s\n' "$control_sha" >> "$GITHUB_OUTPUT"
+          printf 'target_sha=%s\n' "$target_sha" >> "$GITHUB_OUTPUT"
+          printf 'tag_object_sha=%s\n' "$tag_object_sha" >> "$GITHUB_OUTPUT"
           printf 'release_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"
           printf 'release_tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
           printf 'archive_name=%s\n' "$archive_name" >> "$GITHUB_OUTPUT"
@@ -328,6 +454,7 @@ jobs:
             NOOP) printf 'release_action=NOOP\n' >> "$GITHUB_OUTPUT" ;;
             RESUME) printf 'release_action=RESUME\n' >> "$GITHUB_OUTPUT" ;;
             PUBLISH) printf 'release_action=PUBLISH\n' >> "$GITHUB_OUTPUT" ;;
+            RECOVER_TAG_ONLY) printf 'release_action=RECOVER_TAG_ONLY\n' >> "$GITHUB_OUTPUT" ;;
             *) echo "invalid release action: $release_action" >&2; exit 1 ;;
           esac
 
@@ -496,14 +623,15 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.select-target.outputs.release_version }}
+          CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}
           TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
           ARCHIVE_NAME: ${{ needs.select-target.outputs.archive_name }}
           CHECKSUM_NAME: ${{ needs.select-target.outputs.checksum_name }}
           EXPECTED_ARCHIVE_SHA256: ${{ needs.assemble-release.outputs.archive_sha256 }}
         run: |
           set -euo pipefail
-          git fetch origin master --depth=1
-          test "$(git rev-parse origin/master)" = "$TARGET_SHA"
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          test "$(git rev-parse origin/master)" = "$CONTROL_SHA"
           python scripts/verify_release_contract.py \
             --tag "$RELEASE_TAG" --version "$RELEASE_VERSION"
           archive="release-assets/${ARCHIVE_NAME}"
@@ -519,21 +647,27 @@ jobs:
         id: release-state
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.select-target.outputs.release_version }}
+          CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}
           TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ needs.select-target.outputs.tag_object_sha }}
+          RELEASE_ACTION: ${{ needs.select-target.outputs.release_action }}
         run: |
           set -euo pipefail
           tag_ref="refs/tags/${RELEASE_TAG}"
           inspect_current_annotated_tag() {
             local tag_listing="$RUNNER_TEMP/release-tag.txt"
-            local tag_object_sha=""
-            local peeled_commit_sha=""
+            local fetch_tag_object_sha=""
+            local fetch_peeled_sha=""
             local object_sha=""
             local remote_ref=""
             local tag_ref_count=0
             local peeled_ref_count=0
             tag_exists=false
+            current_tag_object_sha=""
+            current_tag_target_sha=""
             if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
               echo "remote release tag lookup failed" >&2
               exit 1
@@ -549,11 +683,11 @@ jobs:
               case "$remote_ref" in
                 "$tag_ref")
                   ((tag_ref_count += 1))
-                  tag_object_sha="$object_sha"
+                  current_tag_object_sha="$object_sha"
                   ;;
                 "${tag_ref}^{}")
                   ((peeled_ref_count += 1))
-                  peeled_commit_sha="$object_sha"
+                  current_tag_target_sha="$object_sha"
                   ;;
                 *)
                   echo "remote release tag lookup returned an unexpected ref" >&2
@@ -566,20 +700,54 @@ jobs:
               exit 1
             fi
             git fetch --no-tags origin "$tag_ref"
+            fetch_tag_object_sha="$(git rev-parse FETCH_HEAD)"
+            fetch_peeled_sha="$(git rev-parse FETCH_HEAD^{commit})"
             if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
-                  "$(git rev-parse FETCH_HEAD)" != "$tag_object_sha" ||
-                  "$(git rev-parse FETCH_HEAD^{commit})" != "$peeled_commit_sha" ||
-                  "$peeled_commit_sha" != "$TARGET_SHA" ]]; then
+                  "$(git cat-file -t "$current_tag_object_sha")" != tag ||
+                  "$fetch_tag_object_sha" != "$current_tag_object_sha" ||
+                  "$fetch_peeled_sha" != "$current_tag_target_sha" ||
+                  "$current_tag_target_sha" != "$TARGET_SHA" ]]; then
               echo "release tag did not resolve to the selected target" >&2
               exit 1
             fi
+            git cat-file -e "$fetch_peeled_sha^{commit}"
             tag_exists=true
           }
 
-          inspect_current_annotated_tag
+          assert_publish_preconditions() {
+            git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+            test "$(git rev-parse origin/master)" = "$CONTROL_SHA"
+            inspect_current_annotated_tag
+            case "$RELEASE_ACTION" in
+              PUBLISH)
+                if [[ -n "$EXPECTED_TAG_OBJECT_SHA" || "$tag_exists" == true ]]; then
+                  echo "a release tag appeared after target selection" >&2
+                  exit 1
+                fi
+                ;;
+              RESUME|RECOVER_TAG_ONLY)
+                if [[ ! "$EXPECTED_TAG_OBJECT_SHA" =~ ^[0-9a-f]{40}$ ||
+                      "$tag_exists" != true ||
+                      "$current_tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA" ]]; then
+                  echo "release tag drifted after target selection" >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "unexpected release action: $RELEASE_ACTION" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          assert_publish_preconditions
           if [[ "$tag_exists" != true ]]; then
+            if [[ "$RELEASE_ACTION" != PUBLISH ]]; then
+              echo "a selected existing release tag disappeared before publication" >&2
+              exit 1
+            fi
             tag_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            tag_object_sha="$(
+            created_tag_object_sha="$(
               gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
                 -f "tag=${RELEASE_TAG}" \
                 -f "message=Release ${RELEASE_VERSION}" \
@@ -590,13 +758,14 @@ jobs:
                 -f "tagger[date]=${tag_date}" \
                 --jq '.sha'
             )"
-            [[ "$tag_object_sha" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$created_tag_object_sha" =~ ^[0-9a-f]{40}$ ]]
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f "ref=${tag_ref}" \
-              -f "sha=${tag_object_sha}" > /dev/null
+              -f "sha=${created_tag_object_sha}" > /dev/null
             inspect_current_annotated_tag
-            if [[ "$tag_exists" != true ]]; then
-              echo "created release tag was not found on origin" >&2
+            if [[ "$tag_exists" != true ||
+                  "$current_tag_object_sha" != "$created_tag_object_sha" ]]; then
+              echo "created release tag did not remain bound to its new annotated object" >&2
               exit 1
             fi
           fi
@@ -625,7 +794,6 @@ jobs:
             )"
           elif grep -Eq 'HTTP 404|Not Found' "$release_error"; then
             gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
               --draft \
               --verify-tag \
               --target "$TARGET_SHA" \
@@ -636,7 +804,12 @@ jobs:
             cat "$release_error" >&2
             exit 1
           fi
+          if [[ ! "$current_tag_object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release-state did not observe a final annotated tag object" >&2
+            exit 1
+          fi
           printf 'state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+          printf 'observed_tag_object_sha=%s\n' "$current_tag_object_sha" >> "$GITHUB_OUTPUT"
       - name: Verify or upload draft assets without replacing existing assets
         if: steps.release-state.outputs.state == 'DRAFT'
         env:
@@ -764,7 +937,86 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
-        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ steps.release-state.outputs.observed_tag_object_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_TAG_OBJECT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release-state did not provide a final annotated tag object" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          test "$(git rev-parse origin/master)" = "$CONTROL_SHA"
+
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          tag_listing="$RUNNER_TEMP/prepublish-release-tag.txt"
+          tag_object_sha=""
+          tag_target_sha=""
+          tag_ref_count=0
+          peeled_ref_count=0
+          if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
+            echo "prepublish release tag lookup failed" >&2
+            exit 1
+          fi
+          while IFS=$'\t' read -r object_sha remote_ref; do
+            if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "prepublish release tag lookup returned an invalid object id" >&2
+              exit 1
+            fi
+            case "$remote_ref" in
+              "$tag_ref")
+                ((tag_ref_count += 1))
+                tag_object_sha="$object_sha"
+                ;;
+              "${tag_ref}^{}")
+                ((peeled_ref_count += 1))
+                tag_target_sha="$object_sha"
+                ;;
+              *)
+                echo "prepublish release tag lookup returned an unexpected ref" >&2
+                exit 1
+                ;;
+            esac
+          done < "$tag_listing"
+          if [[ "$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1 ||
+                "$tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA" ||
+                "$tag_target_sha" != "$TARGET_SHA" ]]; then
+            echo "release tag drifted before draft publication" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "$tag_ref"
+          fetch_tag_object_sha="$(git rev-parse FETCH_HEAD)"
+          fetch_peeled_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
+                "$fetch_tag_object_sha" != "$tag_object_sha" ||
+                "$fetch_peeled_sha" != "$TARGET_SHA" ]]; then
+            echo "fetched release tag drifted before draft publication" >&2
+            exit 1
+          fi
+          git cat-file -e "$fetch_peeled_sha^{commit}"
+
+          release_state="$RUNNER_TEMP/prepublish-release-state.json"
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable \
+            > "$release_state"
+          python - "$release_state" "$RELEASE_TAG" "$TARGET_SHA" <<'PY'
+          import json
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, target = sys.argv[2:]
+          if release.get("tagName") != tag or release.get("targetCommitish") != target:
+              raise SystemExit("draft release identity changed before publish")
+          if release.get("isDraft") is not True:
+              raise SystemExit("release stopped being a draft before publish")
+          if release.get("isPrerelease") is not False:
+              raise SystemExit("draft release has an unexpected prerelease state")
+          if release.get("isImmutable") is True:
+              raise SystemExit("draft release is unexpectedly immutable")
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
       - name: Verify published assets and report GitHub immutability
         env:
           GH_TOKEN: ${{ github.token }}
