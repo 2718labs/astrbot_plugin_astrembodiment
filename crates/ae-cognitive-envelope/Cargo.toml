@@ -1,0 +1,21 @@
+[package]
+name = "ae-cognitive-envelope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-action-contract = { path = "../ae-action-contract" }
+ae-contracts.workspace = true
+ae-efference-copy = { path = "../ae-efference-copy" }
+ae-epistemic-state = { path = "../ae-epistemic-state" }
+ae-genesis.workspace = true
+ae-soma = { path = "../ae-soma" }
+ae-subjective-present = { path = "../ae-subjective-present" }
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ae-fixed.workspace = true

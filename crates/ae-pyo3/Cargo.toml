@@ -18,3 +18,14 @@ ae-store.workspace = true
 ae-runtime.workspace = true
 ae-context-projector.workspace = true
 base64.workspace = true
+
+[dev-dependencies]
+ae-action-contract.workspace = true
+ae-cognitive-envelope.workspace = true
+ae-efference-copy.workspace = true
+ae-epistemic-state.workspace = true
+ae-fixed.workspace = true
+ae-morph.workspace = true
+ae-organism-runtime.workspace = true
+ae-soma.workspace = true
+ae-subjective-present.workspace = true

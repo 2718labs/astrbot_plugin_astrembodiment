@@ -1,0 +1,10 @@
+[package]
+name = "ae-efference-copy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-action-contract = { path = "../ae-action-contract" }
+ae-contracts = { path = "../ae-contracts" }
+thiserror.workspace = true

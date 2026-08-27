@@ -6,6 +6,8 @@
 //! replay verification. Python cannot reach any of this state directly; the
 //! PyO3 surface exposes only coarse calls.
 
+mod n2_native_assembly;
+mod r7;
 mod semantic;
 pub mod semantic_dynamics_v2;
 mod semantic_telemetry_v1;
@@ -38,15 +40,16 @@ use ae_neurofield::{
 use ae_store::{
     phase0_formula_transition_delta_v1, ClaimOutcome, ContextCommitV1, ContinuityCommitBundleV1,
     ContinuityCommitOutcomeV1, GenesisCommit, GraphCommitV1, LegacySemanticFieldDomainUpgradeV1,
-    LegacySemanticFormulaUpgradeReceiptV1, RebirthChildStageRequestV1, RebirthCommitPermitV1,
-    RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1, RebirthPrepareResponseV1,
-    RebirthResponseEnvelopeV1, SeedClearCommitPermitV1, SeedConfigAckResultV1,
-    SeedConfigLifecycleError, SeedConfigPreflightV1, SeedConfigReconcileRequestV1,
-    SeedConfigReconcileResultV1, SeedConfigStateV1, SeedConfigWritebackAckV1,
-    SemanticOutboxCryptoError, SemanticOutboxCryptoStatusV1, SemanticOutboxCryptoStatusValueV1,
-    SemanticOutboxKeyAuthorityV1, SnapshotCommitV1, Store, StoreError, UserAuthorizedRebirthV1,
-    VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1, LEGACY_FIELD_FXP6_SCALE,
-    SEMANTIC_LANE_NAMESPACE_DOMAIN_V1, SEMANTIC_OUTBOX_KEY_VERSION_V1,
+    LegacySemanticFormulaUpgradeReceiptV1, R7PolicyBindingKeyV1, R7PolicyCommitOutcomeV1,
+    R7PolicyValidationContextV1, R7PublicPolicyBundleV1, RebirthChildStageRequestV1,
+    RebirthCommitPermitV1, RebirthLifecycleError, RebirthPreflightV1, RebirthPrepareRequestV1,
+    RebirthPrepareResponseV1, RebirthResponseEnvelopeV1, SeedClearCommitPermitV1,
+    SeedConfigAckResultV1, SeedConfigLifecycleError, SeedConfigPreflightV1,
+    SeedConfigReconcileRequestV1, SeedConfigReconcileResultV1, SeedConfigStateV1,
+    SeedConfigWritebackAckV1, SemanticOutboxCryptoError, SemanticOutboxCryptoStatusV1,
+    SemanticOutboxCryptoStatusValueV1, SemanticOutboxKeyAuthorityV1, SnapshotCommitV1, Store,
+    StoreError, UserAuthorizedRebirthV1, VaultLifecycle, VaultMode, JOINT_MAX_LINEAR_FXP6_V1,
+    LEGACY_FIELD_FXP6_SCALE, SEMANTIC_LANE_NAMESPACE_DOMAIN_V1, SEMANTIC_OUTBOX_KEY_VERSION_V1,
     SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1, SEMANTIC_OUTBOX_MAX_ENVELOPE_BYTES_V1,
     SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1,
 };
@@ -79,6 +82,8 @@ pub enum RuntimeError {
     Closed,
     #[error("invalid neural state")]
     InvalidNeuralState(StateSubcodeV1),
+    #[error("private R7 projection unavailable")]
+    PrivateProjectionUnavailable,
     #[error("invalid closed semantic perception proposal")]
     InvalidPerceptionProposal,
     #[error("invalid semantic perception scope")]
@@ -153,6 +158,14 @@ impl RuntimeError {
             Self::Store(_) => SemanticFieldMigrationSubcodeV1::Unknown,
             _ => SemanticFieldMigrationSubcodeV1::Unknown,
         }
+    }
+}
+
+/// Private R7 compatibility failures collapse at the release runtime boundary.
+/// The production semantic lane never receives an R7 wire or a second writer.
+impl From<r7::RuntimeError> for RuntimeError {
+    fn from(_: r7::RuntimeError) -> Self {
+        Self::PrivateProjectionUnavailable
     }
 }
 
@@ -244,6 +257,15 @@ pub struct InspectReport {
     pub last_chain_digest: Option<Digest>,
     pub journal_count: u64,
     pub observatory_genesis_unavailable: bool,
+}
+
+/// Outcome of optional R7 public-policy hydration.  Refusal is intentionally
+/// a stable G0-only result so malformed optional compatibility material cannot
+/// mutate the committed personality or the production semantic lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum R7HydrationOutcomeV1 {
+    G0Only,
+    Validated { sequence: u64 },
 }
 
 struct HotBrain {
@@ -582,6 +604,63 @@ impl AstrRuntime {
             vault_root,
             semantic_outbox_crypto,
         })
+    }
+
+    /// Hydrate optional, validated R7 policy material without creating an
+    /// alternate semantic writer.  Missing material remains G0-only.
+    pub fn hydrate_r7_public_policy(
+        &mut self,
+        key: &R7PolicyBindingKeyV1,
+        bundle: Option<&R7PublicPolicyBundleV1>,
+    ) -> Result<R7HydrationOutcomeV1, RuntimeError> {
+        self.hydrate_r7_public_policy_with_context(key, bundle, None)
+    }
+
+    /// Context-bound variant of [`Self::hydrate_r7_public_policy`].  Every
+    /// failure is a non-mutating G0-only result; only Store's policy CAS may
+    /// persist the isolated compatibility record.
+    pub fn hydrate_r7_public_policy_with_context(
+        &mut self,
+        key: &R7PolicyBindingKeyV1,
+        bundle: Option<&R7PublicPolicyBundleV1>,
+        context: Option<&R7PolicyValidationContextV1>,
+    ) -> Result<R7HydrationOutcomeV1, RuntimeError> {
+        let (Some(bundle), Some(context)) = (bundle, context) else {
+            return Ok(R7HydrationOutcomeV1::G0Only);
+        };
+        let committed = match self
+            .store
+            .lookup_bound_genesis(&key.bot_token, &key.persona_token)
+        {
+            Ok(Some(committed)) => committed,
+            Ok(None) | Err(_) => return Ok(R7HydrationOutcomeV1::G0Only),
+        };
+        if committed.receipt.incarnation_id != key.committed_g0_incarnation_id
+            || context.committed_g0_incarnation_id != key.committed_g0_incarnation_id
+            || context.committed_g0_manifest_digest != committed.receipt.manifest_digest
+            || context.committed_g0_seed_code_digest != committed.receipt.seed_code_digest
+            || context.committed_g0_persona_source_digest != committed.receipt.persona_source_digest
+            || context.committed_g0_genesis_receipt_digest
+                != wire::genesis_receipt_digest(&committed.receipt)
+            || bundle.policy.g0_manifest_digest != committed.receipt.manifest_digest
+            || bundle.policy.g0_seed_code_digest != committed.receipt.seed_code_digest
+            || bundle.policy.g0_persona_source_digest != committed.receipt.persona_source_digest
+            || bundle.policy.g0_genesis_receipt_digest
+                != wire::genesis_receipt_digest(&committed.receipt)
+        {
+            return Ok(R7HydrationOutcomeV1::G0Only);
+        }
+        match self
+            .store
+            .compare_and_commit_r7_policy_with_context(key, bundle, context)
+        {
+            Ok(R7PolicyCommitOutcomeV1::Inserted)
+            | Ok(R7PolicyCommitOutcomeV1::Replay)
+            | Ok(R7PolicyCommitOutcomeV1::Successor) => Ok(R7HydrationOutcomeV1::Validated {
+                sequence: bundle.policy.incarnation_sequence,
+            }),
+            Err(_) => Ok(R7HydrationOutcomeV1::G0Only),
+        }
     }
 
     /// Report only the fixed async-crypto readiness surface; no key material,

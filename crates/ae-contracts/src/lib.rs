@@ -14,6 +14,9 @@ use std::fmt;
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
+/// R7 authority types stay in an isolated compatibility namespace.
+pub mod r7;
+
 /// Closed, content-free classification for an `INVALID_NEURAL_STATE` rejection.
 ///
 /// This type is deliberately not serialized into any receipt, snapshot, or

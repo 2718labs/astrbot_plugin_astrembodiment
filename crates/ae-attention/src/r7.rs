@@ -2,6 +2,7 @@
 
 //! Closed fifteen-slot routing for the semantic preview lane.
 
+use ae_contracts::r7::EvidenceVector as R7EvidenceVector;
 use ae_contracts::{
     perception_dimension_values, phase0_semantic_route_digest_v1, EvidenceVector,
     PHASE0_SEMANTIC_ROUTE_PRIMARY_COEFFICIENT_FXP6, PHASE0_SEMANTIC_ROUTE_RULES_V1,
@@ -93,4 +94,41 @@ pub fn assemble_full_vector_load(
         injected_dimension_count: PHASE0_SEMANTIC_ROUTE_RULES_V1.len() as u8,
         route_digest: full_vector_route_digest(),
     })
+}
+
+/// R7 compatibility heads remain isolated from the production full-vector
+/// route above. They consume the private R7 evidence type and cannot become a
+/// second public semantic writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttentionHead {
+    Salience,
+    Interoceptive,
+    Epistemic,
+    SocialBoundary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadCandidate {
+    pub active_nodes: Vec<u32>,
+    pub regional_loads: Vec<Fixed>,
+    pub route_digest: [u8; 32],
+}
+
+pub fn assemble_load(evidence: &R7EvidenceVector, node_limit: u32) -> LoadCandidate {
+    // Deterministic compatibility scaffold for the private R7 path.
+    let intensity = evidence
+        .positive
+        .saturating_add(evidence.harm)
+        .saturating_add(evidence.epistemic_conflict)
+        .saturating_add(evidence.boundary);
+    let active = if intensity > Fixed::ZERO {
+        node_limit.min(2048)
+    } else {
+        0
+    };
+    LoadCandidate {
+        active_nodes: (0..active).collect(),
+        regional_loads: vec![intensity; 9],
+        route_digest: [0; 32],
+    }
 }

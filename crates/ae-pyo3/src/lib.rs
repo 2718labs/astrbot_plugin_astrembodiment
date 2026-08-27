@@ -102,6 +102,10 @@ fn map_error(error: ae_runtime::RuntimeError) -> PyErr {
         ae_runtime::RuntimeError::InvalidNeuralState(subcode) => {
             return invalid_neural_state_error(*subcode)
         }
+        ae_runtime::RuntimeError::PrivateProjectionUnavailable => (
+            "PRIVATE_PROJECTION_UNAVAILABLE",
+            "private projection unavailable".to_owned(),
+        ),
         ae_runtime::RuntimeError::InvalidPerceptionProposal => {
             ("INVALID_PERCEPTION_PROPOSAL", error.to_string())
         }
@@ -1516,4 +1520,36 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(flush_and_close, module)?)?;
     module.add("NativeCoreError", module.py().get_type::<NativeCoreError>())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod r7_private_projection_absence_tests {
+    use super::*;
+    use pyo3::types::PyModule;
+
+    #[test]
+    fn python_module_keeps_r7_private_projection_unmounted() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "_native").expect("test module");
+            _native(&module).expect("native module registration");
+
+            for forbidden in [
+                "apply_user_stimulus_with_private_projection_wire_v1",
+                "R7PreOutputProjectionInputV1",
+                "PrivateProjectionPayloadWireV1",
+                "PrivateProjectionPayloadProducerV1",
+                "PrivateProjectionPayloadIngressV1",
+                "PrivateProjectionTransferV1",
+                "seal_private_projection_payload_wire_v1",
+                "materialize_private_projection_payload_v1",
+                "private_projection_payload_callback_v1",
+            ] {
+                assert!(
+                    module.getattr(forbidden).is_err(),
+                    "Python must not expose private R7 projection material: {forbidden}"
+                );
+            }
+        });
+    }
 }
