@@ -115,12 +115,23 @@ def main() -> int:
     parser.add_argument(
         "--version", help="expected production version, for example 1.0.0"
     )
+    parser.add_argument(
+        "--field",
+        choices=("version", "tag"),
+        help="print one metadata-derived release identifier after validation",
+    )
     args = parser.parse_args()
     try:
         tag = verify_release_contract(ROOT, args.tag, args.version)
     except (OSError, tomllib.TOMLDecodeError, ReleaseContractError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    if args.field == "version":
+        print(_metadata_version(ROOT))
+        return 0
+    if args.field == "tag":
+        print(tag)
+        return 0
     print(f"release contract: OK ({tag})")
     return 0
 

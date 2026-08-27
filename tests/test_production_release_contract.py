@@ -22,13 +22,12 @@ def test_production_version_markers_and_changelog_are_coupled() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    version = _metadata_version()
 
-    assert _metadata_version() == "1.0.0"
-    assert pyproject["project"]["version"] == "1.0.0"
-    assert cargo["workspace"]["package"]["version"] == "1.0.0"
-    assert "## [1.0.0] - 2026-08-24" in changelog
-    assert "## [1.0.1]" not in changelog
-    assert "## [1.0.2]" not in changelog
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    assert pyproject["project"]["version"] == version
+    assert cargo["workspace"]["package"]["version"] == version
+    assert f"## [{version}]" in changelog
 
 
 def test_production_readme_states_the_bounded_native_capability_loop() -> None:
@@ -46,18 +45,35 @@ def test_production_readme_states_the_bounded_native_capability_loop() -> None:
         assert required in readme
 
 
-def test_release_contract_verifier_accepts_only_the_production_tag() -> None:
+def test_release_contract_verifier_derives_and_checks_the_production_tag() -> None:
     verifier = ROOT / "scripts" / "verify_release_contract.py"
     assert verifier.is_file()
+    version = _metadata_version()
+    tag = f"v{version}"
+
+    derived_version = subprocess.run(
+        [sys.executable, str(verifier), "--field", "version"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    derived_tag = subprocess.run(
+        [sys.executable, str(verifier), "--field", "tag"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
     accepted = subprocess.run(
         [
             sys.executable,
             str(verifier),
             "--tag",
-            "v1.0.0",
+            tag,
             "--version",
-            "1.0.0",
+            version,
         ],
         cwd=ROOT,
         text=True,
@@ -69,9 +85,9 @@ def test_release_contract_verifier_accepts_only_the_production_tag() -> None:
             sys.executable,
             str(verifier),
             "--tag",
-            "v1.0.0-rc2",
+            f"{tag}-rc1",
             "--version",
-            "1.0.0",
+            version,
         ],
         cwd=ROOT,
         text=True,
@@ -79,6 +95,10 @@ def test_release_contract_verifier_accepts_only_the_production_tag() -> None:
         check=False,
     )
 
+    assert derived_version.returncode == 0, derived_version.stderr
+    assert derived_version.stdout.strip() == version
+    assert derived_tag.returncode == 0, derived_tag.stderr
+    assert derived_tag.stdout.strip() == tag
     assert accepted.returncode == 0, accepted.stderr
     assert rejected.returncode != 0
     assert "version mismatch" in rejected.stderr
@@ -88,9 +108,9 @@ def test_release_contract_verifier_accepts_only_the_production_tag() -> None:
             sys.executable,
             str(verifier),
             "--tag",
-            "v1.0.0",
+            tag,
             "--version",
-            "1.0.1",
+            "0.0.0",
         ],
         cwd=ROOT,
         text=True,
@@ -121,6 +141,9 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "push:\n    branches:\n      - master" in ci
     assert "pull_request:\n    branches:\n      - master" in ci
     assert "github.event.pull_request.number || github.ref" in ci
+    assert "astrbot_plugin_astrembodiment-v1.0.0" not in ci
+    assert "astrbot-plugin-1.0.0-release-candidate" not in ci
+    assert "--field version" in ci
 
     package_matrix = ci.split("  native-package:\n", 1)[1].split(
         "\n  assemble-allowlisted-zip:", 1
@@ -172,12 +195,28 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         assert required in package_matrix
 
     for required in (
+        "workflow_run:",
+        "workflows:\n      - CI",
+        "types:\n      - completed",
         "workflow_dispatch:",
-        "target_sha:",
-        "version:",
+        "github.event.workflow_run.conclusion",
+        "github.event.workflow_run.event",
+        "github.event.workflow_run.head_branch",
+        "github.event.workflow_run.head_repository.full_name",
+        "github.event.workflow_run.head_sha",
+        "workflow_dispatch must run on master",
+        "stale successful CI run",
+        "group: production-release",
+        "cancel-in-progress: false",
+        "--field version",
+        "--field tag",
         "refs/heads/master",
         "git fetch origin master",
-        "git tag -a",
+        "actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${candidate_sha}",
+        "--paginate --slurp",
+        "workflow_dispatch requires a successful CI push run for current master",
+        "git/tags",
+        "git/refs",
         "gh release create",
         "--draft",
         "--verify-tag",
@@ -189,16 +228,96 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         "native-wheel-windows",
         "native-wheel-linux",
         "python scripts/package_plugin.py",
+        "release_action=NOOP",
+        "release_action=RESUME",
+        "release_action=PUBLISH",
+        "::warning",
     ):
         assert required in release
     assert "push:" not in release
+    assert "workflow_dispatch:\n    inputs:" not in release
+    assert "Full SHA of the current master merge commit to publish" not in release
+    assert "inputs.version" not in release
+    assert "inputs.tag" not in release
     assert "actions/upload-artifact@" in release
     assert release.count("contents: write") == 1
+    select_target_job = release.split("  select-target:\n", 1)[1].split(
+        "\n  build-native:", 1
+    )[0]
+    assert (
+        "permissions:\n      contents: read\n      actions: read" in select_target_job
+    )
     publish_job = release.split("  publish-release:\n", 1)[1]
     assert "permissions:\n      contents: write" in publish_job
+    assert "actions: read" not in publish_job
+    assert "actions: write" not in release
+    assert "persist-credentials: true" not in publish_job
+    assert "persist-credentials: false" in publish_job
+    assert "git/tags" in publish_job
+    assert "git/refs" in publish_job
     assert "--force" not in release
     assert "--clobber" not in release
+    assert "per_page=100" not in release
+    assert "git ls-remote --exit-code" not in release
     assert "publication is intentionally outside this workflow" in release
+    assert release.count("python scripts/verify_release_contract.py") >= 3
+    assert "needs.select-target.outputs.release_action != 'NOOP'" in release
+
+    selector = release.split(
+        "      - name: Verify trigger provenance, current master, and release state\n",
+        1,
+    )[1].split("\n  build-native:", 1)[0]
+    for required in (
+        'run.get("head_sha") != candidate_sha',
+        'run.get("status") != "completed"',
+        'run.get("conclusion") != "success"',
+        'run.get("event") != "push"',
+        'run.get("head_branch") != "master"',
+        'head_repository.get("full_name") != repository',
+        "published release target does not match its annotated tag",
+        "published release asset set is invalid",
+        "astr-embodiment-published-assets",
+        "gh release download",
+        "sha256sum --check",
+    ):
+        assert required in selector
+    assert selector.count("len(asset_records) != 2") >= 1
+    assert "release_target_sha" in selector
+    assert "head_sha=${candidate_sha}" in selector
+    assert "--paginate --slurp" in selector
+    assert 'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"' in selector
+    assert 'if [[ ! -s "$tag_listing" ]]; then' in selector
+    assert "remote release tag lookup failed" in selector
+    assert "remote release tag lookup returned an unexpected ref" in selector
+    assert "one annotated ref and one peeled ref" in selector
+
+    assert (
+        publish_job.count('git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"') == 1
+    )
+    assert 'if [[ ! -s "$tag_listing" ]]; then' in publish_job
+    assert "remote release tag lookup failed" in publish_job
+    assert "remote release tag lookup returned an unexpected ref" in publish_job
+    assert "one annotated ref and one peeled ref" in publish_job
+
+    draft_assets = publish_job.split(
+        "      - name: Verify or upload draft assets without replacing existing "
+        "assets\n",
+        1,
+    )[1].split("\n      - name: Publish the verified draft\n", 1)[0]
+    assert "gh release upload" in draft_assets
+    assert "gh release download" in draft_assets
+    assert "cmp --silent" in draft_assets
+    assert "draft release asset set is invalid" in draft_assets
+    assert draft_assets.count("len(asset_records) != 2") >= 1
+    assert draft_assets.index("gh release upload") < draft_assets.index(
+        "gh release download"
+    )
+
+    published_assets = publish_job.split(
+        "      - name: Verify published assets and report GitHub immutability\n", 1
+    )[1]
+    assert "published release asset set is invalid" in published_assets
+    assert published_assets.count("len(asset_records) != 2") >= 1
 
 
 def test_packager_writes_an_allowlisted_zip_sha256_sidecar(tmp_path: Path) -> None:

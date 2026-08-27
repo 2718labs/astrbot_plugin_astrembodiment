@@ -85,8 +85,14 @@ jobs:
           python-version: "3.12"
       - name: Install release test dependencies
         run: python -m pip install --upgrade pip "pytest>=8,<10"
-      - name: Verify production version contract
-        run: python scripts/verify_release_contract.py --tag v1.0.0
+      - name: Derive and verify production release identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="$(python scripts/verify_release_contract.py --field version)"
+          release_tag="$(python scripts/verify_release_contract.py --field tag)"
+          python scripts/verify_release_contract.py \
+            --tag "$release_tag" --version "$release_version"
       - name: Run static release tests
         run: python -m pytest -q tests/test_production_release_contract.py
 
@@ -120,9 +126,19 @@ jobs:
         run: python -m maturin build --release --out dist
       - name: Stage current native wheel
         run: python scripts/stage_native_runtime.py --wheel-dir dist --destination .
+      - name: Resolve production version from metadata
+        id: release-identifiers
+        shell: pwsh
+        run: |
+          $releaseVersion = (python scripts/verify_release_contract.py --field version).Trim()
+          $releaseTag = (python scripts/verify_release_contract.py --field tag).Trim()
+          python scripts/verify_release_contract.py --tag "$releaseTag" --version "$releaseVersion"
+          "release_version=$releaseVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Smoke-test staged native wheel
+        env:
+          RELEASE_VERSION: ${{ steps.release-identifiers.outputs.release_version }}
         run: >-
-          python -c "import hashlib, json, pathlib, sys; import astrembodiment_core as core; root=pathlib.Path('astrembodiment_core'); manifest_path=root/'_bundled'/'manifest.json'; manifest=json.loads(manifest_path.read_text(encoding='utf-8')); key='win32' if sys.platform == 'win32' else 'linux' if sys.platform.startswith('linux') else None; assert key is not None; entry=manifest['platforms'][key]; binary=manifest_path.parent/entry['build_id']/entry['filename']; assert binary.is_file(); assert hashlib.sha256(binary.read_bytes()).hexdigest() == entry['build_id']; assert not any(root.glob('_native*.pyd')); assert not any(root.glob('_native*.so')); assert callable(core.prepare_rebirth_v1); assert callable(core.confirm_rebirth_v1); assert callable(core.semantic_revision_v1); assert callable(core.apply_perception_proposal_v1); assert core.version() == '1.0.0'; print(binary)"
+          python -c "import hashlib, json, os, pathlib, sys; import astrembodiment_core as core; root=pathlib.Path('astrembodiment_core'); manifest_path=root/'_bundled'/'manifest.json'; manifest=json.loads(manifest_path.read_text(encoding='utf-8')); key='win32' if sys.platform == 'win32' else 'linux' if sys.platform.startswith('linux') else None; assert key is not None; entry=manifest['platforms'][key]; binary=manifest_path.parent/entry['build_id']/entry['filename']; assert binary.is_file(); assert hashlib.sha256(binary.read_bytes()).hexdigest() == entry['build_id']; assert not any(root.glob('_native*.pyd')); assert not any(root.glob('_native*.so')); assert callable(core.prepare_rebirth_v1); assert callable(core.confirm_rebirth_v1); assert callable(core.semantic_revision_v1); assert callable(core.apply_perception_proposal_v1); assert core.version() == os.environ['RELEASE_VERSION']; print(binary)"
       - name: Save native wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -187,23 +203,39 @@ jobs:
         with:
           pattern: native-wheel-*
           path: wheels
+      - name: Resolve metadata-derived release asset names
+        id: release-identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="$(python scripts/verify_release_contract.py --field version)"
+          release_tag="$(python scripts/verify_release_contract.py --field tag)"
+          python scripts/verify_release_contract.py \
+            --tag "$release_tag" --version "$release_version"
+          archive_name="astrbot_plugin_astrembodiment-v${release_version}-win_linux_x86_64.zip"
+          printf 'release_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"
+          printf 'archive_name=%s\n' "$archive_name" >> "$GITHUB_OUTPUT"
+          printf 'checksum_name=%s\n' "${archive_name}.sha256" >> "$GITHUB_OUTPUT"
       - name: Assemble allowlisted ZIP
-        run: >-
-          python scripts/package_plugin.py
-          --output dist/astrbot_plugin_astrembodiment-v1.0.0-win_linux_x86_64.zip
-          --sha256-output dist/astrbot_plugin_astrembodiment-v1.0.0-win_linux_x86_64.zip.sha256
-          --native-wheel wheels/native-wheel-windows/*.whl
-          --native-wheel wheels/native-wheel-linux/*.whl
+        env:
+          ARCHIVE_NAME: ${{ steps.release-identifiers.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ steps.release-identifiers.outputs.checksum_name }}
+        run: |
+          python scripts/package_plugin.py \
+            --output "dist/${ARCHIVE_NAME}" \
+            --sha256-output "dist/${CHECKSUM_NAME}" \
+            --native-wheel wheels/native-wheel-windows/*.whl \
+            --native-wheel wheels/native-wheel-linux/*.whl
       - name: Run allowlisted ZIP package contract
         run: python -m pytest -q tests/test_release_contracts.py
       - name: Verify allowlisted ZIP and SHA256
-        run: >-
-          cd dist && sha256sum --check
-          astrbot_plugin_astrembodiment-v1.0.0-win_linux_x86_64.zip.sha256
+        env:
+          CHECKSUM_NAME: ${{ steps.release-identifiers.outputs.checksum_name }}
+        run: cd dist && sha256sum --check "$CHECKSUM_NAME"
       - name: Save release-candidate assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: astrbot-plugin-1.0.0-release-candidate
-          path: dist/astrbot_plugin_astrembodiment-v1.0.0-win_linux_x86_64.zip*
+          name: astrbot-plugin-${{ steps.release-identifiers.outputs.release_version }}-release-candidate
+          path: dist/${{ steps.release-identifiers.outputs.archive_name }}*
           if-no-files-found: error
           retention-days: 14
