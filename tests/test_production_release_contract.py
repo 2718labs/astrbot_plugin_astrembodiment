@@ -249,6 +249,13 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert rebuilt_cleanup in release
     assert release.index(rebuilt_archive) < release.index(rebuilt_compare)
     assert release.index(rebuilt_compare) < release.index(rebuilt_cleanup)
+    assemble_release = release.split("  assemble-release:\n", 1)[1].split(
+        "\n  publish-release:", 1
+    )[0]
+    assert release.count("sha256sum --check") == 5
+    assert 'cd "$(dirname "$checksum")"' in assemble_release
+    assert 'sha256sum --check "$(basename "$checksum")"' in assemble_release
+    assert 'sha256sum --check "$checksum"' not in assemble_release
     select_target_job = release.split("  select-target:\n", 1)[1].split(
         "\n  build-native:", 1
     )[0]
@@ -291,6 +298,10 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         assert required in selector
     assert selector.count("len(asset_records) != 2") >= 1
     assert "release_target_sha" in selector
+    assert (
+        'cd "$download_dir"\n              sha256sum --check "$checksum_name"'
+        in selector
+    )
     assert "head_sha=${candidate_sha}" in selector
     assert "--paginate --slurp" in selector
     assert 'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"' in selector
@@ -306,6 +317,12 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     assert "remote release tag lookup failed" in publish_job
     assert "remote release tag lookup returned an unexpected ref" in publish_job
     assert "one annotated ref and one peeled ref" in publish_job
+    assert (
+        'cd release-assets\n            sha256sum --check "$CHECKSUM_NAME"'
+        in publish_job
+    )
+    assert publish_job.count('cd "$download_dir"') >= 2
+    assert publish_job.count('sha256sum --check "$CHECKSUM_NAME"') == 3
 
     draft_assets = publish_job.split(
         "      - name: Verify or upload draft assets without replacing existing "

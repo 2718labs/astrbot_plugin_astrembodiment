@@ -452,7 +452,7 @@ jobs:
             --native-wheel wheels/native-wheel-linux/*.whl
           cmp --silent "$archive" "$rebuilt"
           rm -f "$rebuilt"
-          sha256sum --check "$checksum"
+          (cd "$(dirname "$checksum")" && sha256sum --check "$(basename "$checksum")")
           printf 'archive_sha256=%s\n' "$(sha256sum "$archive" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
       - name: Run the fresh-wheel release archive contract
         env:
