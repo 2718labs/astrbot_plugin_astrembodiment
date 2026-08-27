@@ -440,7 +440,7 @@ jobs:
           set -euo pipefail
           archive="dist/${ARCHIVE_NAME}"
           checksum="dist/${CHECKSUM_NAME}"
-          rebuilt="dist/.${ARCHIVE_NAME}.rebuild"
+          rebuilt="dist/.${ARCHIVE_NAME%.zip}.rebuild.zip"
           python scripts/package_plugin.py \
             --output "$archive" \
             --sha256-output "$checksum" \
@@ -451,6 +451,7 @@ jobs:
             --native-wheel wheels/native-wheel-windows/*.whl \
             --native-wheel wheels/native-wheel-linux/*.whl
           cmp --silent "$archive" "$rebuilt"
+          rm -f "$rebuilt"
           sha256sum --check "$checksum"
           printf 'archive_sha256=%s\n' "$(sha256sum "$archive" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
       - name: Run the fresh-wheel release archive contract
