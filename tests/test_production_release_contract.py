@@ -51,14 +51,28 @@ def test_release_contract_verifier_accepts_only_the_production_tag() -> None:
     assert verifier.is_file()
 
     accepted = subprocess.run(
-        [sys.executable, str(verifier), "--tag", "v1.0.0"],
+        [
+            sys.executable,
+            str(verifier),
+            "--tag",
+            "v1.0.0",
+            "--version",
+            "1.0.0",
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
     )
     rejected = subprocess.run(
-        [sys.executable, str(verifier), "--tag", "v1.0.0-rc2"],
+        [
+            sys.executable,
+            str(verifier),
+            "--tag",
+            "v1.0.0-rc2",
+            "--version",
+            "1.0.0",
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -69,8 +83,25 @@ def test_release_contract_verifier_accepts_only_the_production_tag() -> None:
     assert rejected.returncode != 0
     assert "version mismatch" in rejected.stderr
 
+    wrong_version = subprocess.run(
+        [
+            sys.executable,
+            str(verifier),
+            "--tag",
+            "v1.0.0",
+            "--version",
+            "1.0.1",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert wrong_version.returncode != 0
+    assert "version mismatch" in wrong_version.stderr
 
-def test_ci_and_release_workflows_are_cross_platform_and_dispatch_only() -> None:
+
+def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     release_path = ROOT / ".github" / "workflows" / "release.yml"
     assert release_path.is_file()
@@ -86,6 +117,10 @@ def test_ci_and_release_workflows_are_cross_platform_and_dispatch_only() -> None
         "python scripts/verify_release_contract.py",
     ):
         assert required in ci
+
+    assert "push:\n    branches:\n      - master" in ci
+    assert "pull_request:\n    branches:\n      - master" in ci
+    assert "github.event.pull_request.number || github.ref" in ci
 
     package_matrix = ci.split("  native-package:\n", 1)[1].split(
         "\n  assemble-allowlisted-zip:", 1
@@ -136,15 +171,34 @@ def test_ci_and_release_workflows_are_cross_platform_and_dispatch_only() -> None
     ):
         assert required in package_matrix
 
-    assert "workflow_dispatch:" in release
-    assert "channel:" in release
-    assert "production" in release
-    assert "github.event.repository.default_branch" in release
+    for required in (
+        "workflow_dispatch:",
+        "target_sha:",
+        "version:",
+        "refs/heads/master",
+        "git fetch origin master",
+        "git tag -a",
+        "gh release create",
+        "--draft",
+        "--verify-tag",
+        "gh release upload",
+        "gh release edit",
+        "isImmutable",
+        "sha256sum",
+        "cmp --silent",
+        "native-wheel-windows",
+        "native-wheel-linux",
+        "python scripts/package_plugin.py",
+    ):
+        assert required in release
     assert "push:" not in release
-    assert "sha256sum" in release
-    assert "allowlisted ZIP" in release
     assert "actions/upload-artifact@" in release
-    assert "gh release create" not in release
+    assert release.count("contents: write") == 1
+    publish_job = release.split("  publish-release:\n", 1)[1]
+    assert "permissions:\n      contents: write" in publish_job
+    assert "--force" not in release
+    assert "--clobber" not in release
+    assert "publication is intentionally outside this workflow" in release
 
 
 def test_packager_writes_an_allowlisted_zip_sha256_sidecar(tmp_path: Path) -> None:
@@ -186,3 +240,44 @@ def test_packager_writes_an_allowlisted_zip_sha256_sidecar(tmp_path: Path) -> No
     with zipfile.ZipFile(output) as archive:
         assert "main.py" in archive.namelist()
         assert not any(name.startswith("tests/") for name in archive.namelist())
+        assert all(
+            info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist()
+        )
+        assert all(
+            info.compress_type == zipfile.ZIP_STORED for info in archive.infolist()
+        )
+
+    repeated_output = tmp_path / "astrbot_plugin_astrembodiment-repeat.zip"
+    repeated = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "package_plugin.py"),
+            "--output",
+            str(repeated_output),
+            "--native-wheel",
+            str(wheel),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert repeated.returncode == 0, repeated.stderr
+    assert repeated_output.read_bytes() == output.read_bytes()
+
+    overwrite = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "package_plugin.py"),
+            "--output",
+            str(output),
+            "--native-wheel",
+            str(wheel),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert overwrite.returncode != 0
+    assert "refusing to overwrite" in overwrite.stderr

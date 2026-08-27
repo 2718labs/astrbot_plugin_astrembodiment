@@ -11,6 +11,13 @@
 
 AstrEmbodiment 首个正式版本。
 
+### 正式发布流程
+
+- 统一 marketplace metadata、Python project、Rust workspace 和标签目标为 `1.0.0`。
+- 合并到 `master` 后，维护者可手动 dispatch 正式发布工作流；它会核对当前 `master`、目标 SHA、版本、标签和更新记录是否一致。
+- 工作流会重新构建 Windows x64 / Linux x86_64 原生轮子，复现并校验确定性的 allowlist ZIP 与 SHA-256 sidecar，再创建或继续同一目标的草稿 GitHub Release。
+- 仅发布步骤拥有仓库写权限：它创建带注释标签、核验远端资产的哈希与大小，发布后要求 GitHub 将 Release 标记为不可变；工作流不直接上传 AstrBot Marketplace。
+
 ### 新增
 
 - 提供“用户话语 → 15 维闭合语义证据 → 原生状态原子提交 → 受限表达投影”的完整运行链路。

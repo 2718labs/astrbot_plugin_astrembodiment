@@ -67,7 +67,9 @@ def _locked_workspace_versions(root: Path, cargo: dict[str, object]) -> set[str]
     return versions
 
 
-def verify_release_contract(root: Path, tag: str | None = None) -> str:
+def verify_release_contract(
+    root: Path, tag: str | None = None, version: str | None = None
+) -> str:
     """Return the expected tag after checking all public production markers."""
     metadata_version = _metadata_version(root)
     cargo = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
@@ -100,15 +102,22 @@ def verify_release_contract(root: Path, tag: str | None = None) -> str:
         raise ReleaseContractError(
             f"version mismatch: tag={tag!r}, expected={expected_tag!r}"
         )
+    if version is not None and version != metadata_version:
+        raise ReleaseContractError(
+            f"version mismatch: version={version!r}, expected={metadata_version!r}"
+        )
     return expected_tag
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", help="expected Git tag, for example v1.0.0")
+    parser.add_argument(
+        "--version", help="expected production version, for example 1.0.0"
+    )
     args = parser.parse_args()
     try:
-        tag = verify_release_contract(ROOT, args.tag)
+        tag = verify_release_contract(ROOT, args.tag, args.version)
     except (OSError, tomllib.TOMLDecodeError, ReleaseContractError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
