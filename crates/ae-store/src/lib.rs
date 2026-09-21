@@ -348,6 +348,8 @@ impl LeaseStatus {
         }
     }
 
+    // Preserve the established storage/API shape in this compatibility boundary.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         Some(match value {
             "claimed" => LeaseStatus::Claimed,
@@ -469,6 +471,8 @@ pub(crate) struct PreparedJournalCommit {
 /// `UserStimulus` out of its semantic transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JournalCommitLane {
+    // Retained historical verification data; no active executor is restored.
+    #[allow(dead_code)]
     JournalOnly,
     PairedSemantic,
 }
@@ -587,6 +591,8 @@ pub(crate) fn query_bounded_journal_row(
         .transpose()
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::type_complexity)]
 pub(crate) fn query_bounded_snapshot_row(
     conn: &Connection,
     scope_digest: &Digest,
@@ -769,8 +775,9 @@ impl Store {
                 semantic::migrate_schema(&tx)?;
                 tx.commit()?;
             }
-            core_boundary_v9::OpenRoute::Fresh | core_boundary_v9::OpenRoute::Legacy(0..=7) =>
-                Self::migrate(conn)?,
+            core_boundary_v9::OpenRoute::Fresh | core_boundary_v9::OpenRoute::Legacy(0..=7) => {
+                Self::migrate(conn)?
+            }
             _ => return Err(StoreError::ContinuityFence("V9_INVALID_UPGRADE_ROUTE")),
         }
         if core_boundary_v9::upgrade(conn)? == core_boundary_v9::TerminalState::FailedClosed {
@@ -779,6 +786,8 @@ impl Store {
         Ok(())
     }
 
+    // Retained historical verification data; no active executor is restored.
+    #[allow(dead_code)]
     fn enforce_core_boundary_v9_retired(
         &self,
         operation: core_boundary_v9::RetiredOperationTagV1,
@@ -1210,7 +1219,7 @@ impl Store {
                         digest
                     });
                     let nonce = stored.or(offered_nonce).ok_or(StoreError::LeaseNotFound)?;
-                    let new_epoch = (epoch + 1) as i64;
+                    let new_epoch = epoch + 1;
                     tx.execute(
                         "UPDATE genesis_leases SET lease_epoch = ?2, status = 'claimed', nonce_digest = ?3, manifest_digest = NULL, incarnation_id = NULL, updated_at_ms = ?4 WHERE scope_key = ?1",
                         params![blob(*scope_key), new_epoch, blob(nonce), now as i64],
@@ -2061,6 +2070,8 @@ impl Store {
         Ok(())
     }
 
+    // Retained historical verification data; no active executor is restored.
+    #[allow(dead_code)]
     pub(crate) fn journal_row_from_prepared(
         envelope: &CommitEnvelope,
         prepared: &PreparedJournalCommit,
@@ -2078,10 +2089,10 @@ impl Store {
         }
     }
 
-    /// CAS commit of one journal entry. The caller supplies the chain seed
-    /// (genesis snapshot digest for the first entry, previous chain digest
-    /// afterwards); the store verifies it against its own last chain digest
-    /// and appends atomically. Duplicate events update zero rows and fail.
+    // CAS commit of one journal entry. The caller supplies the chain seed
+    // (genesis snapshot digest for the first entry, previous chain digest
+    // afterwards); the store verifies it against its own last chain digest
+    // and appends atomically. Duplicate events update zero rows and fail.
 
     // ------------------------------------------------------------ snapshots
 

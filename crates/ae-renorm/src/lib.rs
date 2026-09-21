@@ -59,7 +59,7 @@ fn l0_tokens(field: &NeuralField) -> Vec<[Fixed; 8]> {
 }
 
 fn restrict_once(children: &[[Fixed; 8]]) -> Result<Vec<[Fixed; 8]>, RenormError> {
-    if children.is_empty() || children.len() % 8 != 0 {
+    if children.is_empty() || !children.len().is_multiple_of(8) {
         return Err(RenormError::InvalidLevelShape);
     }
     Ok(children
@@ -72,9 +72,11 @@ fn restrict_once(children: &[[Fixed; 8]]) -> Result<Vec<[Fixed; 8]>, RenormError
                     .map(|child| i128::from(child[component].raw()))
                     .sum::<i128>();
                 let mean = sum / 8;
-                token[component] = Fixed::from_raw(
-                    i64::try_from(mean).unwrap_or(if mean < 0 { i64::MIN } else { i64::MAX }),
-                );
+                token[component] = Fixed::from_raw(i64::try_from(mean).unwrap_or(if mean < 0 {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }));
             }
             token
         })
@@ -117,10 +119,7 @@ pub fn restrict(
     }
     Ok(RenormPyramid {
         levels: [l0, l1, l2, l3],
-        mapping_digest: wire::domain_hash(
-            b"ae.renorm.mapping.v1",
-            &[formula_digest, &layout],
-        ),
+        mapping_digest: wire::domain_hash(b"ae.renorm.mapping.v1", &[formula_digest, &layout]),
         consistency_residual: Fixed::from_raw(residual),
     })
 }
@@ -135,10 +134,7 @@ fn score(token: &[Fixed; 8]) -> Fixed {
     Fixed::from_raw(i64::try_from(raw).unwrap_or(if raw < 0 { i64::MIN } else { i64::MAX }))
 }
 
-pub fn compete(
-    pyramid: &RenormPyramid,
-    threshold: Fixed,
-) -> Option<WorkspaceWinnerV1> {
+pub fn compete(pyramid: &RenormPyramid, threshold: Fixed) -> Option<WorkspaceWinnerV1> {
     pyramid.levels[3]
         .iter()
         .enumerate()
@@ -203,7 +199,10 @@ mod tests {
         assert_eq!(first.mapping_digest, second.mapping_digest);
         assert_eq!(first.levels, second.levels);
         assert_eq!(first.consistency_residual, second.consistency_residual);
-        assert_ne!(first.mapping_digest, restrict(&field, &[8; 32]).unwrap().mapping_digest);
+        assert_ne!(
+            first.mapping_digest,
+            restrict(&field, &[8; 32]).unwrap().mapping_digest
+        );
     }
 
     #[test]

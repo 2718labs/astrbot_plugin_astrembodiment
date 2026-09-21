@@ -126,6 +126,8 @@ impl SemanticTransitionKindV1 {
         }
     }
 
+    // Existing closed parser returns Option; preserve that public contract.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "perception" => Some(Self::Perception),
@@ -485,21 +487,29 @@ impl PerceptionOriginCommitmentV1 {
     /// Core-only projection. The historical relation-required validator above
     /// remains unchanged; only Store-authenticated core origins use this form.
     pub fn validate_core_v1(&self) -> bool {
-        if self.scope.relation_token.is_some() || self.relation_present
+        if self.scope.relation_token.is_some()
+            || self.relation_present
             || self.relation_scope != self.persona_scope
-            || self.scope.session_token != self.turn_id || self.event_id != self.turn_id {
+            || self.scope.session_token != self.turn_id
+            || self.event_id != self.turn_id
+        {
             return false;
         }
         // Apply precisely the same non-relation constraints through the legacy
         // validator without changing any public bytes or origin digest.
         let mut legacy = self.clone();
-        legacy.scope.relation_token = Some([1;16]);
+        legacy.scope.relation_token = Some([1; 16]);
         legacy.scope_digest = wire::scope_digest(&legacy.scope);
         legacy.relation_present = true;
-        legacy.relation_scope = wire::persona_scope_digest(&legacy.scope.bot_token,&legacy.scope.persona_token,Some(&[1;16]));
+        legacy.relation_scope = wire::persona_scope_digest(
+            &legacy.scope.bot_token,
+            &legacy.scope.persona_token,
+            Some(&[1; 16]),
+        );
         legacy.origin_digest = legacy.digest_v1();
         self.scope_digest == wire::scope_digest(&self.scope)
-            && self.origin_digest == self.digest_v1() && legacy.validate_v1()
+            && self.origin_digest == self.digest_v1()
+            && legacy.validate_v1()
     }
 }
 

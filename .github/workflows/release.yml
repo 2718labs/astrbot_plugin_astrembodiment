@@ -1,0 +1,1141 @@
+name: Publish production release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A static lock covers every version because metadata is read only after the
+  # selected CI target is proven to still be the current master commit.
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  select-target:
+    name: Select a current successful master target
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      eligible: ${{ steps.target.outputs.eligible }}
+      control_sha: ${{ steps.target.outputs.control_sha }}
+      target_sha: ${{ steps.target.outputs.target_sha }}
+      tag_object_sha: ${{ steps.target.outputs.tag_object_sha }}
+      release_version: ${{ steps.target.outputs.release_version }}
+      release_tag: ${{ steps.target.outputs.release_tag }}
+      archive_name: ${{ steps.target.outputs.archive_name }}
+      checksum_name: ${{ steps.target.outputs.checksum_name }}
+      release_action: ${{ steps.target.outputs.release_action }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install static release test dependencies
+        run: python -m pip install --upgrade pip "pytest>=8,<10"
+      - name: Verify trigger provenance, current master, and release state
+        id: target
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion || '' }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event || '' }}
+          WORKFLOW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch || '' }}
+          WORKFLOW_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name || '' }}
+          WORKFLOW_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+        run: |
+          set -euo pipefail
+
+          skip() {
+            local reason="$1"
+            echo "::notice title=Production release skipped::${reason}"
+            printf 'eligible=false\n' >> "$GITHUB_OUTPUT"
+            printf 'release_action=SKIP\n' >> "$GITHUB_OUTPUT"
+          }
+
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            if [[ "$WORKFLOW_CONCLUSION" != "success" ||
+                  "$WORKFLOW_EVENT" != "push" ||
+                  "$WORKFLOW_HEAD_BRANCH" != "master" ||
+                  "$WORKFLOW_HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
+              skip "workflow_run did not satisfy success/push/master/same-repository provenance"
+              exit 0
+            fi
+            candidate_sha="$WORKFLOW_HEAD_SHA"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+              echo "workflow_dispatch must run on master" >&2
+              exit 1
+            fi
+            candidate_sha="$GITHUB_SHA"
+          else
+            echo "unsupported production release trigger: $EVENT_NAME" >&2
+            exit 1
+          fi
+
+          if [[ ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release target is not a full lowercase Git SHA" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          master_sha="$(git rev-parse origin/master)"
+          if [[ "$candidate_sha" != "$master_sha" ]]; then
+            if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+              skip "stale successful CI run: $candidate_sha is no longer current master $master_sha"
+              exit 0
+            fi
+            echo "workflow_dispatch may only restore the current master SHA" >&2
+            exit 1
+          fi
+
+          control_sha="$candidate_sha"
+          target_sha="$control_sha"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            ci_runs="$RUNNER_TEMP/current-master-ci-runs.json"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${control_sha}" \
+              > "$ci_runs"
+            python - "$ci_runs" "$control_sha" "$GITHUB_REPOSITORY" <<'PY'
+          import json
+          import sys
+
+          pages = json.load(open(sys.argv[1], encoding="utf-8"))
+          candidate_sha, repository = sys.argv[2:]
+          if not isinstance(pages, list):
+              raise SystemExit("workflow_dispatch CI query returned invalid paginated data")
+          for page in pages:
+              if not isinstance(page, dict):
+                  raise SystemExit("workflow_dispatch CI query returned an invalid page")
+              runs = page.get("workflow_runs")
+              if not isinstance(runs, list):
+                  raise SystemExit("workflow_dispatch CI query returned an invalid workflow run list")
+              for run in runs:
+                  if not isinstance(run, dict):
+                      continue
+                  head_repository = run.get("head_repository")
+                  if not isinstance(head_repository, dict):
+                      continue
+                  if (
+                      run.get("head_sha") != candidate_sha
+                      or run.get("status") != "completed"
+                      or run.get("conclusion") != "success"
+                      or run.get("event") != "push"
+                      or run.get("head_branch") != "master"
+                      or head_repository.get("full_name") != repository
+                  ):
+                      continue
+                  raise SystemExit(0)
+          raise SystemExit("workflow_dispatch requires a successful CI push run for current master")
+          PY
+          fi
+
+          git cat-file -e "$control_sha^{commit}"
+          git checkout --detach "$control_sha"
+
+          release_version="$(python scripts/verify_release_contract.py --field version)"
+          release_tag="$(python scripts/verify_release_contract.py --field tag)"
+          python scripts/verify_release_contract.py \
+            --tag "$release_tag" --version "$release_version"
+          python -m pytest -q tests/test_production_release_contract.py
+
+          archive_name="astrbot_plugin_astrembodiment-v${release_version}-win_linux_x86_64.zip"
+          checksum_name="${archive_name}.sha256"
+          tag_ref="refs/tags/${release_tag}"
+
+          require_successful_master_ci() {
+            local required_sha="$1"
+            local purpose="$2"
+            local ci_runs="$RUNNER_TEMP/${purpose// /-}-ci-runs.json"
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${required_sha}" \
+              > "$ci_runs"
+            python - "$ci_runs" "$required_sha" "$GITHUB_REPOSITORY" "$purpose" <<'PY'
+          import json
+          import sys
+
+          pages = json.load(open(sys.argv[1], encoding="utf-8"))
+          required_sha, repository, purpose = sys.argv[2:]
+          if not isinstance(pages, list):
+              raise SystemExit(f"{purpose} CI query returned invalid paginated data")
+          for page in pages:
+              if not isinstance(page, dict):
+                  raise SystemExit(f"{purpose} CI query returned an invalid page")
+              runs = page.get("workflow_runs")
+              if not isinstance(runs, list):
+                  raise SystemExit(f"{purpose} CI query returned an invalid workflow run list")
+              for run in runs:
+                  if not isinstance(run, dict):
+                      continue
+                  head_repository = run.get("head_repository")
+                  if not isinstance(head_repository, dict):
+                      continue
+                  if (
+                      run.get("head_sha") != required_sha
+                      or run.get("status") != "completed"
+                      or run.get("conclusion") != "success"
+                      or run.get("event") != "push"
+                      or run.get("head_branch") != "master"
+                      or head_repository.get("full_name") != repository
+                  ):
+                      continue
+                  raise SystemExit(0)
+          raise SystemExit(f"{purpose} requires a successful CI push run for the exact master commit")
+          PY
+          }
+
+          inspect_annotated_tag() {
+            local require_tag="$1"
+            local tag_listing="$RUNNER_TEMP/release-tag.txt"
+            local ls_remote_tag_object_sha=""
+            local ls_remote_peeled_sha=""
+            local fetch_tag_object_sha=""
+            local fetch_peeled_sha=""
+            local object_sha=""
+            local remote_ref=""
+            local tag_ref_count=0
+            local peeled_ref_count=0
+            tag_exists=false
+            tag_object_sha=""
+            tag_target_sha=""
+            tag_object_file="$RUNNER_TEMP/release-tag-object.txt"
+            if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
+              echo "remote release tag lookup failed" >&2
+              exit 1
+            fi
+            if [[ ! -s "$tag_listing" ]]; then
+              if [[ "$require_tag" == true ]]; then
+                echo "required release tag is missing: ${release_tag}" >&2
+                exit 1
+              fi
+              return
+            fi
+            while IFS=$'\t' read -r object_sha remote_ref; do
+              if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "remote release tag lookup returned an invalid object id" >&2
+                exit 1
+              fi
+              case "$remote_ref" in
+                "$tag_ref")
+                  ((tag_ref_count += 1))
+                  ls_remote_tag_object_sha="$object_sha"
+                  ;;
+                "${tag_ref}^{}")
+                  ((peeled_ref_count += 1))
+                  ls_remote_peeled_sha="$object_sha"
+                  ;;
+                *)
+                  echo "remote release tag lookup returned an unexpected ref" >&2
+                  exit 1
+                  ;;
+              esac
+            done < "$tag_listing"
+            if [[ "$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1 ]]; then
+              echo "remote release tag lookup must contain one annotated ref and one peeled ref" >&2
+              exit 1
+            fi
+            git fetch --no-tags origin "$tag_ref"
+            fetch_tag_object_sha="$(git rev-parse FETCH_HEAD)"
+            fetch_peeled_sha="$(git rev-parse FETCH_HEAD^{commit})"
+            if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
+                  "$(git cat-file -t "$ls_remote_tag_object_sha")" != tag ||
+                  "$fetch_tag_object_sha" != "$ls_remote_tag_object_sha" ||
+                  "$fetch_peeled_sha" != "$ls_remote_peeled_sha" ]]; then
+              echo "release tag did not resolve to its advertised annotated object" >&2
+              exit 1
+            fi
+            git cat-file -e "$fetch_peeled_sha^{commit}"
+            tag_object_sha="$ls_remote_tag_object_sha"
+            tag_target_sha="$ls_remote_peeled_sha"
+            git cat-file -p "$tag_object_sha" > "$tag_object_file"
+            tag_exists=true
+          }
+
+          validate_tag_only_recovery() {
+            local target_metadata="$RUNNER_TEMP/tag-only-target-metadata.yaml"
+            if [[ "$tag_exists" != true ]]; then
+              echo "tag-only recovery requires an existing annotated release tag" >&2
+              exit 1
+            fi
+            if [[ "$tag_target_sha" == "$control_sha" ]]; then
+              echo "tag-only recovery target must be an older master ancestor" >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$tag_target_sha" "$control_sha"; then
+              echo "tag-only release target is not an ancestor of current master" >&2
+              exit 1
+            fi
+            python - "$tag_object_file" "$release_tag" "$release_version" "$tag_target_sha" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          tag_object = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          tag, version, target = sys.argv[2:]
+          header, separator, message = tag_object.partition("\n\n")
+          header_lines = header.splitlines()
+          expected_tagger = (
+              "tagger github-actions[bot] "
+              "<41898282+github-actions[bot]@users.noreply.github.com> "
+          )
+          if separator != "\n\n" or len(header_lines) != 4:
+              raise SystemExit("tag-only recovery tag object has an invalid header")
+          if header_lines[0] != f"object {target}":
+              raise SystemExit("tag-only recovery tag object target does not match peeled SHA")
+          if header_lines[1] != "type commit" or header_lines[2] != f"tag {tag}":
+              raise SystemExit("tag-only recovery tag object type or name is invalid")
+          if re.fullmatch(re.escape(expected_tagger) + r"\d+ [+-]\d{4}", header_lines[3]) is None:
+              raise SystemExit("tag-only recovery tagger is not github-actions[bot]")
+          if message != f"Release {version}":
+              raise SystemExit("tag-only recovery tag message is invalid")
+          PY
+            git show "${tag_target_sha}:metadata.yaml" > "$target_metadata"
+            python - "$target_metadata" "$release_version" "$release_tag" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          metadata = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          expected_version, expected_tag = sys.argv[2:]
+          match = re.search(r'^version:\s*"([^"]+)"\s*$', metadata, re.MULTILINE)
+          if match is None or match.group(1) != expected_version or f"v{match.group(1)}" != expected_tag:
+              raise SystemExit("tag-only recovery target version and tag do not match current metadata")
+          PY
+            require_successful_master_ci "$tag_target_sha" "tag-only recovery"
+          }
+
+          validate_published_release_assets() {
+            local state_path="$1"
+            python - "$state_path" "$archive_name" "$checksum_name" <<'PY'
+          import json
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          archive_name, checksum_name = sys.argv[2:]
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("published release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {archive_name, checksum_name}
+          if (
+              len(asset_records) != 2
+              or len(asset_names) != len(set(asset_names))
+              or set(asset_names) != expected_assets
+          ):
+              raise SystemExit("published release asset set is invalid")
+          PY
+            local download_dir
+            download_dir="$(mktemp -d "$RUNNER_TEMP/astr-embodiment-published-assets.XXXXXX")"
+            gh release download "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$download_dir" \
+              --pattern "$archive_name"
+            gh release download "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --dir "$download_dir" \
+              --pattern "$checksum_name"
+            test -s "$download_dir/${archive_name}"
+            test -s "$download_dir/${checksum_name}"
+            (
+              cd "$download_dir"
+              sha256sum --check "$checksum_name"
+            )
+          }
+
+          release_json="$RUNNER_TEMP/release-state.json"
+          release_error="$RUNNER_TEMP/release-state.err"
+          release_action=PUBLISH
+          tag_object_sha=""
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${release_tag}" \
+              > "$release_json" 2> "$release_error"; then
+            state_info="$(python - "$release_json" "$release_tag" "$control_sha" <<'PY'
+          import json
+          import re
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, control_sha = sys.argv[2:]
+          if release.get("tag_name") != tag:
+              raise SystemExit("existing release tag does not match metadata-derived tag")
+          if release.get("prerelease") is not False:
+              raise SystemExit("production release must not be a prerelease")
+          release_target_sha = release.get("target_commitish")
+          if not isinstance(release_target_sha, str) or re.fullmatch(r"[0-9a-f]{40}", release_target_sha) is None:
+              raise SystemExit("existing release must record a full original release commit")
+          if release.get("draft") is True:
+              if release_target_sha != control_sha:
+                  raise SystemExit("existing draft release target does not match current master")
+              if release.get("immutable") is True:
+                  raise SystemExit("existing draft release is unexpectedly immutable")
+              print(f"RESUME {release_target_sha}")
+          elif release.get("draft") is False:
+              state = "NOOP_WARN" if release.get("immutable") is not True else "NOOP"
+              print(f"{state} {release_target_sha}")
+          else:
+              raise SystemExit("existing release has an invalid draft state")
+          PY
+            )"
+            read -r state release_target_sha <<< "$state_info"
+            case "$state" in
+              RESUME)
+                inspect_annotated_tag true
+                if [[ "$tag_target_sha" != "$release_target_sha" ]]; then
+                  echo "existing draft release target does not match its annotated tag" >&2
+                  exit 1
+                fi
+                target_sha="$control_sha"
+                release_action=RESUME
+                ;;
+              NOOP)
+                inspect_annotated_tag true
+                if [[ "$tag_target_sha" != "$release_target_sha" ]]; then
+                  echo "published release target does not match its annotated tag" >&2
+                  exit 1
+                fi
+                target_sha="$tag_target_sha"
+                validate_published_release_assets "$release_json"
+                release_action=NOOP
+                ;;
+              NOOP_WARN)
+                inspect_annotated_tag true
+                if [[ "$tag_target_sha" != "$release_target_sha" ]]; then
+                  echo "published release target does not match its annotated tag" >&2
+                  exit 1
+                fi
+                target_sha="$tag_target_sha"
+                validate_published_release_assets "$release_json"
+                echo "::warning title=GitHub Release immutability unavailable::${release_tag} is already published, but GitHub reports immutable=false. No release asset was changed."
+                release_action=NOOP
+                ;;
+              *)
+                echo "unrecognized release state: $state" >&2
+                exit 1
+                ;;
+            esac
+          elif grep -Eq 'HTTP 404|Not Found' "$release_error"; then
+            inspect_annotated_tag false
+            if [[ "$tag_exists" == true ]]; then
+              validate_tag_only_recovery
+              target_sha="$tag_target_sha"
+              release_action=RECOVER_TAG_ONLY
+            fi
+          else
+            cat "$release_error" >&2
+            exit 1
+          fi
+
+          printf 'eligible=true\n' >> "$GITHUB_OUTPUT"
+          printf 'control_sha=%s\n' "$control_sha" >> "$GITHUB_OUTPUT"
+          printf 'target_sha=%s\n' "$target_sha" >> "$GITHUB_OUTPUT"
+          printf 'tag_object_sha=%s\n' "$tag_object_sha" >> "$GITHUB_OUTPUT"
+          printf 'release_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"
+          printf 'release_tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
+          printf 'archive_name=%s\n' "$archive_name" >> "$GITHUB_OUTPUT"
+          printf 'checksum_name=%s\n' "$checksum_name" >> "$GITHUB_OUTPUT"
+          case "$release_action" in
+            NOOP) printf 'release_action=NOOP\n' >> "$GITHUB_OUTPUT" ;;
+            RESUME) printf 'release_action=RESUME\n' >> "$GITHUB_OUTPUT" ;;
+            PUBLISH) printf 'release_action=PUBLISH\n' >> "$GITHUB_OUTPUT" ;;
+            RECOVER_TAG_ONLY) printf 'release_action=RECOVER_TAG_ONLY\n' >> "$GITHUB_OUTPUT" ;;
+            *) echo "invalid release action: $release_action" >&2; exit 1 ;;
+          esac
+
+  build-native:
+    name: Rebuild native wheel (${{ matrix.name }})
+    needs: select-target
+    if: >-
+      needs.select-target.outputs.eligible == 'true' &&
+      needs.select-target.outputs.release_action != 'NOOP'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-2022
+            artifact: native-wheel-windows
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+            artifact: native-wheel-linux
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.select-target.outputs.target_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install stable Rust and packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          python -m pip install --upgrade pip maturin==1.14.1
+      - name: Recheck metadata-derived version at the release target
+        id: version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.select-target.outputs.release_version }}
+          RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python scripts/verify_release_contract.py --tag "$RELEASE_TAG" --version "$RELEASE_VERSION"
+          derived_version="$(python scripts/verify_release_contract.py --field version)"
+          test "$derived_version" = "$RELEASE_VERSION"
+          printf 'release_version=%s\n' "$derived_version" >> "$GITHUB_OUTPUT"
+      - name: Rebuild native wheel from the selected SHA
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.select-target.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            python -m pip install ziglang==0.13.0
+            python scripts/package_plugin.py --build-native --source-sha "$SOURCE_SHA" --output "$RUNNER_TEMP/native-wheels" --target x86_64-unknown-linux-gnu --compatibility manylinux_2_17 --zig
+          else
+            python scripts/package_plugin.py --build-native --source-sha "$SOURCE_SHA" --output "$RUNNER_TEMP/native-wheels" --target x86_64-pc-windows-msvc
+          fi
+      - name: Import the exact wheel on its actual platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/package_plugin.py --verify-wheel "$RUNNER_TEMP"/native-wheels/*.whl --output "$RUNNER_TEMP/native-wheels/import-receipt.json"
+      - name: Save freshly rebuilt native wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/native-wheels/*
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-release:
+    name: Assemble deterministic cross-platform release ZIP
+    needs:
+      - select-target
+      - build-native
+    if: >-
+      needs.select-target.outputs.eligible == 'true' &&
+      needs.select-target.outputs.release_action != 'NOOP'
+    runs-on: ubuntu-22.04
+    outputs:
+      archive_sha256: ${{ steps.package.outputs.archive_sha256 }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.select-target.outputs.target_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install release package test dependencies
+        run: python -m pip install --upgrade pip "pytest>=8,<10"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: native-wheel-*
+          path: ${{ runner.temp }}/native-inputs
+      - name: Recheck metadata and release identifiers before packaging
+        env:
+          RELEASE_VERSION: ${{ needs.select-target.outputs.release_version }}
+          RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
+          ARCHIVE_NAME: ${{ needs.select-target.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ needs.select-target.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+          test "$RELEASE_VERSION" = "$(python scripts/verify_release_contract.py --field version)"
+          test "$RELEASE_TAG" = "$(python scripts/verify_release_contract.py --field tag)"
+          test "$ARCHIVE_NAME" = "astrbot_plugin_astrembodiment-v${RELEASE_VERSION}-win_linux_x86_64.zip"
+          test "$CHECKSUM_NAME" = "${ARCHIVE_NAME}.sha256"
+          python scripts/verify_release_contract.py --tag "$RELEASE_TAG" --version "$RELEASE_VERSION"
+      - name: Assemble and reproduce the allowlisted ZIP
+        id: package
+        env:
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          ARCHIVE_NAME: ${{ needs.select-target.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ needs.select-target.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+          archive="dist/${ARCHIVE_NAME}"
+          checksum="dist/${CHECKSUM_NAME}"
+          rebuilt="dist/.${ARCHIVE_NAME%.zip}.rebuild.zip"
+          python scripts/package_plugin.py --source-sha "$TARGET_SHA" \
+            --output "$archive" \
+            --native-wheel "$RUNNER_TEMP"/native-inputs/native-wheel-windows/*.whl \
+            --native-wheel "$RUNNER_TEMP"/native-inputs/native-wheel-linux/*.whl \
+            --import-receipt "$RUNNER_TEMP/native-inputs/native-wheel-windows/import-receipt.json" \
+            --import-receipt "$RUNNER_TEMP/native-inputs/native-wheel-linux/import-receipt.json"
+          python scripts/package_plugin.py --source-sha "$TARGET_SHA" \
+            --output "$rebuilt" \
+            --native-wheel "$RUNNER_TEMP"/native-inputs/native-wheel-windows/*.whl \
+            --native-wheel "$RUNNER_TEMP"/native-inputs/native-wheel-linux/*.whl \
+            --import-receipt "$RUNNER_TEMP/native-inputs/native-wheel-windows/import-receipt.json" \
+            --import-receipt "$RUNNER_TEMP/native-inputs/native-wheel-linux/import-receipt.json"
+          cmp --silent "$archive" "$rebuilt"
+          rm -f "$rebuilt"
+          (cd dist && sha256sum "$ARCHIVE_NAME" > "$CHECKSUM_NAME")
+          (cd "$(dirname "$checksum")" && sha256sum --check "$(basename "$checksum")")
+          printf 'archive_sha256=%s\n' "$(sha256sum "$archive" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Run the fresh-wheel release archive contract
+        env:
+          ARCHIVE_NAME: ${{ needs.select-target.outputs.archive_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows_wheels=("$RUNNER_TEMP"/native-inputs/native-wheel-windows/*.whl)
+          linux_wheels=("$RUNNER_TEMP"/native-inputs/native-wheel-linux/*.whl)
+          export AE_FRESH_WINDOWS_WHEEL="${windows_wheels[0]}"
+          export AE_FRESH_LINUX_WHEEL="${linux_wheels[0]}"
+          export AE_RELEASE_ARCHIVE="$GITHUB_WORKSPACE/dist/$ARCHIVE_NAME"
+          python -m pytest -q tests/test_release_contracts.py
+      - name: Save verified release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: astrbot-plugin-${{ needs.select-target.outputs.release_tag }}-release-assets
+          path: |
+            dist/${{ needs.select-target.outputs.archive_name }}
+            dist/${{ needs.select-target.outputs.checksum_name }}
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-archive:
+    name: Verify exact ZIP (${{ matrix.runner }})
+    needs: [select-target, assemble-release]
+    if: needs.select-target.outputs.eligible == 'true' && needs.select-target.outputs.release_action != 'NOOP'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, ubuntu-22.04]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.select-target.outputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: astrbot-plugin-${{ needs.select-target.outputs.release_tag }}-release-assets
+          path: ${{ runner.temp }}/archive-input
+      - name: Verify packaged identity, database lifecycle and preservation
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.select-target.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          python scripts/verify_release_archive.py --archive "$RUNNER_TEMP"/archive-input/*.zip --source-sha "$SOURCE_SHA" --work-dir "$RUNNER_TEMP" --receipt "$RUNNER_TEMP/archive-receipt.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: archive-receipt-${{ matrix.runner }}
+          path: ${{ runner.temp }}/archive-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Create or resume the production release
+    needs:
+      - select-target
+      - assemble-release
+      - verify-archive
+    if: >-
+      needs.select-target.outputs.eligible == 'true' &&
+      needs.select-target.outputs.release_action != 'NOOP'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.select-target.outputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: astrbot-plugin-${{ needs.select-target.outputs.release_tag }}-release-assets
+          path: release-assets
+      - name: Recheck current master, metadata, and downloaded assets
+        env:
+          RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.select-target.outputs.release_version }}
+          CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          ARCHIVE_NAME: ${{ needs.select-target.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ needs.select-target.outputs.checksum_name }}
+          EXPECTED_ARCHIVE_SHA256: ${{ needs.assemble-release.outputs.archive_sha256 }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          test "$(git rev-parse origin/master)" = "$CONTROL_SHA"
+          python scripts/verify_release_contract.py \
+            --tag "$RELEASE_TAG" --version "$RELEASE_VERSION"
+          archive="release-assets/${ARCHIVE_NAME}"
+          checksum="release-assets/${CHECKSUM_NAME}"
+          test -s "$archive"
+          test -s "$checksum"
+          test "$(sha256sum "$archive" | awk '{print $1}')" = "$EXPECTED_ARCHIVE_SHA256"
+          (
+            cd release-assets
+            sha256sum --check "$CHECKSUM_NAME"
+          )
+      - name: Create an annotated tag or resume the matching release state
+        id: release-state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.select-target.outputs.release_version }}
+          CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ needs.select-target.outputs.tag_object_sha }}
+          RELEASE_ACTION: ${{ needs.select-target.outputs.release_action }}
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          inspect_current_annotated_tag() {
+            local tag_listing="$RUNNER_TEMP/release-tag.txt"
+            local fetch_tag_object_sha=""
+            local fetch_peeled_sha=""
+            local object_sha=""
+            local remote_ref=""
+            local tag_ref_count=0
+            local peeled_ref_count=0
+            tag_exists=false
+            current_tag_object_sha=""
+            current_tag_target_sha=""
+            if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
+              echo "remote release tag lookup failed" >&2
+              exit 1
+            fi
+            if [[ ! -s "$tag_listing" ]]; then
+              return
+            fi
+            while IFS=$'\t' read -r object_sha remote_ref; do
+              if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "remote release tag lookup returned an invalid object id" >&2
+                exit 1
+              fi
+              case "$remote_ref" in
+                "$tag_ref")
+                  ((tag_ref_count += 1))
+                  current_tag_object_sha="$object_sha"
+                  ;;
+                "${tag_ref}^{}")
+                  ((peeled_ref_count += 1))
+                  current_tag_target_sha="$object_sha"
+                  ;;
+                *)
+                  echo "remote release tag lookup returned an unexpected ref" >&2
+                  exit 1
+                  ;;
+              esac
+            done < "$tag_listing"
+            if [[ "$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1 ]]; then
+              echo "remote release tag lookup must contain one annotated ref and one peeled ref" >&2
+              exit 1
+            fi
+            git fetch --no-tags origin "$tag_ref"
+            fetch_tag_object_sha="$(git rev-parse FETCH_HEAD)"
+            fetch_peeled_sha="$(git rev-parse FETCH_HEAD^{commit})"
+            if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
+                  "$(git cat-file -t "$current_tag_object_sha")" != tag ||
+                  "$fetch_tag_object_sha" != "$current_tag_object_sha" ||
+                  "$fetch_peeled_sha" != "$current_tag_target_sha" ||
+                  "$current_tag_target_sha" != "$TARGET_SHA" ]]; then
+              echo "release tag did not resolve to the selected target" >&2
+              exit 1
+            fi
+            git cat-file -e "$fetch_peeled_sha^{commit}"
+            tag_exists=true
+          }
+
+          assert_publish_preconditions() {
+            git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+            test "$(git rev-parse origin/master)" = "$CONTROL_SHA"
+            inspect_current_annotated_tag
+            case "$RELEASE_ACTION" in
+              PUBLISH)
+                if [[ -n "$EXPECTED_TAG_OBJECT_SHA" || "$tag_exists" == true ]]; then
+                  echo "a release tag appeared after target selection" >&2
+                  exit 1
+                fi
+                ;;
+              RESUME|RECOVER_TAG_ONLY)
+                if [[ ! "$EXPECTED_TAG_OBJECT_SHA" =~ ^[0-9a-f]{40}$ ||
+                      "$tag_exists" != true ||
+                      "$current_tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA" ]]; then
+                  echo "release tag drifted after target selection" >&2
+                  exit 1
+                fi
+                ;;
+              *)
+                echo "unexpected release action: $RELEASE_ACTION" >&2
+                exit 1
+                ;;
+            esac
+          }
+
+          assert_publish_preconditions
+          if [[ "$tag_exists" != true ]]; then
+            if [[ "$RELEASE_ACTION" != PUBLISH ]]; then
+              echo "a selected existing release tag disappeared before publication" >&2
+              exit 1
+            fi
+            tag_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            created_tag_object_sha="$(
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+                -f "tag=${RELEASE_TAG}" \
+                -f "message=Release ${RELEASE_VERSION}" \
+                -f "object=${TARGET_SHA}" \
+                -f "type=commit" \
+                -f 'tagger[name]=github-actions[bot]' \
+                -f 'tagger[email]=41898282+github-actions[bot]@users.noreply.github.com' \
+                -f "tagger[date]=${tag_date}" \
+                --jq '.sha'
+            )"
+            [[ "$created_tag_object_sha" =~ ^[0-9a-f]{40}$ ]]
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=${tag_ref}" \
+              -f "sha=${created_tag_object_sha}" > /dev/null
+            inspect_current_annotated_tag
+            if [[ "$tag_exists" != true ||
+                  "$current_tag_object_sha" != "$created_tag_object_sha" ]]; then
+              echo "created release tag did not remain bound to its new annotated object" >&2
+              exit 1
+            fi
+          fi
+
+          release_json="$RUNNER_TEMP/release-state.json"
+          release_error="$RUNNER_TEMP/release-state.err"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" \
+              > "$release_json" 2> "$release_error"; then
+            state="$(python - "$release_json" "$RELEASE_TAG" "$TARGET_SHA" <<'PY'
+          import json
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, target = sys.argv[2:]
+          if release.get("tag_name") != tag or release.get("target_commitish") != target:
+              raise SystemExit("existing release identity does not match the selected target")
+          if release.get("prerelease") is not False:
+              raise SystemExit("production release must not be a prerelease")
+          if release.get("draft") is True:
+              if release.get("immutable") is True:
+                  raise SystemExit("existing draft release is unexpectedly immutable")
+              print("DRAFT")
+          else:
+              print("PUBLISHED")
+          PY
+            )"
+          elif grep -Eq 'HTTP 404|Not Found' "$release_error"; then
+            gh release create "$RELEASE_TAG" \
+              --draft \
+              --verify-tag \
+              --target "$TARGET_SHA" \
+              --title "AstrEmbodiment ${RELEASE_VERSION}" \
+              --notes-from-tag
+            state=DRAFT
+          else
+            cat "$release_error" >&2
+            exit 1
+          fi
+          if [[ ! "$current_tag_object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release-state did not observe a final annotated tag object" >&2
+            exit 1
+          fi
+          printf 'state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+          printf 'observed_tag_object_sha=%s\n' "$current_tag_object_sha" >> "$GITHUB_OUTPUT"
+      - name: Verify or upload draft assets without replacing existing assets
+        if: steps.release-state.outputs.state == 'DRAFT'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          ARCHIVE_NAME: ${{ needs.select-target.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ needs.select-target.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+          archive="release-assets/${ARCHIVE_NAME}"
+          checksum="release-assets/${CHECKSUM_NAME}"
+          release_state="$RUNNER_TEMP/release-draft-assets.json"
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable,assets \
+            > "$release_state"
+          mapfile -t missing_assets < <(
+            python - "$release_state" "$RELEASE_TAG" "$TARGET_SHA" "$archive" "$checksum" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, target, *paths = sys.argv[2:]
+          if release.get("tagName") != tag or release.get("targetCommitish") != target:
+              raise SystemExit("draft release identity changed while preparing assets")
+          if release.get("isDraft") is not True or release.get("isPrerelease") is not False:
+              raise SystemExit("release must remain a production draft until assets are verified")
+          if release.get("isImmutable") is True:
+              raise SystemExit("draft release is unexpectedly immutable")
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("draft release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {pathlib.Path(raw_path).name for raw_path in paths}
+          if (
+              len(asset_records) > 2
+              or len(asset_names) != len(set(asset_names))
+              or not set(asset_names).issubset(expected_assets)
+          ):
+              raise SystemExit("draft release asset set is invalid")
+          assets: dict[str, list[dict[str, object]]] = {}
+          for asset in asset_records:
+              if not isinstance(asset, dict):
+                  raise SystemExit("draft release asset set is invalid")
+              assets.setdefault(str(asset.get("name")), []).append(asset)
+          for raw_path in paths:
+              path = pathlib.Path(raw_path)
+              existing = assets.get(path.name, [])
+              if len(existing) > 1:
+                  raise SystemExit(f"duplicate draft asset: {path.name}")
+              if existing:
+                  if existing[0].get("size") != path.stat().st_size:
+                      raise SystemExit(f"draft asset size mismatch: {path.name}")
+              else:
+                  print(path)
+          PY
+          )
+          if ((${#missing_assets[@]})); then
+            gh release upload "$RELEASE_TAG" "${missing_assets[@]}"
+          fi
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable,assets \
+            > "$release_state"
+          python - "$release_state" "$RELEASE_TAG" "$TARGET_SHA" "$archive" "$checksum" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, target, *paths = sys.argv[2:]
+          if release.get("tagName") != tag or release.get("targetCommitish") != target:
+              raise SystemExit("draft release identity changed after asset upload")
+          if release.get("isDraft") is not True or release.get("isPrerelease") is not False:
+              raise SystemExit("release must remain a production draft before publish")
+          if release.get("isImmutable") is True:
+              raise SystemExit("draft release is unexpectedly immutable")
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("draft release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {pathlib.Path(raw_path).name for raw_path in paths}
+          if (
+              len(asset_records) != 2
+              or len(asset_names) != len(set(asset_names))
+              or set(asset_names) != expected_assets
+          ):
+              raise SystemExit("draft release asset set is invalid")
+          assets: dict[str, list[dict[str, object]]] = {}
+          for asset in asset_records:
+              if not isinstance(asset, dict):
+                  raise SystemExit("draft release asset set is invalid")
+              assets.setdefault(str(asset.get("name")), []).append(asset)
+          for raw_path in paths:
+              path = pathlib.Path(raw_path)
+              existing = assets.get(path.name, [])
+              if len(existing) != 1 or existing[0].get("size") != path.stat().st_size:
+                  raise SystemExit(f"draft asset did not match local size: {path.name}")
+          PY
+          download_dir="$(mktemp -d "$RUNNER_TEMP/astr-embodiment-draft-assets.XXXXXX")"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$download_dir" \
+            --pattern "$ARCHIVE_NAME"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$download_dir" \
+            --pattern "$CHECKSUM_NAME"
+          cmp --silent "$archive" "$download_dir/${ARCHIVE_NAME}"
+          cmp --silent "$checksum" "$download_dir/${CHECKSUM_NAME}"
+          (
+            cd "$download_dir"
+            sha256sum --check "$CHECKSUM_NAME"
+          )
+      - name: Publish the verified draft
+        if: steps.release-state.outputs.state == 'DRAFT'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
+          CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          EXPECTED_TAG_OBJECT_SHA: ${{ steps.release-state.outputs.observed_tag_object_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_TAG_OBJECT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release-state did not provide a final annotated tag object" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'
+          test "$(git rev-parse origin/master)" = "$CONTROL_SHA"
+
+          tag_ref="refs/tags/${RELEASE_TAG}"
+          tag_listing="$RUNNER_TEMP/prepublish-release-tag.txt"
+          tag_object_sha=""
+          tag_target_sha=""
+          tag_ref_count=0
+          peeled_ref_count=0
+          if ! git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}" > "$tag_listing"; then
+            echo "prepublish release tag lookup failed" >&2
+            exit 1
+          fi
+          while IFS=$'\t' read -r object_sha remote_ref; do
+            if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "prepublish release tag lookup returned an invalid object id" >&2
+              exit 1
+            fi
+            case "$remote_ref" in
+              "$tag_ref")
+                ((tag_ref_count += 1))
+                tag_object_sha="$object_sha"
+                ;;
+              "${tag_ref}^{}")
+                ((peeled_ref_count += 1))
+                tag_target_sha="$object_sha"
+                ;;
+              *)
+                echo "prepublish release tag lookup returned an unexpected ref" >&2
+                exit 1
+                ;;
+            esac
+          done < "$tag_listing"
+          if [[ "$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1 ||
+                "$tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA" ||
+                "$tag_target_sha" != "$TARGET_SHA" ]]; then
+            echo "release tag drifted before draft publication" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "$tag_ref"
+          fetch_tag_object_sha="$(git rev-parse FETCH_HEAD)"
+          fetch_peeled_sha="$(git rev-parse FETCH_HEAD^{commit})"
+          if [[ "$(git cat-file -t FETCH_HEAD)" != tag ||
+                "$fetch_tag_object_sha" != "$tag_object_sha" ||
+                "$fetch_peeled_sha" != "$TARGET_SHA" ]]; then
+            echo "fetched release tag drifted before draft publication" >&2
+            exit 1
+          fi
+          git cat-file -e "$fetch_peeled_sha^{commit}"
+
+          release_state="$RUNNER_TEMP/prepublish-release-state.json"
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable \
+            > "$release_state"
+          python - "$release_state" "$RELEASE_TAG" "$TARGET_SHA" <<'PY'
+          import json
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, target = sys.argv[2:]
+          if release.get("tagName") != tag or release.get("targetCommitish") != target:
+              raise SystemExit("draft release identity changed before publish")
+          if release.get("isDraft") is not True:
+              raise SystemExit("release stopped being a draft before publish")
+          if release.get("isPrerelease") is not False:
+              raise SystemExit("draft release has an unexpected prerelease state")
+          if release.get("isImmutable") is True:
+              raise SystemExit("draft release is unexpectedly immutable")
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+      - name: Verify published assets and report GitHub immutability
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.select-target.outputs.release_tag }}
+          TARGET_SHA: ${{ needs.select-target.outputs.target_sha }}
+          ARCHIVE_NAME: ${{ needs.select-target.outputs.archive_name }}
+          CHECKSUM_NAME: ${{ needs.select-target.outputs.checksum_name }}
+        run: |
+          set -euo pipefail
+          release_state="$RUNNER_TEMP/published-release-state.json"
+          gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable,assets,url \
+            > "$release_state"
+          immutable="$(python - "$release_state" "$RELEASE_TAG" "$TARGET_SHA" "$ARCHIVE_NAME" "$CHECKSUM_NAME" <<'PY'
+          import json
+          import sys
+
+          release = json.load(open(sys.argv[1], encoding="utf-8"))
+          tag, target, archive_name, checksum_name = sys.argv[2:]
+          if release.get("tagName") != tag or release.get("targetCommitish") != target:
+              raise SystemExit("published release identity does not match the selected target")
+          if release.get("isDraft") is not False:
+              raise SystemExit("release did not publish")
+          if release.get("isPrerelease") is not False:
+              raise SystemExit("published release has an unexpected prerelease state")
+          asset_records = release.get("assets")
+          if not isinstance(asset_records, list):
+              raise SystemExit("published release asset set is invalid")
+          asset_names = [
+              asset.get("name") if isinstance(asset, dict) else None
+              for asset in asset_records
+          ]
+          expected_assets = {archive_name, checksum_name}
+          if (
+              len(asset_records) != 2
+              or len(asset_names) != len(set(asset_names))
+              or set(asset_names) != expected_assets
+          ):
+              raise SystemExit("published release asset set is invalid")
+          print("true" if release.get("isImmutable") is True else "false")
+          PY
+          )"
+          download_dir="$(mktemp -d "$RUNNER_TEMP/astr-embodiment-release-assets.XXXXXX")"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$download_dir" \
+            --pattern "$ARCHIVE_NAME"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$download_dir" \
+            --pattern "$CHECKSUM_NAME"
+          cmp --silent "release-assets/${ARCHIVE_NAME}" "$download_dir/${ARCHIVE_NAME}"
+          cmp --silent "release-assets/${CHECKSUM_NAME}" "$download_dir/${CHECKSUM_NAME}"
+          (
+            cd "$download_dir"
+            sha256sum --check "$CHECKSUM_NAME"
+          )
+          if [[ "$immutable" != true ]]; then
+            echo "::warning title=GitHub Release immutability unavailable::${RELEASE_TAG} published successfully, but GitHub reports immutable=false. The verified release remains published and was not changed."
+          fi
+
+# This workflow publishes GitHub release assets only.
+# Marketplace publication is intentionally outside this workflow.

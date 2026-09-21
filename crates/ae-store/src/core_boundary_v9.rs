@@ -567,8 +567,7 @@ pub(crate) fn scan_raw_legacy(conn: &Connection, schema: &Schema) -> Result<RawP
                 || sql_type.len() > 96
                 || !matches!(not_null, 0 | 1)
                 || hidden != 0
-                || pk < 0
-                || pk > 256
+                || !(0..=256).contains(&pk)
             {
                 return Err(invalid("V9_LEGACY_COLUMN_IDENTITY"));
             }
@@ -777,7 +776,6 @@ pub(crate) fn preflight(conn: &Connection) -> Result<OpenRoute, StoreError> {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CoreBoundaryClosedCode {
     LegacyAuthority,
@@ -839,19 +837,31 @@ pub(crate) fn install_pending(
     )?;
     conn.execute(
         "INSERT INTO core_boundary_failure_receipt_v1 VALUES(1,8,?1,?2,?3,?4,?5,?6,?7)",
-        rusqlite::params![proof.rows.len() as i64, proof.payload_bytes as i64,
-            proof.catalog_digest.as_slice(), proof.root.as_slice(), now as i64,
-            receipt, digest.as_slice()],
+        rusqlite::params![
+            proof.rows.len() as i64,
+            proof.payload_bytes as i64,
+            proof.catalog_digest.as_slice(),
+            proof.root.as_slice(),
+            now as i64,
+            receipt,
+            digest.as_slice()
+        ],
     )?;
     let pending = hash("ae.core-boundary.pending.v1", &[]);
     conn.execute(
         "INSERT INTO core_boundary_control_v1 VALUES(1,1,'pending',1,8,?1,?2,?3,?4,?5,?5,?5,NULL)",
-        rusqlite::params![now as i64, schema_digest(schema).as_slice(), proof.root.as_slice(),
-            digest.as_slice(), pending.as_slice()],
+        rusqlite::params![
+            now as i64,
+            schema_digest(schema).as_slice(),
+            proof.root.as_slice(),
+            digest.as_slice(),
+            pending.as_slice()
+        ],
     )?;
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM (SELECT 1 FROM active_bindings LIMIT 65537)",
-        [], |row| row.get(0),
+        [],
+        |row| row.get(0),
     )?;
     if count > 65_536 {
         return Err(invalid("V9_LEGACY_OWNER_LIMIT"));
@@ -877,16 +887,22 @@ pub(crate) fn verify_failure_receipt(
          WHERE singleton=1 AND source_db_version=8 AND source_row_count=?1
          AND source_payload_bytes=?2 AND legacy_catalog_digest=?3 AND raw_preimage_root=?4
          AND authoritative_now_utc_ms=?5 AND receipt_bytes=?6 AND receipt_digest=?7",
-        rusqlite::params![proof.rows.len() as i64, proof.payload_bytes as i64,
-            proof.catalog_digest.as_slice(), proof.root.as_slice(), now as i64,
-            bytes, digest.as_slice()], |row| row.get(0),
+        rusqlite::params![
+            proof.rows.len() as i64,
+            proof.payload_bytes as i64,
+            proof.catalog_digest.as_slice(),
+            proof.root.as_slice(),
+            now as i64,
+            bytes,
+            digest.as_slice()
+        ],
+        |row| row.get(0),
     )?;
     if !valid {
         return Err(invalid("V9_FAILURE_PREIMAGE_MISMATCH"));
     }
     Ok(proof)
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Owner(u8, Digest);
@@ -897,27 +913,41 @@ fn global_owner() -> Owner {
 
 impl Owner {
     fn name(self) -> &'static str {
-        if self.0 == 1 { "persona" } else { "global_unowned" }
+        if self.0 == 1 {
+            "persona"
+        } else {
+            "global_unowned"
+        }
     }
 }
 
 impl RawRow {
     fn integer(&self, name: &str) -> Option<i64> {
         let cell = self.cell(name)?;
-        (cell.0 == 1).then(|| cell.1.as_slice().try_into().ok().map(i64::from_le_bytes)).flatten()
+        (cell.0 == 1)
+            .then(|| cell.1.as_slice().try_into().ok().map(i64::from_le_bytes))
+            .flatten()
     }
     fn cell(&self, name: &str) -> Option<&(u8, Vec<u8>)> {
-        self.columns.iter().position(|column| column == name).map(|index| &self.cells[index])
+        self.columns
+            .iter()
+            .position(|column| column == name)
+            .map(|index| &self.cells[index])
     }
     fn blob(&self, name: &str) -> Option<&[u8]> {
-        self.cell(name).filter(|cell| cell.0 == 4).map(|cell| cell.1.as_slice())
+        self.cell(name)
+            .filter(|cell| cell.0 == 4)
+            .map(|cell| cell.1.as_slice())
     }
     fn text(&self, name: &str) -> Option<&str> {
-        self.cell(name).filter(|cell| cell.0 == 3)
+        self.cell(name)
+            .filter(|cell| cell.0 == 3)
             .and_then(|cell| std::str::from_utf8(&cell.1).ok())
     }
     fn persona(&self) -> Option<Owner> {
-        self.blob("persona_scope").and_then(|bytes| bytes.try_into().ok()).map(|key| Owner(1, key))
+        self.blob("persona_scope")
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(|key| Owner(1, key))
     }
 }
 
@@ -942,10 +972,13 @@ fn closed_claim() -> V9UpgradeError {
 }
 
 fn decode_legacy<T: serde::de::DeserializeOwned>(row: &RawRow) -> Result<T, V9UpgradeError> {
-    serde_json::from_str(row.text("body_json").ok_or_else(closed_claim)?).map_err(|_| closed_claim())
+    serde_json::from_str(row.text("body_json").ok_or_else(closed_claim)?)
+        .map_err(|_| closed_claim())
 }
 
-fn authenticated_intention(row: &RawRow) -> Result<ae_contracts::DurableIntentionV1, V9UpgradeError> {
+fn authenticated_intention(
+    row: &RawRow,
+) -> Result<ae_contracts::DurableIntentionV1, V9UpgradeError> {
     let value: ae_contracts::DurableIntentionV1 = decode_legacy(row)?;
     let state = serde_json::to_value(value.state).map_err(|_| closed_claim())?;
     if row.blob("intention_id") != Some(value.intention_id.as_slice())
@@ -954,7 +987,9 @@ fn authenticated_intention(row: &RawRow) -> Result<ae_contracts::DurableIntentio
         || row.blob("semantic_digest") != Some(value.semantic_idempotency_digest.as_slice())
         || row.text("state") != state.as_str()
         || row.integer("revision").is_none_or(|revision| revision < 0)
-    { return Err(closed_claim()); }
+    {
+        return Err(closed_claim());
+    }
     Ok(value)
 }
 
@@ -965,132 +1000,330 @@ fn authenticated_outbound(row: &RawRow) -> Result<ae_contracts::OutboundAttemptV
         || row.blob("intention_id") != Some(value.intention_id.as_slice())
         || row.blob("target_digest") != Some(value.target.binding_digest.as_slice())
         || row.text("state") != state.as_str()
-    { return Err(closed_claim()); }
+    {
+        return Err(closed_claim());
+    }
     Ok(value)
 }
 
 /// One read-only authentication result supplies ownership, dispatch uncertainty
 /// and reservation classification. No caller can infer any of these from an
 /// unauthenticated raw record_id or from body JSON alone.
-fn authenticate_claims(proof: &RawProof) -> Result<std::collections::BTreeMap<Digest, ClaimAuthority>, V9UpgradeError> {
+fn authenticate_claims(
+    proof: &RawProof,
+) -> Result<std::collections::BTreeMap<Digest, ClaimAuthority>, V9UpgradeError> {
     use ae_contracts::*;
     let mut output = std::collections::BTreeMap::new();
     for row in proof.rows.iter().filter(|row| row.kind == 10) {
-        let token: Digest = row.blob("claim_token").and_then(|v| v.try_into().ok()).ok_or_else(closed_claim)?;
-        let caller: Digest = row.blob("caller_incarnation").and_then(|v| v.try_into().ok()).ok_or_else(closed_claim)?;
+        let token: Digest = row
+            .blob("claim_token")
+            .and_then(|v| v.try_into().ok())
+            .ok_or_else(closed_claim)?;
+        let caller: Digest = row
+            .blob("caller_incarnation")
+            .and_then(|v| v.try_into().ok())
+            .ok_or_else(closed_claim)?;
         let record = row.blob("record_id").ok_or_else(closed_claim)?;
-        let deadline = row.integer("lease_deadline_utc_ms").and_then(|v| u64::try_from(v).ok()).ok_or_else(closed_claim)?;
-        let mut authority = ClaimAuthority { owner: global_owner(), record: record.to_vec(), dispatch_started: false, reservation: None };
+        let deadline = row
+            .integer("lease_deadline_utc_ms")
+            .and_then(|v| u64::try_from(v).ok())
+            .ok_or_else(closed_claim)?;
+        let mut authority = ClaimAuthority {
+            owner: global_owner(),
+            record: record.to_vec(),
+            dispatch_started: false,
+            reservation: None,
+        };
         match row.text("claim_kind").ok_or_else(closed_claim)? {
             kind @ ("wake" | "wake_v2") => {
-                let (claim_token,event,proposal,lease) = if kind == "wake" {
+                let (claim_token, event, proposal, lease) = if kind == "wake" {
                     let claim: WakeClaimV1 = decode_legacy(row)?;
-                    (claim.claim_token,claim.event,claim.proposal,claim.lease_deadline_utc_ms)
+                    (
+                        claim.claim_token,
+                        claim.event,
+                        claim.proposal,
+                        claim.lease_deadline_utc_ms,
+                    )
                 } else {
                     let claim: WakeClaimV2 = decode_legacy(row)?;
-                    let scope = wire::persona_scope_digest(&claim.event.scope.bot_token,&claim.event.scope.persona_token,None);
-                    if claim.proposal.world_anchor.as_ref().is_some_and(|v|v.persona_scope!=scope)
-                        || claim.proposal.lived_day.as_ref().is_some_and(|v|v.persona_scope!=scope)
-                        || claim.proposal.dream_updates.iter().any(|v|v.persona_scope!=scope)
-                    { return Err(closed_claim()); }
-                    (claim.claim_token,claim.event,claim.proposal.legacy,claim.lease_deadline_utc_ms)
+                    let scope = wire::persona_scope_digest(
+                        &claim.event.scope.bot_token,
+                        &claim.event.scope.persona_token,
+                        None,
+                    );
+                    if claim
+                        .proposal
+                        .world_anchor
+                        .as_ref()
+                        .is_some_and(|v| v.persona_scope != scope)
+                        || claim
+                            .proposal
+                            .lived_day
+                            .as_ref()
+                            .is_some_and(|v| v.persona_scope != scope)
+                        || claim
+                            .proposal
+                            .dream_updates
+                            .iter()
+                            .any(|v| v.persona_scope != scope)
+                    {
+                        return Err(closed_claim());
+                    }
+                    (
+                        claim.claim_token,
+                        claim.event,
+                        claim.proposal.legacy,
+                        claim.lease_deadline_utc_ms,
+                    )
                 };
-                let scope = wire::persona_scope_digest(&event.scope.bot_token,&event.scope.persona_token,None);
-                let domain: &[u8] = if kind=="wake" { b"wake" } else { b"wake-v2" };
-                ae_autonomy::validate_frozen_time(&event.frozen).map_err(|_|closed_claim())?;
-                let mut frozen_hash=Sha256::new();
+                let scope = wire::persona_scope_digest(
+                    &event.scope.bot_token,
+                    &event.scope.persona_token,
+                    None,
+                );
+                let domain: &[u8] = if kind == "wake" { b"wake" } else { b"wake-v2" };
+                ae_autonomy::validate_frozen_time(&event.frozen).map_err(|_| closed_claim())?;
+                let mut frozen_hash = Sha256::new();
                 frozen_hash.update(b"ae.frozen-time-input.v1\0");
-                frozen_hash.update(serde_json::to_vec(&event.frozen).map_err(|_|closed_claim())?);
-                let expected_frozen: Digest=frozen_hash.finalize().into();
-                if event.scope.relation_token.is_some() || record != event.event_id.as_slice()
-                    || event.frozen_input_digest!=expected_frozen
-                    || claim_token!=token || crate::autonomy::digest_claim(domain,&event.event_id,&caller)!=token
-                    || lease!=deadline || deadline!=event.frozen.effective_now_utc_ms.saturating_add(120_000)
-                    || proposal.state.persona_scope!=scope
-                    || proposal.state.generation!=event.expected_generation.saturating_add(1)
-                    || proposal.inner_events.iter().any(|v|v.persona_scope!=scope)
-                    || proposal.intentions.iter().any(|v|v.persona_scope!=scope)
-                { return Err(closed_claim()); }
-                authority.owner=Owner(1,scope);
+                frozen_hash.update(serde_json::to_vec(&event.frozen).map_err(|_| closed_claim())?);
+                let expected_frozen: Digest = frozen_hash.finalize().into();
+                if event.scope.relation_token.is_some()
+                    || record != event.event_id.as_slice()
+                    || event.frozen_input_digest != expected_frozen
+                    || claim_token != token
+                    || crate::autonomy::digest_claim(domain, &event.event_id, &caller) != token
+                    || lease != deadline
+                    || deadline != event.frozen.effective_now_utc_ms.saturating_add(120_000)
+                    || proposal.state.persona_scope != scope
+                    || proposal.state.generation != event.expected_generation.saturating_add(1)
+                    || proposal
+                        .inner_events
+                        .iter()
+                        .any(|v| v.persona_scope != scope)
+                    || proposal.intentions.iter().any(|v| v.persona_scope != scope)
+                {
+                    return Err(closed_claim());
+                }
+                authority.owner = Owner(1, scope);
             }
             "externalization" | "externalization_v2" => {
-                let intention_row=proof.rows.iter().find(|v|v.kind==6 && v.blob("intention_id")==Some(record)).ok_or_else(closed_claim)?;
-                let intention=authenticated_intention(intention_row)?;
-                authority.owner=Owner(1,intention.persona_scope);
-                if let Ok(claim)=decode_legacy::<ExternalizationClaimV1>(row) {
-                    if claim.claim_token!=token || claim.intention_id.as_slice()!=record
-                        || claim.caller_incarnation!=caller || claim.lease_deadline_utc_ms!=deadline
-                        || crate::autonomy::externalization_claim_token(&claim)!=token
-                    { return Err(closed_claim()); }
-                    authority.reservation=Some((intention.relation_scope,None,u64::from(claim.max_tokens)));
+                let intention_row = proof
+                    .rows
+                    .iter()
+                    .find(|v| v.kind == 6 && v.blob("intention_id") == Some(record))
+                    .ok_or_else(closed_claim)?;
+                let intention = authenticated_intention(intention_row)?;
+                authority.owner = Owner(1, intention.persona_scope);
+                if let Ok(claim) = decode_legacy::<ExternalizationClaimV1>(row) {
+                    if claim.claim_token != token
+                        || claim.intention_id.as_slice() != record
+                        || claim.caller_incarnation != caller
+                        || claim.lease_deadline_utc_ms != deadline
+                        || crate::autonomy::externalization_claim_token(&claim) != token
+                    {
+                        return Err(closed_claim());
+                    }
+                    authority.reservation =
+                        Some((intention.relation_scope, None, u64::from(claim.max_tokens)));
                 } else {
-                    let claim: ExternalizationClaimV2=decode_legacy(row)?;
-                    let revision=intention_row.integer("revision").and_then(|v|u64::try_from(v).ok()).and_then(|v|v.checked_sub(1)).ok_or_else(closed_claim)?;
-                    let expected=wire::domain_hash(b"ae.alpha3.externalization-claim.v2",&[
-                        &intention.relation_scope,&intention.intention_id,&[claim.attempt_no],&claim.reserved_tokens.to_le_bytes(),
-                        &revision.to_le_bytes(),&claim.policy_revision.to_le_bytes(),&claim.consent_revision.to_le_bytes(),
-                        &claim.capability_snapshot_digest,&caller,&claim.budget_day_start_utc_ms.to_le_bytes()]);
-                    if token!=claim.claim_token || token!=expected || deadline!=claim.lease_deadline_utc_ms
-                        || (claim.intention_public_ref!=encode_intention_scoped_locator_v1(&intention.relation_scope,&intention.intention_id)
-                            && !legacy_v2_intention_public_ref_matches(&intention.relation_scope,&intention.intention_id,&claim.intention_public_ref))
-                    { return Err(closed_claim()); }
-                    if let Some(gate)=&claim.gate_decision_snapshot { gate.validate().map_err(|_|closed_claim())?; }
-                    authority.reservation=Some((intention.relation_scope,Some(claim.budget_day_start_utc_ms),claim.reserved_tokens));
+                    let claim: ExternalizationClaimV2 = decode_legacy(row)?;
+                    let revision = intention_row
+                        .integer("revision")
+                        .and_then(|v| u64::try_from(v).ok())
+                        .and_then(|v| v.checked_sub(1))
+                        .ok_or_else(closed_claim)?;
+                    let expected = wire::domain_hash(
+                        b"ae.alpha3.externalization-claim.v2",
+                        &[
+                            &intention.relation_scope,
+                            &intention.intention_id,
+                            &[claim.attempt_no],
+                            &claim.reserved_tokens.to_le_bytes(),
+                            &revision.to_le_bytes(),
+                            &claim.policy_revision.to_le_bytes(),
+                            &claim.consent_revision.to_le_bytes(),
+                            &claim.capability_snapshot_digest,
+                            &caller,
+                            &claim.budget_day_start_utc_ms.to_le_bytes(),
+                        ],
+                    );
+                    if token != claim.claim_token
+                        || token != expected
+                        || deadline != claim.lease_deadline_utc_ms
+                        || (claim.intention_public_ref
+                            != encode_intention_scoped_locator_v1(
+                                &intention.relation_scope,
+                                &intention.intention_id,
+                            )
+                            && !legacy_v2_intention_public_ref_matches(
+                                &intention.relation_scope,
+                                &intention.intention_id,
+                                &claim.intention_public_ref,
+                            ))
+                    {
+                        return Err(closed_claim());
+                    }
+                    if let Some(gate) = &claim.gate_decision_snapshot {
+                        gate.validate().map_err(|_| closed_claim())?;
+                    }
+                    authority.reservation = Some((
+                        intention.relation_scope,
+                        Some(claim.budget_day_start_utc_ms),
+                        claim.reserved_tokens,
+                    ));
                 }
             }
             "dispatch" | "dispatch_v2" => {
-                let outbound_row=proof.rows.iter().find(|v|v.kind==9 && v.blob("outbound_id")==Some(record)).ok_or_else(closed_claim)?;
-                let outbound=authenticated_outbound(outbound_row)?;
-                let intention=authenticated_intention(proof.rows.iter().find(|v|v.kind==6 && v.blob("intention_id")==Some(outbound.intention_id.as_slice())).ok_or_else(closed_claim)?)?;
-                if wire::persona_scope_digest(&outbound.target.bot_token,&outbound.target.persona_token,None)!=intention.persona_scope
-                    || wire::persona_scope_digest(&outbound.target.bot_token,&outbound.target.persona_token,Some(&outbound.target.relation_token))!=intention.relation_scope
-                { return Err(closed_claim()); }
-                authority.owner=Owner(1,intention.persona_scope);
-                if let Ok(claim)=decode_legacy::<DispatchClaimV1>(row) {
-                    if claim.claim_token!=token || claim.outbound_id.as_slice()!=record || claim.caller_incarnation!=caller
-                        || claim.lease_deadline_utc_ms!=deadline || crate::autonomy::dispatch_claim_token(&claim)!=token
-                        || claim.target!=outbound.target || claim.candidate_ciphertext!=outbound.candidate_ciphertext
-                    { return Err(closed_claim()); }
+                let outbound_row = proof
+                    .rows
+                    .iter()
+                    .find(|v| v.kind == 9 && v.blob("outbound_id") == Some(record))
+                    .ok_or_else(closed_claim)?;
+                let outbound = authenticated_outbound(outbound_row)?;
+                let intention = authenticated_intention(
+                    proof
+                        .rows
+                        .iter()
+                        .find(|v| {
+                            v.kind == 6
+                                && v.blob("intention_id") == Some(outbound.intention_id.as_slice())
+                        })
+                        .ok_or_else(closed_claim)?,
+                )?;
+                if wire::persona_scope_digest(
+                    &outbound.target.bot_token,
+                    &outbound.target.persona_token,
+                    None,
+                ) != intention.persona_scope
+                    || wire::persona_scope_digest(
+                        &outbound.target.bot_token,
+                        &outbound.target.persona_token,
+                        Some(&outbound.target.relation_token),
+                    ) != intention.relation_scope
+                {
+                    return Err(closed_claim());
+                }
+                authority.owner = Owner(1, intention.persona_scope);
+                if let Ok(claim) = decode_legacy::<DispatchClaimV1>(row) {
+                    if claim.claim_token != token
+                        || claim.outbound_id.as_slice() != record
+                        || claim.caller_incarnation != caller
+                        || claim.lease_deadline_utc_ms != deadline
+                        || crate::autonomy::dispatch_claim_token(&claim) != token
+                        || claim.target != outbound.target
+                        || claim.candidate_ciphertext != outbound.candidate_ciphertext
+                    {
+                        return Err(closed_claim());
+                    }
                 } else {
-                    let claim: DispatchClaimV2=decode_legacy(row)?;
-                    if claim.claim_token!=token || claim.lease_deadline_utc_ms!=deadline
-                        || crate::alpha3::projection::dispatch_claim_token(&claim,&caller)!=token
-                        || claim.target_binding_digest!=outbound.target.binding_digest
-                        || (claim.outbound_public_ref!=encode_execution_scoped_locator_v1(&intention.relation_scope,&outbound.outbound_id)
-                            && !legacy_v2_execution_public_ref_matches(&intention.relation_scope,&outbound.outbound_id,&claim.outbound_public_ref))
-                    { return Err(closed_claim()); }
-                    if let Some(gate)=&claim.gate_decision_snapshot { gate.validate().map_err(|_|closed_claim())?; }
+                    let claim: DispatchClaimV2 = decode_legacy(row)?;
+                    if claim.claim_token != token
+                        || claim.lease_deadline_utc_ms != deadline
+                        || crate::alpha3::projection::dispatch_claim_token(&claim, &caller) != token
+                        || claim.target_binding_digest != outbound.target.binding_digest
+                        || (claim.outbound_public_ref
+                            != encode_execution_scoped_locator_v1(
+                                &intention.relation_scope,
+                                &outbound.outbound_id,
+                            )
+                            && !legacy_v2_execution_public_ref_matches(
+                                &intention.relation_scope,
+                                &outbound.outbound_id,
+                                &claim.outbound_public_ref,
+                            ))
+                    {
+                        return Err(closed_claim());
+                    }
+                    if let Some(gate) = &claim.gate_decision_snapshot {
+                        gate.validate().map_err(|_| closed_claim())?;
+                    }
                 }
                 // Claim acquisition is the historical durable adapter-start
                 // boundary, even if a crash left the intention pending.
-                authority.dispatch_started=true;
+                authority.dispatch_started = true;
             }
             _ => return Err(closed_claim()),
         }
-        if output.insert(token,authority).is_some() { return Err(closed_claim()); }
+        if output.insert(token, authority).is_some() {
+            return Err(closed_claim());
+        }
     }
     Ok(output)
 }
 
-fn reservation_proven(row: &RawRow, proof: &RawProof, claims: &std::collections::BTreeMap<Digest,ClaimAuthority>) -> bool {
-    let Some(token)=row.blob("claim_token").and_then(|v| <Digest>::try_from(v).ok()) else { return false; };
-    let Some((relation,claim_day,tokens))=claims.get(&token).and_then(|v|v.reservation) else { return false; };
-    let Some(day)=row.integer("budget_day_start_utc_ms").and_then(|v|u64::try_from(v).ok()) else { return false; };
-    if row.blob("relation_scope")!=Some(relation.as_slice()) || claim_day.is_some_and(|v|v!=day)
-        || row.integer("reserved_tokens").and_then(|v|u64::try_from(v).ok())!=Some(tokens) { return false; }
-    let Some(budget)=proof.rows.iter().find(|v|v.kind==11 && v.blob("relation_scope")==Some(relation.as_slice())
-        && v.integer("budget_day_start_utc_ms")==Some(day as i64)) else { return false; };
-    let (Some(reserved),Some(charged),Some(limit),Some(used),Some(known))=(budget.integer("reserved_tokens"),budget.integer("charged_tokens"),budget.integer("limit_tokens"),budget.integer("used_tokens"),budget.integer("usage_known")) else {return false;};
-    if reserved<0 || charged<0 || used<0 || limit<0 || used>charged || !matches!(known,0|1)
-        || charged.checked_add(reserved).is_none_or(|v|v>limit) { return false; }
+fn reservation_proven(
+    row: &RawRow,
+    proof: &RawProof,
+    claims: &std::collections::BTreeMap<Digest, ClaimAuthority>,
+) -> bool {
+    let Some(token) = row
+        .blob("claim_token")
+        .and_then(|v| <Digest>::try_from(v).ok())
+    else {
+        return false;
+    };
+    let Some((relation, claim_day, tokens)) = claims.get(&token).and_then(|v| v.reservation) else {
+        return false;
+    };
+    let Some(day) = row
+        .integer("budget_day_start_utc_ms")
+        .and_then(|v| u64::try_from(v).ok())
+    else {
+        return false;
+    };
+    if row.blob("relation_scope") != Some(relation.as_slice())
+        || claim_day.is_some_and(|v| v != day)
+        || row
+            .integer("reserved_tokens")
+            .and_then(|v| u64::try_from(v).ok())
+            != Some(tokens)
+    {
+        return false;
+    }
+    let Some(budget) = proof.rows.iter().find(|v| {
+        v.kind == 11
+            && v.blob("relation_scope") == Some(relation.as_slice())
+            && v.integer("budget_day_start_utc_ms") == Some(day as i64)
+    }) else {
+        return false;
+    };
+    let (Some(reserved), Some(charged), Some(limit), Some(used), Some(known)) = (
+        budget.integer("reserved_tokens"),
+        budget.integer("charged_tokens"),
+        budget.integer("limit_tokens"),
+        budget.integer("used_tokens"),
+        budget.integer("usage_known"),
+    ) else {
+        return false;
+    };
+    if reserved < 0
+        || charged < 0
+        || used < 0
+        || limit < 0
+        || used > charged
+        || !matches!(known, 0 | 1)
+        || charged.checked_add(reserved).is_none_or(|v| v > limit)
+    {
+        return false;
+    }
     match row.integer("migrated_unknown_full_charge") {
-        Some(1) => known==0 && u64::try_from(charged).is_ok_and(|v|v>=tokens),
+        Some(1) => known == 0 && u64::try_from(charged).is_ok_and(|v| v >= tokens),
         Some(0) => {
-            let total=proof.rows.iter().filter(|v|v.kind==12 && v.blob("relation_scope")==Some(relation.as_slice()) && v.integer("budget_day_start_utc_ms")==Some(day as i64) && v.integer("migrated_unknown_full_charge")==Some(0))
-                .try_fold(0u64,|sum,v|sum.checked_add(u64::try_from(v.integer("reserved_tokens")?).ok()?));
-            total==u64::try_from(reserved).ok()
+            let total = proof
+                .rows
+                .iter()
+                .filter(|v| {
+                    v.kind == 12
+                        && v.blob("relation_scope") == Some(relation.as_slice())
+                        && v.integer("budget_day_start_utc_ms") == Some(day as i64)
+                        && v.integer("migrated_unknown_full_charge") == Some(0)
+                })
+                .try_fold(0u64, |sum, v| {
+                    sum.checked_add(u64::try_from(v.integer("reserved_tokens")?).ok()?)
+                });
+            total == u64::try_from(reserved).ok()
         }
-        _=>false,
+        _ => false,
     }
 }
 
@@ -1101,8 +1334,8 @@ fn disposition_code(row: &RawRow) -> Result<(u16, &'static str), V9UpgradeError>
             "forming" | "ready" | "deferred" | "externalizing" => (1, "suppressed_core_boundary"),
             "dispatch_pending" => (2, "terminal_core_boundary"),
             "adapter_call_started" => (3, "dispatch_unknown_no_retry"),
-            "adapter_submitted" | "platform_accepted" | "delivery_confirmed" | "dispatch_unknown" =>
-                (4, "historical_fact_preserved_no_retry"),
+            "adapter_submitted" | "platform_accepted" | "delivery_confirmed"
+            | "dispatch_unknown" => (4, "historical_fact_preserved_no_retry"),
             "suppressed" | "expired" | "terminal" => (5, "historical_terminal_preserved"),
             _ => return Err(invalid_state()),
         },
@@ -1124,59 +1357,115 @@ fn dispositions(proof: &RawProof) -> Result<Vec<Disposition<'_>>, V9UpgradeError
     let mut relations = std::collections::BTreeMap::<Vec<u8>, Option<Owner>>::new();
     for row in proof.rows.iter().filter(|row| row.kind == 5) {
         if let (Some(relation), Some(persona)) = (row.blob("relation_scope"), row.persona()) {
-            relations.entry(relation.to_vec()).and_modify(|old| {
-                if *old != Some(persona) { *old = None; }
-            }).or_insert(Some(persona));
+            relations
+                .entry(relation.to_vec())
+                .and_modify(|old| {
+                    if *old != Some(persona) {
+                        *old = None;
+                    }
+                })
+                .or_insert(Some(persona));
         }
     }
-    let resolve_relation = |row: &RawRow| row.blob("relation_scope")
-        .and_then(|key| relations.get(key)).and_then(|owner| *owner);
+    let resolve_relation = |row: &RawRow| {
+        row.blob("relation_scope")
+            .and_then(|key| relations.get(key))
+            .and_then(|owner| *owner)
+    };
     let mut output = Vec::with_capacity(proof.rows.len());
     for row in &proof.rows {
         if row.key.len() > 512 || row.cells.iter().any(|cell| cell.0 == 2) {
-            return Err(V9UpgradeError::Closed(CoreBoundaryClosedCode::LegacyAuthority));
+            return Err(V9UpgradeError::Closed(
+                CoreBoundaryClosedCode::LegacyAuthority,
+            ));
         }
         let owner = match row.kind {
             9 => {
-                let outbound=authenticated_outbound(row)?;
-                proof.rows.iter().find(|candidate|candidate.kind==6 && candidate.blob("intention_id")==Some(outbound.intention_id.as_slice()))
-                    .map(authenticated_intention).transpose()?.map(|v|Owner(1,v.persona_scope))
+                let outbound = authenticated_outbound(row)?;
+                proof
+                    .rows
+                    .iter()
+                    .find(|candidate| {
+                        candidate.kind == 6
+                            && candidate.blob("intention_id")
+                                == Some(outbound.intention_id.as_slice())
+                    })
+                    .map(authenticated_intention)
+                    .transpose()?
+                    .map(|v| Owner(1, v.persona_scope))
             }
-            10 => {
-                row.blob("claim_token").and_then(|v| <Digest>::try_from(v).ok()).and_then(|token|claims.get(&token)).map(|v|v.owner)
-            },
-            6 => Some(Owner(1,authenticated_intention(row)?.persona_scope)),
+            10 => row
+                .blob("claim_token")
+                .and_then(|v| <Digest>::try_from(v).ok())
+                .and_then(|token| claims.get(&token))
+                .map(|v| v.owner),
+            6 => Some(Owner(1, authenticated_intention(row)?.persona_scope)),
             23 => None,
             _ => row.persona().or_else(|| resolve_relation(row)),
-        }.unwrap_or_else(global_owner);
+        }
+        .unwrap_or_else(global_owner);
         if row.kind == 10 && owner.0 == 2 {
-            return Err(V9UpgradeError::Closed(CoreBoundaryClosedCode::LegacyAuthority));
+            return Err(V9UpgradeError::Closed(
+                CoreBoundaryClosedCode::LegacyAuthority,
+            ));
         }
         let (mut code, mut name) = disposition_code(row)?;
-        if row.kind==12 {
-            (code,name)=if reservation_proven(row,proof,&claims) {(9,"effective_charged_unknown_frozen")} else {(10,"frozen_unverified_no_refund")};
+        if row.kind == 12 {
+            (code, name) = if reservation_proven(row, proof, &claims) {
+                (9, "effective_charged_unknown_frozen")
+            } else {
+                (10, "frozen_unverified_no_refund")
+            };
         }
-        if matches!(row.kind,6|9) && row.text("state")==Some("dispatch_pending") {
-            let started = proof.rows.iter().filter(|v|v.kind==9 && (row.kind==9 && v.key==row.key || row.kind==6 && v.blob("intention_id")==row.blob("intention_id")))
+        if matches!(row.kind, 6 | 9) && row.text("state") == Some("dispatch_pending") {
+            let started = proof
+                .rows
+                .iter()
+                .filter(|v| {
+                    v.kind == 9
+                        && (row.kind == 9 && v.key == row.key
+                            || row.kind == 6 && v.blob("intention_id") == row.blob("intention_id"))
+                })
                 .map(|outbound| {
-                    let value=authenticated_outbound(outbound)?;
-                    Ok(value.state==ae_contracts::IntentionStateV1::AdapterCallStarted || claims.values().any(|claim|claim.dispatch_started && claim.record==value.outbound_id))
-                }).collect::<Result<Vec<bool>,V9UpgradeError>>()?.into_iter().any(|v|v);
-            if started {(code,name)=(3,"dispatch_unknown_no_retry");}
+                    let value = authenticated_outbound(outbound)?;
+                    Ok(
+                        value.state == ae_contracts::IntentionStateV1::AdapterCallStarted
+                            || claims.values().any(|claim| {
+                                claim.dispatch_started && claim.record == value.outbound_id
+                            }),
+                    )
+                })
+                .collect::<Result<Vec<bool>, V9UpgradeError>>()?
+                .into_iter()
+                .any(|v| v);
+            if started {
+                (code, name) = (3, "dispatch_unknown_no_retry");
+            }
         }
         let mut input = Vec::new();
         lp(&row.key, &mut input);
         input.extend_from_slice(&row.digest);
-        let preimage_leaf = hash(&format!("ae.core-boundary.preimage-leaf.v1/{}", row.kind), &input);
+        let preimage_leaf = hash(
+            &format!("ae.core-boundary.preimage-leaf.v1/{}", row.kind),
+            &input,
+        );
         input.extend_from_slice(&code.to_le_bytes());
         input.push(owner.0);
         input.extend_from_slice(&owner.1);
-        let leaf = hash(&format!("ae.core-boundary.disposition-leaf.v1/{}", row.kind), &input);
-        output.push(Disposition { row, owner, name, leaf, preimage_leaf });
+        let leaf = hash(
+            &format!("ae.core-boundary.disposition-leaf.v1/{}", row.kind),
+            &input,
+        );
+        output.push(Disposition {
+            row,
+            owner,
+            name,
+            leaf,
+            preimage_leaf,
+        });
     }
     Ok(output)
 }
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OwnerReceipt {
@@ -1193,12 +1482,24 @@ struct OwnerReceipt {
 }
 
 fn prefix_anchors(
-    conn: &Connection, owner: Owner, frozen: Option<&OwnerReceipt>,
+    conn: &Connection,
+    owner: Owner,
+    frozen: Option<&OwnerReceipt>,
 ) -> Result<(u64, Digest, u64, Digest), StoreError> {
     use rusqlite::OptionalExtension;
     if owner.0 == 2 {
-        return Ok((0, hash("ae.core-boundary.global-unowned.journal-prefix-empty.v1", &[]),
-            0, hash("ae.core-boundary.global-unowned.operational-prefix-empty.v1", &[])));
+        return Ok((
+            0,
+            hash(
+                "ae.core-boundary.global-unowned.journal-prefix-empty.v1",
+                &[],
+            ),
+            0,
+            hash(
+                "ae.core-boundary.global-unowned.operational-prefix-empty.v1",
+                &[],
+            ),
+        ));
     }
     let journal: Option<(i64, Vec<u8>)> = if let Some(receipt) = frozen {
         if receipt.journal_revision == 0 {
@@ -1243,7 +1544,10 @@ fn prefix_anchors(
 }
 
 fn owner_receipts(
-    conn: &Connection, schema: &Schema, dispositions: &[Disposition<'_>], now: u64,
+    conn: &Connection,
+    schema: &Schema,
+    dispositions: &[Disposition<'_>],
+    now: u64,
     frozen: Option<&[OwnerReceipt]>,
 ) -> Result<Vec<OwnerReceipt>, StoreError> {
     let mut owners = BTreeSet::from([global_owner()]);
@@ -1251,12 +1555,22 @@ fn owner_receipts(
     if let Some(frozen) = frozen {
         owners.extend(frozen.iter().map(|receipt| receipt.owner));
     } else {
-        let mut statement = conn.prepare("SELECT bot_token,persona_token FROM active_bindings LIMIT 65537")?;
+        let mut statement =
+            conn.prepare("SELECT bot_token,persona_token FROM active_bindings LIMIT 65537")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
-            let bot: [u8; 16] = row.get::<_, Vec<u8>>(0)?.try_into().map_err(|_| invalid("V9_BINDING_IDENTITY"))?;
-            let persona: [u8; 16] = row.get::<_, Vec<u8>>(1)?.try_into().map_err(|_| invalid("V9_BINDING_IDENTITY"))?;
-            owners.insert(Owner(1, ae_contracts::wire::persona_scope_digest(&bot, &persona, None)));
+            let bot: [u8; 16] = row
+                .get::<_, Vec<u8>>(0)?
+                .try_into()
+                .map_err(|_| invalid("V9_BINDING_IDENTITY"))?;
+            let persona: [u8; 16] = row
+                .get::<_, Vec<u8>>(1)?
+                .try_into()
+                .map_err(|_| invalid("V9_BINDING_IDENTITY"))?;
+            owners.insert(Owner(
+                1,
+                ae_contracts::wire::persona_scope_digest(&bot, &persona, None),
+            ));
             if owners.len() > 65_536 {
                 return Err(invalid("V9_OWNER_LIMIT"));
             }
@@ -1269,11 +1583,13 @@ fn owner_receipts(
     }
     let mut output = Vec::new();
     for owner in owners {
-        let previous = frozen.and_then(|receipts| receipts.iter().find(|receipt| receipt.owner == owner));
+        let previous =
+            frozen.and_then(|receipts| receipts.iter().find(|receipt| receipt.owner == owner));
         if frozen.is_some() && previous.is_none() {
             return Err(invalid("V9_OWNER_SET_MISMATCH"));
         }
-        let (journal_revision, journal_anchor, operational_count, operational_anchor) = prefix_anchors(conn, owner, previous)?;
+        let (journal_revision, journal_anchor, operational_count, operational_anchor) =
+            prefix_anchors(conn, owner, previous)?;
         let mut seed = schema_digest.to_vec();
         seed.push(owner.0);
         seed.extend_from_slice(&owner.1);
@@ -1306,8 +1622,18 @@ fn owner_receipts(
         bytes.extend_from_slice(&disposition);
         bytes.extend_from_slice(&now.to_le_bytes());
         let digest = hash("ae.core-boundary.owner-receipt.v1", &bytes);
-        output.push(OwnerReceipt { owner, journal_revision, journal_anchor, operational_count,
-            operational_anchor, count, preimage, disposition, bytes, digest });
+        output.push(OwnerReceipt {
+            owner,
+            journal_revision,
+            journal_anchor,
+            operational_count,
+            operational_anchor,
+            count,
+            preimage,
+            disposition,
+            bytes,
+            digest,
+        });
     }
     Ok(output)
 }
@@ -1324,7 +1650,10 @@ fn control_roots(schema: &Schema, receipts: &[OwnerReceipt]) -> [Digest; 3] {
             "ae.core-boundary.global-preimage-step.v1",
             "ae.core-boundary.global-disposition-step.v1",
             "ae.core-boundary.global-receipt-step.v1",
-        ].iter().enumerate() {
+        ]
+        .iter()
+        .enumerate()
+        {
             let mut bytes = roots[lane].to_vec();
             bytes.extend_from_slice(&(index as u64).to_le_bytes());
             bytes.push(receipt.owner.0);
@@ -1340,7 +1669,10 @@ fn control_roots(schema: &Schema, receipts: &[OwnerReceipt]) -> [Digest; 3] {
 }
 
 fn persist_overlay(
-    conn: &Connection, dispositions: &[Disposition<'_>], receipts: &[OwnerReceipt], now: u64,
+    conn: &Connection,
+    dispositions: &[Disposition<'_>],
+    receipts: &[OwnerReceipt],
+    now: u64,
 ) -> Result<(), StoreError> {
     for entry in dispositions {
         conn.execute(
@@ -1362,7 +1694,6 @@ fn persist_overlay(
     }
     Ok(())
 }
-
 
 fn read_owner_receipts(conn: &Connection) -> Result<Vec<OwnerReceipt>, StoreError> {
     let (count, bytes): (i64, i64) = conn.query_row(
@@ -1388,10 +1719,14 @@ fn read_owner_receipts(conn: &Connection) -> Result<Vec<OwnerReceipt>, StoreErro
             _ => return Err(invalid("V9_OWNER_KIND")),
         };
         let digest = |index| -> Result<Digest, StoreError> {
-            row.get::<_, Vec<u8>>(index)?.try_into().map_err(|_| invalid("V9_RECEIPT_DIGEST"))
+            row.get::<_, Vec<u8>>(index)?
+                .try_into()
+                .map_err(|_| invalid("V9_RECEIPT_DIGEST"))
         };
         let unsigned = |index| -> Result<u64, StoreError> {
-            row.get::<_, i64>(index)?.try_into().map_err(|_| invalid("V9_RECEIPT_COUNT"))
+            row.get::<_, i64>(index)?
+                .try_into()
+                .map_err(|_| invalid("V9_RECEIPT_COUNT"))
         };
         let count = unsigned(6)?;
         if count != unsigned(8)? {
@@ -1401,18 +1736,33 @@ fn read_owner_receipts(conn: &Connection) -> Result<Vec<OwnerReceipt>, StoreErro
         if kind == 2 && owner != global_owner() {
             return Err(invalid("V9_GLOBAL_OWNER"));
         }
-        output.push(OwnerReceipt { owner, journal_revision: unsigned(2)?,
-            journal_anchor: digest(3)?, operational_count: unsigned(4)?,
-            operational_anchor: digest(5)?, count, preimage: digest(7)?,
-            disposition: digest(9)?, bytes: row.get(10)?, digest: digest(11)? });
+        output.push(OwnerReceipt {
+            owner,
+            journal_revision: unsigned(2)?,
+            journal_anchor: digest(3)?,
+            operational_count: unsigned(4)?,
+            operational_anchor: digest(5)?,
+            count,
+            preimage: digest(7)?,
+            disposition: digest(9)?,
+            bytes: row.get(10)?,
+            digest: digest(11)?,
+        });
     }
     Ok(output)
 }
 
 fn verify_overlay(
-    conn: &Connection, entries: &[Disposition<'_>], receipts: &[OwnerReceipt], now: u64,
+    conn: &Connection,
+    entries: &[Disposition<'_>],
+    receipts: &[OwnerReceipt],
+    now: u64,
 ) -> Result<(), StoreError> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM core_boundary_disposition_v1", [], |row| row.get(0))?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM core_boundary_disposition_v1",
+        [],
+        |row| row.get(0),
+    )?;
     if count != entries.len() as i64 {
         return Err(invalid("V9_DISPOSITION_COUNT"));
     }
@@ -1444,12 +1794,17 @@ fn verify_overlay(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TerminalState { Applied, FailedClosed }
+pub(crate) enum TerminalState {
+    Applied,
+    FailedClosed,
+}
 
 fn not_classified_roots(proof: &RawProof) -> [Digest; 3] {
-    [proof.root,
+    [
+        proof.root,
         hash("ae.core-boundary.not-classified.disposition.v1", &[]),
-        hash("ae.core-boundary.not-classified.owner-receipt.v1", &[])]
+        hash("ae.core-boundary.not-classified.owner-receipt.v1", &[]),
+    ]
 }
 
 pub(crate) fn verify_terminal(conn: &Connection) -> Result<TerminalState, StoreError> {
@@ -1477,17 +1832,24 @@ pub(crate) fn verify_terminal(conn: &Connection) -> Result<TerminalState, StoreE
             let receipts = owner_receipts(conn, &schema, &entries, now as u64, Some(&frozen))?;
             verify_overlay(conn, &entries, &receipts, now as u64)?;
             (TerminalState::Applied, control_roots(&schema, &receipts))
-        },
-        "failed_closed" if matches!(code.as_deref(),
-            Some("CORE_BOUNDARY_LEGACY_AUTHORITY" | "CORE_BOUNDARY_UNSUPPORTED_LEGACY_STATE")) => {
+        }
+        "failed_closed"
+            if matches!(
+                code.as_deref(),
+                Some("CORE_BOUNDARY_LEGACY_AUTHORITY" | "CORE_BOUNDARY_UNSUPPORTED_LEGACY_STATE")
+            ) =>
+        {
             let empty: bool = conn.query_row(
                 "SELECT NOT EXISTS(SELECT 1 FROM core_boundary_disposition_v1)
                  AND NOT EXISTS(SELECT 1 FROM core_boundary_persona_receipt_v1)",
-                [], |row| row.get(0),
+                [],
+                |row| row.get(0),
             )?;
-            if !empty { return Err(invalid("V9_FAILED_CLOSED_OVERLAY")); }
+            if !empty {
+                return Err(invalid("V9_FAILED_CLOSED_OVERLAY"));
+            }
             (TerminalState::FailedClosed, not_classified_roots(&proof))
-        },
+        }
         _ => return Err(invalid("V9_CONTROL_STATE")),
     };
     let (_, failure_digest) = failure_receipt(&proof, now as u64);
@@ -1496,8 +1858,15 @@ pub(crate) fn verify_terminal(conn: &Connection) -> Result<TerminalState, StoreE
          AND boundary_revision=1 AND externalization_disabled=1 AND source_db_version=8
          AND schema_digest=?1 AND failure_preimage_root=?2 AND failure_receipt_digest=?3
          AND preimage_root=?4 AND disposition_root=?5 AND receipt_root=?6",
-        rusqlite::params![schema_digest(&schema).as_slice(), proof.root.as_slice(), failure_digest.as_slice(),
-            roots[0].as_slice(), roots[1].as_slice(), roots[2].as_slice()], |row| row.get(0),
+        rusqlite::params![
+            schema_digest(&schema).as_slice(),
+            proof.root.as_slice(),
+            failure_digest.as_slice(),
+            roots[0].as_slice(),
+            roots[1].as_slice(),
+            roots[2].as_slice()
+        ],
+        |row| row.get(0),
     )?;
     let migration: bool = conn.query_row(
         "SELECT COUNT(*)=1 FROM schema_migrations WHERE version=9 AND digest=?1 AND completed_at_ms=?2",
@@ -1510,14 +1879,24 @@ pub(crate) fn verify_terminal(conn: &Connection) -> Result<TerminalState, StoreE
 }
 
 fn classified_upgrade(
-    conn: &Connection, schema: &Schema, proof: &RawProof, now: u64,
+    conn: &Connection,
+    schema: &Schema,
+    proof: &RawProof,
+    now: u64,
 ) -> Result<[Digest; 3], V9UpgradeError> {
-    if proof.rows.iter().any(|row| row.cells.iter().any(|cell| cell.0 == 2)) {
-        return Err(V9UpgradeError::Closed(CoreBoundaryClosedCode::LegacyAuthority));
+    if proof
+        .rows
+        .iter()
+        .any(|row| row.cells.iter().any(|cell| cell.0 == 2))
+    {
+        return Err(V9UpgradeError::Closed(
+            CoreBoundaryClosedCode::LegacyAuthority,
+        ));
     }
     crate::autonomy::verify_autonomy_v8_read_only(conn).map_err(|error| match error {
-        StoreError::AutonomyConflict(_) | StoreError::ContinuityFence(_) =>
-            V9UpgradeError::Closed(CoreBoundaryClosedCode::LegacyAuthority),
+        StoreError::AutonomyConflict(_) | StoreError::ContinuityFence(_) => {
+            V9UpgradeError::Closed(CoreBoundaryClosedCode::LegacyAuthority)
+        }
         other => V9UpgradeError::Fatal(other),
     })?;
     let entries = dispositions(proof)?;
@@ -1540,20 +1919,32 @@ pub(crate) fn upgrade(conn: &mut Connection) -> Result<TerminalState, StoreError
         Ok(roots) => {
             tx.execute_batch("RELEASE core_boundary_classification")?;
             ("applied", roots, None)
-        },
+        }
         Err(V9UpgradeError::Closed(code)) => {
-            tx.execute_batch("ROLLBACK TO core_boundary_classification; RELEASE core_boundary_classification")?;
+            tx.execute_batch(
+                "ROLLBACK TO core_boundary_classification; RELEASE core_boundary_classification",
+            )?;
             if verify_failure_receipt(&tx, &schema, now)? != proof {
                 return Err(invalid("V9_PREIMAGE_CHANGED"));
             }
-            ("failed_closed", not_classified_roots(&proof), Some(code.as_str()))
-        },
+            (
+                "failed_closed",
+                not_classified_roots(&proof),
+                Some(code.as_str()),
+            )
+        }
         Err(V9UpgradeError::Fatal(error)) => return Err(error),
     };
     tx.execute(
         "UPDATE core_boundary_control_v1 SET state=?1,preimage_root=?2,
          disposition_root=?3,receipt_root=?4,failure_code=?5 WHERE singleton=1 AND state='pending'",
-        rusqlite::params![state, roots[0].as_slice(), roots[1].as_slice(), roots[2].as_slice(), code],
+        rusqlite::params![
+            state,
+            roots[0].as_slice(),
+            roots[1].as_slice(),
+            roots[2].as_slice(),
+            code
+        ],
     )?;
     let terminal = verify_terminal(&tx)?;
     tx.commit()?;
@@ -1580,6 +1971,8 @@ pub(crate) fn reopen(conn: &Connection) -> Result<TerminalState, StoreError> {
 // detect an added bypass. These tags are private migration compatibility only.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 pub(crate) enum RetiredOperationTagV1 {
     upsert_temporal_profile,
     upsert_relation_policy,
@@ -1680,7 +2073,9 @@ pub(crate) fn enforce_retired(
             rusqlite::params![schema_digest(&schema).as_slice(), MIGRATION_DIGEST],
             |row| row.get(0),
         )?;
-        if !terminal { return Err(invalid("V9_TERMINAL_CLOSURE")); }
+        if !terminal {
+            return Err(invalid("V9_TERMINAL_CLOSURE"));
+        }
         return Err(invalid("UNSUPPORTED_CORE_BOUNDARY"));
     }
     Ok(())
@@ -1744,16 +2139,28 @@ mod tests {
         assert_eq!(preflight(conn).unwrap(), OpenRoute::V9);
         assert_eq!(reopen(conn).unwrap(), TerminalState::Applied);
         assert_eq!(conn.total_changes(), writes);
-        assert!(conn.execute("INSERT INTO persona_temporal_profile VALUES(?1,1,'{}')",
-            rusqlite::params![[7u8; 32].as_slice()]).is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO persona_temporal_profile VALUES(?1,1,'{}')",
+                rusqlite::params![[7u8; 32].as_slice()]
+            )
+            .is_err());
         assert_eq!(conn.total_changes(), writes);
     }
 
     #[test]
     fn malformed_legacy_authority_is_preserved_in_failed_closed_reopen() {
         let mut conn = legacy();
-        conn.execute("INSERT INTO durable_intention VALUES(?1,?2,?3,?4,'unknown',0,'not json')",
-            rusqlite::params![[1u8;16].as_slice(),[2u8;32].as_slice(),[3u8;32].as_slice(),[4u8;32].as_slice()]).unwrap();
+        conn.execute(
+            "INSERT INTO durable_intention VALUES(?1,?2,?3,?4,'unknown',0,'not json')",
+            rusqlite::params![
+                [1u8; 16].as_slice(),
+                [2u8; 32].as_slice(),
+                [3u8; 32].as_slice(),
+                [4u8; 32].as_slice()
+            ],
+        )
+        .unwrap();
         let schema = render_schema().unwrap();
         let before = scan_raw_legacy(&conn, &schema).unwrap();
         assert_eq!(upgrade(&mut conn).unwrap(), TerminalState::FailedClosed);
@@ -1761,7 +2168,9 @@ mod tests {
         let changes = conn.total_changes();
         assert_eq!(reopen(&conn).unwrap(), TerminalState::FailedClosed);
         assert_eq!(conn.total_changes(), changes);
-        assert!(conn.execute("INSERT INTO meta VALUES('forbidden',X'00')", []).is_err());
+        assert!(conn
+            .execute("INSERT INTO meta VALUES('forbidden',X'00')", [])
+            .is_err());
     }
 
     #[test]
@@ -1769,17 +2178,28 @@ mod tests {
         let mut conn = legacy();
         let schema = render_schema().unwrap();
         {
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
             install_pending(&tx, &schema, 42).unwrap();
             tx.commit().unwrap();
         }
         let changes = conn.total_changes();
-        assert!(matches!(reopen(&conn), Err(StoreError::ContinuityFence("CORE_BOUNDARY_PENDING_CORRUPT"))));
+        assert!(matches!(
+            reopen(&conn),
+            Err(StoreError::ContinuityFence("CORE_BOUNDARY_PENDING_CORRUPT"))
+        ));
         assert_eq!(conn.total_changes(), changes);
         let mut broken = legacy();
         broken.execute_batch("DROP TABLE outbound_target").unwrap();
         assert!(upgrade(&mut broken).is_err());
-        let count: i64 = broken.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'core_boundary_%'",[],|r|r.get(0)).unwrap();
+        let count: i64 = broken
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'core_boundary_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
         assert_eq!(preflight(&broken).unwrap(), OpenRoute::Legacy(8));
     }
@@ -1788,52 +2208,207 @@ mod tests {
     fn nonempty_v8_claims_authenticate_wake_owners_and_both_reservation_dispositions() {
         use ae_contracts::*;
         use ae_fixed::Fixed;
-        let mut conn=legacy();
-        let scope=ScopeRef {bot_token:[1;16],persona_token:[2;16],relation_token:None,session_token:[3;16]};
-        let persona=wire::persona_scope_digest(&scope.bot_token,&scope.persona_token,None);
-        let frozen=FrozenTimeInputV1 {schema_version:1,observed_now_utc_ms:1000,effective_now_utc_ms:1000,
-            persona_tzid:"UTC".into(),persona_utc_offset_seconds:0,persona_local_minute:0,persona_day_ordinal:0,
-            relation_tzid:"UTC".into(),relation_utc_offset_seconds:0,relation_local_minute:0,relation_day_ordinal:0,
-            budget_day_start_utc_ms:0,budget_next_day_start_utc_ms:86_400_000,next_timezone_transition_utc_ms:None,tzdb_fingerprint:[4;32]};
-        let mut frozen_hash=Sha256::new();frozen_hash.update(b"ae.frozen-time-input.v1\0");frozen_hash.update(serde_json::to_vec(&frozen).unwrap());
-        let event=TimeAdvanceV1 {event_id:[5;16],scope:scope.clone(),expected_generation:0,frozen,
-            frozen_input_digest:frozen_hash.finalize().into(),stimulus:AutonomousStimulusV1::default()};
-        let state=AutonomousRuntimeStateV1 {schema_version:1,persona_scope:persona,relation_scope:None,generation:1,state_revision:0,
-            last_advanced_at_utc_ms:1000,next_wake_at_utc_ms:301000,wake_intensity:WakeIntensityV1::Micro,sleep_state:SleepStateV1::Awake,
-            process_s:Fixed::ZERO,process_c:Fixed::ZERO,arousal:Fixed::ZERO,sleep_threshold_held_ms:0,circadian_phase_minutes:Fixed::ZERO,
-            affiliation_need:Fixed::ZERO,unfinished_topic_salience:Fixed::ZERO,social_energy:Fixed::ONE,formula_digest:[6;32],mapping_digest:[7;32],workspace_residual:Fixed::ZERO};
-        let proposal=WakeProposalV1 {state,inner_events:vec![],intentions:vec![]};
-        for (kind,domain,id) in [("wake",b"wake".as_slice(),5u8),("wake_v2",b"wake-v2".as_slice(),8u8)] {
-            let mut event=event.clone();event.event_id=[id;16];
-            let caller=wire::domain_hash(b"ae.runtime.wake-caller.v2",&[&event.event_id,&event.scope.session_token]);
-            let token=crate::autonomy::digest_claim(domain,&event.event_id,&caller);
-            let body=if kind=="wake" {serde_json::to_string(&WakeClaimV1 {claim_token:token,event:event.clone(),proposal:proposal.clone(),lease_deadline_utc_ms:121000}).unwrap()}
-                else {serde_json::to_string(&WakeClaimV2 {claim_token:token,event:event.clone(),proposal:Alpha3WakeProposalV1 {legacy:proposal.clone(),contact_updates:vec![],contact_bases:vec![],lived_day:None,world_anchor:None,dream_updates:vec![]},lease_deadline_utc_ms:121000}).unwrap()};
-            conn.execute("INSERT INTO autonomy_claim VALUES(?1,?2,?3,?4,121000,?5)",rusqlite::params![token.as_slice(),kind,event.event_id.as_slice(),caller.as_slice(),body]).unwrap();
+        let mut conn = legacy();
+        let scope = ScopeRef {
+            bot_token: [1; 16],
+            persona_token: [2; 16],
+            relation_token: None,
+            session_token: [3; 16],
+        };
+        let persona = wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
+        let frozen = FrozenTimeInputV1 {
+            schema_version: 1,
+            observed_now_utc_ms: 1000,
+            effective_now_utc_ms: 1000,
+            persona_tzid: "UTC".into(),
+            persona_utc_offset_seconds: 0,
+            persona_local_minute: 0,
+            persona_day_ordinal: 0,
+            relation_tzid: "UTC".into(),
+            relation_utc_offset_seconds: 0,
+            relation_local_minute: 0,
+            relation_day_ordinal: 0,
+            budget_day_start_utc_ms: 0,
+            budget_next_day_start_utc_ms: 86_400_000,
+            next_timezone_transition_utc_ms: None,
+            tzdb_fingerprint: [4; 32],
+        };
+        let mut frozen_hash = Sha256::new();
+        frozen_hash.update(b"ae.frozen-time-input.v1\0");
+        frozen_hash.update(serde_json::to_vec(&frozen).unwrap());
+        let event = TimeAdvanceV1 {
+            event_id: [5; 16],
+            scope: scope.clone(),
+            expected_generation: 0,
+            frozen,
+            frozen_input_digest: frozen_hash.finalize().into(),
+            stimulus: AutonomousStimulusV1::default(),
+        };
+        let state = AutonomousRuntimeStateV1 {
+            schema_version: 1,
+            persona_scope: persona,
+            relation_scope: None,
+            generation: 1,
+            state_revision: 0,
+            last_advanced_at_utc_ms: 1000,
+            next_wake_at_utc_ms: 301000,
+            wake_intensity: WakeIntensityV1::Micro,
+            sleep_state: SleepStateV1::Awake,
+            process_s: Fixed::ZERO,
+            process_c: Fixed::ZERO,
+            arousal: Fixed::ZERO,
+            sleep_threshold_held_ms: 0,
+            circadian_phase_minutes: Fixed::ZERO,
+            affiliation_need: Fixed::ZERO,
+            unfinished_topic_salience: Fixed::ZERO,
+            social_energy: Fixed::ONE,
+            formula_digest: [6; 32],
+            mapping_digest: [7; 32],
+            workspace_residual: Fixed::ZERO,
+        };
+        let proposal = WakeProposalV1 {
+            state,
+            inner_events: vec![],
+            intentions: vec![],
+        };
+        for (kind, domain, id) in [
+            ("wake", b"wake".as_slice(), 5u8),
+            ("wake_v2", b"wake-v2".as_slice(), 8u8),
+        ] {
+            let mut event = event.clone();
+            event.event_id = [id; 16];
+            let caller = wire::domain_hash(
+                b"ae.runtime.wake-caller.v2",
+                &[&event.event_id, &event.scope.session_token],
+            );
+            let token = crate::autonomy::digest_claim(domain, &event.event_id, &caller);
+            let body = if kind == "wake" {
+                serde_json::to_string(&WakeClaimV1 {
+                    claim_token: token,
+                    event: event.clone(),
+                    proposal: proposal.clone(),
+                    lease_deadline_utc_ms: 121000,
+                })
+                .unwrap()
+            } else {
+                serde_json::to_string(&WakeClaimV2 {
+                    claim_token: token,
+                    event: event.clone(),
+                    proposal: Alpha3WakeProposalV1 {
+                        legacy: proposal.clone(),
+                        contact_updates: vec![],
+                        contact_bases: vec![],
+                        lived_day: None,
+                        world_anchor: None,
+                        dream_updates: vec![],
+                    },
+                    lease_deadline_utc_ms: 121000,
+                })
+                .unwrap()
+            };
+            conn.execute(
+                "INSERT INTO autonomy_claim VALUES(?1,?2,?3,?4,121000,?5)",
+                rusqlite::params![
+                    token.as_slice(),
+                    kind,
+                    event.event_id.as_slice(),
+                    caller.as_slice(),
+                    body
+                ],
+            )
+            .unwrap();
         }
-        let intention=DurableIntentionV1 {schema_version:1,intention_id:[10;16],persona_scope:persona,relation_scope:[11;32],state:IntentionStateV1::Externalizing,
-            action_class:"follow_up".into(),salience:Fixed::ONE,urgency:Fixed::ONE,confidence:Fixed::ONE,created_at_utc_ms:1,not_before_utc_ms:1,expires_at_utc_ms:999999,
-            externalization_attempts:1,semantic_idempotency_digest:[12;32],workspace_mapping_digest:[13;32],workspace_residual:Fixed::ZERO,source_event_ids:vec![[14;16]]};
-        conn.execute("INSERT INTO durable_intention VALUES(?1,?2,?3,?4,'externalizing',1,?5)",rusqlite::params![intention.intention_id.as_slice(),persona.as_slice(),intention.relation_scope.as_slice(),intention.semantic_idempotency_digest.as_slice(),serde_json::to_string(&intention).unwrap()]).unwrap();
-        let mut claim=ExternalizationClaimV1 {claim_token:[0;32],intention_id:intention.intention_id,attempt_no:1,max_tokens:64,prompt_contract:"fixture".into(),prompt_contract_digest:[15;32],relation_policy_revision:1,target_binding_digest:[16;32],capability_snapshot_digest:[17;32],frozen_input_digest:[18;32],caller_incarnation:[19;32],lease_deadline_utc_ms:121000};
-        claim.claim_token=crate::autonomy::externalization_claim_token(&claim);
-        conn.execute("INSERT INTO autonomy_claim VALUES(?1,'externalization',?2,?3,121000,?4)",rusqlite::params![claim.claim_token.as_slice(),claim.intention_id.as_slice(),claim.caller_incarnation.as_slice(),serde_json::to_string(&claim).unwrap()]).unwrap();
+        let intention = DurableIntentionV1 {
+            schema_version: 1,
+            intention_id: [10; 16],
+            persona_scope: persona,
+            relation_scope: [11; 32],
+            state: IntentionStateV1::Externalizing,
+            action_class: "follow_up".into(),
+            salience: Fixed::ONE,
+            urgency: Fixed::ONE,
+            confidence: Fixed::ONE,
+            created_at_utc_ms: 1,
+            not_before_utc_ms: 1,
+            expires_at_utc_ms: 999999,
+            externalization_attempts: 1,
+            semantic_idempotency_digest: [12; 32],
+            workspace_mapping_digest: [13; 32],
+            workspace_residual: Fixed::ZERO,
+            source_event_ids: vec![[14; 16]],
+        };
+        conn.execute(
+            "INSERT INTO durable_intention VALUES(?1,?2,?3,?4,'externalizing',1,?5)",
+            rusqlite::params![
+                intention.intention_id.as_slice(),
+                persona.as_slice(),
+                intention.relation_scope.as_slice(),
+                intention.semantic_idempotency_digest.as_slice(),
+                serde_json::to_string(&intention).unwrap()
+            ],
+        )
+        .unwrap();
+        let mut claim = ExternalizationClaimV1 {
+            claim_token: [0; 32],
+            intention_id: intention.intention_id,
+            attempt_no: 1,
+            max_tokens: 64,
+            prompt_contract: "fixture".into(),
+            prompt_contract_digest: [15; 32],
+            relation_policy_revision: 1,
+            target_binding_digest: [16; 32],
+            capability_snapshot_digest: [17; 32],
+            frozen_input_digest: [18; 32],
+            caller_incarnation: [19; 32],
+            lease_deadline_utc_ms: 121000,
+        };
+        claim.claim_token = crate::autonomy::externalization_claim_token(&claim);
+        conn.execute(
+            "INSERT INTO autonomy_claim VALUES(?1,'externalization',?2,?3,121000,?4)",
+            rusqlite::params![
+                claim.claim_token.as_slice(),
+                claim.intention_id.as_slice(),
+                claim.caller_incarnation.as_slice(),
+                serde_json::to_string(&claim).unwrap()
+            ],
+        )
+        .unwrap();
         conn.execute("INSERT INTO externalization_budget(relation_scope,budget_day_start_utc_ms,reserved_tokens,limit_tokens,charged_tokens,used_tokens,usage_known,revision) VALUES(?1,0,64,128,0,0,1,1)",rusqlite::params![intention.relation_scope.as_slice()]).unwrap();
-        conn.execute("INSERT INTO externalization_budget_claim VALUES(?1,?2,0,64,0)",rusqlite::params![claim.claim_token.as_slice(),intention.relation_scope.as_slice()]).unwrap();
-        conn.execute("INSERT INTO externalization_budget_claim VALUES(?1,?2,86400000,32,0)",rusqlite::params![[99u8;32].as_slice(),intention.relation_scope.as_slice()]).unwrap();
-        let schema=render_schema().unwrap();
-        let before=scan_raw_legacy(&conn,&schema).unwrap();
-        assert_eq!(authenticate_claims(&before).unwrap().len(),3);
-        assert_eq!(upgrade(&mut conn).unwrap(),TerminalState::Applied);
-        assert_eq!(scan_raw_legacy(&conn,&schema).unwrap(),before);
+        conn.execute(
+            "INSERT INTO externalization_budget_claim VALUES(?1,?2,0,64,0)",
+            rusqlite::params![
+                claim.claim_token.as_slice(),
+                intention.relation_scope.as_slice()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO externalization_budget_claim VALUES(?1,?2,86400000,32,0)",
+            rusqlite::params![[99u8; 32].as_slice(), intention.relation_scope.as_slice()],
+        )
+        .unwrap();
+        let schema = render_schema().unwrap();
+        let before = scan_raw_legacy(&conn, &schema).unwrap();
+        assert_eq!(authenticate_claims(&before).unwrap().len(), 3);
+        assert_eq!(upgrade(&mut conn).unwrap(), TerminalState::Applied);
+        assert_eq!(scan_raw_legacy(&conn, &schema).unwrap(), before);
         let mut stmt=conn.prepare("SELECT effective_disposition FROM core_boundary_disposition_v1 WHERE record_kind=12 ORDER BY effective_disposition").unwrap();
-        assert_eq!(stmt.query_map([],|r|r.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap(),vec!["effective_charged_unknown_frozen","frozen_unverified_no_refund"]);
+        assert_eq!(
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            vec![
+                "effective_charged_unknown_frozen",
+                "frozen_unverified_no_refund"
+            ]
+        );
         drop(stmt);
         let owners:i64=conn.query_row("SELECT COUNT(*) FROM core_boundary_disposition_v1 WHERE record_kind=10 AND owner_kind='persona' AND owner_key=?1",rusqlite::params![persona.as_slice()],|r|r.get(0)).unwrap();
-        assert_eq!(owners,3);
-        let changes=conn.total_changes();
-        assert_eq!(reopen(&conn).unwrap(),TerminalState::Applied);
-        assert_eq!(conn.total_changes(),changes);
-        assert_eq!(scan_raw_legacy(&conn,&schema).unwrap(),before);
+        assert_eq!(owners, 3);
+        let changes = conn.total_changes();
+        assert_eq!(reopen(&conn).unwrap(), TerminalState::Applied);
+        assert_eq!(conn.total_changes(), changes);
+        assert_eq!(scan_raw_legacy(&conn, &schema).unwrap(), before);
     }
 }

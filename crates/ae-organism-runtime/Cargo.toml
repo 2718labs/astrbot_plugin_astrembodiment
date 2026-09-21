@@ -1,0 +1,21 @@
+[package]
+name = "ae-organism-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-runtime.workspace = true
+
+[dev-dependencies]
+ae-fixed.workspace = true
+ae-action-contract = { path = "../ae-action-contract" }
+ae-cognitive-envelope = { path = "../ae-cognitive-envelope" }
+ae-contracts.workspace = true
+ae-efference-copy = { path = "../ae-efference-copy" }
+ae-epistemic-state = { path = "../ae-epistemic-state" }
+ae-genesis.workspace = true
+ae-morph = { path = "../ae-morph" }
+ae-soma = { path = "../ae-soma" }
+ae-subjective-present = { path = "../ae-subjective-present" }
+serde_json.workspace = true

@@ -10,7 +10,6 @@ from types import MappingProxyType
 from typing import Any
 
 from .semantic_contract import (
-    ABSENT,
     DIMENSION_NAMES,
     FXP6_SCALE,
     PRESENT,
@@ -64,9 +63,12 @@ class SemanticEstimatorRequestV3:
 
     @property
     def reserved_tokens(self) -> int:
-        return len(self.system_prompt.encode("utf-8")) + len(
-            self.request_json.encode("utf-8")
-        ) + 512 + 256
+        return (
+            len(self.system_prompt.encode("utf-8"))
+            + len(self.request_json.encode("utf-8"))
+            + 512
+            + 256
+        )
 
 
 def _reject_constant(_value: str) -> None:
@@ -101,7 +103,10 @@ def parse_estimator_output_v3(value: Any) -> SemanticEstimateV3:
     """Parse exactly one complete fifteen-dimension JSON estimate."""
 
     payload = _decode_closed_object(value)
-    if set(payload) != _ROOT_FIELDS or payload.get("schema") != SEMANTIC_ESTIMATE_V3_SCHEMA:
+    if (
+        set(payload) != _ROOT_FIELDS
+        or payload.get("schema") != SEMANTIC_ESTIMATE_V3_SCHEMA
+    ):
         raise SemanticEstimateError()
     raw_dimensions = payload.get("dimensions")
     if type(raw_dimensions) is not dict or set(raw_dimensions) != set(DIMENSION_NAMES):
@@ -145,7 +150,11 @@ def build_perception_proposal_v3(
 ) -> dict[str, Any]:
     """Reduce a complete estimate to Native's exact six-key proposal."""
 
-    parsed = estimate if type(estimate) is SemanticEstimateV3 else parse_estimator_output_v3(estimate)
+    parsed = (
+        estimate
+        if type(estimate) is SemanticEstimateV3
+        else parse_estimator_output_v3(estimate)
+    )
     dimensions: dict[str, int] = {}
     confidences: list[int] = []
     for name in DIMENSION_NAMES:

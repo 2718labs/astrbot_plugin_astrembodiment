@@ -9,6 +9,7 @@ ae-fixed.workspace = true
 ae-contracts.workspace = true
 serde.workspace = true
 blake3.workspace = true
+ed25519-dalek.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

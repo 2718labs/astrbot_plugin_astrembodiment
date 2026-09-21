@@ -502,6 +502,8 @@ pub struct SemanticAppraisalClaimV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum SemanticAppraisalBeginStoreOutcomeV1 {
     Completed {
         interaction: ApplyInteractionResultV1,
@@ -513,6 +515,8 @@ pub enum SemanticAppraisalBeginStoreOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum SemanticAppraisalStoreSettlementV1 {
     Committed {
         result: SemanticCommitResultV1,
@@ -527,6 +531,8 @@ pub enum SemanticAppraisalStoreSettlementV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::large_enum_variant)]
 pub enum SemanticAppraisalSettlementStoreOutcomeV1 {
     Completed(SemanticAppraisalStoreSettlementV1),
     RetryExpiredOrUnknown,
@@ -904,8 +910,7 @@ fn scan_perception_challenges_phase_one_v1(
         let remaining = MAX_PENDING_PERCEPTION_CHALLENGES_GLOBAL.saturating_sub(budget.rows);
         let limit = i64::try_from(
             remaining
-                .checked_add(1)
-                .unwrap_or(u64::MAX)
+                .saturating_add(1)
                 .min(PERCEPTION_CHALLENGE_SCAN_BATCH_ROWS_V1),
         )
         .map_err(|_| StoreError::ContinuityFence("perception_challenge_scan_limit"))?;
@@ -1780,10 +1785,14 @@ fn committed_perception_origin_v1(
         || !is_nonzero(&fact.extractor_digest)
         || (batch.scope.relation_token.is_none()
             && (batch.scope.session_token != batch.causal.turn_id
-                || batch.causal.action_id.is_some() || batch.causal.delivery_id.is_some()
-                || batch.causal.claim_id.is_some() || fact.value_code.is_some()
-                || fact.subject_public_ref.is_some() || fact.consent_terms.is_some()
-                || fact.scheduled_at_utc_ms.is_some() || fact.expires_at_utc_ms.is_some()))
+                || batch.causal.action_id.is_some()
+                || batch.causal.delivery_id.is_some()
+                || batch.causal.claim_id.is_some()
+                || fact.value_code.is_some()
+                || fact.subject_public_ref.is_some()
+                || fact.consent_terms.is_some()
+                || fact.scheduled_at_utc_ms.is_some()
+                || fact.expires_at_utc_ms.is_some()))
     {
         return Err(StoreError::SemanticInvalid("perception_origin_authority"));
     }
@@ -2202,6 +2211,8 @@ fn encode_reply_affect_v1(
     Ok((bytes, digest))
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn encode_terminal_semantic_appraisal_v1(
     outcome_code: &str,
     usage: &SemanticAppraisalProviderUsageV1,
@@ -2939,6 +2950,8 @@ fn valid_stored_semantic_appraisal_terminal_outcome_code_v1(outcome_code: &str) 
         || outcome_code == "budget_exhausted"
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn settle_semantic_appraisal_claim_tx_v1(
     tx: &Transaction<'_>,
     scope: &ScopeRef,
@@ -4435,6 +4448,8 @@ fn origin_digest(origin: &SemanticOriginV1) -> Digest {
     )
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn commit_digest(
     candidate: &PairedSemanticCommitV1,
     relation_present: bool,
@@ -5880,10 +5895,12 @@ fn verify_semantic_schema_v2_namespace_v1(
         return Err(StoreError::ContinuityFence("semantic_schema_object_set"));
     }
     for (kind, name, table, has_sql) in CORE.iter().chain(
-        (supplemental_count == 2)
-            .then_some(SUPPLEMENT.as_slice())
-            .unwrap_or_default()
-            .iter(),
+        if supplemental_count == 2 {
+            SUPPLEMENT.as_slice()
+        } else {
+            &[]
+        }
+        .iter(),
     ) {
         let exact = objects.iter().any(|object| {
             object.kind == *kind
@@ -7115,8 +7132,7 @@ fn appraisal_required_payload_length_v1(
 
 fn semantic_appraisal_scan_limit_v1(remaining: u64) -> Result<i64, StoreError> {
     let limit = remaining
-        .checked_add(1)
-        .unwrap_or(u64::MAX)
+        .saturating_add(1)
         .min(SEMANTIC_APPRAISAL_SCAN_BATCH_ROWS_V1);
     i64::try_from(limit).map_err(|_| StoreError::ContinuityFence("semantic_appraisal_scan_limit"))
 }
@@ -8521,6 +8537,8 @@ pub(crate) fn migrate_schema(tx: &Transaction<'_>) -> Result<(), StoreError> {
     Ok(())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::type_complexity)]
 fn decode_origin_row(
     persona_scope: Digest,
     row: (
@@ -8611,6 +8629,8 @@ fn stored_origin_tx(
     stored_origin(tx, persona_scope)
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn derive_origin_tx(
     tx: &Transaction<'_>,
     scope: &ScopeRef,
@@ -8889,20 +8909,44 @@ fn observer_identity_for_persona_tx_v1(
         // V9 has no active autonomy_scope_binding. Resolve the persona against
         // the actual Genesis bindings; all candidate identities are bounded.
         let mut statement=tx.prepare("SELECT bot_token,persona_token,revision FROM active_bindings ORDER BY bot_token,persona_token LIMIT 4097")?;
-        let mut rows=statement.query([])?;let mut found=None;let mut count=0;
-        while let Some(row)=rows.next()? {
-            count+=1;if count>4096{return Err(StoreError::ContinuityFence("semantic_observer_inventory_bound"));}
-            let bot=id_from_vec(row.get(0)?,"active_binding.bot")?;let persona=id_from_vec(row.get(1)?,"active_binding.persona")?;
-            if wire::persona_scope_digest(&bot,&persona,None)==persona_scope {
-                if found.is_some(){return Err(StoreError::ContinuityFence("semantic_observer_identity_collision"));}
-                let revision=semantic_revision_from_sql(row.get(2)?)?;
-                if revision==0{return Err(StoreError::ContinuityFence("semantic_observer_personality_revision"));}
-                found=Some((ScopeRef{bot_token:bot,persona_token:persona,relation_token:None,session_token:[0;16]},revision));
+        let mut rows = statement.query([])?;
+        let mut found = None;
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            if count > 4096 {
+                return Err(StoreError::ContinuityFence(
+                    "semantic_observer_inventory_bound",
+                ));
+            }
+            let bot = id_from_vec(row.get(0)?, "active_binding.bot")?;
+            let persona = id_from_vec(row.get(1)?, "active_binding.persona")?;
+            if wire::persona_scope_digest(&bot, &persona, None) == persona_scope {
+                if found.is_some() {
+                    return Err(StoreError::ContinuityFence(
+                        "semantic_observer_identity_collision",
+                    ));
+                }
+                let revision = semantic_revision_from_sql(row.get(2)?)?;
+                if revision == 0 {
+                    return Err(StoreError::ContinuityFence(
+                        "semantic_observer_personality_revision",
+                    ));
+                }
+                found = Some((
+                    ScopeRef {
+                        bot_token: bot,
+                        persona_token: persona,
+                        relation_token: None,
+                        session_token: [0; 16],
+                    },
+                    revision,
+                ));
             }
         }
-        let (scope,revision)=found.ok_or(StoreError::GenesisNotFound)?;
-        let identity=active_identity_for_scope_tx(tx,&scope)?;
-        return Ok((scope,identity,revision));
+        let (scope, revision) = found.ok_or(StoreError::GenesisNotFound)?;
+        let identity = active_identity_for_scope_tx(tx, &scope)?;
+        return Ok((scope, identity, revision));
     }
     type RawScope = (Option<String>, i64);
     let raw: RawScope = tx
@@ -9308,7 +9352,15 @@ pub(crate) fn attested_affect_projection_input_tx_v1(
                 current.graph_digest,
             )?;
             let (confidence, residual, receipt) = perception_observer_metadata_v1(tx, &current)?;
-            let previous_field = if let Some((field, _)) = crate::embodiment_clock::semantic_proof_input(tx, &ae_contracts::PersonaScopeRef { bot_token: _scope.bot_token, persona_token: _scope.persona_token }, &current)? {
+            let previous_field = if let Some((field, _)) =
+                crate::embodiment_clock::semantic_proof_input(
+                    tx,
+                    &ae_contracts::PersonaScopeRef {
+                        bot_token: _scope.bot_token,
+                        persona_token: _scope.persona_token,
+                    },
+                    &current,
+                )? {
                 field
             } else if receipt.base_revision == origin.source_revision {
                 let (field, _) = semantic_origin_state(tx, &origin, &identity)?;
@@ -9962,7 +10014,7 @@ fn next_semantic_persona_scope_in_tables_v1(
     let mut next = None;
     for &table in tables {
         if let Some(candidate) = next_semantic_persona_scope_in_table_v1(conn, table, last_scope)? {
-            if next.map_or(true, |current| candidate < current) {
+            if next.is_none_or(|current| candidate < current) {
                 next = Some(candidate);
             }
         }
@@ -10388,15 +10440,25 @@ fn verify_semantic_history_closure(
             return Err(StoreError::ContinuityFence("semantic_dynamics_replay"));
         }
         if committed.transition_kind == SemanticTransitionKindV1::Perception {
-            if let Some((projected, graph)) = crate::embodiment_clock::semantic_proof_input(conn, &ae_contracts::PersonaScopeRef { bot_token: event_scope.bot_token, persona_token: event_scope.persona_token }, &committed)? {
+            if let Some((projected, graph)) = crate::embodiment_clock::semantic_proof_input(
+                conn,
+                &ae_contracts::PersonaScopeRef {
+                    bot_token: event_scope.bot_token,
+                    persona_token: event_scope.persona_token,
+                },
+                &committed,
+            )? {
                 expected_state_before = state_digest(&projected, &committed.formula_digest);
                 expected_graph_before = graph_digest(&graph);
                 replay_field = Some(projected);
                 replay_graph = Some(graph);
             }
         }
-        if digest_from_vec(stored.state_before, "semantic_history.state_before")? != expected_state_before
-            || digest_from_vec(stored.graph_before, "semantic_history.graph_before")? != expected_graph_before {
+        if digest_from_vec(stored.state_before, "semantic_history.state_before")?
+            != expected_state_before
+            || digest_from_vec(stored.graph_before, "semantic_history.graph_before")?
+                != expected_graph_before
+        {
             return Err(StoreError::ContinuityFence("semantic_predecessor_chain"));
         }
         let field = replay_field
@@ -10556,6 +10618,8 @@ fn verify_semantic_history_closure(
     Ok(())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::type_complexity)]
 fn read_semantic_budget_checkpoint_v1(
     conn: &Connection,
     persona_scope: Digest,
@@ -10996,6 +11060,8 @@ fn verify_semantic_cursor_epoch_binding_v1(
     Ok(())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::type_complexity)]
 fn semantic_head(
     conn: &Connection,
     persona_scope: Digest,
@@ -11399,6 +11465,8 @@ fn bounded_payload(
     Ok(bytes)
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn time_commitment_digest_v1(
     persona_scope: &Digest,
     semantic_revision: u64,
@@ -11441,6 +11509,8 @@ fn time_commitment_digest_v1(
 /// Commitment used by prerelease semantic schema V4, where every time row
 /// duplicated a full field and graph. It remains solely as a migration
 /// verifier: V5 writes cannot call it or produce the legacy representation.
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn legacy_time_commitment_digest_v4(
     persona_scope: &Digest,
     semantic_revision: u64,
@@ -12093,10 +12163,19 @@ fn validate_semantic_cas_tx(
     candidate: &PairedSemanticCommitV1,
     derived: &DerivedSemanticCommitV1,
 ) -> Result<bool, StoreError> {
-    let event = wire::decode_event(&candidate.journal.event_bytes).map_err(|_| StoreError::SemanticInvalid("canonical_event_wire"))?;
+    let event = wire::decode_event(&candidate.journal.event_bytes)
+        .map_err(|_| StoreError::SemanticInvalid("canonical_event_wire"))?;
     let scope = &validated_stimulus(&event)?.scope;
-    let clock_input = crate::embodiment_clock::semantic_input(tx, &ae_contracts::PersonaScopeRef { bot_token: scope.bot_token, persona_token: scope.persona_token })?;
-    let projected_state = clock_input.as_ref().map(|(f, _)| state_digest(f, &candidate.formula_digest));
+    let clock_input = crate::embodiment_clock::semantic_input(
+        tx,
+        &ae_contracts::PersonaScopeRef {
+            bot_token: scope.bot_token,
+            persona_token: scope.persona_token,
+        },
+    )?;
+    let projected_state = clock_input
+        .as_ref()
+        .map(|(f, _)| state_digest(f, &candidate.formula_digest));
     match semantic_head_tx(tx, candidate.persona_scope)? {
         Some((current, state, graph, commitment)) => {
             if current != candidate.semantic_base_revision {
@@ -12427,6 +12506,8 @@ fn advance_semantic_budget_checkpoint_tx(
     Ok(())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::large_enum_variant)]
 enum ProductionSemanticPreparation {
     Existing(CommittedSemanticV1),
     Candidate(PairedSemanticCommitV1),
@@ -12475,7 +12556,14 @@ fn prepare_production_semantic_tx(
     )?;
     let (semantic_base_revision, field, graph) =
         semantic_state_for_derivation_tx(tx, persona_scope, &origin, &identity)?;
-    let (field, graph) = crate::embodiment_clock::semantic_input(tx, &ae_contracts::PersonaScopeRef { bot_token: stimulus.scope.bot_token, persona_token: stimulus.scope.persona_token })?.unwrap_or((field, graph));
+    let (field, graph) = crate::embodiment_clock::semantic_input(
+        tx,
+        &ae_contracts::PersonaScopeRef {
+            bot_token: stimulus.scope.bot_token,
+            persona_token: stimulus.scope.persona_token,
+        },
+    )?
+    .unwrap_or((field, graph));
     let canonical_nonce = canonical_semantic_nonce_v1(
         &event_bytes,
         &persona_scope,
@@ -12559,6 +12647,8 @@ fn prepare_production_semantic_tx(
     ))
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::large_enum_variant)]
 enum SemanticTransactionOutcome {
     Existing(CommittedSemanticV1),
     Inserted {
@@ -13695,7 +13785,14 @@ impl Store {
             return Err(StoreError::ContinuityFence("perception_evidence_binding"));
         }
         let committed = read_semantic_commit(tx, committed_scope, semantic_revision)?;
-        crate::embodiment_clock::commit_semantic_anchor(tx, &ae_contracts::PersonaScopeRef { bot_token: scope.bot_token, persona_token: scope.persona_token }, &committed)?;
+        crate::embodiment_clock::commit_semantic_anchor(
+            tx,
+            &ae_contracts::PersonaScopeRef {
+                bot_token: scope.bot_token,
+                persona_token: scope.persona_token,
+            },
+            &committed,
+        )?;
         let reply_affect = reply_affect_for_persona_tx_v1(tx, committed_scope)?;
         let charged_tokens = appraisal_usage
             .map(|usage| {
@@ -13860,9 +13957,26 @@ impl Store {
         let persona_scope =
             wire::persona_scope_digest(&scope.bot_token, &scope.persona_token, None);
         if let Some((field, graph)) = crate::embodiment_clock::semantic_input(conn, scope)? {
-            let identity = active_identity_for_scope_tx(conn, &ScopeRef { bot_token: scope.bot_token, persona_token: scope.persona_token, relation_token: None, session_token: [0;16] })?;
+            let identity = active_identity_for_scope_tx(
+                conn,
+                &ScopeRef {
+                    bot_token: scope.bot_token,
+                    persona_token: scope.persona_token,
+                    relation_token: None,
+                    session_token: [0; 16],
+                },
+            )?;
             let formula_digest = phase0_canonical_formula_digest_v1(&identity.formula_digest);
-            return Ok(Some(HydratedSemanticStateV1 { semantic_revision: semantic_head(conn, persona_scope)?.map(|v|v.0).unwrap_or(0), formula_digest, state_digest: state_digest(&field,&formula_digest), graph_digest: graph_digest(&graph), field, graph }));
+            return Ok(Some(HydratedSemanticStateV1 {
+                semantic_revision: semantic_head(conn, persona_scope)?
+                    .map(|v| v.0)
+                    .unwrap_or(0),
+                formula_digest,
+                state_digest: state_digest(&field, &formula_digest),
+                graph_digest: graph_digest(&graph),
+                field,
+                graph,
+            }));
         }
         let Some(origin) = stored_origin(conn, persona_scope)? else {
             return Ok(None);

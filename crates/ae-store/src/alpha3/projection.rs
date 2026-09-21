@@ -5,7 +5,11 @@ use ae_semantic_core::potential_region_projection_v1;
 use rusqlite::{params, Connection, OptionalExtension};
 
 const MAX_ALPHA3_BODY_BYTES: usize = 256 * 1024;
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const CLAIM_LEASE_MS: u64 = 120_000;
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const MAX_ALPHA3_OBSERVER_SCAN_ROWS: usize = 128;
 
 fn conflict(code: &str, message: impl AsRef<str>) -> StoreError {
@@ -35,6 +39,8 @@ fn state_name<T: serde::Serialize>(value: T) -> Result<String, StoreError> {
     Ok(encoded.trim_matches('"').to_owned())
 }
 
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct GateAuthority {
     relation_scope: Digest,
     intention: DurableIntentionV1,
@@ -51,6 +57,8 @@ struct GateAuthority {
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct GateAuthorityDeadlinesV1 {
     evaluated_at_utc_ms: u64,
     projection_ttl_expires_at_utc_ms: u64,
@@ -63,6 +71,8 @@ struct GateAuthorityDeadlinesV1 {
 }
 
 #[derive(serde::Serialize)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct GateAuthoritySnapshotV1 {
     schema_version: u16,
     phase: GatePhaseV1,
@@ -92,9 +102,7 @@ struct GateAuthoritySnapshotV1 {
     active_claim_count: u64,
 }
 
-impl Store {
-
-}
+impl Store {}
 
 #[cfg(test)]
 mod bounded_observer_scan_tests {
@@ -391,11 +399,17 @@ mod bounded_observer_scan_tests {
     }
 }
 
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const BODY_PROJECTION_TTL_MS: u64 = 60_000;
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const BUDGET_DAY_MS: u64 = 86_400_000;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct BodyRuntimeProjectionRow {
     schema_version: u16,
     persona_scope: String,
@@ -409,6 +423,8 @@ struct BodyRuntimeProjectionRow {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct IntentionProjectionBody {
     schema_version: u16,
     intention_id: String,
@@ -421,6 +437,8 @@ struct IntentionProjectionBody {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct OutboundProjectionBody {
     outbound_id: String,
     intention_id: String,
@@ -431,6 +449,8 @@ struct OutboundProjectionBody {
 }
 
 #[derive(Clone, Copy)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct IntentionProjectionRow {
     intention_id: Id128,
     persona_scope: Digest,
@@ -442,6 +462,8 @@ struct IntentionProjectionRow {
 }
 
 #[derive(Clone, Copy)]
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct OutboundProjectionRow {
     outbound_id: Id128,
     intention_id: Id128,
@@ -451,9 +473,7 @@ struct OutboundProjectionRow {
     settled_at_utc_ms: Option<u64>,
 }
 
-impl Store {
-
-}
+impl Store {}
 
 #[allow(dead_code)]
 fn load_world_anchor(
@@ -525,6 +545,8 @@ fn load_lived_day(
 #[derive(Clone)]
 pub(crate) struct AffectObserverFieldsV1 {
     affect: ProjectionFieldV1<AffectProjectionV1>,
+    // Retained historical verification data; no active executor is restored.
+    #[allow(dead_code)]
     semantic_health: ProjectionFieldV1<SemanticProjectionHealthV1>,
 }
 
@@ -699,9 +721,7 @@ fn private_dreams(
     Ok(dreams)
 }
 
-impl Store {
-
-}
+impl Store {}
 
 fn legacy_dispatch_claim_token(claim: &DispatchClaimV2, caller_incarnation: &Digest) -> Digest {
     wire::domain_hash(
@@ -745,6 +765,4 @@ pub(crate) fn dispatch_claim_token(claim: &DispatchClaimV2, caller_incarnation: 
     )
 }
 
-impl Store {
-
-}
+impl Store {}

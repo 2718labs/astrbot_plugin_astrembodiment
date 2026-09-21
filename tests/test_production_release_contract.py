@@ -1,0 +1,461 @@
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+import tomllib
+import hashlib
+
+import pytest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _metadata_version() -> str:
+    metadata = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
+    match = re.search(r'^version:\s*"([^"]+)"\s*$', metadata, re.MULTILINE)
+    assert match is not None
+    return match.group(1)
+
+
+def test_production_version_markers_and_changelog_are_coupled() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    version = _metadata_version()
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    assert pyproject["project"]["version"] == version
+    assert cargo["workspace"]["package"]["version"] == version
+    assert f"## [{version}]" in changelog
+
+
+def test_production_readme_states_the_bounded_native_capability_loop() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for required in (
+        "用户话语 → 15 维闭合语义证据 → 原生状态原子提交 → 受限表达投影",
+        "插件升级后继续从持久化原生状态恢复",
+        "Windows x64 与 Linux x86_64",
+        "19 个方法",
+        "身体时钟",
+        "精确识别",
+        "不等同于意识、主观感受或真实关系",
+    ):
+        assert required in readme
+
+
+def test_release_contract_verifier_derives_and_checks_the_production_tag() -> None:
+    verifier = ROOT / "scripts" / "verify_release_contract.py"
+    assert verifier.is_file()
+    version = _metadata_version()
+    tag = f"v{version}"
+
+    derived_version = subprocess.run(
+        [sys.executable, str(verifier), "--field", "version"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    derived_tag = subprocess.run(
+        [sys.executable, str(verifier), "--field", "tag"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    accepted = subprocess.run(
+        [
+            sys.executable,
+            str(verifier),
+            "--tag",
+            tag,
+            "--version",
+            version,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(verifier),
+            "--tag",
+            f"{tag}-rc1",
+            "--version",
+            version,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert derived_version.returncode == 0, derived_version.stderr
+    assert derived_version.stdout.strip() == version
+    assert derived_tag.returncode == 0, derived_tag.stderr
+    assert derived_tag.stdout.strip() == tag
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode != 0
+    assert "version mismatch" in rejected.stderr
+
+    wrong_version = subprocess.run(
+        [
+            sys.executable,
+            str(verifier),
+            "--tag",
+            tag,
+            "--version",
+            "0.0.0",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert wrong_version.returncode != 0
+    assert "version mismatch" in wrong_version.stderr
+
+
+def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    release_path = ROOT / ".github" / "workflows" / "release.yml"
+    assert release_path.is_file()
+    release = release_path.read_text(encoding="utf-8")
+
+    for required in (
+        "windows-2022",
+        "ubuntu-22.04",
+        "ruff format --check",
+        "ruff check --select E,F",
+        "rustfmt --edition 2021 --config skip_children=true --check",
+        "cargo clippy --workspace --lib --bins --locked -- -D warnings",
+        "python scripts/verify_release_contract.py",
+    ):
+        assert required in ci
+
+    assert "push:\n    branches:\n      - master" in ci
+    assert "pull_request:\n    branches:\n      - master" in ci
+    assert "github.event.pull_request.number || github.ref" in ci
+    assert "astrbot_plugin_astrembodiment-v1.0.0" not in ci
+    assert "astrbot-plugin-1.0.0-release-candidate" not in ci
+    assert "--field version" in ci
+
+    package_matrix = ci.split("  native-package:\n", 1)[1].split(
+        "\n  assemble-allowlisted-zip:", 1
+    )[0]
+    release_contract = ci.split("  release-contract:\n", 1)[1].split(
+        "\n  native-package:", 1
+    )[0]
+    assemble = ci.split("  assemble-allowlisted-zip:\n", 1)[1]
+
+    release_test = "python -m pytest -q tests/test_production_release_contract.py"
+    assert "pytest>=8,<10" in release_contract
+    assert release_contract.index("pytest>=8,<10") < release_contract.index(
+        release_test
+    )
+
+    native_build = "python scripts/package_plugin.py --build-native --source-sha"
+    native_stage = 'python -m pip install "$RUNNER_TEMP"/native-wheels/*.whl'
+    native_regressions = "python -m pytest -q tests/test_host_master_integration.py"
+    assert native_build in package_matrix
+    assert native_stage in package_matrix
+    assert native_regressions in package_matrix
+    assert package_matrix.index(native_build) < package_matrix.index(native_stage)
+    assert package_matrix.index(native_stage) < package_matrix.index(native_regressions)
+
+    package_contract = "python -m pytest -q tests/test_release_contracts.py"
+    assert "actions/download-artifact@" in assemble
+    assert "native-inputs/native-wheel-windows/*.whl" in assemble
+    assert "native-inputs/native-wheel-linux/*.whl" in assemble
+    assert "pytest>=8,<10" in assemble
+    assert package_contract in assemble
+    assert assemble.index("actions/download-artifact@") < assemble.index(
+        package_contract
+    )
+    assert assemble.index("python scripts/package_plugin.py") < assemble.index(
+        package_contract
+    )
+    assert assemble.index("pytest>=8,<10") < assemble.index(package_contract)
+
+    for required in (
+        "ruff format --check",
+        "ruff check --select E,F",
+        native_regressions,
+        "cargo test -p ae-runtime --test core_boundary_runtime --test core_matrix_regression --test phase0_native_semantic --locked",
+    ):
+        assert required in package_matrix
+
+    for required in (
+        "workflow_run:",
+        "workflows:\n      - CI",
+        "types:\n      - completed",
+        "workflow_dispatch:",
+        "github.event.workflow_run.conclusion",
+        "github.event.workflow_run.event",
+        "github.event.workflow_run.head_branch",
+        "github.event.workflow_run.head_repository.full_name",
+        "github.event.workflow_run.head_sha",
+        "workflow_dispatch must run on master",
+        "stale successful CI run",
+        "group: production-release",
+        "cancel-in-progress: false",
+        "--field version",
+        "--field tag",
+        "refs/heads/master",
+        "git fetch --no-tags origin '+refs/heads/master:refs/remotes/origin/master'",
+        "actions/workflows/ci.yml/runs?event=push&branch=master&status=completed&head_sha=${control_sha}",
+        "--paginate --slurp",
+        "workflow_dispatch requires a successful CI push run for current master",
+        "git/tags",
+        "git/refs",
+        "gh release create",
+        "--draft",
+        "--verify-tag",
+        "gh release upload",
+        "gh release edit",
+        "isImmutable",
+        "sha256sum",
+        "cmp --silent",
+        "native-wheel-windows",
+        "native-wheel-linux",
+        "python scripts/package_plugin.py",
+        "release_action=NOOP",
+        "release_action=RESUME",
+        "release_action=PUBLISH",
+        "release_action=RECOVER_TAG_ONLY",
+        "::warning",
+    ):
+        assert required in release
+    assert "push:" not in release
+    assert "workflow_dispatch:\n    inputs:" not in release
+    assert "Full SHA of the current master merge commit to publish" not in release
+    assert "inputs.version" not in release
+    assert "inputs.tag" not in release
+    assert "actions/upload-artifact@" in release
+    assert release.count("contents: write") == 1
+    rebuilt_archive = 'rebuilt="dist/.${ARCHIVE_NAME%.zip}.rebuild.zip"'
+    rebuilt_compare = 'cmp --silent "$archive" "$rebuilt"'
+    rebuilt_cleanup = 'rm -f "$rebuilt"'
+    assert rebuilt_archive in release
+    assert rebuilt_compare in release
+    assert rebuilt_cleanup in release
+    assert release.index(rebuilt_archive) < release.index(rebuilt_compare)
+    assert release.index(rebuilt_compare) < release.index(rebuilt_cleanup)
+    assemble_release = release.split("  assemble-release:\n", 1)[1].split(
+        "\n  publish-release:", 1
+    )[0]
+    assert release.count("sha256sum --check") == 5
+    assert 'cd "$(dirname "$checksum")"' in assemble_release
+    assert 'sha256sum --check "$(basename "$checksum")"' in assemble_release
+    assert 'sha256sum --check "$checksum"' not in assemble_release
+    select_target_job = release.split("  select-target:\n", 1)[1].split(
+        "\n  build-native:", 1
+    )[0]
+    assert (
+        "permissions:\n      contents: read\n      actions: read" in select_target_job
+    )
+    publish_job = release.split("  publish-release:\n", 1)[1]
+    assert "permissions:\n      contents: write" in publish_job
+    assert "actions: read" not in publish_job
+    assert "actions: write" not in release
+    assert "persist-credentials: true" not in publish_job
+    assert "persist-credentials: false" in publish_job
+    publish_setup_python = (
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+    )
+    assert publish_job.count(publish_setup_python) == 1
+    publish_setup = publish_job.split(publish_setup_python, 1)[1].split(
+        "\n      - ", 1
+    )[0]
+    assert 'python-version: "3.12"' in publish_setup
+    publish_setup_index = publish_job.index(publish_setup_python)
+    publish_python_calls = [
+        match.start() for match in re.finditer(r"(?m)^\s*python(?:\s|$)", publish_job)
+    ]
+    assert publish_python_calls
+    assert all(publish_setup_index < call for call in publish_python_calls)
+    assert "git/tags" in publish_job
+    assert "git/refs" in publish_job
+    assert "--force" not in release
+    assert "--clobber" not in release
+    assert "per_page=100" not in release
+    assert "git ls-remote --exit-code" not in release
+    assert "publication is intentionally outside this workflow" in release
+    assert release.count("python scripts/verify_release_contract.py") >= 3
+    assert "needs.select-target.outputs.release_action != 'NOOP'" in release
+    assert "control_sha: ${{ steps.target.outputs.control_sha }}" in release
+    assert "tag_object_sha: ${{ steps.target.outputs.tag_object_sha }}" in release
+
+    selector = release.split(
+        "      - name: Verify trigger provenance, current master, and release state\n",
+        1,
+    )[1].split("\n  build-native:", 1)[0]
+    for required in (
+        'run.get("head_sha") != candidate_sha',
+        'run.get("status") != "completed"',
+        'run.get("conclusion") != "success"',
+        'run.get("event") != "push"',
+        'run.get("head_branch") != "master"',
+        'head_repository.get("full_name") != repository',
+        "published release target does not match its annotated tag",
+        "published release asset set is invalid",
+        "astr-embodiment-published-assets",
+        "gh release download",
+        "sha256sum --check",
+    ):
+        assert required in selector
+    assert selector.count("len(asset_records) != 2") >= 1
+    assert "release_target_sha" in selector
+    assert 'control_sha="$candidate_sha"' in selector
+    assert 'target_sha="$control_sha"' in selector
+    assert '"$tag_target_sha" == "$control_sha"' in selector
+    assert 'git merge-base --is-ancestor "$tag_target_sha" "$control_sha"' in selector
+    assert (
+        'require_successful_master_ci "$tag_target_sha" "tag-only recovery"' in selector
+    )
+    assert 'git cat-file -p "$tag_object_sha"' in selector
+    assert "github-actions[bot]" in selector
+    assert 'if message != f"Release {version}":' in selector
+    assert 'git show "${tag_target_sha}:metadata.yaml"' in selector
+    assert "printf 'control_sha=%s\\n' \"$control_sha\"" in selector
+    assert "printf 'target_sha=%s\\n' \"$target_sha\"" in selector
+    assert "printf 'tag_object_sha=%s\\n' \"$tag_object_sha\"" in selector
+    assert "RECOVER_TAG_ONLY" in selector
+    assert "release tag did not resolve to its advertised annotated object" in selector
+    assert (
+        'cd "$download_dir"\n              sha256sum --check "$checksum_name"'
+        in selector
+    )
+    assert "head_sha=${control_sha}" in selector
+    assert "--paginate --slurp" in selector
+    assert 'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"' in selector
+    assert 'if [[ ! -s "$tag_listing" ]]; then' in selector
+    assert "remote release tag lookup failed" in selector
+    assert "remote release tag lookup returned an unexpected ref" in selector
+    assert "one annotated ref and one peeled ref" in selector
+
+    assert (
+        publish_job.count('git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"') == 2
+    )
+    assert 'if [[ ! -s "$tag_listing" ]]; then' in publish_job
+    assert "remote release tag lookup failed" in publish_job
+    assert "remote release tag lookup returned an unexpected ref" in publish_job
+    assert "one annotated ref and one peeled ref" in publish_job
+    assert (
+        'cd release-assets\n            sha256sum --check "$CHECKSUM_NAME"'
+        in publish_job
+    )
+    assert publish_job.count('cd "$download_dir"') >= 2
+    assert publish_job.count('sha256sum --check "$CHECKSUM_NAME"') == 3
+    assert "GH_REPO: ${{ github.repository }}" in publish_job
+    assert "CONTROL_SHA: ${{ needs.select-target.outputs.control_sha }}" in publish_job
+    assert (
+        "EXPECTED_TAG_OBJECT_SHA: ${{ needs.select-target.outputs.tag_object_sha }}"
+        in publish_job
+    )
+    assert (
+        "RELEASE_ACTION: ${{ needs.select-target.outputs.release_action }}"
+        in publish_job
+    )
+    assert 'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"' in publish_job
+    assert "assert_publish_preconditions" in publish_job
+    assert "release tag drifted after target selection" in publish_job
+    release_create = publish_job.split("gh release create", 1)[1].split(
+        "state=DRAFT", 1
+    )[0]
+    assert "--notes-from-tag" in release_create
+    assert '--repo "$GITHUB_REPOSITORY"' not in release_create
+
+    release_state = publish_job.split(
+        "      - name: Create an annotated tag or resume the matching release state\n",
+        1,
+    )[1].split(
+        "      - name: Verify or upload draft assets without replacing existing "
+        "assets\n",
+        1,
+    )[0]
+    assert "observed_tag_object_sha" in release_state
+    assert "release-state did not observe a final annotated tag object" in release_state
+    assert (
+        "printf 'observed_tag_object_sha=%s\\n' \"$current_tag_object_sha\""
+        in release_state
+    )
+
+    draft_assets = publish_job.split(
+        "      - name: Verify or upload draft assets without replacing existing "
+        "assets\n",
+        1,
+    )[1].split("\n      - name: Publish the verified draft\n", 1)[0]
+    assert "gh release upload" in draft_assets
+    assert "gh release download" in draft_assets
+    assert "cmp --silent" in draft_assets
+    assert "draft release asset set is invalid" in draft_assets
+    assert draft_assets.count("len(asset_records) != 2") >= 1
+    assert draft_assets.index("gh release upload") < draft_assets.index(
+        "gh release download"
+    )
+
+    prepublish = publish_job.split("      - name: Publish the verified draft\n", 1)[
+        1
+    ].split(
+        "\n      - name: Verify published assets and report GitHub immutability\n", 1
+    )[0]
+    for required in (
+        "EXPECTED_TAG_OBJECT_SHA: ${{ steps.release-state.outputs."
+        "observed_tag_object_sha }}",
+        'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"',
+        'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"',
+        '"$tag_ref_count" -ne 1 || "$peeled_ref_count" -ne 1',
+        '"$tag_object_sha" != "$EXPECTED_TAG_OBJECT_SHA"',
+        '"$tag_target_sha" != "$TARGET_SHA"',
+        'git fetch --no-tags origin "$tag_ref"',
+        '"$fetch_tag_object_sha" != "$tag_object_sha"',
+        '"$fetch_peeled_sha" != "$TARGET_SHA"',
+        "prepublish-release-state.json",
+        "draft release identity changed before publish",
+        "release stopped being a draft before publish",
+    ):
+        assert required in prepublish
+    prepublish_edit = (
+        'gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false'
+    )
+    assert prepublish_edit in prepublish
+    assert prepublish.index(
+        'test "$(git rev-parse origin/master)" = "$CONTROL_SHA"'
+    ) < prepublish.index(prepublish_edit)
+    assert prepublish.index(
+        'git ls-remote --tags origin "$tag_ref" "${tag_ref}^{}"'
+    ) < prepublish.index(prepublish_edit)
+    assert prepublish.index("prepublish-release-state.json") < prepublish.index(
+        prepublish_edit
+    )
+
+    published_assets = publish_job.split(
+        "      - name: Verify published assets and report GitHub immutability\n", 1
+    )[1]
+    assert "published release asset set is invalid" in published_assets
+    assert published_assets.count("len(asset_records) != 2") >= 1
+
+
+def test_packager_writes_an_allowlisted_zip_sha256_sidecar(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from package_plugin import write_checksum
+
+    archive = tmp_path / "release.zip"
+    archive.write_bytes(b"exact archive payload")
+    checksum = tmp_path / "release.zip.sha256"
+    write_checksum(archive, checksum)
+    assert checksum.read_text(encoding="utf-8") == (
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n"
+    )
+    before = checksum.read_bytes()
+    with pytest.raises((ValueError, FileExistsError)):
+        write_checksum(archive, checksum)
+    assert checksum.read_bytes() == before

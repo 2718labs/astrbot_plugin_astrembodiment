@@ -1434,7 +1434,7 @@ impl EffectiveFrequencyV1 {
         const MODERATE_MS: u64 = 3 * 60 * 60 * 1_000;
         let restrained_preset = self.daily_max == 2 && self.cooldown_ms == RESTRAINED_MS;
         let unanswered_backoff = self.daily_max == 2
-            && self.cooldown_ms % RESTRAINED_MS == 0
+            && self.cooldown_ms.is_multiple_of(RESTRAINED_MS)
             && (self.cooldown_ms / RESTRAINED_MS).is_power_of_two();
         let balanced_preset = self.daily_max == 3 && self.cooldown_ms == BALANCED_MS;
         let moderate_preset = self.daily_max == 4 && self.cooldown_ms == MODERATE_MS;
@@ -1820,18 +1820,14 @@ pub fn integration_availability_v1() -> IntegrationAvailabilityV1 {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+#[derive(Default)]
 pub enum ProjectionFieldV1<T> {
     Available(T),
     UnavailableOnHost,
+    #[default]
     NotInitialized,
     Redacted,
     Inconsistent,
-}
-
-impl<T> Default for ProjectionFieldV1<T> {
-    fn default() -> Self {
-        Self::NotInitialized
-    }
 }
 
 impl<T> ProjectionFieldV1<T> {
@@ -2105,6 +2101,8 @@ impl DeveloperProjectionV2 {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
+// Preserve the historical DTO layout; boxing would change its public Rust API.
+#[allow(clippy::large_enum_variant)]
 pub enum ObserveProjectionV2 {
     Experience(ExperienceProjectionV2),
     Private(PrivateProjectionV2),

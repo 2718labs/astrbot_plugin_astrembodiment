@@ -20,6 +20,8 @@ const MAX_CANONICAL_EVENT_BYTES: usize = 256 * 1024;
 const MAX_RUNTIME_STATE_BYTES: usize = 256 * 1024;
 const MAX_SNAPSHOT_STATE_BYTES: usize = 256 * 1024;
 const MAX_INNER_EVENTS_PER_DELTA: usize = 1024;
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const MAX_INTENTIONS_PER_WAKE: usize = 1024;
 const MAX_EVENT_SOURCE_IDS: usize = 64;
 const MAX_INNER_EVENT_SUMMARY_BYTES: usize = 256;
@@ -291,7 +293,9 @@ fn require_exact_autonomy_schema_v8(conn: &Connection) -> Result<(), StoreError>
 pub(crate) fn verify_autonomy_v8_schema_identity(conn: &Connection) -> Result<(), StoreError> {
     require_exact_autonomy_schema_v8(conn)?;
     let marker: bool=conn.query_row("SELECT COUNT(*)=1 FROM pragma_table_info('externalization_budget_claim') WHERE name='migrated_unknown_full_charge' AND type='INTEGER' AND \"notnull\"=1",[],|r|r.get(0))?;
-    if !marker { return Err(StoreError::ContinuityFence("V9_LEGACY_SCHEMA_IDENTITY")); }
+    if !marker {
+        return Err(StoreError::ContinuityFence("V9_LEGACY_SCHEMA_IDENTITY"));
+    }
     Ok(())
 }
 
@@ -509,10 +513,13 @@ pub(crate) fn verify_autonomy_v8_read_only(conn: &Connection) -> Result<(), Stor
         (AUTONOMY_DB_VERSION_V7, MIGRATION_DIGEST_V7),
         (AUTONOMY_DB_VERSION_V8, MIGRATION_DIGEST_V8),
     ] {
-        let actual: Option<Vec<u8>> = conn.query_row(
-            "SELECT digest FROM schema_migrations WHERE version=?1",
-            params![version], |row| row.get(0),
-        ).optional()?;
+        let actual: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT digest FROM schema_migrations WHERE version=?1",
+                params![version],
+                |row| row.get(0),
+            )
+            .optional()?;
         if actual.as_deref() != Some(digest) {
             return Err(StoreError::ContinuityFence("V9_LEGACY_MIGRATION_IDENTITY"));
         }
@@ -524,19 +531,33 @@ pub(crate) fn verify_autonomy_v8_read_only(conn: &Connection) -> Result<(), Stor
     let expected = autonomy_v8_schema_objects(&reference)?;
     let catalog = crate::core_boundary_v9::bounded_catalog(conn)?;
     let v9 = crate::core_boundary_v9::render_schema()?;
-    let has_v9 = catalog.iter().any(|object| object.name == "core_boundary_control_v1");
+    let has_v9 = catalog
+        .iter()
+        .any(|object| object.name == "core_boundary_control_v1");
     if has_v9 {
         crate::core_boundary_v9::verify_schema_catalog(&catalog, &v9)?;
     }
-    let actual: Vec<_> = catalog.iter().filter(|object|
-        matches!(object.table.as_str(), "endogenous_intent_state_v1" | "local_dream_residue_v1" | "wake_time_settlement_v1")
-        && !(has_v9 && v9.objects.contains(object))
-    ).map(|object| AutonomyV8SchemaObject {
-        kind: object.kind.clone(), name: object.name.clone(), table: object.table.clone(),
-        canonical_sql: if object.sql.is_empty() { None } else { Some(canonical_autonomy_schema_sql(&object.sql)) },
-    }).collect();
+    let actual: Vec<_> = catalog
+        .iter()
+        .filter(|object| {
+            matches!(
+                object.table.as_str(),
+                "endogenous_intent_state_v1" | "local_dream_residue_v1" | "wake_time_settlement_v1"
+            ) && !(has_v9 && v9.objects.contains(object))
+        })
+        .map(|object| AutonomyV8SchemaObject {
+            kind: object.kind.clone(),
+            name: object.name.clone(),
+            table: object.table.clone(),
+            canonical_sql: if object.sql.is_empty() {
+                None
+            } else {
+                Some(canonical_autonomy_schema_sql(&object.sql))
+            },
+        })
+        .collect();
     let mut actual = actual;
-    actual.sort_by(|a,b| (&a.kind,&a.name).cmp(&(&b.kind,&b.name)));
+    actual.sort_by(|a, b| (&a.kind, &a.name).cmp(&(&b.kind, &b.name)));
     if actual != expected {
         return Err(StoreError::ContinuityFence("V9_LEGACY_SCHEMA_IDENTITY"));
     }
@@ -559,13 +580,19 @@ pub(crate) fn verify_autonomy_v8_read_only(conn: &Connection) -> Result<(), Stor
         if count > 65_536 {
             return Err(StoreError::ContinuityFence("V9_LEGACY_OWNER_LIMIT"));
         }
-        let scope: Digest = row.get::<_, Vec<u8>>(0)?.try_into()
+        let scope: Digest = row
+            .get::<_, Vec<u8>>(0)?
+            .try_into()
             .map_err(|_| StoreError::ContinuityFence("V9_LEGACY_OWNER_IDENTITY"))?;
         let checkpoints = read_operational_checkpoints(conn, &scope)?;
-        let expected: Vec<_> = checkpoints.into_iter()
-            .map(|(ordinal, checkpoint)| (ordinal, checkpoint.delta)).collect();
+        let expected: Vec<_> = checkpoints
+            .into_iter()
+            .map(|(ordinal, checkpoint)| (ordinal, checkpoint.delta))
+            .collect();
         if read_operational_authority(conn, &scope)? != expected {
-            return Err(StoreError::ContinuityFence("V9_LEGACY_OPERATIONAL_AUTHORITY"));
+            return Err(StoreError::ContinuityFence(
+                "V9_LEGACY_OPERATIONAL_AUTHORITY",
+            ));
         }
     }
     Ok(())
@@ -1071,6 +1098,8 @@ fn rebuild_inner_event_manifests_v6(tx: &Transaction<'_>) -> Result<(), StoreErr
     Ok(())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn verify_interaction_fact_batch_manifest_v7(
     conn: &Connection,
     scope: &Digest,
@@ -1401,7 +1430,8 @@ fn verify_relation_consent_authority_v7(conn: &Connection) -> Result<(), StoreEr
                 ));
             };
             if batch.scope.relation_token.is_none()
-                && crate::core_ingress::verify_core_inbound_journal(conn, &event_bytes)? {
+                && crate::core_ingress::verify_core_inbound_journal(conn, &event_bytes)?
+            {
                 continue;
             }
             ae_contracts::validate_interaction_fact_batch(&batch)
@@ -1549,7 +1579,11 @@ fn verify_all_inner_event_manifests_v6(conn: &Connection) -> Result<(), StoreErr
             StoreError::AutonomyConflict("canonical delta exceeds its verification bound".into())
         })?;
         if event_kind == "interaction_fact_batch" && delta_bytes.is_empty() {
-            let bytes = event_bytes.as_ref().ok_or_else(|| StoreError::AutonomyConflict("canonical event exceeds its verification bound".into()))?;
+            let bytes = event_bytes.as_ref().ok_or_else(|| {
+                StoreError::AutonomyConflict(
+                    "canonical event exceeds its verification bound".into(),
+                )
+            })?;
             if crate::core_ingress::verify_core_inbound_journal(conn, bytes)? {
                 continue;
             }
@@ -4666,6 +4700,8 @@ fn capture_operational_delta(
     })
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::type_complexity)]
 fn terminalize_revoked_alpha3_work(
     tx: &Transaction<'_>,
     event_kind: &str,
@@ -4964,7 +5000,10 @@ pub(crate) fn append_operational_authority(
     event_kind: &str,
     intention_id: &Id128,
 ) -> Result<(), StoreError> {
-    crate::core_boundary_v9::enforce_retired(tx, crate::core_boundary_v9::RetiredOperationTagV1::append_operational_authority)?;
+    crate::core_boundary_v9::enforce_retired(
+        tx,
+        crate::core_boundary_v9::RetiredOperationTagV1::append_operational_authority,
+    )?;
     terminalize_revoked_alpha3_work(tx, event_kind, intention_id)?;
     let delta = capture_operational_delta(tx, event_kind, intention_id)?;
     let anchor = tx
@@ -5050,7 +5089,7 @@ pub(crate) fn append_operational_authority(
     let ordinal: u64 = (count + 1).try_into().map_err(|_| {
         StoreError::AutonomyConflict("invalid operational authority ordinal".into())
     })?;
-    append_operational_checkpoint(&tx, ordinal, chain, &delta)?;
+    append_operational_checkpoint(tx, ordinal, chain, &delta)?;
     Ok(())
 }
 
@@ -5575,14 +5614,14 @@ fn observe_bounded_autonomy_delta(
     context: &str,
 ) -> Result<AutonomyJournalDeltaV1, StoreError> {
     if bytes.len() > MAX_AUTONOMY_DELTA_BYTES {
-        return Err(observe_projection_unavailable(&format!(
+        return Err(observe_projection_unavailable(format!(
             "{context} exceeds the 1 MiB verification bound"
         )));
     }
     let delta: AutonomyJournalDeltaV1 = serde_json::from_slice(bytes)
-        .map_err(|_| observe_projection_unavailable(&format!("{context} is invalid")))?;
+        .map_err(|_| observe_projection_unavailable(format!("{context} is invalid")))?;
     if let Some(reason) = autonomy_delta_bound_violation(&delta) {
-        return Err(observe_projection_unavailable(&format!(
+        return Err(observe_projection_unavailable(format!(
             "{context} exceeds its verification bound: {reason}"
         )));
     }
@@ -6136,6 +6175,8 @@ fn state_name(value: IntentionStateV1) -> Result<String, StoreError> {
     Ok(encoded.trim_matches('"').to_owned())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn wake_time_settlement_digest_v1(
     claim_token: &Digest,
     persona_scope: &Digest,
@@ -6353,21 +6394,20 @@ pub(crate) fn digest_claim(kind: &[u8], id: &[u8], caller: &Digest) -> Digest {
 }
 
 impl Store {
+    // Discover autonomy scopes from canonical event bytes and repair the
+    // derived lookup binding. The binding is never an authority source.
 
-    /// Discover autonomy scopes from canonical event bytes and repair the
-    /// derived lookup binding. The binding is never an authority source.
+    // Read and revalidate an already committed wake result.  This is the
+    // retry path after the one-shot claim has been consumed.
 
-    /// Read and revalidate an already committed wake result.  This is the
-    /// retry path after the one-shot claim has been consumed.
+    // Settle a wake from the Store-minted claim alone. Receipt identity,
+    // semantic graph/counts, journal base and chain seed are sampled only
+    // after the Store owns the immediate write transaction.
 
-    /// Settle a wake from the Store-minted claim alone. Receipt identity,
-    /// semantic graph/counts, journal base and chain seed are sampled only
-    /// after the Store owns the immediate write transaction.
-
-    /// Rebuild canonical state from journal deltas and operational lifecycle
-    /// projections from the append-only authority chain. Targets and relation
-    /// configuration remain independent inputs; in-flight claims are resolved
-    /// conservatively instead of being recreated as callable leases.
+    // Rebuild canonical state from journal deltas and operational lifecycle
+    // projections from the append-only authority chain. Targets and relation
+    // configuration remain independent inputs; in-flight claims are resolved
+    // conservatively instead of being recreated as callable leases.
 
     pub fn observe_snapshot_v1(
         &self,

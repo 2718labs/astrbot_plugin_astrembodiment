@@ -3,12 +3,11 @@
 use crate::{Store, StoreError};
 use ae_continuum::JournalRow;
 use ae_contracts::{
-    wire, AdminAction, AutonomousRuntimeStateV1, AutonomyJournalDeltaV1,
-    CanonicalEvent, CommitStatus, Digest,
-    DreamResidueStateV1, DreamResidueV1, DreamReviewActionV1, DreamReviewRequestV1,
-    EcosystemCapabilityGrantV1,
-    EcosystemProposalV1, InnerEventKindV1, InnerEventV1, InteractionFactV1,
-    InteractionSourceAuthorityV1, LivedDayStateV1, LivedNodeImportanceV1, LivedSegmentStateV1, ScopeRef, SleepStateV1, TimeAdvanceV1,
+    wire, AdminAction, AutonomousRuntimeStateV1, AutonomyJournalDeltaV1, CanonicalEvent,
+    CommitStatus, Digest, DreamResidueStateV1, DreamResidueV1, DreamReviewActionV1,
+    DreamReviewRequestV1, EcosystemCapabilityGrantV1, EcosystemProposalV1, InnerEventKindV1,
+    InnerEventV1, InteractionFactV1, InteractionSourceAuthorityV1, LivedDayStateV1,
+    LivedNodeImportanceV1, LivedSegmentStateV1, ScopeRef, SleepStateV1, TimeAdvanceV1,
     TransitionReceipt, WorldAnchorV1, WorldLayerV1,
 };
 use ae_fixed::Fixed;
@@ -813,8 +812,8 @@ fn persist_dream_transition_tx(
     Ok(())
 }
 
-/// Called by Task 2's wake materializer while its existing BEGIN IMMEDIATE is
-/// still open. This function never starts or commits a transaction.
+// Called by Task 2's wake materializer while its existing BEGIN IMMEDIATE is
+// still open. This function never starts or commits a transaction.
 
 fn notable_importance(event: &InnerEventV1) -> Option<LivedNodeImportanceV1> {
     match event.summary_code.as_str() {
@@ -1131,6 +1130,8 @@ fn verify_lived_world_replay_from(
     Ok(())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn append_dream_review_authority_tx(
     tx: &Transaction<'_>,
     persona_scope: &Digest,
@@ -1344,8 +1345,8 @@ impl Store {
         )
     }
 
-    /// Cross-validates the exact side-table projection at the latest settled
-    /// wake or waking dream review against its chain-bound authority record.
+    // Cross-validates the exact side-table projection at the latest settled
+    // wake or waking dream review against its chain-bound authority record.
 
     /// Test-fixture ingress only. Release builds expose no dream creation path;
     /// production wake/review code can only transition an existing residue.

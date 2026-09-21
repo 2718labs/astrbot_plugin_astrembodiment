@@ -3617,6 +3617,8 @@ fn attest_exact_semantic_authority_sets(
 /// The migration row authenticates only the exact prefix through `boundary`;
 /// later revisions stay closed until Task 7 adds replayable Store-owned
 /// dynamics authority ahead of the structural closure checks below.
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::too_many_arguments)]
 fn attest_post_migration_semantic_suffix(
     tx: &Transaction<'_>,
     event_scope: &ScopeRef,
@@ -3913,6 +3915,8 @@ fn attest_post_migration_semantic_suffix(
     Ok(())
 }
 
+// Preserve the established storage/API shape in this compatibility boundary.
+#[allow(clippy::type_complexity)]
 pub(crate) fn active_identity(
     tx: &Connection,
     scope: &ScopeRef,

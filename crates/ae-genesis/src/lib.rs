@@ -15,6 +15,9 @@ use ae_contracts::{
 use ae_fixed::{Fixed, SCALE};
 use thiserror::Error;
 
+/// R7 identity constitution types are additive and do not replace G0 genesis.
+pub mod r7;
+
 pub const MIN_TRAIT: Fixed = Fixed::from_raw(50_000);
 pub const MAX_TRAIT: Fixed = Fixed::from_raw(950_000);
 

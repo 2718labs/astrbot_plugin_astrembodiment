@@ -17,7 +17,7 @@ pub fn embodiment_fixed_offset(tzid: &str) -> Option<i32> {
     let b = tzid.as_bytes();
     if b.len() != 9
         || &b[..3] != b"UTC"
-        || ![b'+', b'-'].contains(&b[3])
+        || !b"+-".contains(&b[3])
         || b[6] != b':'
         || ![b[4], b[5], b[7], b[8]].iter().all(u8::is_ascii_digit)
     {
@@ -233,7 +233,8 @@ impl EmbodimentTemporalProfileV1 {
             && self.tzdb_content_sha256 != [0; 32]
             && self.tzdb_release == EMBODIMENT_TZDB_RELEASE
             && hex::encode32(&self.tzdb_content_sha256) == EMBODIMENT_TZDB_SHA256
-            && freeze_embodiment_time_v1(&self.persona_tzid, 1).is_ok_and(|f| f.persona_tzid == self.persona_tzid)
+            && freeze_embodiment_time_v1(&self.persona_tzid, 1)
+                .is_ok_and(|f| f.persona_tzid == self.persona_tzid)
             && (72_000_000..=100_800_000).contains(&self.circadian_period_millis)
             && self.maximum_analytic_horizon_ms == EMBODIMENT_MAX_HORIZON_MS
             && [
@@ -493,6 +494,8 @@ pub struct EmbodimentPersonaAnchorReceiptV1 {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+// Preserve the frozen public DTO; a boxed variant would alter its Rust API.
+#[allow(clippy::large_enum_variant)]
 pub enum EmbodimentPersonaLookupV1 {
     Missing {
         #[serde(with = "crate::hex::d32")]

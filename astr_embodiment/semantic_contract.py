@@ -97,4 +97,3 @@ def build_semantic_estimate_schema_v3() -> dict[str, Any]:
             },
         },
     }
-

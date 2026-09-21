@@ -26,6 +26,9 @@ pub use embodiment_time::*;
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
+/// Pure historical R7 contract types; no runtime submission capability.
+pub mod r7;
+
 pub mod hex {
     //! Serde helpers: digests and opaque tokens cross the FFI as lowercase hex
     //! strings. The canonical binary wire forms are unaffected.

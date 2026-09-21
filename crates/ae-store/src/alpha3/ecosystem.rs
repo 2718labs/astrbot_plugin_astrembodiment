@@ -3,8 +3,7 @@
 use crate::{Store, StoreError};
 use ae_contracts::{
     wire, CanonicalEvent, CapabilityGrantStateV1, Digest, EcosystemCapabilityGrantV1,
-    EcosystemCapabilityV1, EcosystemProposalKindV1,
-    EcosystemProposalV1, Id128, WorldLayerV1,
+    EcosystemCapabilityV1, EcosystemProposalKindV1, EcosystemProposalV1, Id128, WorldLayerV1,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest as ShaDigest, Sha256};
@@ -92,7 +91,7 @@ fn sha256_framed(domain: &[u8], fields: &[&[u8]]) -> Digest {
 }
 
 pub(crate) fn ecosystem_capability_digest_v1(grant: &EcosystemCapabilityGrantV1) -> Digest {
-    let mut capabilities = grant.capabilities.iter().copied().collect::<Vec<_>>();
+    let mut capabilities = grant.capabilities.to_vec();
     capabilities.sort();
     let encoded = capabilities
         .into_iter()
@@ -291,6 +290,4 @@ fn persona_local_minute_at(
     Ok(((u64::from(event.frozen.persona_local_minute) + elapsed_minutes) % 1_440) as u16)
 }
 
-impl Store {
-
-}
+impl Store {}

@@ -6,6 +6,8 @@ AstrEmbodiment 是 AstrBot 的 Rust 原生人格情绪、语义评价和确定�
 
 ## 能力与边界
 
+用户话语 → 15 维闭合语义证据 → 原生状态原子提交 → 受限表达投影。插件升级后继续从持久化原生状态恢复；这种工程状态不等同于意识、主观感受或真实关系。
+
 - 保留 Persona Genesis、SeedCode、核心情绪状态、语义评价，以及普通对话的投递结算。
 - Persona 独立身体时钟使用随包冻结的 IANA 2026c 数据；时区、日程、单调性和重启状态由原生类型化接口管理。
 - Native 与 Python 包装器仅开放契约规定的 19 个方法，包括无数据库能力的 `compile_core_host_request_v1`。
@@ -36,7 +38,7 @@ python -m pytest tests/test_release_contracts.py tests/test_static_contracts.py
 git diff --check
 ```
 
-当前新门禁的重点检查可用 `-k 'test_alpha4 or release_versions or initializer_and_packager or config_schema or formula_and_runtime or region_layout or self_action_has'` 选择。上述发布测试文件中的旧 readiness/wake 调用、占位二进制成功打包和旧 manifest 结构断言尚待迁移；全文件通过与最终归档验收仍是后续门禁，不能用这组重点检查替代。
+发布单元契约使用 `tests/test_release_contracts.py`、`tests/test_production_release_contract.py`、`tests/test_release_workflow_pipeline.py` 和 `tests/test_release_archive_verifier.py`。合成 wheel fixture 仅验证拒绝规则与打包逻辑，不能替代真实 Native 导入或最终归档验收。
 
 最终构建必须在所有源码和回归迁移提交完成后的干净工作树执行，以同一个完整 40 位 Git SHA 替换下方 `SOURCE_SHA`。构建输出使用新的目录；构建脚本把 SHA 注入 Native，同时将编译身份写入 wheel 的 `astrembodiment_core/build_identity.json` 并更新 RECORD。
 
@@ -63,6 +65,12 @@ python scripts/package_plugin.py --source-sha SOURCE_SHA --native-wheel PATH_TO_
 ```
 
 现有 `astrembodiment_core/_bundled/manifest.json` 记录双平台 wheel、二进制、同源身份和导入凭据。归档生成后仍需对精确 ZIP 完成 artifact parity、保护样本哈希核验和独立审查。导入凭据是构建证据记录，不是签名或发布授权。
+
+## 自动验证与发布
+
+PR CI 在 Windows x64 与实际 Linux x86_64 上，以同一完整 SHA 构建原生 wheel、执行真实导入并生成身份凭据；只有两份凭据与 wheel 的哈希、19 项 API 和源码身份全部匹配才组装 universal ZIP。随后两种系统分别从同一个精确 ZIP 验证 Native 身份、fresh 数据库和历史 `1774023` schema 的 open/close/reopen，以及不安全 authority 路径拒绝后数据保全。
+
+正式发布仍保留当前 master、成功 CI 来源、annotated tag 对象防漂移、草稿恢复和最小写权限门禁。GitHub Release 只上传确定性 ZIP 与 SHA-256 sidecar；双平台验证回执保存在同次 Actions 运行的 artifacts，ZIP 内记录 wheel 导入凭据。本次 PR 适配本身不代表已经触发发布或完成 AstrBot 实机验收。
 
 ## 许可
 

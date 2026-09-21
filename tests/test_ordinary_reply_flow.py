@@ -181,20 +181,28 @@ class _Harness:
             self.begin_requests.append(copy.deepcopy(request))
             observation = request["observation"]
             return {
-                "commit_status": "committed", "provider_authorized_now": True,
+                "commit_status": "committed",
+                "provider_authorized_now": True,
                 "initial_receipt": {
-                "disposition": "claimed",
-                "event": {"scope": observation["scope"],
-                          "operation_id": observation["operation_id"],
-                          "turn_id": observation["turn_id"],
-                          "transition": {"next_revision": 1}},
-                "challenge": {
-                    "request_nonce_digest": "71" * 32,
-                    "origin": {"origin_digest": "72" * 32,
-                               "scope": {**observation["scope"], "relation_token": None,
-                                         "session_token": observation["turn_id"]}},
-                },
-                "reply_affect": None,
+                    "disposition": "claimed",
+                    "event": {
+                        "scope": observation["scope"],
+                        "operation_id": observation["operation_id"],
+                        "turn_id": observation["turn_id"],
+                        "transition": {"next_revision": 1},
+                    },
+                    "challenge": {
+                        "request_nonce_digest": "71" * 32,
+                        "origin": {
+                            "origin_digest": "72" * 32,
+                            "scope": {
+                                **observation["scope"],
+                                "relation_token": None,
+                                "session_token": observation["turn_id"],
+                            },
+                        },
+                    },
+                    "reply_affect": None,
                 },
             }
 
@@ -219,8 +227,14 @@ class _Harness:
         }
         self.plugin._bridge.bootstrap_autonomy = lambda _request: {}
         import astrembodiment_core
-        self.plugin._bridge.compile_core_host_request_v1 = lambda op, request: json.loads(
-            astrembodiment_core.compile_core_host_request_v1(op, json.dumps(request)))
+
+        self.plugin._bridge.compile_core_host_request_v1 = lambda op, request: (
+            json.loads(
+                astrembodiment_core.compile_core_host_request_v1(
+                    op, json.dumps(request)
+                )
+            )
+        )
         self.plugin._bridge.commit_core_inbound_v1 = begin
         self.plugin._bridge.settle_semantic_appraisal_v1 = settle
 
@@ -243,9 +257,9 @@ class _Harness:
                 "semantic_estimator_provider_id": "semantic-dedicated",
                 "assistant_provider_id": "legacy-assistant",
             },
-            "semantic-dedicated",
+            "legacy-assistant",
             0,
-            id="semantic-estimator-over-legacy-and-current",
+            id="unified-assistant-over-legacy-semantic-and-current",
         ),
         pytest.param(
             {
@@ -321,7 +335,7 @@ def test_ordinary_reply_uses_main_llm_path_without_becoming_proactive(
     harness = _Harness(
         config_values={
             "semantic_estimator_provider_id": "semantic-dedicated",
-            "assistant_provider_id": "legacy-must-not-be-fallback",
+            "assistant_provider_id": "",
         },
         failure=failure,
         retry_settlement=True,
@@ -362,52 +376,74 @@ def test_pending_survives_provider_and_settlement_failure_then_delivery(settle_f
     harness = _Harness(config_values={}, failure="transport")
     plugin = harness.plugin
     original_settle = plugin._bridge.settle_semantic_appraisal_v1
+
     def settle(request):
         assert plugin._pending
         assert plugin._persona_locks[plugin._semantic_lock_key(harness.scope)].locked()
         if settle_fails:
             raise OSError("settlement unavailable")
         return original_settle(request)
+
     plugin._bridge.settle_semantic_appraisal_v1 = settle
     deliveries = []
+
     def delivery(request):
         assert "base_revision" not in request
         assert request["delivered"] is False
         deliveries.append(request)
-        return {"commit_status":"committed", "receipt":{
-            "operation_id":request["operation_id"],"scope":request["scope"],
-            "turn_id":request["turn_id"],"transition":{"next_revision":99}}}
+        return {
+            "commit_status": "committed",
+            "receipt": {
+                "operation_id": request["operation_id"],
+                "scope": request["scope"],
+                "turn_id": request["turn_id"],
+                "transition": {"next_revision": 99},
+            },
+        }
+
     plugin._bridge.commit_core_delivery_outcome_v1 = delivery
+
     async def run():
         event, request, response = await harness.run()
         frozen = plugin._pending[event.turn_token]
         assert "base_revision" not in frozen
-        with pytest.raises(TypeError): frozen["turn_id"] = "changed"
+        with pytest.raises(TypeError):
+            frozen["turn_id"] = "changed"
         assert response.completion_text == "AstrBot ordinary reply"
         await plugin.after_message_sent(event, delivered=False)
-        assert not plugin._pending and len(deliveries)==1
+        assert not plugin._pending and len(deliveries) == 1
         assert plugin._revisions[harness.scope.persona_token] == 99
         await plugin.after_message_sent(event)
-        assert len(deliveries)==1
+        assert len(deliveries) == 1
+
     asyncio.run(run())
 
 
 def test_delivery_terminal_error_clears_exact_pending_and_cancellation_compensates():
     harness = _Harness(config_values={}, failure="timeout")
     plugin = harness.plugin
+
     async def cancelled_provider(**kwargs):
         assert plugin._pending
-        assert not plugin._persona_locks[plugin._semantic_lock_key(harness.scope)].locked()
+        assert not plugin._persona_locks[
+            plugin._semantic_lock_key(harness.scope)
+        ].locked()
         raise asyncio.CancelledError()
+
     plugin._semantic_generate = cancelled_provider
+
     async def run():
         event = _Event()
         with pytest.raises(asyncio.CancelledError):
             await plugin.on_llm_request(event, _Request())
-        assert plugin._pending and len(harness.settlement_requests)==1
-        def fail(request): raise OSError("terminal delivery error")
+        assert plugin._pending and len(harness.settlement_requests) == 1
+
+        def fail(request):
+            raise OSError("terminal delivery error")
+
         plugin._bridge.commit_core_delivery_outcome_v1 = fail
         await plugin.after_message_sent(event)
         assert plugin._pending == {}
         assert len(plugin.delivery_diagnostics) == 1
+
     asyncio.run(run())

@@ -1,11 +1,21 @@
 use super::super::{Store, StoreError};
 use ae_contracts::{
-    wire, CanonicalEvent, ConsentTermsV1, Digest, InnerEventKindV1, InnerEventV1, InteractionFactBatchV1, InteractionFactKindV1, InteractionFactV1, RelationConsentStateV1, RelationConsentV1,
+    wire, CanonicalEvent, ConsentTermsV1, Digest, InnerEventKindV1, InnerEventV1,
+    InteractionFactBatchV1, InteractionFactKindV1, InteractionFactV1, RelationConsentStateV1,
+    RelationConsentV1,
 };
 
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const MAX_BODY_BYTES: usize = 256 * 1024;
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const MAX_EVENT_BYTES: usize = 256 * 1024;
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const MAX_DELTA_BYTES: usize = 1024 * 1024;
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 const REPETITION_SUBMISSION_STEP_RAW: i64 = 250_000;
 
 fn relation_scope(batch: &InteractionFactBatchV1) -> Result<Digest, StoreError> {
@@ -201,6 +211,4 @@ pub(crate) fn reduce_consent_transition_v1(
     Ok(Some(next))
 }
 
-impl Store {
-
-}
+impl Store {}

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 import hashlib
-import json
 import secrets
 import time
+import threading
+import sys
+import contextvars
+from concurrent.futures import Future
 from collections import deque
 from collections.abc import Mapping
 from typing import Any
@@ -68,10 +70,10 @@ try:
         SemanticAppraisalRetryExpiredOrUnknown,
     )
     from .astr_embodiment.contracts import ScopeTokens
+    from .astr_embodiment.auxiliary_transport import AuxiliaryProviderTransport
     from .astr_embodiment.coordinator import GenesisCoordinator
     from .astr_embodiment.embodiment_clock import EmbodimentClock
     from .astr_embodiment.interaction import build_core_inbound_request, persona_scope
-    from .astr_embodiment.temporal import TemporalConfig, freeze_time_input
     from .astr_embodiment.relation import (
         RelationBindingError,
         canonical_relation_key,
@@ -91,11 +93,8 @@ try:
     )
     from .astr_embodiment.tokens import (
         bot_token,
-        event_id,
         persona_token,
-        platform_token,
         session_token,
-        turn_id,
     )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
     from astr_embodiment import (
@@ -104,10 +103,10 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
         SemanticAppraisalRetryExpiredOrUnknown,
     )
     from astr_embodiment.contracts import ScopeTokens
+    from astr_embodiment.auxiliary_transport import AuxiliaryProviderTransport
     from astr_embodiment.coordinator import GenesisCoordinator
     from astr_embodiment.embodiment_clock import EmbodimentClock
     from astr_embodiment.interaction import build_core_inbound_request, persona_scope
-    from astr_embodiment.temporal import TemporalConfig, freeze_time_input
     from astr_embodiment.relation import (
         RelationBindingError,
         canonical_relation_key,
@@ -127,19 +126,60 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
     )
     from astr_embodiment.tokens import (
         bot_token,
-        event_id,
         persona_token,
-        platform_token,
         session_token,
-        turn_id,
     )
 
 _G0_FORMULA_DIGEST = "00" * 32
 _G0_PROTOCOL_DIGEST = "00" * 32
 _DELIVERY_DIAGNOSTIC_LIMIT = 64
+# Process registry survives plugin reload/reimport and namespace changes.
+_SYNC_PROVIDER_SLOTS = sys.__dict__.setdefault(
+    "_astrembodiment_sync_provider_slots_v1", threading.BoundedSemaphore(4)
+)
+
+
+def _discard_provider_result(result: Any) -> None:
+    """A late coroutine must never start a new provider call."""
+    if inspect.iscoroutine(result):
+        result.close()
+    elif isinstance(result, asyncio.Future):
+        loop = result.get_loop()
+        if not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(result.cancel)
+            except RuntimeError:
+                pass  # Loop shutdown raced this best-effort disposal.
+
+
+class _SyncProviderCall:
+    def __init__(self) -> None:
+        self.future: Future = Future()
+        self.lock = threading.Lock()
+        self.abandoned = False
+
+    def abandon(self) -> None:
+        with self.lock:
+            if self.abandoned:
+                return
+            self.abandoned = True
+            if self.future.done() and not self.future.cancelled():
+                if self.future.exception() is None:
+                    _discard_provider_result(self.future.result())
+            else:
+                self.future.cancel()
+
+    def complete(self, result: Any) -> None:
+        with self.lock:
+            if self.abandoned:
+                _discard_provider_result(result)
+            else:
+                self.future.set_result(result)
+
 
 class SemanticAppraisalRuntimeError(RuntimeError):
     """Closed Host/Native appraisal fault that must not block normal reply."""
+
 
 class AstrEmbodimentPlugin(Star):
     """AstrBot-native shell. The Rust runtime owns all production state."""
@@ -152,6 +192,9 @@ class AstrEmbodimentPlugin(Star):
         self._config_values = dict(self.config)
         self._caller_incarnation = secrets.token_hex(32)
         self._bridge = NativeBridge()
+        self._sync_provider_calls: set[_SyncProviderCall] = set()
+        self._sync_provider_lock = threading.Lock()
+        self._provider_closed = False
         self._coordinator = GenesisCoordinator(self._bridge)
         self._health = None
         self._clock = None
@@ -192,13 +235,22 @@ class AstrEmbodimentPlugin(Star):
             self._health.status,
         )
         self._clock = EmbodimentClock(
-            bridge=self._bridge, persona_locks=self._persona_locks,
+            bridge=self._bridge,
+            persona_locks=self._persona_locks,
             config=self._config_value,
         )
         if bool(self._config_value("embodiment_clock_enabled", True)):
             await self._clock.start()
 
     async def terminate(self) -> None:
+        # External synchronous methods cannot be forcibly killed. Abandon their
+        # results, retain their global slots until actual completion, and never
+        # wait indefinitely or consume AstrBot's shared default executor.
+        with self._sync_provider_lock:
+            self._provider_closed = True
+            calls = tuple(self._sync_provider_calls)
+        for call in calls:
+            call.abandon()
         if self._clock is not None:
             await self._clock.stop()
             self._clock = None
@@ -321,21 +373,8 @@ class AstrEmbodimentPlugin(Star):
         system_prompt: str,
     ) -> Any:
         """Call the configured compiler provider with an explicit fallback rule."""
-        provider_id = self._assistant_provider_id()
-        if provider_id:
-            get_provider = getattr(self.context, "get_provider_by_id", None)
-            if callable(get_provider) and get_provider(provider_id) is None:
-                raise ValueError(f"辅助模型 Provider 不存在: {provider_id}")
-        else:
-            get_current = getattr(self.context, "get_current_chat_provider_id", None)
-            if not callable(get_current):
-                raise RuntimeError("AstrBot 未提供当前会话模型接口")
-            provider_id = await get_current(umo=event.unified_msg_origin)
-
-        generate = getattr(self.context, "llm_generate", None)
-        if not callable(generate):
-            raise TypeError("AstrBot 未提供 llm_generate 接口")
-        return await generate(
+        provider_id = await self._semantic_provider_id(event)
+        return await self._auxiliary_generate(
             chat_provider_id=provider_id,
             prompt=prompt,
             system_prompt=system_prompt,
@@ -345,29 +384,30 @@ class AstrEmbodimentPlugin(Star):
         )
 
     async def _semantic_provider_id(self, event: Any) -> str:
-        provider_id = str(
-            self._config_value("semantic_estimator_provider_id", "") or ""
-        ).strip()
-        if not provider_id:
-            provider_id = self._assistant_provider_id()
-        if not provider_id:
-            get_current = getattr(self.context, "get_current_chat_provider_id", None)
-            if not callable(get_current):
-                raise RuntimeError("AstrBot 未提供当前会话模型接口")
-            provider_id = str(
-                await self._maybe_await(
-                    get_current(umo=getattr(event, "unified_msg_origin", None))
-                )
-                or ""
-            ).strip()
-        if not provider_id:
-            raise RuntimeError("语义估计 Provider 不可用")
-        get_provider = getattr(self.context, "get_provider_by_id", None)
-        if callable(get_provider):
-            provider = await self._maybe_await(get_provider(provider_id))
-            if provider is None:
-                raise RuntimeError("语义估计 Provider 不存在")
-        return provider_id
+        def configured() -> tuple[str, str]:
+            for key, source in (
+                ("assistant_provider_id", "CONFIGURED"),
+                ("semantic_estimator_provider_id", "LEGACY_COMPAT"),
+            ):
+                value = self._config_value(key, "")
+                if value:
+                    if type(value) is not str:
+                        raise TypeError("invalid provider id")
+                    if value.strip():
+                        return value.strip(), source
+            return "", "CURRENT_SESSION"
+
+        transport = AuxiliaryProviderTransport(
+            context=self.context,
+            configured_provider=configured,
+            timeout_ms=lambda: 15_000,
+        )
+        request = transport.open_request(umo=getattr(event, "unified_msg_origin", None))
+        request.bind_semantic_key(f"typed-host:{id(event)}")
+        try:
+            return (await request.resolve_binding()).provider_id
+        finally:
+            request.close()
 
     @staticmethod
     def _semantic_provider_digest(provider_id: str) -> str:
@@ -388,9 +428,7 @@ class AstrEmbodimentPlugin(Star):
     def _semantic_lock_key(scope: ScopeTokens) -> tuple[str, str]:
         return scope.bot_token, scope.persona_token
 
-    async def _semantic_native_call(
-        self, scope: ScopeTokens, operation: Any
-    ) -> Any:
+    async def _semantic_native_call(self, scope: ScopeTokens, operation: Any) -> Any:
         """Serialize only the short Native transaction, never Provider I/O."""
 
         key = self._semantic_lock_key(scope)
@@ -476,9 +514,7 @@ class AstrEmbodimentPlugin(Star):
             except Exception as exc:
                 if attempt == 0:
                     first_error = exc
-                    self._semantic_diagnostic(
-                        "SEMANTIC_SETTLE_RETRY", stage="settle"
-                    )
+                    self._semantic_diagnostic("SEMANTIC_SETTLE_RETRY", stage="settle")
                     continue
                 self._semantic_diagnostic("SEMANTIC_SETTLE_FAILED", stage="settle")
                 logger.warning(
@@ -506,7 +542,9 @@ class AstrEmbodimentPlugin(Star):
     ) -> Mapping[str, Any]:
         payload = {
             "schema_version": 1,
-            "scope": ScopeTokens(scope.bot_token, scope.persona_token, scope.session_token).scope_json(),
+            "scope": ScopeTokens(
+                scope.bot_token, scope.persona_token, scope.session_token
+            ).scope_json(),
             "request_nonce_digest": nonce,
             "outcome": outcome,
             "provider_usage": {"known": False, "used_tokens": None},
@@ -544,9 +582,7 @@ class AstrEmbodimentPlugin(Star):
         elif status == "claimed":
             # A current Native build cannot produce this state: the independent
             # settlement handle is constructed in the same typed begin result.
-            self._semantic_diagnostic(
-                "SEMANTIC_BEGIN_HANDLE_MISSING", stage=stage
-            )
+            self._semantic_diagnostic("SEMANTIC_BEGIN_HANDLE_MISSING", stage=stage)
         raise SemanticAppraisalRuntimeError(code)
 
     async def _semantic_generate(
@@ -556,10 +592,7 @@ class AstrEmbodimentPlugin(Star):
         prompt: str,
         system_prompt: str,
     ) -> Any:
-        generate = getattr(self.context, "llm_generate", None)
-        if not callable(generate):
-            raise RuntimeError("AstrBot 未提供 llm_generate 接口")
-        call = generate(
+        return await self._auxiliary_generate(
             chat_provider_id=provider_id,
             prompt=prompt,
             system_prompt=system_prompt,
@@ -568,7 +601,74 @@ class AstrEmbodimentPlugin(Star):
             temperature=0,
             max_tokens=512,
         )
-        return await asyncio.wait_for(self._maybe_await(call), timeout=15.0)
+
+    async def _auxiliary_generate(self, **kwargs: Any) -> Any:
+        """Bound synchronous or async host calls without discarding usage."""
+        if self._provider_closed:
+            raise RuntimeError("PROVIDER_TRANSPORT_CLOSED")
+        generate = getattr(self.context, "llm_generate", None)
+        if not callable(generate):
+            raise RuntimeError("HOST_API_UNAVAILABLE")
+
+        async def invoke() -> Any:
+            if inspect.iscoroutinefunction(generate):
+                result = generate(**kwargs)
+            else:
+                result = await self._sync_provider_generate(generate, kwargs)
+            return await self._maybe_await(result)
+
+        try:
+            return await asyncio.wait_for(invoke(), timeout=15.0)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            raise TimeoutError("PROVIDER_CALL_TIMEOUT") from None
+        except Exception:
+            raise RuntimeError("PROVIDER_CALL_FAILED") from None
+
+    async def _sync_provider_generate(
+        self, generate: Any, kwargs: dict[str, Any]
+    ) -> Any:
+        call = _SyncProviderCall()
+        context = contextvars.copy_context()
+        acquired_slots = _SYNC_PROVIDER_SLOTS
+        with self._sync_provider_lock:
+            if self._provider_closed or not acquired_slots.acquire(blocking=False):
+                raise RuntimeError("PROVIDER_CALL_IN_PROGRESS")
+            self._sync_provider_calls.add(call)
+
+        def worker() -> None:
+            try:
+                result = context.run(generate, **kwargs)
+                call.complete(result)
+            except BaseException as exc:
+                with call.lock:
+                    if not call.abandoned:
+                        call.future.set_exception(
+                            exc
+                            if isinstance(
+                                exc,
+                                (asyncio.CancelledError, KeyboardInterrupt, SystemExit),
+                            )
+                            else RuntimeError("PROVIDER_CALL_FAILED")
+                        )
+            finally:
+                with self._sync_provider_lock:
+                    self._sync_provider_calls.discard(call)
+                acquired_slots.release()
+
+        try:
+            threading.Thread(target=worker, name="ae-provider", daemon=True).start()
+        except BaseException:
+            with self._sync_provider_lock:
+                self._sync_provider_calls.discard(call)
+            acquired_slots.release()
+            raise
+        try:
+            return await asyncio.shield(asyncio.wrap_future(call.future))
+        except BaseException:
+            call.abandon()
+            raise
 
     @staticmethod
     def _semantic_response_parts(
@@ -1018,8 +1118,14 @@ class AstrEmbodimentPlugin(Star):
             event, request
         )
         message_getter = getattr(event, "get_message_str", None)
-        raw_message = message_getter() if callable(message_getter) else getattr(event, "message_str", "")
-        message = raw_message if isinstance(raw_message, str) else str(raw_message or "")
+        raw_message = (
+            message_getter()
+            if callable(message_getter)
+            else getattr(event, "message_str", "")
+        )
+        message = (
+            raw_message if isinstance(raw_message, str) else str(raw_message or "")
+        )
         provider_id, estimator_request, appraisal = "", None, None
         if self._semantic_daily_limit() > 0:
             try:
@@ -1031,7 +1137,9 @@ class AstrEmbodimentPlugin(Star):
                     "provider_digest": self._semantic_provider_digest(provider_id),
                 }
             except Exception as exc:
-                self._semantic_diagnostic("SEMANTIC_PROVIDER_UNAVAILABLE", stage="provider_resolve")
+                self._semantic_diagnostic(
+                    "SEMANTIC_PROVIDER_UNAVAILABLE", stage="provider_resolve"
+                )
                 logger.warning("Semantic Provider unavailable: %s", type(exc).__name__)
 
         # Reusing this immutable event in another hook preserves exact request bytes.
@@ -1043,22 +1151,34 @@ class AstrEmbodimentPlugin(Star):
         inbound = requests.get(key)
         if inbound is None:
             timestamp = getattr(getattr(event, "message_obj", None), "timestamp", None)
-            observed = int(float(timestamp) * 1000) if timestamp else int(time.time() * 1000)
+            observed = (
+                int(float(timestamp) * 1000) if timestamp else int(time.time() * 1000)
+            )
             inbound = build_core_inbound_request(
-                self._bridge, scope=scope, event=event, message=message,
-                appraisal=appraisal, observed_at_ms=observed,
+                self._bridge,
+                scope=scope,
+                event=event,
+                message=message,
+                appraisal=appraisal,
+                observed_at_ms=observed,
             )
             requests[key] = inbound
         observation = inbound["observation"]
         turn_token, event_key = observation["turn_id"], observation["operation_id"]
         scope = ScopeTokens(scope.bot_token, scope.persona_token, turn_token)
-        delivery = self._bridge.compile_core_host_request_v1("delivery", {
-            "schema_version": 1, "operation_id": "00" * 16,
-            "scope": persona_scope(scope), "turn_id": turn_token,
-            "inbound_operation_id": event_key, "delivered": True,
-            "observed_at_utc_ms": observation["observed_at_utc_ms"],
-            "visible_action_digest": hashlib.sha256(b"").hexdigest(),
-        })
+        delivery = self._bridge.compile_core_host_request_v1(
+            "delivery",
+            {
+                "schema_version": 1,
+                "operation_id": "00" * 16,
+                "scope": persona_scope(scope),
+                "turn_id": turn_token,
+                "inbound_operation_id": event_key,
+                "delivered": True,
+                "observed_at_utc_ms": observation["observed_at_utc_ms"],
+                "visible_action_digest": hashlib.sha256(b"").hexdigest(),
+            },
+        )
         lock = self._persona_locks.setdefault(key, asyncio.Lock())
         async with lock:
             # The persona anchor is needed by both semantic settlement and clock.
@@ -1069,29 +1189,47 @@ class AstrEmbodimentPlugin(Star):
                 raise SemanticAppraisalRuntimeError("CORE_INBOUND_RECEIPT_INVALID")
             initial = outcome["initial_receipt"]
             receipt = initial["event"]
-            if (receipt["scope"] != persona_scope(scope)
-                    or receipt["operation_id"] != event_key
-                    or receipt["turn_id"] != turn_token):
+            if (
+                receipt["scope"] != persona_scope(scope)
+                or receipt["operation_id"] != event_key
+                or receipt["turn_id"] != turn_token
+            ):
                 raise SemanticAppraisalRuntimeError("CORE_INBOUND_IDENTITY_MISMATCH")
-            self._pending.setdefault(turn_token, MappingProxyType({
-                "scope": scope, "turn_id": turn_token,
-                "inbound_operation_id": event_key,
-                "delivery_operation_id": delivery["operation_id"],
-                "contract": None,
-                "visible_action_digest": hashlib.sha256(b"").hexdigest(),
-            }))
+            self._pending.setdefault(
+                turn_token,
+                MappingProxyType(
+                    {
+                        "scope": scope,
+                        "turn_id": turn_token,
+                        "inbound_operation_id": event_key,
+                        "delivery_operation_id": delivery["operation_id"],
+                        "contract": None,
+                        "visible_action_digest": hashlib.sha256(b"").hexdigest(),
+                    }
+                ),
+            )
             interaction_revision = receipt["transition"]["next_revision"]
             decision["contract"] = None
             decision["reply_affect"] = initial.get("reply_affect")
             decision["revision"] = interaction_revision
-            context = (decision, scope, session_key, seq, turn_token, interaction_revision)
+            context = (
+                decision,
+                scope,
+                session_key,
+                seq,
+                turn_token,
+                interaction_revision,
+            )
             setattr(event, "_ae_core_context", context)
             setattr(event, "turn_token", turn_token)
         if self._clock is not None and self._clock._task is not None:
             await self._clock.notify_persona(persona_scope(scope))
         if outcome["provider_authorized_now"] is not True:
             return context
-        if outcome["commit_status"] != "committed" or initial["disposition"] != "claimed":
+        if (
+            outcome["commit_status"] != "committed"
+            or initial["disposition"] != "claimed"
+        ):
             raise SemanticAppraisalRuntimeError("CORE_PROVIDER_AUTHORITY_INVALID")
         begin = initial
         settlement_nonce = self._semantic_nonce(
@@ -1180,7 +1318,9 @@ class AstrEmbodimentPlugin(Star):
 
         settle_payload = {
             "schema_version": 1,
-            "scope": ScopeTokens(scope.bot_token, scope.persona_token, scope.session_token).scope_json(),
+            "scope": ScopeTokens(
+                scope.bot_token, scope.persona_token, scope.session_token
+            ).scope_json(),
             "request_nonce_digest": nonce,
             "outcome": outcome,
             "provider_usage": usage,
@@ -1223,7 +1363,9 @@ class AstrEmbodimentPlugin(Star):
         contract = settle.get("contract")
         reply_affect = settle.get("reply_affect")
         decision["contract"] = contract if isinstance(contract, Mapping) else None
-        decision["reply_affect"] = reply_affect if isinstance(reply_affect, Mapping) else None
+        decision["reply_affect"] = (
+            reply_affect if isinstance(reply_affect, Mapping) else None
+        )
         decision["revision"] = settled_revision
         self._semantic_attempts[event_key] = "settled"
         self._semantic_diagnostic(
@@ -1339,7 +1481,11 @@ class AstrEmbodimentPlugin(Star):
         del args, kwargs
         text = getattr(response, "completion_text", None)
         if isinstance(text, str):
-            setattr(event, "_ae_visible_action_digest", hashlib.sha256(text.encode("utf-8")).hexdigest())
+            setattr(
+                event,
+                "_ae_visible_action_digest",
+                hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
 
     @filter.after_message_sent(desc="消息发送后：提交投递事实并同步原生修订号")
     async def after_message_sent(self, event: Any, *args: Any, **kwargs: Any) -> None:
@@ -1350,32 +1496,46 @@ class AstrEmbodimentPlugin(Star):
             return
         try:
             scope = frozen["scope"]
-            async with self._persona_locks.setdefault(self._semantic_lock_key(scope), asyncio.Lock()):
+            async with self._persona_locks.setdefault(
+                self._semantic_lock_key(scope), asyncio.Lock()
+            ):
                 if self._pending.get(turn_token) is not frozen:
                     return
                 request = {
                     "schema_version": 1,
                     "operation_id": frozen["delivery_operation_id"],
-                    "scope": persona_scope(scope), "turn_id": frozen["turn_id"],
+                    "scope": persona_scope(scope),
+                    "turn_id": frozen["turn_id"],
                     "inbound_operation_id": frozen["inbound_operation_id"],
                     "delivered": kwargs.get("delivered", True) is True,
                     "observed_at_utc_ms": int(time.time() * 1000),
-                    "visible_action_digest": getattr(event, "_ae_visible_action_digest", frozen["visible_action_digest"]),
+                    "visible_action_digest": getattr(
+                        event,
+                        "_ae_visible_action_digest",
+                        frozen["visible_action_digest"],
+                    ),
                 }
                 result = self._bridge.commit_core_delivery_outcome_v1(request)
                 receipt = result["receipt"]
-                if (result["commit_status"] not in {"committed", "existing"}
-                        or receipt["operation_id"] != request["operation_id"]
-                        or receipt["scope"] != request["scope"]
-                        or receipt["turn_id"] != request["turn_id"]):
+                if (
+                    result["commit_status"] not in {"committed", "existing"}
+                    or receipt["operation_id"] != request["operation_id"]
+                    or receipt["scope"] != request["scope"]
+                    or receipt["turn_id"] != request["turn_id"]
+                ):
                     raise SemanticAppraisalRuntimeError("CORE_DELIVERY_RECEIPT_INVALID")
-                self._revisions[scope.persona_token] = receipt["transition"]["next_revision"]
+                self._revisions[scope.persona_token] = receipt["transition"][
+                    "next_revision"
+                ]
         except Exception as exc:
             self._record_delivery_diagnostic(
                 event_id_value=frozen.get("delivery_operation_id"),
-                turn_id_value=turn_token, base_revision=None,
+                turn_id_value=turn_token,
+                base_revision=None,
                 error_code=str(getattr(exc, "code", type(exc).__name__)),
             )
-            logger.warning("AstrEmbodiment delivery lane failed: %s", type(exc).__name__)
+            logger.warning(
+                "AstrEmbodiment delivery lane failed: %s", type(exc).__name__
+            )
         finally:
             self._clear_pending_delivery_if_same(turn_token, frozen)

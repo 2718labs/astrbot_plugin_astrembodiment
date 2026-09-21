@@ -19,4 +19,5 @@ manifest-path = "crates/ae-pyo3/Cargo.toml"
 python-source = "python"
 module-name = "astrembodiment_core._native"
 bindings = "pyo3"
+features = ["pyo3/extension-module"]
 strip = true

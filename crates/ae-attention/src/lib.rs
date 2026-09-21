@@ -2,6 +2,9 @@
 
 pub mod emotion_matrix;
 
+/// Pure R7 routing primitives retained independently of the core ingress API.
+pub mod r7;
+
 use ae_contracts::EvidenceVector;
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};

@@ -23,7 +23,6 @@ if str(ROOT) not in sys.path:
 import astr_embodiment.bridge as bridge_module  # noqa: E402
 from astr_embodiment.contracts import ScopeTokens  # noqa: E402
 from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
-from astr_embodiment.interaction import build_interaction_batch_v1  # noqa: E402
 from astr_embodiment.persona_genesis import (  # noqa: E402
     PersonaGenesisError,
     PersonaSourceSnapshot,
@@ -335,7 +334,7 @@ class FakeContext:
 
     def get_provider_by_id(self, provider_id: str):
         self.provider_calls.append(provider_id)
-        if provider_id == self.configured_provider:
+        if provider_id in {self.configured_provider, self.current_provider}:
             return object()
         return None
 
@@ -586,7 +585,7 @@ def test_invalid_explicit_assistant_provider_does_not_fallback():
         context = FakeContext(configured_provider="helper", current_provider="chat")
         instance = plugin(FakeConfig(assistant_provider_id="missing"), context)
 
-        with pytest.raises(ValueError, match="missing"):
+        with pytest.raises(RuntimeError, match="ESTIMATOR_UNAVAILABLE"):
             await instance._genesis_generate(
                 FakeEvent(), prompt="compile", system_prompt="compiler"
             )
@@ -1756,6 +1755,9 @@ def test_fresh_windows_native_initializer_and_semantic_boundary(
                 sort_keys=True,
             )
         )
+        # Historical pre-1.1 native harness; not part of typed-core acceptance.
+        from astr_embodiment.interaction import build_interaction_batch_v1
+
         interaction = build_interaction_batch_v1(
             scope=scope,
             message="真实 PyO3 边界",

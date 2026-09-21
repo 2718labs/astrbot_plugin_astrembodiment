@@ -544,7 +544,7 @@ pub fn open_regular_file_no_follow(path: &Path) -> io::Result<std::fs::File> {
                 "opened handle is not a real regular file",
             ));
         }
-        return Ok(file);
+        Ok(file)
     }
 
     #[cfg(unix)]

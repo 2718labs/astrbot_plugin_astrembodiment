@@ -4,7 +4,6 @@ members = [
   "crates/ae-fixed",
   "crates/ae-autonomy",
   "crates/ae-contracts",
-  "crates/ae-genesis",
   "crates/ae-authority",
   "crates/ae-attention",
   "crates/ae-neurofield",
@@ -15,8 +14,18 @@ members = [
   "crates/ae-continuum",
   "crates/ae-store",
   "crates/ae-platform-fs",
+  "crates/ae-context-projector",
   "crates/ae-runtime",
   "crates/ae-pyo3",
+  "crates/ae-cognitive-envelope",
+  "crates/ae-genesis",
+  "crates/ae-action-contract",
+  "crates/ae-efference-copy",
+  "crates/ae-subjective-present",
+  "crates/ae-soma",
+  "crates/ae-epistemic-state",
+  "crates/ae-organism-runtime",
+  "crates/ae-morph",
 ]
 
 [workspace.package]
@@ -34,7 +43,8 @@ blake3 = "1"
 constant_time_eq = "0.4.2"
 getrandom = "0.3.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
-pyo3 = { version = "0.29.0", features = ["abi3-py312", "extension-module"] }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std"] }
+pyo3 = { version = "0.29.0", features = ["abi3-py312"] }
 ae-fixed = { path = "crates/ae-fixed" }
 ae-autonomy = { path = "crates/ae-autonomy" }
 ae-contracts = { path = "crates/ae-contracts" }
@@ -49,4 +59,13 @@ ae-agent = { path = "crates/ae-agent" }
 ae-continuum = { path = "crates/ae-continuum" }
 ae-store = { path = "crates/ae-store" }
 ae-platform-fs = { path = "crates/ae-platform-fs" }
+ae-context-projector = { path = "crates/ae-context-projector" }
 ae-runtime = { path = "crates/ae-runtime" }
+ae-cognitive-envelope = { path = "crates/ae-cognitive-envelope" }
+ae-action-contract = { path = "crates/ae-action-contract" }
+ae-efference-copy = { path = "crates/ae-efference-copy" }
+ae-subjective-present = { path = "crates/ae-subjective-present" }
+ae-soma = { path = "crates/ae-soma" }
+ae-epistemic-state = { path = "crates/ae-epistemic-state" }
+ae-organism-runtime = { path = "crates/ae-organism-runtime" }
+ae-morph = { path = "crates/ae-morph" }

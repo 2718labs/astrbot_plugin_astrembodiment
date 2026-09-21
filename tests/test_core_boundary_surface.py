@@ -23,7 +23,8 @@ HOST = re.findall(r'"([^"]+)"', _section("RETIRED_HOST_IDENTIFIER_MANIFEST_V1"))
 
 
 def test_manifest_goldens_and_counts():
-    lp = lambda value: struct.pack("<H", len(value.encode())) + value.encode()
+    def lp(value):
+        return struct.pack("<H", len(value.encode())) + value.encode()
     public = struct.pack("<H", len(PUBLIC)) + b"".join(lp(n) + struct.pack("<H", 1) for n in PUBLIC)
     kinds = re.findall(r'\((\d+),\s*"([^"]+)",\s*(\d+)\)', _section("RETIRED_EVENT_KIND_MANIFEST_V1"))
     retired = struct.pack("<H", len(RETIRED)) + b"".join(lp(n) for n in RETIRED)
@@ -36,7 +37,7 @@ def test_manifest_goldens_and_counts():
 
 def test_source_surface_is_exact_and_host_has_no_retired_callables():
     native = (ROOT / "crates/ae-pyo3/src/lib.rs").read_text(encoding="utf-8")
-    assert set(re.findall(r"wrap_pyfunction!\((\w+),", native)) == set(PUBLIC)
+    assert sorted(re.findall(r"wrap_pyfunction!\s*\(\s*(\w+)\s*,", native)) == sorted(PUBLIC)
     wrapper = ast.parse((ROOT / "python/astrembodiment_core/__init__.py").read_text(encoding="utf-8"))
     exports = next(ast.literal_eval(n.value) for n in wrapper.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id == "__all__" for t in n.targets))
     assert set(exports) == set(PUBLIC) | {"NativeCoreError"}

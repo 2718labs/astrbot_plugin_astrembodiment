@@ -55,29 +55,77 @@ pub(crate) fn journal_scope(scope: &PersonaScopeRef, turn_id: Id128) -> ScopeRef
 
 /// Authenticate the v9 persona-only kind-10 lane during legacy journal audit.
 /// No empty-delta exemption exists without its immutable core receipt.
-pub(crate) fn verify_core_inbound_journal(conn: &Connection, event_bytes: &[u8]) -> Result<bool, StoreError> {
+pub(crate) fn verify_core_inbound_journal(
+    conn: &Connection,
+    event_bytes: &[u8],
+) -> Result<bool, StoreError> {
     let installed: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='core_inbound_receipt_v1')", [], |r|r.get(0))?;
-    if !installed { return Ok(false); }
-    let event=wire::decode_event(event_bytes).map_err(|_|invalid("CORE_EVENT_INVALID"))?;
-    let CanonicalEvent::InteractionFactBatch(batch)=&event else { return Ok(false); };
-    let p=wire::persona_scope_digest(&batch.scope.bot_token,&batch.scope.persona_token,None);
-    let ed=wire::event_digest(&event);
+    if !installed {
+        return Ok(false);
+    }
+    let event = wire::decode_event(event_bytes).map_err(|_| invalid("CORE_EVENT_INVALID"))?;
+    let CanonicalEvent::InteractionFactBatch(batch) = &event else {
+        return Ok(false);
+    };
+    let p = wire::persona_scope_digest(&batch.scope.bot_token, &batch.scope.persona_token, None);
+    let ed = wire::event_digest(&event);
     let row:Option<(Vec<u8>,Vec<u8>)>=conn.query_row("SELECT CASE WHEN length(initial_receipt_bytes)<=65536 THEN initial_receipt_bytes ELSE zeroblob(0) END,initial_receipt_digest FROM core_inbound_receipt_v1 WHERE persona_scope=?1 AND event_digest=?2",params![blob(p),blob(ed)],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    let Some((bytes,hash))=row else { return Ok(false); };
-    if digest(b"ae.core-inbound.initial-receipt.v1",&bytes).as_slice()!=hash { return Err(invalid("CORE_RECEIPT_INVALID")); }
-    let initial:CoreInboundInitialReceiptV1=decode(&bytes)?;let r=&initial.event;
-    check_core(conn,&r.scope)?;
-    if r.schema_version!=1 || core_persona_digest(&r.scope)!=p || r.event_bytes!=event_bytes || r.event_id!=batch.event_id || r.transition.event_digest!=ed || batch.scope.relation_token.is_some() || batch.facts.len()!=1 || r.transition.base_revision!=batch.causal.base_revision || r.transition.base_revision.checked_add(1)!=Some(r.transition.next_revision) { return Err(invalid("CORE_RECEIPT_INVALID")); }
+    let Some((bytes, hash)) = row else {
+        return Ok(false);
+    };
+    if digest(b"ae.core-inbound.initial-receipt.v1", &bytes).as_slice() != hash {
+        return Err(invalid("CORE_RECEIPT_INVALID"));
+    }
+    let initial: CoreInboundInitialReceiptV1 = decode(&bytes)?;
+    let r = &initial.event;
+    check_core(conn, &r.scope)?;
+    if r.schema_version != 1
+        || core_persona_digest(&r.scope) != p
+        || r.event_bytes != event_bytes
+        || r.event_id != batch.event_id
+        || r.transition.event_digest != ed
+        || batch.scope.relation_token.is_some()
+        || batch.facts.len() != 1
+        || r.transition.base_revision != batch.causal.base_revision
+        || r.transition.base_revision.checked_add(1) != Some(r.transition.next_revision)
+    {
+        return Err(invalid("CORE_RECEIPT_INVALID"));
+    }
     let bound:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM core_inbound_receipt_v1 AS c JOIN journal AS j ON j.scope_digest=c.persona_scope AND j.logical_revision=c.inbound_revision JOIN applied_events AS a ON a.scope_digest=j.scope_digest AND a.event_digest=j.event_digest AND a.revision=j.logical_revision WHERE c.persona_scope=?1 AND c.event_digest=?2 AND c.operation_id=?3 AND c.turn_id=?4 AND c.request_digest=?5 AND c.event_id=?6 AND c.event_bytes=?7 AND c.inbound_revision=?8 AND c.clock_head_digest=?9 AND j.event_bytes=c.event_bytes AND j.event_digest=c.event_digest AND j.receipt_bytes=?10 AND length(j.delta_bytes)=0 AND j.event_kind='interaction_fact_batch' AND j.base_revision=?11)",params![blob(p),blob(ed),blob(r.operation_id),blob(r.turn_id),blob(r.request_digest),blob(r.event_id),event_bytes,r.transition.next_revision,blob(r.clock_head_digest),wire::encode_transition_receipt(&r.transition),r.transition.base_revision],|r|r.get(0))?;
-    if !bound { return Err(invalid("CORE_JOURNAL_RECEIPT_INVALID")); }
-    let f=&batch.facts[0];
+    if !bound {
+        return Err(invalid("CORE_JOURNAL_RECEIPT_INVALID"));
+    }
+    let f = &batch.facts[0];
     let fact_body:String=conn.query_row("SELECT CASE WHEN length(CAST(body_json AS BLOB))<=262144 THEN body_json ELSE '' END FROM interaction_fact WHERE fact_id=?1 AND event_id=?2 AND persona_scope=?3 AND relation_scope=?3 AND revision=?4 AND observed_at_utc_ms=?5 AND source_digest=?6",params![blob(f.fact_id),blob(batch.event_id),blob(p),r.transition.next_revision,f.observed_at_utc_ms,blob(f.source_digest)],|r|r.get(0))?;
-    if serde_json::from_str::<InteractionFactV1>(&fact_body).map_err(|_|invalid("CORE_FACT_INVALID"))?!=*f { return Err(invalid("CORE_FACT_INVALID")); }
-    let inner=InnerEventV1 { schema_version:1,event_id:core_id(b"ae.core-inbound.inner-event.v1",&[&p,&ed]),persona_scope:p,kind:InnerEventKindV1::HomeostasisChanged,committed_at_utc_ms:f.observed_at_utc_ms,summary_code:"inbound_observed".into(),value_before:None,value_after:None,source_event_ids:vec![f.fact_id],tombstoned:false };
+    if serde_json::from_str::<InteractionFactV1>(&fact_body)
+        .map_err(|_| invalid("CORE_FACT_INVALID"))?
+        != *f
+    {
+        return Err(invalid("CORE_FACT_INVALID"));
+    }
+    let inner = InnerEventV1 {
+        schema_version: 1,
+        event_id: core_id(b"ae.core-inbound.inner-event.v1", &[&p, &ed]),
+        persona_scope: p,
+        kind: InnerEventKindV1::HomeostasisChanged,
+        committed_at_utc_ms: f.observed_at_utc_ms,
+        summary_code: "inbound_observed".into(),
+        value_before: None,
+        value_after: None,
+        source_event_ids: vec![f.fact_id],
+        tombstoned: false,
+    };
     let inner_body:String=conn.query_row("SELECT CASE WHEN length(CAST(body_json AS BLOB))<=262144 THEN body_json ELSE '' END FROM inner_event WHERE event_id=?1 AND persona_scope=?2 AND journal_revision=?3 AND committed_at_utc_ms=?4 AND kind=?5 AND tombstoned=0",params![blob(inner.event_id),blob(p),r.transition.next_revision,inner.committed_at_utc_ms,format!("{:?}",inner.kind)],|r|r.get(0))?;
-    if serde_json::from_str::<InnerEventV1>(&inner_body).map_err(|_|invalid("CORE_INNER_INVALID"))?!=inner { return Err(invalid("CORE_INNER_INVALID")); }
+    if serde_json::from_str::<InnerEventV1>(&inner_body)
+        .map_err(|_| invalid("CORE_INNER_INVALID"))?
+        != inner
+    {
+        return Err(invalid("CORE_INNER_INVALID"));
+    }
     let closure:bool=conn.query_row("SELECT (SELECT COUNT(*) FROM interaction_fact WHERE event_id=?1)=1 AND (SELECT COUNT(*) FROM inner_event WHERE persona_scope=?2 AND journal_revision=?3)=1 AND EXISTS(SELECT 1 FROM inner_event_manifest WHERE persona_scope=?2 AND journal_revision=?3 AND event_count=1 AND event_digest=?4)",params![blob(batch.event_id),blob(p),r.transition.next_revision,blob(crate::autonomy::inner_event_manifest_digest(&[inner])?)],|r|r.get(0))?;
-    if !closure { return Err(invalid("CORE_INNER_MANIFEST_INVALID")); }
+    if !closure {
+        return Err(invalid("CORE_INNER_MANIFEST_INVALID"));
+    }
     Ok(true)
 }
 
@@ -107,10 +155,11 @@ fn append(
     };
     // New operations consume the authenticated rolling closure and projected
     // field. Exact idempotent replay returned before entering this function.
-    let (clock_head_digest, field, graph) = match crate::embodiment_clock::core_clock_projection(tx, scope)? {
-        Some(projection) => projection,
-        None => (digest(b"ae.embodiment.clock-missing.v1", &p), field, graph),
-    };
+    let (clock_head_digest, field, graph) =
+        match crate::embodiment_clock::core_clock_projection(tx, scope)? {
+            Some(projection) => projection,
+            None => (digest(b"ae.embodiment.clock-missing.v1", &p), field, graph),
+        };
     let event = make(base);
     let event_bytes = wire::encode_event(&event);
     let event_digest = wire::event_digest(&event);
@@ -160,7 +209,8 @@ fn append(
             source_event_ids: vec![f.fact_id],
             tombstoned: false,
         };
-        let inner_digest = crate::autonomy::inner_event_manifest_digest(&[inner.clone()])?;
+        let inner_digest =
+            crate::autonomy::inner_event_manifest_digest(std::slice::from_ref(&inner))?;
         tx.execute("INSERT INTO inner_event_manifest(persona_scope,journal_revision,event_count,event_digest) VALUES(?1,?2,1,?3)",params![blob(p),transition.next_revision,blob(inner_digest)])?;
         tx.execute("INSERT INTO inner_event(event_id,persona_scope,journal_revision,committed_at_utc_ms,kind,tombstoned,body_json) VALUES(?1,?2,?3,?4,?5,0,?6)",params![blob(inner.event_id),blob(p),transition.next_revision,inner.committed_at_utc_ms,format!("{:?}",inner.kind),serde_json::to_string(&inner).map_err(|_|invalid("CORE_INNER_ENCODE"))?])?;
     }

@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -53,19 +54,42 @@ FRESH_LINUX_WHEEL = _single_fresh_wheel(
 )
 # Exact frozen Task 12 surface, independent of the packager's runtime lookup.
 NATIVE_API = {
-    "NativeCoreError", "advance_embodiment_time_v1", "build_info_v1",
-    "commit_core_delivery_outcome_v1", "commit_core_inbound_v1",
-    "compare_and_swap_embodiment_profile_v1", "compile_core_host_request_v1",
-    "create_embodiment_persona_if_missing_v1", "embodiment_clock_status_v1",
-    "ensure_genesis", "flush_and_close", "get_embodiment_persona_v1",
-    "health", "inspect", "list_embodiment_personas_v1", "open",
-    "read_embodiment_profile_v1", "settle_semantic_appraisal_v1",
-    "verify_replay", "version",
+    "NativeCoreError",
+    "advance_embodiment_time_v1",
+    "build_info_v1",
+    "commit_core_delivery_outcome_v1",
+    "commit_core_inbound_v1",
+    "compare_and_swap_embodiment_profile_v1",
+    "compile_core_host_request_v1",
+    "create_embodiment_persona_if_missing_v1",
+    "embodiment_clock_status_v1",
+    "ensure_genesis",
+    "flush_and_close",
+    "get_embodiment_persona_v1",
+    "health",
+    "inspect",
+    "list_embodiment_personas_v1",
+    "open",
+    "read_embodiment_profile_v1",
+    "settle_semantic_appraisal_v1",
+    "verify_replay",
+    "version",
 }
-LEGACY_MIND_EXPORTS = {"mood_card", "query_inner_events", "observe_events_v1", "observe_snapshot_v1"}
-RETIRED_ALPHA3_OPERATIONS = {"alpha3_call", "apply_event", "autonomy_status", "claim_wake", "settle_dispatch"}
-# Legacy placeholder-success packaging tests below still need migration to real
-# platform receipts. They are NOT release acceptance and are not silently skipped.
+LEGACY_MIND_EXPORTS = {
+    "mood_card",
+    "query_inner_events",
+    "observe_events_v1",
+    "observe_snapshot_v1",
+}
+RETIRED_ALPHA3_OPERATIONS = {
+    "alpha3_call",
+    "apply_event",
+    "autonomy_status",
+    "claim_wake",
+    "settle_dispatch",
+}
+# Synthetic wheels below exercise validation only; real release acceptance uses
+# AE_RELEASE_ARCHIVE and the matching platform wheels.
 NATIVE_API_MARKERS_PAYLOAD = b" ".join(marker.encode() for marker in sorted(NATIVE_API))
 NATIVE_API_PAYLOAD = NATIVE_API_MARKERS_PAYLOAD + b" " + NATIVE_RUNTIME_VERSION.encode()
 HEADLESS_SURFACE_PATHS = (
@@ -274,13 +298,29 @@ def _expected_release_source_members() -> dict[str, bytes]:
 def _assert_release_native_bundle(archive: zipfile.ZipFile) -> set[str]:
     manifest_payload = archive.read(NATIVE_MANIFEST)
     manifest = json.loads(manifest_payload)
-    assert set(manifest) == {"schema", "platforms"}
+    assert set(manifest) == {"schema", "platforms", "build_info"}
     assert manifest["schema"] == NATIVE_MANIFEST_SCHEMA
     assert set(manifest["platforms"]) == set(NATIVE_FILENAMES)
     native_members: set[str] = set()
     for platform, expected_filename in NATIVE_FILENAMES.items():
         entry = manifest["platforms"][platform]
-        assert set(entry) == {"build_id", "filename"}
+        assert set(entry) == {
+            "build_id",
+            "filename",
+            "wheel_filename",
+            "wheel_sha256",
+            "binary_sha256",
+            "build_info",
+            "import_receipt",
+        }
+        assert entry["build_info"] == manifest["build_info"]
+        receipt = entry["import_receipt"]
+        assert receipt["status"] == "IMPORTED"
+        assert receipt["platform"] == platform
+        assert receipt["wheel_sha256"] == entry["wheel_sha256"]
+        assert receipt["wheel_filename"] == entry["wheel_filename"]
+        assert receipt["build_info"] == entry["build_info"]
+        assert set(receipt["methods"]) == NATIVE_API - {"NativeCoreError"}
         build_id = entry["build_id"]
         assert (
             isinstance(build_id, str)
@@ -291,6 +331,7 @@ def _assert_release_native_bundle(archive: zipfile.ZipFile) -> set[str]:
         member = f"{NATIVE_BUNDLE_ROOT}/{build_id}/{expected_filename}"
         payload = archive.read(member)
         assert hashlib.sha256(payload).hexdigest() == build_id
+        assert receipt["binary_sha256"] == entry["binary_sha256"] == build_id
         native_members.add(member)
     assert manifest_payload == json.dumps(
         manifest, sort_keys=True, separators=(",", ":")
@@ -356,8 +397,16 @@ def test_plugin_entrypoint_uses_astrbot_auto_discovery() -> None:
 def test_plugin_entrypoint_uses_package_relative_host_imports() -> None:
     entrypoint = (ROOT / "main.py").read_text(encoding="utf-8")
     bridge = (ROOT / "astr_embodiment" / "bridge.py").read_text(encoding="utf-8")
-    assert (
-        "from .astr_embodiment import NativeBridge, NativeCoreUnavailable" in entrypoint
+    imports = [
+        node
+        for node in ast.walk(ast.parse(entrypoint))
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "astr_embodiment"
+    ]
+    assert any(
+        {"NativeBridge", "NativeCoreUnavailable"} <= {item.name for item in node.names}
+        for node in imports
     )
     assert 'import_module("..astrembodiment_core", package_name)' in bridge
 
@@ -377,7 +426,6 @@ def test_native_initializer_and_packager_require_release_api() -> None:
     initializer = (ROOT / "python" / "astrembodiment_core" / "__init__.py").read_text(
         encoding="utf-8"
     )
-    packager = (ROOT / "scripts" / "package_plugin.py").read_text(encoding="utf-8")
     initializer_exports = set(_literal_assignment(initializer, "__all__"))
     packager_markers = set(_load_packager().NATIVE_API_MARKERS)
     assert initializer_exports == NATIVE_API
@@ -394,7 +442,7 @@ def test_native_initializer_and_packager_require_release_api() -> None:
     sys.platform not in {"win32", "linux"},
     reason="requires a supported alpha4 native platform",
 )
-def test_native_wrapper_exports_readiness_and_wake_for_real_bridge_calls(
+def test_native_wrapper_exports_exact_current_api_with_matching_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -405,6 +453,7 @@ def test_native_wrapper_exports_readiness_and_wake_for_real_bridge_calls(
         (ROOT / "python" / "astrembodiment_core" / "__init__.py").read_bytes()
     )
 
+    identity = _test_identity()
     platform_key = "win32" if sys.platform == "win32" else "linux"
     filename = "_native.pyd" if platform_key == "win32" else "_native.abi3.so"
     native_payload = b"release-wrapper-smoke"
@@ -416,6 +465,7 @@ def test_native_wrapper_exports_readiness_and_wake_for_real_bridge_calls(
         json.dumps(
             {
                 "schema": "astrembodiment-native-bundle-v1",
+                "build_info": identity,
                 "platforms": {
                     platform_key: {"build_id": build_id, "filename": filename}
                 },
@@ -432,10 +482,7 @@ def test_native_wrapper_exports_readiness_and_wake_for_real_bridge_calls(
             for symbol in NATIVE_API - {"NativeCoreError"}:
                 setattr(module, symbol, lambda *_args, **_kwargs: None)
             module.NativeCoreError = type("NativeCoreError", (RuntimeError,), {})
-            module.host_readiness_witness_digest_v1 = lambda _items_json: "12" * 32
-            module.wake_caller_incarnation_v2 = (
-                lambda _event_id, _session_token: "34" * 32
-            )
+            module.build_info_v1 = lambda: json.dumps(identity)
 
     real_spec_from_file_location = importlib.util.spec_from_file_location
 
@@ -468,30 +515,15 @@ def test_native_wrapper_exports_readiness_and_wake_for_real_bridge_calls(
         sys.modules.pop(f"{wrapper_name}._native", None)
 
     assert set(wrapper.__all__) == NATIVE_API
-    assert callable(wrapper.host_readiness_witness_digest_v1)
-    assert callable(wrapper.wake_caller_incarnation_v2)
-
-    monkeypatch.syspath_prepend(str(ROOT))
-    from astr_embodiment.bridge import NativeBridge
-
-    bridge = NativeBridge()
-    bridge._native = wrapper
-    items = [{"kind": "provider", "status": "ready", "witness_revision": 0}]
-    assert bridge.host_readiness_witness_v1(items) == {
-        "schema_version": 1,
-        "items": items,
-        "witness_digest": "12" * 32,
-    }
-    assert (
-        bridge.wake_caller_incarnation_v2(
-            event_id="0a" * 16, session_token="0b" * 16
-        )
-        == "34" * 32
-    )
+    assert json.loads(wrapper.build_info_v1()) == identity
+    assert not RETIRED_ALPHA3_OPERATIONS & set(dir(wrapper))
+    assert not hasattr(wrapper, "host_readiness_witness_digest_v1")
+    assert not hasattr(wrapper, "wake_caller_incarnation_v2")
 
 
 def test_release_archive_uses_current_native_initializer_and_not_wheels(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     windows_wheel = tmp_path / WINDOWS_WHEEL_NAME
     linux_wheel = tmp_path / LINUX_WHEEL_NAME
@@ -507,23 +539,7 @@ def test_release_archive_uses_current_native_initializer_and_not_wheels(
     )
 
     output = tmp_path / "archive.zip"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(output),
-            "--native-wheel",
-            str(windows_wheel),
-            "--native-wheel",
-            str(linux_wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
+    _write_unit_bundle(output, [windows_wheel, linux_wheel], monkeypatch)
     source_initializer = (
         ROOT / "python" / "astrembodiment_core" / "__init__.py"
     ).read_bytes()
@@ -536,19 +552,7 @@ def test_release_archive_uses_current_native_initializer_and_not_wheels(
             archive.read(f"astrembodiment_core/_bundled/{build_id}/_native.pyd")
             == NATIVE_API_PAYLOAD
         )
-        manifest = json.loads(
-            archive.read("astrembodiment_core/_bundled/manifest.json")
-        )
-        assert manifest == {
-            "schema": "astrembodiment-native-bundle-v1",
-            "platforms": {
-                "linux": {
-                    "build_id": build_id,
-                    "filename": "_native.abi3.so",
-                },
-                "win32": {"build_id": build_id, "filename": "_native.pyd"},
-            },
-        }
+        _assert_release_native_bundle(archive)
         assert not any(name.endswith(".whl") for name in names)
     assert output.stat().st_size < 16 * 1024 * 1024
 
@@ -582,6 +586,8 @@ def test_packager_rejects_forbidden_headless_members(
     assert packager_spec is not None and packager_spec.loader is not None
     packager = importlib.util.module_from_spec(packager_spec)
     packager_spec.loader.exec_module(packager)
+    monkeypatch.setattr(packager, "require_clean_source", lambda *args: "0" * 40)
+    monkeypatch.setattr(packager, "scan_source", lambda: None)
     for index, forbidden_member in enumerate(HEADLESS_FORBIDDEN_MEMBER_CASES):
         for file_kind in ("ordinary", "hardlink"):
             case_root = tmp_path / f"forbidden-{index}-{file_kind}"
@@ -600,9 +606,7 @@ def test_packager_rejects_forbidden_headless_members(
                 "_source_files",
                 lambda source_file=source_file: [source_file],
             )
-            monkeypatch.setattr(
-                packager, "_write_native_package", lambda *_args: None
-            )
+            monkeypatch.setattr(packager, "_write_native_package", lambda *_args: None)
             monkeypatch.setattr(
                 sys,
                 "argv",
@@ -649,12 +653,12 @@ def test_packager_rejects_case_insensitive_windows_member_collision() -> None:
     with zipfile.ZipFile(io.BytesIO(), "w") as archive:
         packager._write_member(archive, "pkg/Module.py", b"first", written_members)
         with pytest.raises(ValueError, match="duplicate release archive member"):
-            packager._write_member(
-                archive, "pkg/module.py", b"second", written_members
-            )
+            packager._write_member(archive, "pkg/module.py", b"second", written_members)
 
 
-def test_release_archive_requires_both_native_platforms(tmp_path: Path) -> None:
+def test_release_archive_requires_both_native_platforms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     wheel = tmp_path / WINDOWS_WHEEL_NAME
     _write_test_wheel(
         wheel,
@@ -663,23 +667,11 @@ def test_release_archive_requires_both_native_platforms(tmp_path: Path) -> None:
     )
 
     output = tmp_path / "archive.zip"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(output),
-            "--native-wheel",
-            str(wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "both Windows and Linux" in result.stderr
+    packager = _load_packager()
+    monkeypatch.setattr(packager, "require_clean_source", lambda *args: "0" * 40)
+    with zipfile.ZipFile(io.BytesIO(), "w") as archive:
+        with pytest.raises(ValueError, match="two actual platform import receipts"):
+            packager._write_native_package(archive, [wheel], {}, [])
     assert not output.exists()
 
 
@@ -720,7 +712,7 @@ def test_release_archive_requires_both_native_platforms(tmp_path: Path) -> None:
         (
             WINDOWS_WHEEL_NAME,
             "astrembodiment_core/_native.pyd",
-            NATIVE_API_MARKERS_PAYLOAD + b" 1.1.0-alpha1",
+            NATIVE_API_MARKERS_PAYLOAD + b" 1.0.0",
             NATIVE_WHEEL_VERSION,
             "cp312-abi3-win_amd64",
             "runtime version marker",
@@ -729,6 +721,7 @@ def test_release_archive_requires_both_native_platforms(tmp_path: Path) -> None:
 )
 def test_release_archive_rejects_stale_or_wrong_platform_wheels(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     bad_wheel_name: str,
     native_member: str,
     payload: bytes,
@@ -758,25 +751,12 @@ def test_release_archive_rejects_stale_or_wrong_platform_wheels(
     _write_test_wheel(counterpart, counterpart_member, NATIVE_API_PAYLOAD)
 
     output = tmp_path / "archive.zip"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(output),
-            "--native-wheel",
-            str(bad_wheel),
-            "--native-wheel",
-            str(counterpart),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert expected_error in result.stderr
+    packager = _load_packager()
+    with pytest.raises(ValueError, match=expected_error):
+        _, platform_tag = packager._wheel_platform(bad_wheel.name)
+        with zipfile.ZipFile(bad_wheel) as wheel:
+            packager._validate_wheel_metadata(wheel, wheel.namelist(), platform_tag)
+            packager._validate_native_payload(native_member, payload)
     assert not output.exists()
 
 
@@ -841,10 +821,13 @@ def test_fresh_wheel_members_are_copied_byte_for_byte_to_bundled_paths() -> None
                 == hashlib.sha256(wheel_bytes).hexdigest()
             )
             assert all(symbol.encode("ascii") in archive_bytes for symbol in NATIVE_API)
-            assert manifest["platforms"][platform] == {
-                "build_id": build_id,
-                "filename": filename,
-            }
+            entry = manifest["platforms"][platform]
+            assert entry["build_id"] == build_id
+            assert entry["filename"] == filename
+            assert (
+                entry["wheel_sha256"]
+                == hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+            )
 
 
 @pytest.mark.skipif(
@@ -899,23 +882,10 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
             "neuron_slots": 16384,
             "version": NATIVE_RUNTIME_VERSION,
         }
-        assert native.version() == NATIVE_RUNTIME_VERSION
-        assert json.loads(native.integration_availability_v1()) == {
-            "schema_version": 1,
-            "state": "UNAVAILABLE_HOST_ATTESTATION",
-            "required_capabilities": [
-                "service_instance_proof",
-                "caller_identity_proof",
-                "installation_manifest_binding",
-                "bounded_call",
-                "lifecycle_revocation",
-            ],
-        }
-        for operation in RETIRED_ALPHA3_OPERATIONS:
-            with pytest.raises(native.NativeCoreError, match="CLOSED_SCHEMA"):
-                native.alpha3_call(
-                    json.dumps({"operation": operation, "request": {}}, sort_keys=True)
-                )
+        assert not RETIRED_ALPHA3_OPERATIONS & set(dir(native))
+        build_info = json.loads(native.build_info_v1())
+        assert build_info["version"] == NATIVE_RUNTIME_VERSION
+        assert set(build_info["methods"]) == NATIVE_API - {"NativeCoreError"}
         runtime_dir = tmp_path / "runtime"
         runtime_dir.mkdir()
         health = bridge_module.NativeBridge().open(str(runtime_dir))
@@ -935,7 +905,9 @@ def test_fresh_archive_imports_native_api_in_clean_astrbot_namespace(
         sys.modules.update(previous_modules)
 
 
-def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
+def test_release_archive_accepts_linux_abi3_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     linux_wheel = tmp_path / LINUX_WHEEL_NAME
     windows_wheel = tmp_path / WINDOWS_WHEEL_NAME
     _write_test_wheel(
@@ -950,23 +922,7 @@ def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
     )
 
     output = tmp_path / "astrbot_plugin_astrembodiment-1.1.0-universal.zip"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(output),
-            "--native-wheel",
-            str(windows_wheel),
-            "--native-wheel",
-            str(linux_wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
+    _write_unit_bundle(output, [windows_wheel, linux_wheel], monkeypatch)
     with zipfile.ZipFile(output) as archive:
         names = set(archive.namelist())
         payload = b"linux-native-placeholder " + NATIVE_API_PAYLOAD
@@ -979,6 +935,7 @@ def test_release_archive_accepts_linux_abi3_extension(tmp_path: Path) -> None:
 
 def test_release_archive_can_bundle_windows_and_linux_extensions(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     windows_wheel = tmp_path / WINDOWS_WHEEL_NAME
     linux_wheel = tmp_path / LINUX_WHEEL_NAME
@@ -994,23 +951,7 @@ def test_release_archive_can_bundle_windows_and_linux_extensions(
     )
 
     output = tmp_path / "astrbot_plugin_astrembodiment-1.1.0-universal.zip"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(output),
-            "--native-wheel",
-            str(windows_wheel),
-            "--native-wheel",
-            str(linux_wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
+    _write_unit_bundle(output, [windows_wheel, linux_wheel], monkeypatch)
     with zipfile.ZipFile(output) as archive:
         names = set(archive.namelist())
         windows_build_id = hashlib.sha256(
@@ -1026,8 +967,11 @@ def test_release_archive_can_bundle_windows_and_linux_extensions(
     assert windows_wheel.name not in names
     assert linux_wheel.name not in names
 
+
 def _load_packager():
-    spec = importlib.util.spec_from_file_location("release_package_plugin", ROOT / "scripts/package_plugin.py")
+    spec = importlib.util.spec_from_file_location(
+        "release_package_plugin", ROOT / "scripts/package_plugin.py"
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1037,9 +981,23 @@ def _load_packager():
 def test_alpha4_dirty_and_mismatched_source_fail_before_build(tmp_path, monkeypatch):
     packager = _load_packager()
     subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=Fixture", "-c",
-                    "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"],
-                   check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+        capture_output=True,
+    )
     monkeypatch.setattr(packager, "ROOT", tmp_path)
     sha = packager.require_clean_source()
     with pytest.raises(ValueError, match="SOURCE_SHA_MISMATCH"):
@@ -1058,13 +1016,16 @@ def test_alpha4_package_requires_real_platform_receipts(monkeypatch):
             packager._write_native_package(archive, [], {}, [])
 
 
-@pytest.mark.parametrize("source", [
-    "from .proactive import execute",
-    "bridge.claim_wake()",
-    "registry = {'ae_wake': handler}",
-    "settings = {'proactive_enabled': False}",
-    "def submit_proactive_message(): pass",
-])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from .proactive import execute",
+        "bridge.claim_wake()",
+        "registry = {'ae_wake': handler}",
+        "settings = {'proactive_enabled': False}",
+        "def submit_proactive_message(): pass",
+    ],
+)
 def test_alpha4_scanner_rejects_retired_active_python(source):
     packager = _load_packager()
     with pytest.raises(ValueError, match="RETIRED_"):
@@ -1079,12 +1040,207 @@ def test_alpha4_scanner_accepts_current_source_and_manifest():
     assert len(result["methods"]) == 19
 
 
-@pytest.mark.parametrize("member", [
-    "astr_embodiment/autonomy.py", "astr_embodiment/proactive.py",
-    "astr_embodiment/proactive_settings.py", "astr_embodiment/secret_store.py",
-])
+@pytest.mark.parametrize("layout", ["single", "multiline", "mixed"])
+@pytest.mark.parametrize("extra", [None, "unexpected_api", "duplicate"])
+def test_scanner_native_registration_whitespace_preserves_exact_set(
+    monkeypatch, layout, extra
+):
+    packager = _load_packager()
+    public = packager.manifests()[0]
+    names = public + ([public[0] if extra == "duplicate" else extra] if extra else [])
+    source = "\n".join(
+        f"wrap_pyfunction!(\n    {name},\n    module\n)"
+        if layout == "multiline" or (layout == "mixed" and index % 2)
+        else f"wrap_pyfunction!({name}, module)"
+        for index, name in enumerate(names)
+    )
+    original_read = Path.read_text
+    native_path = ROOT / "crates/ae-pyo3/src/lib.rs"
+
+    def read_source(path, *args, **kwargs):
+        return source if path == native_path else original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_source)
+    if extra:
+        with pytest.raises(ValueError, match="^NATIVE_REGISTRATION_SET$"):
+            packager.scan_source()
+    else:
+        result = packager.scan_source()
+        assert result["methods"] == public
+        assert len(result["methods"]) == 19
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        "astr_embodiment/autonomy.py",
+        "astr_embodiment/proactive.py",
+        "astr_embodiment/proactive_settings.py",
+        "astr_embodiment/secret_store.py",
+    ],
+)
 def test_alpha4_packager_rejects_retired_archive_members(member):
     packager = _load_packager()
     with zipfile.ZipFile(io.BytesIO(), "w") as archive:
         with pytest.raises(ValueError, match="forbidden"):
             packager._write_member(archive, member, b"# historical", {})
+
+
+def _test_identity():
+    """Synthetic identity for unit validation, never an actual import receipt."""
+    packager = _load_packager()
+    schema = (ROOT / "crates/ae-store/src/core_boundary_v9.rs").read_text(
+        encoding="utf-8"
+    )
+    tzdb = json.loads((ROOT / "astr_embodiment/assets/tzdb/manifest.json").read_bytes())
+    return {
+        "source_sha": "0" * 40,
+        "version": NATIVE_RUNTIME_VERSION,
+        "contract_version": 1,
+        "methods": packager.manifests()[0],
+        "tzdb_release": "2026c",
+        "core_api_digest": "1" * 64,
+        "core_public_method_manifest_sha256": "800e4dccb2a29b6edbaa2ac7cc46c34f466ece682e0ccf1a272577aacb3790c4",
+        "retired_surface_manifest_sha256": "6a28d0e925be34a108b636c47b4ea8ff1a69b763d7de14ba91d4a44127dc291a",
+        "autonomy_schema_v9_sql_sha256": re.search(
+            r'const SQL_SHA256: &str = "([0-9a-f]+)"', schema
+        ).group(1),
+        "tzdb_content_sha256": tzdb["content_sha256"],
+    }
+
+
+def _write_unit_bundle(output, wheels, monkeypatch, receipt_edit=None):
+    """Exercise bundle encoding with synthetic evidence; not release acceptance."""
+    packager = _load_packager()
+    identity = _test_identity()
+    monkeypatch.setattr(
+        packager, "require_clean_source", lambda *args: identity["source_sha"]
+    )
+    receipts = []
+    for path in wheels:
+        with zipfile.ZipFile(path, "a") as wheel:
+            wheel.writestr(packager.WHEEL_IDENTITY, json.dumps(identity))
+            payload = wheel.read(packager._native_extension(wheel.namelist()))
+        platform, _ = packager._wheel_platform(path.name)
+        receipts.append(
+            dict(
+                status="IMPORTED",
+                platform=platform,
+                machine="x86_64",
+                wheel_filename=path.name,
+                wheel_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                binary_sha256=hashlib.sha256(payload).hexdigest(),
+                build_info=identity,
+                methods=identity["methods"],
+            )
+        )
+    if receipt_edit is not None:
+        receipts[0].update(receipt_edit)
+    with zipfile.ZipFile(output, "w") as archive:
+        packager._write_native_package(archive, wheels, {}, receipts)
+
+
+@pytest.mark.parametrize(
+    "receipt_edit",
+    [
+        {"status": "STATIC_CHECK"},
+        {"wheel_sha256": "f" * 64},
+        {"binary_sha256": "f" * 64},
+        {"methods": ["alpha3_call"]},
+        {"build_info": {}},
+        {"machine": "aarch64"},
+    ],
+)
+def test_bundle_rejects_mismatched_import_evidence(tmp_path, monkeypatch, receipt_edit):
+    windows = tmp_path / WINDOWS_WHEEL_NAME
+    linux = tmp_path / LINUX_WHEEL_NAME
+    _write_test_wheel(windows, "astrembodiment_core/_native.pyd", NATIVE_API_PAYLOAD)
+    _write_test_wheel(linux, "astrembodiment_core/_native.abi3.so", NATIVE_API_PAYLOAD)
+    with pytest.raises(
+        ValueError, match="import receipt does not match exact wheel identity"
+    ):
+        _write_unit_bundle(
+            tmp_path / "unit.zip", [windows, linux], monkeypatch, receipt_edit
+        )
+
+
+def test_checksum_output_matches_completed_archive(tmp_path, monkeypatch):
+    packager = _load_packager()
+    output = tmp_path / "unit.zip"
+    checksum = tmp_path / "unit.sha256"
+    monkeypatch.setattr(packager, "require_clean_source", lambda *args: "0" * 40)
+    monkeypatch.setattr(packager, "scan_source", lambda: None)
+    monkeypatch.setattr(packager, "_source_files", lambda: [])
+    monkeypatch.setattr(packager, "_write_native_package", lambda *args: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "package_plugin.py",
+            "--output",
+            str(output),
+            "--sha256-output",
+            str(checksum),
+        ],
+    )
+    packager.main()
+    assert (
+        checksum.read_text()
+        == f"{hashlib.sha256(output.read_bytes()).hexdigest()}  {output.name}\n"
+    )
+
+
+def test_archive_member_metadata_is_platform_independent():
+    packager = _load_packager()
+    outputs = []
+    for _ in range(2):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            packager._write_member(archive, "metadata.yaml", b"unit fixture", {})
+            info = archive.getinfo("metadata.yaml")
+            assert info.date_time == (1980, 1, 1, 0, 0, 0)
+            assert info.create_system == 3
+            assert info.external_attr == 0o100644 << 16
+            assert info.compress_type == zipfile.ZIP_STORED
+        outputs.append(buffer.getvalue())
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source_sha", "2" * 40),
+        ("version", "1.1.0-alpha1"),
+        ("methods", ["alpha3_call"]),
+        ("tzdb_content_sha256", "3" * 64),
+    ],
+)
+def test_identity_rejects_stale_source_version_api_and_assets(field, value):
+    packager = _load_packager()
+    identity = dict(_test_identity(), **{field: value})
+    with pytest.raises(ValueError, match="IDENTITY"):
+        packager.validate_identity(identity, "0" * 40)
+
+
+@pytest.mark.parametrize("same_path", [False, True])
+def test_checksum_output_never_overwrites_existing_file(
+    tmp_path, monkeypatch, same_path
+):
+    packager = _load_packager()
+    output = tmp_path / "unit.zip"
+    checksum = output if same_path else tmp_path / "unit.sha256"
+    checksum.write_text("preserve me", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "package_plugin.py",
+            "--output",
+            str(output),
+            "--sha256-output",
+            str(checksum),
+        ],
+    )
+    with pytest.raises((ValueError, SystemExit)):
+        packager.main()
+    assert checksum.read_text() == "preserve me"

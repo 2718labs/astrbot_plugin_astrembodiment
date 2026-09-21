@@ -15,6 +15,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .auxiliary_transport import (
+    DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
+    AuxiliaryProviderTransport,
+)
 from .contracts import ScopeTokens
 
 PERSONA_SOURCE_SCHEMA = "astr-embodiment.persona-source.v1"
@@ -393,7 +397,11 @@ async def compile_with_provider(
         prompt=_compiler_user_prompt(source),
         system_prompt=_COMPILER_SYSTEM,
     )
-    raw = str(getattr(response, "completion_text", "") or "").strip()
+    raw = (
+        response.strip()
+        if type(response) is str
+        else str(getattr(response, "completion_text", "") or "").strip()
+    )
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -407,17 +415,25 @@ async def compile_with_current_chat_model(
     event: Any,
     source: PersonaSourceSnapshot,
 ) -> dict[str, Any]:
-    """One-time invisible compiler call using the current conversation provider."""
-    provider_id = await context.get_current_chat_provider_id(
-        umo=event.unified_msg_origin
+    """Legacy compiler entry point routed through the closed Host adapter."""
+
+    transport = AuxiliaryProviderTransport(
+        context=context,
+        configured_provider=lambda: ("", "CURRENT_SESSION"),
+        timeout_ms=lambda: DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
     )
-    return await compile_with_provider(
-        generate=lambda **kwargs: context.llm_generate(
-            chat_provider_id=provider_id,
-            contexts=None,
-            tools=None,
-            temperature=0,
-            **kwargs,
-        ),
-        source=source,
-    )
+    request = transport.open_request(umo=getattr(event, "unified_msg_origin", None))
+    request.bind_semantic_key(f"legacy-compiler:{id(event)}")
+
+    async def generate(*, prompt: str, system_prompt: str) -> str:
+        result = await request.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            semantic_operation=False,
+        )
+        return result.text
+
+    try:
+        return await compile_with_provider(generate=generate, source=source)
+    finally:
+        request.close()

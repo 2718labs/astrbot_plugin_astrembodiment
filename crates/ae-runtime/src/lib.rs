@@ -18,10 +18,10 @@ mod semantic_telemetry_v1;
 use ae_agent::noop_action_contract;
 use ae_continuum::ReplayReport;
 use ae_contracts::{
-    phase0_canonical_formula_digest_v1, wire, ActionContract, Alpha3ErrorCodeV1, CanonicalEvent, Digest, GenesisReceipt, GenesisStatus, Id128, InvariantResiduals,
-    PersonaGenesisRequest, ScopeRef, SemanticAppraisalSettleRequestV1,
-    SemanticAppraisalSettleResultV1, SemanticAppraisalSettleStatusV1, StateSubcodeV1,
-    TransitionReceipt,
+    phase0_canonical_formula_digest_v1, wire, ActionContract, Alpha3ErrorCodeV1, CanonicalEvent,
+    Digest, GenesisReceipt, GenesisStatus, Id128, InvariantResiduals, PersonaGenesisRequest,
+    ScopeRef, SemanticAppraisalSettleRequestV1, SemanticAppraisalSettleResultV1,
+    SemanticAppraisalSettleStatusV1, StateSubcodeV1, TransitionReceipt,
 };
 #[cfg(feature = "legacy-semantic-test-api")]
 use ae_contracts::{PerceptionChallengeV1, PerceptionProposalV1};
@@ -121,6 +121,8 @@ pub struct InspectReport {
     pub observatory_genesis_unavailable: bool,
 }
 
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 struct HotBrain {
     bot_token: Id128,
     persona_token: Id128,
@@ -139,6 +141,8 @@ pub struct AstrRuntime {
     hot: Option<HotBrain>,
 }
 
+// Retained historical verification data; no active executor is restored.
+#[allow(dead_code)]
 fn fixed_zero_vector() -> InvariantResiduals {
     InvariantResiduals::default()
 }
@@ -155,29 +159,80 @@ impl AstrRuntime {
     }
 
     fn evict_core_scope(&mut self, scope: &ae_contracts::PersonaScopeRef) {
-        if self.hot.as_ref().is_some_and(|h|h.bot_token==scope.bot_token && h.persona_token==scope.persona_token) {
-            self.hot=None;
+        if self.hot.as_ref().is_some_and(|h| {
+            h.bot_token == scope.bot_token && h.persona_token == scope.persona_token
+        }) {
+            self.hot = None;
         }
     }
 
-    pub fn list_embodiment_personas_v1(&mut self,request:&ae_contracts::ListEmbodimentPersonasV1)->Result<ae_contracts::EmbodimentPersonaInventoryPageV1,RuntimeError>{Ok(self.store.list_embodiment_personas_v1(request)?)}
-    pub fn read_embodiment_profile_v1(&mut self,scope:&ae_contracts::PersonaScopeRef)->Result<ae_contracts::EmbodimentProfileReadV1,RuntimeError>{Ok(self.store.read_embodiment_profile_v1(scope)?)}
-    pub fn get_embodiment_persona_v1(&mut self,scope:&ae_contracts::PersonaScopeRef)->Result<ae_contracts::EmbodimentPersonaLookupV1,RuntimeError>{Ok(self.store.get_embodiment_persona_v1(scope)?)}
-    pub fn create_embodiment_persona_if_missing_v1(&mut self,request:&ae_contracts::CreateEmbodimentPersonaIfMissingV1)->Result<ae_contracts::EmbodimentPersonaCreateOutcomeV1,RuntimeError>{let result=self.store.create_embodiment_persona_if_missing_v1(request)?;self.evict_core_scope(&request.scope);Ok(result)}
-    pub fn embodiment_clock_status_v1(&mut self,request:&ae_contracts::EmbodimentClockStatusRequestV1)->Result<ae_contracts::EmbodimentClockStatusV1,RuntimeError>{Ok(self.store.embodiment_clock_status_v1(request)?)}
-    pub fn advance_embodiment_time_v1(&mut self,request:&[u8])->Result<ae_contracts::EmbodimentClockCommitOutcomeV1,RuntimeError>{let result=self.store.advance_embodiment_time_v1(request)?;self.evict_core_scope(&result.receipt.result.scope);Ok(result)}
-    pub fn compare_and_swap_embodiment_profile_v1(&mut self,request:&ae_contracts::CompareAndSwapEmbodimentProfileV1)->Result<ae_contracts::EmbodimentClockCommitOutcomeV1,RuntimeError>{let result=self.store.compare_and_swap_embodiment_profile_v1(request)?;self.evict_core_scope(&request.scope);Ok(result)}
+    pub fn list_embodiment_personas_v1(
+        &mut self,
+        request: &ae_contracts::ListEmbodimentPersonasV1,
+    ) -> Result<ae_contracts::EmbodimentPersonaInventoryPageV1, RuntimeError> {
+        Ok(self.store.list_embodiment_personas_v1(request)?)
+    }
+    pub fn read_embodiment_profile_v1(
+        &mut self,
+        scope: &ae_contracts::PersonaScopeRef,
+    ) -> Result<ae_contracts::EmbodimentProfileReadV1, RuntimeError> {
+        Ok(self.store.read_embodiment_profile_v1(scope)?)
+    }
+    pub fn get_embodiment_persona_v1(
+        &mut self,
+        scope: &ae_contracts::PersonaScopeRef,
+    ) -> Result<ae_contracts::EmbodimentPersonaLookupV1, RuntimeError> {
+        Ok(self.store.get_embodiment_persona_v1(scope)?)
+    }
+    pub fn create_embodiment_persona_if_missing_v1(
+        &mut self,
+        request: &ae_contracts::CreateEmbodimentPersonaIfMissingV1,
+    ) -> Result<ae_contracts::EmbodimentPersonaCreateOutcomeV1, RuntimeError> {
+        let result = self
+            .store
+            .create_embodiment_persona_if_missing_v1(request)?;
+        self.evict_core_scope(&request.scope);
+        Ok(result)
+    }
+    pub fn embodiment_clock_status_v1(
+        &mut self,
+        request: &ae_contracts::EmbodimentClockStatusRequestV1,
+    ) -> Result<ae_contracts::EmbodimentClockStatusV1, RuntimeError> {
+        Ok(self.store.embodiment_clock_status_v1(request)?)
+    }
+    pub fn advance_embodiment_time_v1(
+        &mut self,
+        request: &[u8],
+    ) -> Result<ae_contracts::EmbodimentClockCommitOutcomeV1, RuntimeError> {
+        let result = self.store.advance_embodiment_time_v1(request)?;
+        self.evict_core_scope(&result.receipt.result.scope);
+        Ok(result)
+    }
+    pub fn compare_and_swap_embodiment_profile_v1(
+        &mut self,
+        request: &ae_contracts::CompareAndSwapEmbodimentProfileV1,
+    ) -> Result<ae_contracts::EmbodimentClockCommitOutcomeV1, RuntimeError> {
+        let result = self.store.compare_and_swap_embodiment_profile_v1(request)?;
+        self.evict_core_scope(&request.scope);
+        Ok(result)
+    }
 
-    pub fn commit_core_inbound_v1(&mut self, request:&ae_contracts::CommitCoreInboundV1) -> Result<ae_contracts::CoreInboundCommitOutcomeV1,RuntimeError> {
-        let result=self.store.commit_core_inbound_v1(request)?;
+    pub fn commit_core_inbound_v1(
+        &mut self,
+        request: &ae_contracts::CommitCoreInboundV1,
+    ) -> Result<ae_contracts::CoreInboundCommitOutcomeV1, RuntimeError> {
+        let result = self.store.commit_core_inbound_v1(request)?;
         // ReloadRequired is intentional: no fallible hydration after commit,
         // and an unrelated resident persona is never modified.
         self.evict_core_scope(&result.initial_receipt.event.scope);
         Ok(result)
     }
 
-    pub fn commit_core_delivery_outcome_v1(&mut self, request:&ae_contracts::CommitCoreDeliveryOutcomeV1) -> Result<ae_contracts::CoreDeliveryCommitOutcomeV1,RuntimeError> {
-        let result=self.store.commit_core_delivery_outcome_v1(request)?;
+    pub fn commit_core_delivery_outcome_v1(
+        &mut self,
+        request: &ae_contracts::CommitCoreDeliveryOutcomeV1,
+    ) -> Result<ae_contracts::CoreDeliveryCommitOutcomeV1, RuntimeError> {
+        let result = self.store.commit_core_delivery_outcome_v1(request)?;
         self.evict_core_scope(&result.receipt.scope);
         Ok(result)
     }
@@ -554,9 +609,9 @@ impl AstrRuntime {
         }
     }
 
-    /// Apply one canonical event. User stimuli enter the Store-owned semantic
-    /// lane; delivery outcomes remain journal-only and cannot fabricate
-    /// evidence or advance the independent semantic cursor.
+    // Apply one canonical event. User stimuli enter the Store-owned semantic
+    // lane; delivery outcomes remain journal-only and cannot fabricate
+    // evidence or advance the independent semantic cursor.
 
     // ------------------------------------------------------------ observatory
 
