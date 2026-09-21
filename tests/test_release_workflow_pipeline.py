@@ -11,6 +11,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_ci_and_release_use_one_pinned_rust_toolchain_without_global_default():
+    config = tomllib.loads((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))
+    toolchain = config["toolchain"]
+    assert toolchain["channel"] == "1.98.1"
+    assert toolchain["profile"] == "minimal"
+    assert set(toolchain["components"]) == {"rustfmt", "clippy"}
+    for name, installs in (("ci.yml", 2), ("release.yml", 1)):
+        workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+        assert workflow.count("Path('rust-toolchain.toml')") == installs
+        assert workflow.count('rustup toolchain install "$rust_toolchain"') == installs
+        assert "rustup default" not in workflow
+        assert "rustup toolchain install stable" not in workflow
+        assert "1.98.1" not in workflow
+
+
 def test_wheel_only_extension_link_mode():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "pyo3/extension-module" in project["tool"]["maturin"]["features"]

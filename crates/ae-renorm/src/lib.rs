@@ -63,7 +63,9 @@ fn restrict_once(children: &[[Fixed; 8]]) -> Result<Vec<[Fixed; 8]>, RenormError
         return Err(RenormError::InvalidLevelShape);
     }
     Ok(children
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|group| {
             let mut token = [Fixed::ZERO; 8];
             for component in 0..8 {

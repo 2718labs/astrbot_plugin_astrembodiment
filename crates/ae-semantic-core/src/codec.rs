@@ -638,7 +638,7 @@ pub fn decode_canonical_aesem3_blocks(
     if !cursor.eof() {
         return Err(SemanticCoreError::SnapshotWireInvalid);
     }
-    for raw in reserved.chunks_exact(8) {
+    for raw in reserved.as_chunks::<8>().0 {
         let mut value = [0; 8];
         value.copy_from_slice(raw);
         if Fixed::decode(value) != Fixed::ZERO {

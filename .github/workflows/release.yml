@@ -484,12 +484,13 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install stable Rust and packaging tools
+      - name: Install pinned Rust and packaging tools
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rust_toolchain="$(python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('rust-toolchain.toml').read_text(encoding='utf-8'))['toolchain']['channel'])")"
+          rustup toolchain install "$rust_toolchain" --profile minimal --component rustfmt --component clippy
+          rustup show active-toolchain
           python -m pip install --upgrade pip maturin==1.14.1
       - name: Recheck metadata-derived version at the release target
         id: version

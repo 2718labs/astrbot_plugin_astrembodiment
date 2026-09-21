@@ -1513,10 +1513,11 @@ def test_seed_command_echoes_saved_seed_without_regenerating():
     assert context.generate_calls == []
 
 
+@pytest.mark.parametrize("installed_core", [False, True])
 def test_native_bridge_finds_sibling_package_for_top_level_loader(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed_core: bool
 ):
-    """A file-based/top-level host loader must still see the bundled core."""
+    """When normal import is unavailable, load the archive-relative core."""
     plugin_root = tmp_path / "plugin"
     native_root = plugin_root / "astrembodiment_core"
     native_root.mkdir(parents=True)
@@ -1541,10 +1542,40 @@ def version():
     monkeypatch.setattr(
         sys, "path", [entry for entry in sys.path if entry != str(plugin_root)]
     )
-    monkeypatch.delitem(sys.modules, "astrembodiment_core", raising=False)
+    # Register cleanup even when there was no original cached package; the
+    # fallback loader inserts its synthetic package into sys.modules.
+    monkeypatch.setitem(sys.modules, "astrembodiment_core", None)
+    monkeypatch.delitem(sys.modules, "astrembodiment_core")
 
+    if installed_core:
+        # Reproduce a CI environment where the real wheel has been installed.
+        installed_root = tmp_path / "site-packages"
+        installed_package = installed_root / "astrembodiment_core"
+        installed_package.mkdir(parents=True)
+        (installed_package / "__init__.py").write_text(
+            (native_root / "__init__.py").read_text(encoding="utf-8").replace(
+                '"test"', '"installed"'
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(installed_root))
+
+    original_import = bridge_module.import_module
+    imports = []
+
+    def unavailable_top_level(name, package=None):
+        imports.append(name)
+        if name == "astrembodiment_core":
+            raise ModuleNotFoundError(
+                "top-level core intentionally unavailable for fallback test",
+                name="astrembodiment_core",
+            )
+        return original_import(name, package)
+
+    monkeypatch.setattr(bridge_module, "import_module", unavailable_top_level)
     health = bridge_module.NativeBridge().open(str(tmp_path / "runtime"))
 
+    assert imports == ["astrembodiment_core"]
     assert health.status == "test"
     assert health.version == "test"
 
