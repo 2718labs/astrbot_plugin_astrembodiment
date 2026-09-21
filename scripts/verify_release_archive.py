@@ -110,6 +110,7 @@ PROBE = r'''
 import hashlib
 import json
 import sqlite3
+import stat
 import sys
 import tempfile
 from contextlib import closing
@@ -174,6 +175,62 @@ def prepare_store_mode_baseline(path, sql):
     assert not Path(f"{path}-wal").exists()
 
 
+def exercise_retired_authority_link(db_root):
+    # This retired sidecar is not an authority input to the current core.
+    # Prove preservation, not rejection or absence of reads.
+    unsafe = db_root / "unsafe-authority"
+    unsafe.mkdir()
+    unsafe_db = unsafe / "astrembodiment.sqlite3"
+    lifecycle(unsafe_db)
+    before_unsafe_db = unsafe_db.read_bytes()
+    before_unsafe_catalog = catalog(unsafe_db)
+    authority = unsafe / ".native-authority"
+    target = db_root / "authority-target"
+    assert not authority.exists() and not authority.is_symlink()
+    target.mkdir()
+    (target / "legacy-key.bin").write_bytes(b"synthetic retired key sentinel\x00\xff")
+    (target / "legacy-state.json").write_bytes(b'{"fixture":"retired-sidecar"}\n')
+    before_target = {p.name: p.read_bytes() for p in target.iterdir() if p.is_file()}
+    assert before_target
+    import os
+    import subprocess
+    link_kind = "symlink"
+    try:
+        authority.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if sys.platform != "win32":
+            raise
+        # PowerShell receives paths as environment values, never shell code.
+        environment = dict(os.environ, AE_LINK=str(authority), AE_TARGET=str(target))
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                        "New-Item -ItemType Junction -Path $env:AE_LINK -Target $env:AE_TARGET | Out-Null"],
+                       env=environment, check=True, capture_output=True)
+        link_kind = "junction"
+    try:
+        def link_identity():
+            metadata = authority.lstat()
+            attributes = getattr(metadata, "st_file_attributes", 0)
+            assert stat.S_ISLNK(metadata.st_mode) or attributes & 0x400
+            return (metadata.st_ino, metadata.st_mode, attributes, os.readlink(authority))
+
+        before_link = link_identity()
+        assert authority.resolve() == target.resolve()
+        lifecycle(unsafe_db)
+        assert link_identity() == before_link
+        assert authority.resolve() == target.resolve()
+        assert {p.name: p.read_bytes() for p in target.iterdir() if p.is_file()} == before_target
+        assert sorted(p.name for p in target.iterdir()) == sorted(before_target)
+        assert unsafe_db.read_bytes() == before_unsafe_db
+        assert catalog(unsafe_db) == before_unsafe_catalog
+    finally:
+        if link_kind == "junction":
+            os.rmdir(authority)
+        else:
+            authority.unlink()
+
+    return link_kind
+
+
 with tempfile.TemporaryDirectory(prefix="native-db-", dir=db_parent) as db_temp:
     db_root = Path(db_temp)
 
@@ -181,6 +238,8 @@ with tempfile.TemporaryDirectory(prefix="native-db-", dir=db_parent) as db_temp:
     fresh.parent.mkdir()
     lifecycle(fresh)
     assert fresh.is_file()
+    retired_fresh = fresh.parent / ".native-authority"
+    assert not retired_fresh.exists() and not retired_fresh.is_symlink()
 
     historical = db_root / "historical-empty" / "astrembodiment.sqlite3"
     historical.parent.mkdir()
@@ -231,49 +290,7 @@ with tempfile.TemporaryDirectory(prefix="native-db-", dir=db_parent) as db_temp:
         ).fetchall()
     assert after_rows == before_rows == [("010203",)]
 
-    # Repoint an actual valid authority directory; accepting it would be unsafe.
-    unsafe = db_root / "unsafe-authority"
-    unsafe.mkdir()
-    unsafe_db = unsafe / "astrembodiment.sqlite3"
-    lifecycle(unsafe_db)
-    before_unsafe_db = unsafe_db.read_bytes()
-    before_unsafe_catalog = catalog(unsafe_db)
-    authority = unsafe / ".native-authority"
-    target = db_root / "authority-target"
-    authority.rename(target)
-    before_target = {p.name: p.read_bytes() for p in target.iterdir() if p.is_file()}
-    assert before_target
-    import os
-    import subprocess
-    link_kind = "symlink"
-    try:
-        authority.symlink_to(target, target_is_directory=True)
-    except OSError:
-        if sys.platform != "win32":
-            raise
-        # PowerShell receives paths as environment values, never shell code.
-        environment = dict(os.environ, AE_LINK=str(authority), AE_TARGET=str(target))
-        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                        "New-Item -ItemType Junction -Path $env:AE_LINK -Target $env:AE_TARGET | Out-Null"],
-                       env=environment, check=True, capture_output=True)
-        link_kind = "junction"
-    try:
-        try:
-            native.open(str(unsafe_db))
-        except native.NativeCoreError as error:
-            unsafe_rejection = str(error)
-        else:
-            native.flush_and_close()
-            raise AssertionError("unsafe authority path was accepted")
-        assert {p.name: p.read_bytes() for p in target.iterdir() if p.is_file()} == before_target
-        assert sorted(p.name for p in target.iterdir()) == sorted(before_target)
-        assert unsafe_db.read_bytes() == before_unsafe_db
-        assert catalog(unsafe_db) == before_unsafe_catalog
-    finally:
-        if link_kind == "junction":
-            os.rmdir(authority)
-        else:
-            authority.unlink()
+    link_kind = exercise_retired_authority_link(db_root)
 
 print(json.dumps({
     "build_info": identity,
@@ -287,13 +304,99 @@ print(json.dumps({
     "database_filename": "astrembodiment.sqlite3",
     "database_lifecycle": {
         "fresh_open_flush_reopen": "PASS",
-        "unsafe_authority_refused_target_unchanged": "PASS",
+        "fresh_retired_authority_absent": "PASS",
+        "retired_authority_link_target_preserved": "PASS",
         "unsafe_path_kind": link_kind,
         "historical_1774023_empty_open_flush_reopen": "PASS",
         "historical_1774023_nonempty_rejected_unchanged": "PASS",
     },
 }))
 '''
+
+
+def run_probe(
+    extracted: Path, fixture: Path, root: Path, *, timeout_seconds: float = 180
+) -> dict:
+    """Run the isolated probe and expose evidence without dumping its source."""
+
+    def diagnostic(status, exit_code, stdout, stderr):
+        def decoded(name, value):
+            rendered = (
+                value.decode("utf-8", errors="backslashreplace")
+                if isinstance(value, bytes)
+                else value or ""
+            )
+            characters = len(rendered)
+            byte_count = (
+                len(value)
+                if isinstance(value, bytes)
+                else len(rendered.encode("utf-8"))
+            )
+            truncated = characters > 8192
+            if truncated:
+                marker = "\n... [truncated; head and tail retained] ...\n"
+                head = (8192 - len(marker)) // 2
+                tail = 8192 - len(marker) - head
+                rendered = rendered[:head] + marker + rendered[-tail:]
+            return {
+                name: rendered,
+                name + "_truncated": truncated,
+                name + "_bytes": byte_count,
+                name + "_characters": characters,
+            }
+
+        return RuntimeError(
+            json.dumps(
+                {
+                    "status": status,
+                    "exit_code": exit_code,
+                    **decoded("stdout", stdout),
+                    **decoded("stderr", stderr),
+                    "timeout_seconds": timeout_seconds,
+                },
+                sort_keys=True,
+            )
+        )
+
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                PROBE,
+                str(extracted),
+                str(fixture),
+                str(root),
+            ],
+            cwd=root,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise diagnostic(
+            "NATIVE_PROBE_TIMEOUT", None, error.stdout, error.stderr
+        ) from None
+    if completed.returncode:
+        raise diagnostic(
+            "NATIVE_PROBE_FAILED",
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        ) from None
+    try:
+        imported = json.loads(completed.stdout)
+        if not isinstance(imported, dict):
+            raise TypeError("probe receipt must be an object")
+    except (ValueError, TypeError):
+        raise diagnostic(
+            "NATIVE_PROBE_INVALID_RECEIPT",
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        ) from None
+    return imported
 
 
 def verify(archive_path: Path, source_sha: str, work_dir: Path) -> dict:
@@ -367,23 +470,7 @@ def verify(archive_path: Path, source_sha: str, work_dir: Path) -> dict:
             extracted = root / "archive"
             extracted.mkdir()
             archive.extractall(extracted)
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-I",
-                    "-c",
-                    PROBE,
-                    str(extracted),
-                    str(fixture),
-                    str(root),
-                ],
-                cwd=root,
-                text=True,
-                capture_output=True,
-                timeout=180,
-                check=True,
-            )
-            imported = json.loads(completed.stdout)
+            imported = run_probe(extracted, fixture, root)
         if imported["build_info"] != manifest["build_info"]:
             raise ValueError("runtime identity differs from manifest")
         if (

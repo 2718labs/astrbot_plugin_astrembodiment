@@ -68,7 +68,7 @@ python scripts/package_plugin.py --source-sha SOURCE_SHA --native-wheel PATH_TO_
 
 ## 自动验证与发布
 
-PR CI 在 Windows x64 与实际 Linux x86_64 上，以同一完整 SHA 构建原生 wheel、执行真实导入并生成身份凭据；只有两份凭据与 wheel 的哈希、19 项 API 和源码身份全部匹配才组装 universal ZIP。随后两种系统分别从同一个精确 ZIP 验证 Native 身份、fresh 数据库和历史 `1774023` schema 的 open/close/reopen，以及不安全 authority 路径拒绝后数据保全。
+PR CI 在 Windows x64 与实际 Linux x86_64 上，以同一完整 SHA 构建原生 wheel、执行真实导入并生成身份凭据；只有两份凭据与 wheel 的哈希、19 项 API 和源码身份全部匹配才组装 universal ZIP。随后两种系统分别从同一个精确 ZIP 验证 Native 身份、fresh 数据库和历史 `1774023` schema 的 open/close/reopen，以及非空升级证据拒绝后数据保全。退休 `.native-authority` 目录不再自动创建；人为放置的链接、目标内容和既有数据库必须在重开后保持不变，这不表示已验证该路径遭原生拒绝或从未被读取。现役迁移备份校验仍保留。
 
 正式发布仍保留当前 master、成功 CI 来源、annotated tag 对象防漂移、草稿恢复和最小写权限门禁。GitHub Release 只上传确定性 ZIP 与 SHA-256 sidecar；双平台验证回执保存在同次 Actions 运行的 artifacts，ZIP 内记录 wheel 导入凭据。本次 PR 适配本身不代表已经触发发布或完成 AstrBot 实机验收。
 

@@ -19,8 +19,13 @@ historical tests compatible with the current 19-method contract.
 5. Each platform receives the same assembled ZIP. The verifier compares source
    bytes, loaded native identity, exact 19 APIs and binary hashes; it runs fresh
    and historical `1774023` database open/close/reopen, rejects nonempty unsafe
-   upgrade evidence unchanged, and rejects linked authority storage while
-   preserving the database and key bytes. All databases are temporary fixtures.
+   upgrade evidence unchanged, and verifies that fresh stores do not create the
+   retired `.native-authority` sidecar. A deliberately placed sidecar link retains
+   its link identity and target, sentinel members/bytes and initialized database
+   bytes/catalog across reopen. This proves preservation, not native rejection
+   or absence of reads. Active `.astr-embodiment-field-migration-preimages`
+   validation for authenticated migrations remains unchanged. All databases and
+   sentinels are temporary fixtures.
 6. Publishing depends on both archive jobs. Default permissions remain read-only;
    only the publish job obtains contents-write. Successful master push CI,
    current-master checks, annotated-tag object checks, tag-only recovery, draft
@@ -71,6 +76,14 @@ Intentional historical codec or read-only support uses local, explained lint
 allowances on specific symbols; no global warning suppression is applied.
 
 ## Acceptance still required
+
+The archive-probe correction was diagnosed using the unchanged ZIP from CI run
+`35557556583` (source `fa4cd3128431411f639cb49355299fab34c95258`, SHA-256
+`93f6bb7723493cbc6a63b1b96036604ecbdf0ee675eff5c878c65465f8241440`). The corrected
+probe passed on Windows and existing WSL Linux without rebuilding binaries.
+Those results are diagnostic evidence for that earlier artifact, not acceptance
+of a new source SHA. Failed or timed-out probes expose bounded structured
+diagnostics and cannot write a successful verification receipt.
 
 Run PR CI against the final committed SHA to obtain real Windows/Linux wheel and
 archive receipts. Local unit results do not establish cross-platform build,

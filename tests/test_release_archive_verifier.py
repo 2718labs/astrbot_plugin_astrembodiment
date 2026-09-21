@@ -2,6 +2,7 @@
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import stat
@@ -24,6 +25,89 @@ class ArchiveVerifierTests(unittest.TestCase):
 
     def test_safe_members(self):
         self.verifier.validate_members([zipfile.ZipInfo("pkg/main.py")])
+
+    def test_probe_success_returns_json(self):
+        self.assertTrue(hasattr(self.verifier, "run_probe"), "probe runner is missing")
+        self.verifier.PROBE = 'print(\'{"build_info": {"version": "test"}}\')'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(
+                self.verifier.run_probe(root, root, root),
+                {"build_info": {"version": "test"}},
+            )
+
+    def test_probe_failure_reports_exit_code_and_captured_streams(self):
+        self.assertTrue(hasattr(self.verifier, "run_probe"), "probe runner is missing")
+        self.verifier.PROBE = "import sys; print('stage: historical'); print('assertion evidence', file=sys.stderr); sys.exit(7)"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(RuntimeError) as caught:
+                self.verifier.run_probe(root, root, root)
+        diagnostic = json.loads(str(caught.exception))
+        self.assertEqual(diagnostic["status"], "NATIVE_PROBE_FAILED")
+        self.assertEqual(diagnostic["exit_code"], 7)
+        self.assertIn("stage: historical", diagnostic["stdout"])
+        self.assertIn("assertion evidence", diagnostic["stderr"])
+        self.assertNotIn(self.verifier.PROBE, str(caught.exception))
+
+    def test_probe_timeout_preserves_partial_output(self):
+        self.assertTrue(hasattr(self.verifier, "run_probe"), "probe runner is missing")
+        self.verifier.PROBE = "import sys,time; print('before timeout', flush=True); print('waiting', file=sys.stderr, flush=True); time.sleep(30)"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(RuntimeError) as caught:
+                self.verifier.run_probe(root, root, root, timeout_seconds=1)
+        diagnostic = json.loads(str(caught.exception))
+        self.assertEqual(diagnostic["status"], "NATIVE_PROBE_TIMEOUT")
+        self.assertIsNone(diagnostic["exit_code"])
+        self.assertEqual(diagnostic["timeout_seconds"], 1)
+        self.assertIn("before timeout", diagnostic["stdout"])
+        self.assertIn("waiting", diagnostic["stderr"])
+        self.assertNotIn(self.verifier.PROBE, str(caught.exception))
+
+    def test_probe_invalid_receipt_reports_output(self):
+        self.assertTrue(hasattr(self.verifier, "run_probe"), "probe runner is missing")
+        self.verifier.PROBE = "print('not a JSON receipt')"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(RuntimeError) as caught:
+                self.verifier.run_probe(root, root, root)
+        diagnostic = json.loads(str(caught.exception))
+        self.assertEqual(diagnostic["status"], "NATIVE_PROBE_INVALID_RECEIPT")
+        self.assertEqual(diagnostic["exit_code"], 0)
+        self.assertIn("not a JSON receipt", diagnostic["stdout"])
+
+    def test_probe_failure_preserves_non_utf8_error_bytes(self):
+        self.verifier.PROBE = (
+            "import sys; sys.stderr.buffer.write(bytes([255, 129])); sys.exit(3)"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(RuntimeError) as caught:
+                self.verifier.run_probe(root, root, root)
+        diagnostic = json.loads(str(caught.exception))
+        self.assertEqual(diagnostic["exit_code"], 3)
+        self.assertEqual(diagnostic["stderr"], r"\xff\x81")
+
+    def test_probe_large_failure_output_is_bounded_with_head_and_tail(self):
+        self.verifier.PROBE = (
+            "import sys; "
+            "sys.stdout.write('OUT_HEAD' + 'x'*20000 + 'OUT_TAIL'); "
+            "sys.stderr.write('ERR_HEAD' + 'y'*20000 + 'ERR_TAIL'); sys.exit(9)"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaises(RuntimeError) as caught:
+                self.verifier.run_probe(root, root, root)
+        diagnostic = json.loads(str(caught.exception))
+        for stream, prefix in (("stdout", "OUT"), ("stderr", "ERR")):
+            self.assertLessEqual(len(diagnostic[stream]), 8192)
+            self.assertTrue(diagnostic[stream].startswith(prefix + "_HEAD"))
+            self.assertTrue(diagnostic[stream].endswith(prefix + "_TAIL"))
+            self.assertIn("truncated", diagnostic[stream])
+            self.assertTrue(diagnostic[stream + "_truncated"])
+            self.assertEqual(diagnostic[stream + "_bytes"], 20016)
+            self.assertEqual(diagnostic[stream + "_characters"], 20016)
 
     def test_unsafe_and_case_colliding_members(self):
         for name in (
@@ -135,6 +219,64 @@ class ArchiveVerifierTests(unittest.TestCase):
         self.assertTrue(calls)
         for call in calls:
             self.assertIn(call.func.attr, {*exports, "NativeCoreError"})
+
+    def test_retired_sidecar_preservation_detects_mutations(self):
+        helper = next(
+            node
+            for node in ast.parse(self.verifier.PROBE).body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "exercise_retired_authority_link"
+        )
+        for mutation in (
+            None,
+            "target_bytes",
+            "target_members",
+            "database",
+            "fresh_sidecar",
+        ):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+
+                def lifecycle(path):
+                    if not path.exists():
+                        path.write_bytes(b"initialized fixture database")
+                        if mutation == "fresh_sidecar":
+                            (path.parent / ".native-authority").mkdir()
+                    elif mutation == "target_bytes":
+                        (path.parent / ".native-authority/legacy-key.bin").write_bytes(
+                            b"changed"
+                        )
+                    elif mutation == "target_members":
+                        (path.parent / ".native-authority/extra").write_bytes(
+                            b"unexpected"
+                        )
+                    elif mutation == "database":
+                        path.write_bytes(b"changed")
+
+                namespace = {
+                    "Path": Path,
+                    "stat": stat,
+                    "sys": sys,
+                    "lifecycle": lifecycle,
+                    "catalog": lambda path: path.read_bytes(),
+                }
+                exec(
+                    compile(
+                        ast.Module(body=[helper], type_ignores=[]),
+                        "probe-helper",
+                        "exec",
+                    ),
+                    namespace,
+                )
+                run = namespace["exercise_retired_authority_link"]
+                if mutation:
+                    with self.assertRaises(AssertionError):
+                        run(root)
+                else:
+                    self.assertIn(run(root), {"symlink", "junction"})
 
 
 if __name__ == "__main__":
