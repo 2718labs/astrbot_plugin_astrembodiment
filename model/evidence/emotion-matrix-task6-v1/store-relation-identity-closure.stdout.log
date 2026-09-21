@@ -1,0 +1,6 @@
+
+running 1 test
+test semantic_atomic_tests::relation_evidence_identity_drift_fails_latest_and_reopen ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 2.56s
+

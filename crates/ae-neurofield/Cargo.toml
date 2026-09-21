@@ -8,3 +8,7 @@ license.workspace = true
 ae-fixed.workspace = true
 ae-contracts.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+sha2 = "0.10.9"

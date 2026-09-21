@@ -8,6 +8,7 @@ closed JSON envelopes for the Rust boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,51 +75,61 @@ def _causal_json(
     }
 
 
-def build_user_stimulus_json(
-    *,
-    scope: ScopeTokens,
-    event_id: str,
-    turn_id: str,
-    base_revision: int,
-    observed_at_ms: int,
-) -> dict:
-    """Closed CanonicalEvent JSON for the first-turn barrier path.
+def build_alpha3_request(operation: str, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the single closed alpha3 dispatcher envelope.
 
-    G0 has no semantic estimator yet (G1): the estimate is an explicit
-    zero-confidence placeholder so the wire digest stays deterministic and
-    the event carries no raw text at all.
+    The operation string is selected by a typed bridge wrapper, never copied
+    from a plugin-supplied payload.
     """
-    return {
-        "kind": "user_stimulus",
-        "payload": {
-            "event_id": event_id,
-            "scope": scope.scope_json(),
-            "causal": _causal_json(turn_id, base_revision),
-            "observed_at_ms": observed_at_ms,
-            "evidence": {
-                "schema_version": 1,
-                "dimensions": {
-                    "positive": 0,
-                    "affiliation": 0,
-                    "harm": 0,
-                    "boundary": 0,
-                    "repair": 0,
-                    "repetition": 0,
-                    "new_information": 0,
-                    "constraint_instability": 0,
-                    "epistemic_conflict": 0,
-                    "self_responsibility": 0,
-                    "other_responsibility": 0,
-                    "hostility": 0,
-                    "publicness": 0,
-                    "engagement": 0,
-                    "rejection": 0,
-                },
-                "estimator_confidence": 0,
-                "estimator_digest": "00" * 32,
-            },
-        },
+    if not operation or not isinstance(request, Mapping):
+        raise ValueError("alpha3 operation and request are required")
+    return {"operation": operation, "request": dict(request)}
+
+
+def build_readiness_items_v1(
+    *,
+    global_enabled: bool,
+    target_available: bool,
+    secret_available: bool,
+    provider_available: bool,
+    send_available: bool,
+) -> list[dict[str, object]]:
+    """Freeze every typed Host-readiness item exactly once.
+
+    Native recomputes consent, timezone, budget, sleep and policy readiness;
+    Host marks those inputs ready only to request that authoritative check.
+    """
+    host_status = {
+        "global_switch": global_enabled,
+        "target_envelope": target_available,
+        "secret_store": secret_available,
+        "provider": provider_available,
+        "astrbot_send": send_available,
     }
+    kinds: Sequence[str] = (
+        "global_switch",
+        "relation_consent",
+        "trusted_timezone",
+        "target_envelope",
+        "secret_store",
+        "provider",
+        "astrbot_send",
+        "budget",
+        "sleep_quiet_hours",
+        "policy_revision",
+    )
+    return [
+        {
+            "kind": kind,
+            "status": (
+                "ready"
+                if kind not in host_status or host_status[kind]
+                else "unavailable_on_host"
+            ),
+            "witness_revision": 0,
+        }
+        for kind in kinds
+    ]
 
 
 def build_delivery_outcome_json(
@@ -149,13 +160,21 @@ def build_time_advance_json(
     *,
     scope: ScopeTokens,
     event_id: str,
-    elapsed_ms: int,
+    expected_generation: int,
+    frozen: Mapping[str, object],
 ) -> dict:
+    frozen_body = dict(frozen)
+    try:
+        frozen_input_digest = str(frozen_body.pop("frozen_input_digest"))
+    except KeyError as exc:
+        raise ValueError("frozen input digest is required") from exc
     return {
         "kind": "time_advance",
         "payload": {
             "event_id": event_id,
             "scope": scope.scope_json(),
-            "elapsed_ms": elapsed_ms,
+            "expected_generation": expected_generation,
+            "frozen": frozen_body,
+            "frozen_input_digest": frozen_input_digest,
         },
     }

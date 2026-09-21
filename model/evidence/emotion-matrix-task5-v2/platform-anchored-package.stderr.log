@@ -1,0 +1,3 @@
+   Compiling ae-platform-fs v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-platform-fs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.97s
+     Running unittests src\lib.rs (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-task05-v2-target\debug\deps\ae_platform_fs-938ac02eeb949873.exe)

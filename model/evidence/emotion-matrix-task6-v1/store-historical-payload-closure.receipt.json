@@ -1,0 +1,77 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task6-v1-store-historical-payload-closure",
+  "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8",
+  "command": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::corrupted_historical_payload_fails_reopen_and_append_before_any_write -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-store",
+    "--lib",
+    "--jobs",
+    "1",
+    "semantic_atomic_tests::corrupted_historical_payload_fails_reopen_and_append_before_any_write",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-task06-evidence-target",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task6-v1/store-historical-payload-closure.stdout.log",
+      "sha256": "f7fb46a664ab824fda36ffeba12f47f0935a2281b7e9a9177f6c256f76e04b4f"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task6-v1/store-historical-payload-closure.stderr.log",
+      "sha256": "d7a0099ad56bdc109fc943650ea62955ccb858be67bc3cd446d6884750f55562"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "236c70e4e8cd34a23bdd641f50cb0217121769baf44cb66b3155b7962f537b7b"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "bfd23688456b63e189caae11372a73550ebf0975c2803934bdc5590499c8fb46"
+    },
+    {
+      "path": "crates/ae-store/Cargo.toml",
+      "sha256": "970b897cdcd1ec14a6b20614722c6fce8cd410aa7847e50aa422cbb4c3b2debb"
+    },
+    {
+      "path": "crates/ae-store/src/lib.rs",
+      "sha256": "03f308b6d561d41b3345b591fa96405c5b30f3484af0d89fda7e56a6eceb84e9"
+    },
+    {
+      "path": "crates/ae-store/src/semantic.rs",
+      "sha256": "e02e0ff1cecd0282b536428052f18e785e3d59366186cd11a3f40da85aceef72"
+    },
+    {
+      "path": "crates/ae-store/src/semantic_atomic_tests.rs",
+      "sha256": "7221e32d9d2d48efb0e7ff97f2476b03da61617f27bdeca7ddcd40abcd2f79cd"
+    },
+    {
+      "path": "crates/ae-store/src/semantic_field_attestation.rs",
+      "sha256": "83274e10800cd7250c63126738b3edc54a92675c8c5ebd288f6eaec79b7b21e5"
+    }
+  ]
+}

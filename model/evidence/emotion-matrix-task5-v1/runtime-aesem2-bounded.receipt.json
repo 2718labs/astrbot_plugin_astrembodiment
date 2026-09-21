@@ -1,0 +1,18 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task5-runtime-aesem2-bounded",
+  "target_commit": "91cb4acbeb089eee001b51625b2ced3b66a5af86",
+  "command": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_history_codec_is_bounded_and_authority_authenticated -- --exact",
+  "argv": ["test", "--locked", "--offline", "-p", "ae-runtime", "--lib", "--jobs", "1", "semantic::tests::aesem2_history_codec_is_bounded_and_authority_authenticated", "--", "--exact"],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {"exit_code": 0, "locked": true, "offline": true, "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-task05-final-target", "cargo_term_color": "never"},
+  "toolchain": {"cargo": "cargo 1.97.0 (c980f4866 2026-06-30)", "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)", "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3", "host": "x86_64-pc-windows-msvc", "llvm": "22.1.6"},
+  "logs": {"normalization": "utf8-lf", "stdout": {"path": "model/evidence/emotion-matrix-task5-v1/runtime-aesem2-bounded.stdout.log", "sha256": "67abc461a39f320eca9259bd5391dc698b33b7542ad8615290f7e525936367f4"}, "stderr": {"path": "model/evidence/emotion-matrix-task5-v1/runtime-aesem2-bounded.stderr.log", "sha256": "76d6a4a75dd5ee1b3435a79a22711db2d99369e492917f7b5321591a5d5624ed"}},
+  "artifacts": [
+    {"path": "Cargo.lock", "sha256": "876e85b277b52092656ba564ec133b372693be10ab91f338d8d65381a631ec6d"},
+    {"path": "crates/ae-runtime/src/lib.rs", "sha256": "b7d0b47f897b95b4c0262e4b45e9e16f0a2e5780a2415491a9aaaf33b26fb319"},
+    {"path": "crates/ae-runtime/src/semantic.rs", "sha256": "a1e7197a080706ba8f59671949831cf1bce10260d1be872f74ffcb69e210f99a"}
+  ]
+}

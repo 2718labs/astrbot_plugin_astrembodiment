@@ -1,0 +1,79 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task8-v1-store-semantic-v4-time-keyset",
+  "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405",
+  "command": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic::tests::semantic_v4_time_ -- --nocapture",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-store",
+    "--lib",
+    "--jobs",
+    "1",
+    "semantic::tests::semantic_v4_time_",
+    "--",
+    "--nocapture"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t8-evidence-49b3866",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "passed": 2,
+    "failed": 0,
+    "filtered_out": 63
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task8-v1/store-semantic-v4-time-keyset.stdout.log",
+        "sha256": "98f2d42e77cd6c300ac7fdf2088f10f1fc18498a38802bccdad2567ae19c8473"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task8-v1/store-semantic-v4-time-keyset.stderr.log",
+      "sha256": "ed44e51d521b3ddef6fe2e6d36fffff3d97a8c40be96198f16ae0fa398437fab"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "f6c840552aa97f04f535bb92f1cdd52bb36e70dfa61fda0562d56217d1954531"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5708e225a0e63e77786c2f60c41b0ef9d00cdacb86dcff8ea47b6285d34e920a"
+    },
+    {
+      "path": "crates/ae-contracts/src/emotion_matrix.rs",
+      "sha256": "06172d6132adcaf8a4849a4fdd802091f06ea49fe55fbc6c10f98cfb7e12ef39"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/codec.rs",
+      "sha256": "4acfee2f9fa86b7cb0e052b4a1d4562db215abd94172bc014db0b7028f954488"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/matrix_time.rs",
+      "sha256": "9c7eec017fbf89bd971715dd82dfa7769cbef92da5876eda01ea877ed9745cc1"
+    },
+    {
+      "path": "crates/ae-store/src/semantic.rs",
+      "sha256": "9b8887887a496d00e9a66d08c8083679f577753f4271eb7983e678a60e4cad9b"
+    }
+  ]
+}

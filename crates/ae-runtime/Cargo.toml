@@ -4,15 +4,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+legacy-semantic-test-api = ["ae-store/legacy-semantic-test-api"]
+
 [dependencies]
 ae-fixed.workspace = true
+ae-autonomy.workspace = true
 ae-contracts.workspace = true
 ae-genesis.workspace = true
 ae-authority.workspace = true
 ae-attention.workspace = true
 ae-neurofield.workspace = true
+ae-semantic-core.workspace = true
 ae-renorm.workspace = true
 ae-agent.workspace = true
 ae-continuum.workspace = true
 ae-store.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+
+[dev-dependencies]
+rusqlite.workspace = true

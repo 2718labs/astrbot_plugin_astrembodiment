@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "astrembodiment-core"
-version = "1.0.0"
-description = "Rust-native ASTER-CCN runtime for AstrEmbodiment"
+version = "1.1.0"
+description = "Persona emotion and embodiment clock core for AstrEmbodiment"
 requires-python = ">=3.12"
 license = { text = "AGPL-3.0-or-later" }
 classifiers = [

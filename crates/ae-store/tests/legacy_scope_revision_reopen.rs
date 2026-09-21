@@ -1,6 +1,6 @@
 use ae_continuum::CommitEnvelope;
 use ae_contracts::{
-    wire, CanonicalEvent, CommitStatus, InvariantResiduals, ScopeRef, TimeAdvance,
+    wire, AdminAction, CanonicalEvent, CommitStatus, InvariantResiduals, ScopeRef,
     TransitionReceipt,
 };
 use ae_store::{Store, StoreError};
@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, Transaction};
 use std::path::Path;
 
 fn event(id: u8, bot: u8, persona: u8) -> CanonicalEvent {
-    CanonicalEvent::TimeAdvance(TimeAdvance {
+    CanonicalEvent::AdminAction(AdminAction {
         event_id: [id; 16],
         scope: ScopeRef {
             bot_token: [bot; 16],
@@ -16,7 +16,8 @@ fn event(id: u8, bot: u8, persona: u8) -> CanonicalEvent {
             relation_token: None,
             session_token: [id; 16],
         },
-        elapsed_ms: u64::from(id),
+        operation: "journal_test".into(),
+        nonce_digest: [id; 32],
     })
 }
 
@@ -81,7 +82,7 @@ fn legacy_row(
     let receipt_bytes = wire::encode_transition_receipt(&receipt);
     let chain = ae_continuum::chain_link(seed, &event_bytes, &receipt_bytes);
     tx.execute(
-        "INSERT INTO journal (scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1,?2,'time_advance',?3,?4,?5,?6,1)",
+        "INSERT INTO journal (scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1,?2,'admin_action',?3,?4,?5,?6,1)",
         params![scope.to_vec(), base as i64, event_bytes, event_digest.to_vec(), receipt_bytes, chain.to_vec()],
     )?;
     let physical = tx.last_insert_rowid();
@@ -120,7 +121,7 @@ fn envelope(
     let event_bytes = wire::encode_event(ev);
     let event_digest = wire::event_digest(ev);
     CommitEnvelope {
-        event_kind: "time_advance".to_owned(),
+        event_kind: "admin_action".to_owned(),
         event_bytes,
         receipt: TransitionReceipt {
             schema_version: 1,

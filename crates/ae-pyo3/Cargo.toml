@@ -16,3 +16,8 @@ ae-contracts.workspace = true
 ae-genesis.workspace = true
 ae-store.workspace = true
 ae-runtime.workspace = true
+
+[build-dependencies]
+ae-contracts.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"

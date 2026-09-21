@@ -1,0 +1,173 @@
+{
+  "schema": "ae.emotion-matrix-task9-evidence-custody.v1",
+  "status": "EARNED_AFTER_REVIEW_WITH_KNOWN_BASELINE_DEBT",
+  "code_anchor": {
+    "reviewed_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+    "reviewed_tree": "433584138d47c0cb97dd712ad859f7422c094687",
+    "task8_evidence_parent": "8e806b671472fd221eb463d55a84295ec628f68b",
+    "implementation_chain": [
+      {
+        "commit": "6b016b0456f9608bdc0786d8cd9bfca4b6781ee1",
+        "subject": "feat: expose committed affect projection"
+      },
+      {
+        "commit": "c09af1fabdcdd97b5ab15dcc44640d24480491ec",
+        "subject": "fix: close affect observer authority bounds"
+      },
+      {
+        "commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+        "subject": "fix: bound claim ownership projection"
+      }
+    ],
+    "reviewed_delta": {
+      "files_changed": 12,
+      "insertions": 2400,
+      "deletions": 139
+    },
+    "artifacts": [
+      {
+        "path": "Cargo.lock",
+        "git_blob": "5566d9ebff25f6434a87bb95b837fa555d6c9303",
+        "sha256": "64e4cd78299209c491c7dcfc8469ef9ad3f4a149edcc1bc045a7f49582530fb8"
+      },
+      {
+        "path": "crates/ae-contracts/src/alpha3.rs",
+        "git_blob": "6533f4de473605cd816b4438439853c7753ad474",
+        "sha256": "7b15921084e497b57e789c10562fdce26758a959439d240fabbbe4e25e827375"
+      },
+      {
+        "path": "crates/ae-contracts/src/lib.rs",
+        "git_blob": "d3ca52491d61b07478800c4585b125cbd4fc0d59",
+        "sha256": "4a09dd0087891e2b5ed99321b87c0d245412f4d65b12bf1deacb515360017f33"
+      },
+      {
+        "path": "crates/ae-contracts/tests/alpha3_contracts.rs",
+        "git_blob": "e66b500c98b0b369419374ecfa2e06dac31a431e",
+        "sha256": "aa82bc1042483b01a71d3ab22419c4d450ebe9fe50da1f252d0bbbe90c227002"
+      },
+      {
+        "path": "crates/ae-runtime/src/semantic.rs",
+        "git_blob": "7413fdfae4e669d9fd84b90ab92422fe4085ae46",
+        "sha256": "8ac7a6a7eb002465c5b9137640ba05122d2f3d9918a06af8c6bad7a25dd7d345"
+      },
+      {
+        "path": "crates/ae-runtime/tests/emotion_matrix_projection.rs",
+        "git_blob": "5ed8e4d39fd9d59dd34f49a2872953a5e658e61d",
+        "sha256": "ba32a67bc377e48904989dbf71403f557166e17d3872964e6ba22b437ed383bd"
+      },
+      {
+        "path": "crates/ae-semantic-core/src/affect_projection.rs",
+        "git_blob": "04b4e5b3803364fc923cac36616674382498642b",
+        "sha256": "879f71756a44b529fda9878f1f75355907304bb76181931ec769eeffd8909560"
+      },
+      {
+        "path": "crates/ae-semantic-core/src/lib.rs",
+        "git_blob": "05e4bc13852716314ddbbfec72328fdbafa63c0e",
+        "sha256": "6261c6b8b304f374c7da095bd229c7b2ab4c1775ce5872baaf1191cbaed9bbc1"
+      },
+      {
+        "path": "crates/ae-semantic-core/tests/affect_projection.rs",
+        "git_blob": "9d8eb6d91ab428f7e0960f1a1d7383ed180ef89b",
+        "sha256": "16195c4b7174ebbcade8b1f29167ff5449a00ee4d6467f50f39c9be4231bc251"
+      },
+      {
+        "path": "crates/ae-store/Cargo.toml",
+        "git_blob": "94adc0d7e0885eb4d70bf9dd26cfe55a695d5286",
+        "sha256": "cff5b3e3635dbe7c06f991f35b9f2c67f059bf85783b8ac9f693f340aff4920d"
+      },
+      {
+        "path": "crates/ae-store/src/alpha3/projection.rs",
+        "git_blob": "987086c6d0ddda840df50825597c1f6aab6d90df",
+        "sha256": "03cbf145f0e1ff63c347d4b5836b2ffed6faa8c35dee88ca167475f62cb6f52b"
+      },
+      {
+        "path": "crates/ae-store/src/semantic.rs",
+        "git_blob": "725503288f7ca969f78b2c79d49500303ce745a9",
+        "sha256": "9dedf1184464caac966d785e45dfb45c6e27ce6f854cb7d8629746d77c4c6b65"
+      }
+    ]
+  },
+  "review_preconditions": {
+    "code_spec": "APPROVED",
+    "quality": "APPROVED",
+    "reviewed_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+    "approval_scope": "Final independent code-spec and quality reviews supplied by the Task 9 coordinator for this exact commit.",
+    "custody_reproduction": "All execution receipts in this directory were rerun independently against the exact reviewed commit with a D-drive Cargo target and jobs=1."
+  },
+  "fresh_verification": {
+    "runtime_projection": {
+      "locator": "model/evidence/emotion-matrix-task9-v1/runtime-affect-projection.receipt.json",
+      "sha256": "c232bbc05702841caa4d8404fa623115205c972b4dd9577b560f05aa17df8756",
+      "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+      "passed": 4,
+      "failed": 0
+    },
+    "store_observer_window": {
+      "locator": "model/evidence/emotion-matrix-task9-v1/store-observer-window.receipt.json",
+      "sha256": "29feadf3fa6d1572018885d62f0bb994c0e08f1ebf625ae16c02f92fde5d25b7",
+      "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+      "passed": 1,
+      "failed": 0
+    },
+    "semantic_core_projection": {
+      "locator": "model/evidence/emotion-matrix-task9-v1/semantic-core-affect-projection.receipt.json",
+      "sha256": "910e64aad5d8afc0f74633f8b8f4c04aceb8b515f70b1d682fe4639f62b6e430",
+      "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+      "passed": 1,
+      "failed": 0
+    },
+    "legacy_affect_serde": {
+      "locator": "model/evidence/emotion-matrix-task9-v1/contracts-legacy-affect-serde.receipt.json",
+      "sha256": "02c4f315c806b3ce5522d5d76bd0c8f54ef667c4dd5460480a9ae0209ad5af7e",
+      "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+      "passed": 1,
+      "failed": 0
+    },
+    "workspace_check": {
+      "locator": "model/evidence/emotion-matrix-task9-v1/workspace-check.receipt.json",
+      "sha256": "7e450d9cc77d8f9e4a29d9d04ea2e4c9eb283852af0e1bd9dd15138bd46dcd28",
+      "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+      "exit_code": 0
+    }
+  },
+  "capability_accounting": {
+    "newly_mapped_capability_ids": [],
+    "consumer_evidence_only": [
+      {
+        "capability_id": "node-observability-v2",
+        "receipt": "model/evidence/emotion-matrix-task9-v1/runtime-affect-projection.receipt.json",
+        "reason": "The projection is a bounded committed-state consumer surface; it does not alter the existing EXACT_PORT disposition."
+      }
+    ],
+    "before": {
+      "mapped_capability_count": 31,
+      "unmapped_capability_count": 12,
+      "release_gate": "NO_GO"
+    },
+    "after": {
+      "mapped_capability_count": 31,
+      "unmapped_capability_count": 12,
+      "release_gate": "NO_GO"
+    }
+  },
+  "known_baseline_debt": {
+    "status": "OPEN_NON_TASK9_FIXTURE_DEBT",
+    "full_suite_green_claimed": false,
+    "source": {
+      "locator": "model/evidence/emotion-matrix-task8-v1/evidence-custody-v1.json",
+      "sha256": "1f43fad4eb4b44a53b4e5917970ad6c79014d2794b7cde0fbda2308badec081a"
+    },
+    "failing_fixture_count": 2,
+    "classification": "The two named legacy_v2 autonomy migration fixture failures remain open baseline debt. Task 9 did not rerun or resolve the full suite and makes no all-suite GREEN claim."
+  },
+  "non_vacuity": {
+    "fresh_exact_test_count": 7,
+    "fresh_runtime_test_count": 4,
+    "fresh_store_test_count": 1,
+    "fresh_semantic_core_test_count": 1,
+    "fresh_contract_serde_test_count": 1,
+    "compile_receipt_count": 1,
+    "full_suite_green": false
+  },
+  "custody_note": "Task 9 records reviewed affect-observer implementation and consumer evidence only. No capability disposition is added or changed; the matrix remains 31 mapped of 43, 12 UNMAPPED, release NO_GO."
+}

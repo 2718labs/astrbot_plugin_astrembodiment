@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 ae-fixed.workspace = true
 ae-contracts.workspace = true
+ae-neurofield.workspace = true
 serde.workspace = true

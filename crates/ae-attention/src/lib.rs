@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod emotion_matrix;
+
 use ae_contracts::EvidenceVector;
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};

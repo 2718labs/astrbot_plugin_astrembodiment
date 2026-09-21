@@ -1,0 +1,262 @@
+{
+  "schema": "ae.emotion-matrix-task8-evidence-custody.v1",
+  "status": "EARNED_AFTER_REVIEW_WITH_KNOWN_FIXTURE_DEBT",
+  "code_anchor": {
+    "reviewed_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405",
+    "reviewed_tree": "8ea9bdd27ad41194fc9d4932ab33e42a762d5cdc",
+    "task7_evidence_parent": "965ac20c012013e67d0298edcfb7eaa588974559",
+    "initial_task8_implementation": "3a042ad5a8cef2adeb6772c780112ca43661f3ab",
+    "hardening_commits": [
+      "af873e35cda3066f1aba35c8f6724640929946e3",
+      "a6005065b0f89a495150f5f46168eb58c4842f8c",
+      "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    ],
+    "reviewed_delta": {
+      "files_changed": 20,
+      "insertions": 6819,
+      "deletions": 529
+    },
+    "artifacts": [
+      {
+        "path": "Cargo.lock",
+        "git_blob": "3709f6e05b5633315f65a8eeb8f716fa0868cef1",
+        "sha256": "f6c840552aa97f04f535bb92f1cdd52bb36e70dfa61fda0562d56217d1954531"
+      },
+      {
+        "path": "crates/ae-contracts/src/autonomy.rs",
+        "git_blob": "b12233a8c091807acd4112cdfba9fbf4412e8fe2",
+        "sha256": "5b560d926ecfae6be0007ee2e62ba1b5a9bcc1fe03b5bbd35e9e45686dfd025b"
+      },
+      {
+        "path": "crates/ae-contracts/src/emotion_matrix.rs",
+        "git_blob": "5484909f3e4c0451a634db0aa976317f84e16486",
+        "sha256": "06172d6132adcaf8a4849a4fdd802091f06ea49fe55fbc6c10f98cfb7e12ef39"
+      },
+      {
+        "path": "crates/ae-contracts/tests/local_endogenous_contract.rs",
+        "git_blob": "cc38ac6c4c747406f6f530228a3ce5bf2122eb33",
+        "sha256": "29672e3d68315d262a3093818ded02cbf1272ca04cd785c65b9f768b9748a470"
+      },
+      {
+        "path": "crates/ae-runtime/src/autonomy.rs",
+        "git_blob": "6e5340b029e255ee966192429722f5087cf17bc1",
+        "sha256": "d9bd80dfbc3e4b0b2a2f14c5f5641a182f85849ff7368df6901d9a165997cf08"
+      },
+      {
+        "path": "crates/ae-runtime/src/lib.rs",
+        "git_blob": "3207926bb1bc548c35d07a323a65f891b366dacf",
+        "sha256": "1143f65e3803518b065a2adabb069a7cf8677ba341e3367113b56b12ec301b30"
+      },
+      {
+        "path": "crates/ae-runtime/src/matrix_time.rs",
+        "git_blob": "338c1f004384d57dbc31a36726b1356fd7a4e0c3",
+        "sha256": "432ac3b57475e4a3225b54a8368d458c860fc9a028c8c1f0396962e48ba27a91"
+      },
+      {
+        "path": "crates/ae-runtime/tests/emotion_matrix_time.rs",
+        "git_blob": "c96f475ca7699826d23ab875f06c5f6036743368",
+        "sha256": "10630e4cb9f76e1023ae918463945d6fb06b3ac4760d5a6ab9e7e5104ff5680e"
+      },
+      {
+        "path": "crates/ae-semantic-core/src/codec.rs",
+        "git_blob": "20a12cc3e3a3b4fba85bf275df6afa7d92f0abfa",
+        "sha256": "4acfee2f9fa86b7cb0e052b4a1d4562db215abd94172bc014db0b7028f954488"
+      },
+      {
+        "path": "crates/ae-semantic-core/src/lib.rs",
+        "git_blob": "ddc45d468db58fb75665029c8ea0475a274ea235",
+        "sha256": "855202344c08e6643166c442456007790a75b6b29007946a66010e81c8ee3ec9"
+      },
+      {
+        "path": "crates/ae-semantic-core/src/matrix_time.rs",
+        "git_blob": "e76b04e259de6beb086a3c97e52ce4523dfa96e9",
+        "sha256": "9c7eec017fbf89bd971715dd82dfa7769cbef92da5876eda01ea877ed9745cc1"
+      },
+      {
+        "path": "crates/ae-semantic-core/tests/matrix_time.rs",
+        "git_blob": "a80f9b6d0ff099f0ab9d572e32cd842a7863c52b",
+        "sha256": "3844a65fca1e395359c6f9d1c9f63682b1a0915e5eafffa160f3ef8a026213e3"
+      },
+      {
+        "path": "crates/ae-store/Cargo.toml",
+        "git_blob": "e9d500070cc67492565802dc66dc3b9f4e7d092a",
+        "sha256": "0e7b9deb3799d526b8bd618a746f6f56b9c568b0db8456120e14d0c741c5d260"
+      },
+      {
+        "path": "crates/ae-store/src/alpha3/interaction.rs",
+        "git_blob": "9b4d24fec7673788487e1fa708b9a9b30ce33be6",
+        "sha256": "9c6b2c8a61fe62ea06f52c7bf84fc9a790ae34bddb8557286696b4b83fb6de45"
+      },
+      {
+        "path": "crates/ae-store/src/alpha3/projection.rs",
+        "git_blob": "f7b2766324f4132bb9687ddae1fdced5f6ece104",
+        "sha256": "ea6739009ec419134af1dcfbfc02410c94bad88ada9a8cf490a252e1b8565488"
+      },
+      {
+        "path": "crates/ae-store/src/autonomy.rs",
+        "git_blob": "567a508a79468808783572661492d6f02c3a87b6",
+        "sha256": "99f9bf30728230cdf9e3937b1064355e5f58df8b429bec747d6e00553ef76c44"
+      },
+      {
+        "path": "crates/ae-store/src/semantic.rs",
+        "git_blob": "eb517acb8f59dda4c87d5b3e1d0ce903b9c6f4ca",
+        "sha256": "9b8887887a496d00e9a66d08c8083679f577753f4271eb7983e678a60e4cad9b"
+      },
+      {
+        "path": "crates/ae-store/src/semantic_atomic_tests.rs",
+        "git_blob": "b25770faa1366f704ee95de68ff72688cbf664c6",
+        "sha256": "92a960ef4635c1e15fbd6424b096dadd1c92c83d6b97f1c683e80049af4475f8"
+      },
+      {
+        "path": "crates/ae-store/tests/autonomy_migration.rs",
+        "git_blob": "27e50c6906804eb471a6ddb87cc63d03ecca0529",
+        "sha256": "b4b14f1299eccb038d60eb2be2fbe48ea8898cba40d8d472d6053d712bc2e732"
+      },
+      {
+        "path": "crates/ae-store/tests/perception_schema_v3.rs",
+        "git_blob": "cae523ae00395a567123604df72f5d0b646c6107",
+        "sha256": "739b32ecee80e0f56cb3f52420ecc80120100cff3dce7858b9f871c25627beb0"
+      }
+    ]
+  },
+  "review_preconditions": {
+    "code_spec": "APPROVED",
+    "quality": "APPROVED",
+    "reviewed_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405",
+    "independent_review_observations": {
+      "code_spec": [
+        "authentic old semantic V4 full AESET1 rows compact to the fixed 431-byte time projection",
+        "time-lane graph deletion, commitment/cursor/budget closure, reopen audit, and tamper zero-write rollback were reviewed",
+        "fresh reviewer exact migration node: 1 passed, 0 failed, 3 filtered out"
+      ],
+      "quality": [
+        "persona-scoped keyset migration and per-persona materialization bound were reviewed",
+        "outer IMMEDIATE transaction preserves database-wide rollback",
+        "fresh reviewer keyset nodes passed 2 of 2 and the real V4 migration/tamper node passed 1 of 1",
+        "reviewed worktree was clean"
+      ]
+    },
+    "custody_reproduction": "All receipts in this directory were rerun independently against the exact reviewed commit with a D-drive Cargo target."
+  },
+  "prior_parity": {
+    "mapped_capability_count": 29,
+    "unmapped_capability_count": 14,
+    "release_gate": "NO_GO"
+  },
+  "newly_mapped_capability_ids": [
+    "matrix-time-decay",
+    "sleep-aware-time-advance"
+  ],
+  "primary_receipts": {
+    "matrix-time-decay": {
+      "locator": "model/evidence/emotion-matrix-task8-v1/runtime-frozen-chunking.receipt.json",
+      "sha256": "6debb190467015c9c9934da0c398f75cbc6f4866064f321f0a307664cf9b84a3",
+      "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    },
+    "sleep-aware-time-advance": {
+      "locator": "model/evidence/emotion-matrix-task8-v1/runtime-sleep-time.receipt.json",
+      "sha256": "51bf3a1078424a2558a63e2ad9b5e0dc6d5e051c37037b7ce069c65112d166fb",
+      "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    }
+  },
+  "supporting_receipts": [
+    {
+      "claims": [
+        "matrix-time-decay",
+        "sleep-aware-time-advance"
+      ],
+      "locator": "model/evidence/emotion-matrix-task8-v1/runtime-frozen-chunking.receipt.json",
+      "sha256": "6debb190467015c9c9934da0c398f75cbc6f4866064f321f0a307664cf9b84a3",
+      "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    },
+    {
+      "claims": [
+        "matrix-time-decay",
+        "sleep-aware-time-advance"
+      ],
+      "locator": "model/evidence/emotion-matrix-task8-v1/runtime-sleep-time.receipt.json",
+      "sha256": "51bf3a1078424a2558a63e2ad9b5e0dc6d5e051c37037b7ce069c65112d166fb",
+      "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    },
+    {
+      "claims": [
+        "sleep-aware-time-advance",
+        "local-dream-and-intent-no-send-authority"
+      ],
+      "locator": "model/evidence/emotion-matrix-task8-v1/runtime-local-dream-intent.receipt.json",
+      "sha256": "0cd92ea55f73bb8af1959644b89881595fb64bc71a31af516a2d76249c6af8dd",
+      "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    },
+    {
+      "claims": [
+        "matrix-time-decay",
+        "sleep-aware-time-advance",
+        "authenticated-v4-compaction-and-rollback"
+      ],
+      "locator": "model/evidence/emotion-matrix-task8-v1/runtime-v4-compaction-rollback.receipt.json",
+      "sha256": "3b31127daf2f6acf32511e40f84b9f83a7a37a73bac0786eb82ea9f491263c7e",
+      "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    },
+    {
+      "claims": [
+        "persona-scoped-keyset-and-bounded-migration"
+      ],
+      "locator": "model/evidence/emotion-matrix-task8-v1/store-semantic-v4-time-keyset.receipt.json",
+      "sha256": "1efa9f38e6a8e6a70407c24cd49fc2c066ad4366caa0772dd380841003b38a78",
+      "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+    }
+  ],
+  "compile_receipt": {
+    "configuration": "workspace-locked-offline-jobs-1",
+    "locator": "model/evidence/emotion-matrix-task8-v1/workspace-check.receipt.json",
+    "sha256": "3c551c852bc6dd54ac41dc9e06c7d6e69b5cce2bc6af0d11593fead34aff7ce1",
+    "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+  },
+  "known_fixture_debt": {
+    "status": "OPEN_NON_TASK8_FIXTURE_DEBT",
+    "full_suite_green_claimed": false,
+    "current_head_observation": {
+      "passed": 12,
+      "failed": 2,
+      "total": 14,
+      "exit_code": 101,
+      "receipt": {
+        "locator": "model/evidence/emotion-matrix-task8-v1/store-autonomy-migration-known-debt.receipt.json",
+        "sha256": "07c642c6085c23642e43eef1fbfd431d366a649ec41355a08df5cc244ae8e9a9",
+        "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+      }
+    },
+    "failing_tests": [
+      {
+        "test": "legacy_ready_and_deferred_keep_claimable_revisions_in_pending_work",
+        "symptom": "table world_anchor already exists",
+        "classification": "legacy_v2 fixture constructs a table already supplied by the current schema"
+      },
+      {
+        "test": "legacy_v2_uncertain_outbound_bootstraps_anchored_unknown_snapshot",
+        "symptom": "table world_anchor already exists",
+        "classification": "legacy_v2 fixture constructs a table already supplied by the current schema"
+      }
+    ],
+    "baseline_context": {
+      "anchor": "3a042ad5a8cef2adeb6772c780112ca43661f3ab",
+      "provenance": "independent quality review reports the same two failures at the Task 8 baseline; this custody agent did not rerun that baseline",
+      "regression_claim": "No fresh all-suite GREEN claim is made. The two failures remain explicit debt."
+    }
+  },
+  "non_vacuity": {
+    "task8_exact_receipt_count": 4,
+    "passed_task8_exact_test_count": 4,
+    "distinct_task8_exact_test_identity_count": 4,
+    "supporting_store_test_count": 2,
+    "compile_receipt_count": 1,
+    "diagnostic_failure_receipt_count": 1,
+    "full_suite_green": false
+  },
+  "parity_after_task8": {
+    "mapped_capability_count": 31,
+    "unmapped_capability_count": 12,
+    "release_gate": "NO_GO"
+  },
+  "custody_note": "Only matrix-time-decay and sleep-aware-time-advance are newly mapped. Earlier dispositions remain unchanged. The release remains NO_GO while any capability is UNMAPPED, and the two named legacy_v2 fixture failures remain open debt."
+}

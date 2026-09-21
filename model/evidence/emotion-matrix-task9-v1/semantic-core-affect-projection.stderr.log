@@ -1,0 +1,8 @@
+   Compiling constant_time_eq v0.4.2
+   Compiling blake3 v1.8.6
+   Compiling ae-contracts v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-contracts)
+   Compiling ae-neurofield v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-neurofield)
+   Compiling ae-attention v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-attention)
+   Compiling ae-semantic-core v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-semantic-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.94s
+     Running tests\affect_projection.rs (D:\CodexTemp\ae-t9-evidence-c663f1d\debug\deps\affect_projection-51d751b007df2feb.exe)

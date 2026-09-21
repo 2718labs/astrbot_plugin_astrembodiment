@@ -1,0 +1,65 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task5-v2-platform-anchored-package",
+  "target_commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f",
+  "command": "cargo test --locked --offline -p ae-platform-fs --lib --jobs 1 tests::anchored_package_opens_only_the_exact_regular_members -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-platform-fs",
+    "--lib",
+    "--jobs",
+    "1",
+    "tests::anchored_package_opens_only_the_exact_regular_members",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-task05-v2-target",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task5-v2/platform-anchored-package.stdout.log",
+      "sha256": "6e92330ba25256842a371e07b418866e7ebb72f90273b2bb61b576ac63163e20"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task5-v2/platform-anchored-package.stderr.log",
+      "sha256": "d233b1fc4380f9fc4ca658c7eac2d0dd0e39fa302c015f0cc09227fece01695d"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "236c70e4e8cd34a23bdd641f50cb0217121769baf44cb66b3155b7962f537b7b"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "bfd23688456b63e189caae11372a73550ebf0975c2803934bdc5590499c8fb46"
+    },
+    {
+      "path": "crates/ae-platform-fs/Cargo.toml",
+      "sha256": "774617745705eb853cacfa256acd660c0249d3403a6d0725e5747ba095069a16"
+    },
+    {
+      "path": "crates/ae-platform-fs/src/lib.rs",
+      "sha256": "bb953118a4d618daca76a1803c7a72d12d62fe41e44d7c2412754765533082b5"
+    }
+  ]
+}

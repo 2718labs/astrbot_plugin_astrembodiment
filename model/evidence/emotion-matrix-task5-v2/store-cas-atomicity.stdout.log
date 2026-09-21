@@ -1,0 +1,6 @@
+
+running 1 test
+test concurrent_cas_and_exact_retry_are_zero_write_or_identical ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 4.19s
+

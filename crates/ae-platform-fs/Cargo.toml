@@ -1,0 +1,15 @@
+[package]
+name = "ae-platform-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fs2 = "0.4.3"
+
+[target.'cfg(unix)'.dependencies]
+errno = "0.3.14"
+libc = "0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

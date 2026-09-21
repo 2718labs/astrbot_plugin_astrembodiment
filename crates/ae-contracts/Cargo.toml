@@ -6,9 +6,12 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
 ae-fixed.workspace = true
+tz-rs = "=0.7.3"
+sha2 = "0.10.9"
 
 [dev-dependencies]
 serde_json.workspace = true

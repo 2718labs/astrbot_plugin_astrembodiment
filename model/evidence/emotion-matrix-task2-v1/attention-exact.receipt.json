@@ -1,0 +1,68 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task2-attention-exact",
+  "target_commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0",
+  "command": "cargo test --locked --offline -p ae-attention --test emotion_matrix_route all_fifteen_dimensions_route_through_one_frozen_contract -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-attention",
+    "--test",
+    "emotion_matrix_route",
+    "all_fifteen_dimensions_route_through_one_frozen_contract",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-target",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task2-v1/attention-exact.stdout.log",
+      "sha256": "f7274a9fcb07e1dbaa0c39b8cd8a2fba049478e4d41d2096c7902e3ff782dcd9"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task2-v1/attention-exact.stderr.log",
+      "sha256": "747f16bd1f571295b4dbaaf89f017651313555c68b01c7ea0d836c0f904e4cae"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "2d11b0e4ffdd7654c7aef301a658ecbc3622a595a17066de7ff2acec4a5989b0"
+    },
+    {
+      "path": "crates/ae-contracts/src/emotion_matrix.rs",
+      "sha256": "87f240ce7eab378b351d1852df361004e1a87d45d2896b5352e86d1fb7cd3191"
+    },
+    {
+      "path": "crates/ae-attention/Cargo.toml",
+      "sha256": "b2710862cd9fd7b1ea340946f914980db36c81c74bbe2d7003e54dfcfcbddad4"
+    },
+    {
+      "path": "crates/ae-attention/src/emotion_matrix.rs",
+      "sha256": "d7d181a10543114ba406597e503fae2e705cf4be1ddf0cc78dc02306fa64ba6c"
+    },
+    {
+      "path": "crates/ae-attention/tests/emotion_matrix_route.rs",
+      "sha256": "b5b8aabd258149fbeeffaf2fac8ffcaa0e95dea278aff8e63df1b40ec67a1b42"
+    }
+  ]
+}

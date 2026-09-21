@@ -1,0 +1,65 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task9-v1-store-observer-window",
+  "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+  "command": "cargo test --locked --offline -p ae-store --lib --jobs 1 alpha3::projection::bounded_observer_scan_tests::observer_windows_are_indexed_bounded_and_fail_closed -- --exact --nocapture",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-store",
+    "--lib",
+    "--jobs",
+    "1",
+    "alpha3::projection::bounded_observer_scan_tests::observer_windows_are_indexed_bounded_and_fail_closed",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t9-evidence-c663f1d",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 65
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task9-v1/store-observer-window.stdout.log",
+      "sha256": "7f73486f606a8809631bacb30d8b2c4b8968161acdaa782af2d792cc668e3d1c"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task9-v1/store-observer-window.stderr.log",
+      "sha256": "3918e5d3c03684616034656c533914424c761fca4809b9e525e2f3d6a61f400c"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "crates/ae-store/src/alpha3/projection.rs",
+      "sha256": "03cbf145f0e1ff63c347d4b5836b2ffed6faa8c35dee88ca167475f62cb6f52b"
+    },
+    {
+      "path": "crates/ae-store/Cargo.toml",
+      "sha256": "cff5b3e3635dbe7c06f991f35b9f2c67f059bf85783b8ac9f693f340aff4920d"
+    }
+  ]
+}

@@ -10,6 +10,19 @@
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
 
+pub mod autonomy;
+pub use autonomy::*;
+pub mod alpha3;
+pub use alpha3::*;
+pub mod emotion_matrix;
+pub use emotion_matrix::*;
+pub mod core_boundary;
+pub use core_boundary::*;
+pub mod core_surface;
+pub use core_surface::*;
+pub mod embodiment_time;
+pub use embodiment_time::*;
+
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
@@ -554,15 +567,6 @@ pub struct DeliveryOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TimeAdvance {
-    #[serde(with = "crate::hex::d16")]
-    pub event_id: Id128,
-    pub scope: ScopeRef,
-    pub elapsed_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AdminAction {
     #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
@@ -587,8 +591,9 @@ pub enum CanonicalEvent {
     SelfActionCandidate(SelfActionCandidate),
     DeliveryOutcome(DeliveryOutcome),
     SettlementEvidence(SettlementEvidence),
-    TimeAdvance(TimeAdvance),
+    TimeAdvance(TimeAdvanceV1),
     AdminAction(AdminAction),
+    InteractionFactBatch(InteractionFactBatchV1),
 }
 
 impl CanonicalEvent {
@@ -602,6 +607,7 @@ impl CanonicalEvent {
             Self::SettlementEvidence(e) => e.source,
             Self::TimeAdvance(_) => SourceAuthority::TimeAdvance,
             Self::AdminAction(_) => SourceAuthority::AdminAction,
+            Self::InteractionFactBatch(_) => SourceAuthority::UserObserved,
         }
     }
 }
@@ -775,7 +781,8 @@ pub mod wire {
     use super::*;
     use thiserror::Error;
 
-    pub const WIRE_SCHEMA_VERSION: u16 = 1;
+    pub const WIRE_SCHEMA_VERSION: u16 = 5;
+    pub const LEGACY_EVENT_WIRE_SCHEMA_VERSION: u16 = 4;
 
     pub const MANIFEST_BODY_DOMAIN: &[u8] = b"ae.genesis.manifest-body.v1";
     pub const EVENT_DOMAIN: &[u8] = b"ae.event.v1";
@@ -803,6 +810,7 @@ pub mod wire {
     pub const KIND_SETTLEMENT_EVIDENCE: u8 = 7;
     pub const KIND_TIME_ADVANCE: u8 = 8;
     pub const KIND_ADMIN_ACTION: u8 = 9;
+    pub const KIND_INTERACTION_FACT_BATCH: u8 = 10;
 
     #[derive(Debug, Error, PartialEq, Eq)]
     pub enum WireError {
@@ -812,6 +820,8 @@ pub mod wire {
         TrailingBytes(usize),
         #[error("wire schema version {0} is not supported")]
         SchemaVersion(u16),
+        #[error("legacy wire schema {0} is not valid for this event")]
+        UnsupportedSchema(u16),
         #[error("wire unknown event kind {0}")]
         UnknownKind(u8),
         #[error("wire invalid enum code {0}")]
@@ -822,6 +832,14 @@ pub mod wire {
         StringTooLong,
         #[error("wire claim count exceeds limit")]
         TooManyClaims,
+        #[error("wire interaction fact batch must not be empty")]
+        EmptyInteractionFacts,
+        #[error("wire interaction fact batch exceeds limit")]
+        TooManyInteractionFacts,
+        #[error("wire alpha3 source vector exceeds limit")]
+        TooManyAlpha3SourceRefs,
+        #[error("wire alpha3 contract is invalid: {0}")]
+        InvalidAlpha3Contract(&'static str),
     }
 
     /// Domain-separated hash: BLAKE3(domain || 0x00 || len(field) || field ...)
@@ -892,6 +910,11 @@ pub mod wire {
             Ok(u32::from_le_bytes(bytes))
         }
 
+        pub fn i32(&mut self) -> Result<i32, WireError> {
+            let bytes: [u8; 4] = self.take(4)?.try_into().unwrap();
+            Ok(i32::from_le_bytes(bytes))
+        }
+
         pub fn u64(&mut self) -> Result<u64, WireError> {
             let bytes: [u8; 8] = self.take(8)?.try_into().unwrap();
             Ok(u64::from_le_bytes(bytes))
@@ -928,6 +951,14 @@ pub mod wire {
             }
         }
 
+        pub fn opt_u64(&mut self) -> Result<Option<u64>, WireError> {
+            if self.bool()? {
+                Ok(Some(self.u64()?))
+            } else {
+                Ok(None)
+            }
+        }
+
         pub fn string(&mut self) -> Result<String, WireError> {
             let length = self.u32()? as usize;
             if length > MAX_WIRE_STRING {
@@ -950,6 +981,10 @@ pub mod wire {
     }
 
     fn push_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_i32(out: &mut Vec<u8>, value: i32) {
         out.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -980,6 +1015,13 @@ pub mod wire {
         push_bool(out, value.is_some());
         if let Some(digest) = value {
             push_digest(out, digest);
+        }
+    }
+
+    fn push_opt_u64(out: &mut Vec<u8>, value: Option<u64>) {
+        push_bool(out, value.is_some());
+        if let Some(value) = value {
+            push_u64(out, value);
         }
     }
 
@@ -1249,6 +1291,7 @@ pub mod wire {
             CanonicalEvent::SettlementEvidence(_) => KIND_SETTLEMENT_EVIDENCE,
             CanonicalEvent::TimeAdvance(_) => KIND_TIME_ADVANCE,
             CanonicalEvent::AdminAction(_) => KIND_ADMIN_ACTION,
+            CanonicalEvent::InteractionFactBatch(_) => KIND_INTERACTION_FACT_BATCH,
         }
     }
 
@@ -1263,6 +1306,7 @@ pub mod wire {
             CanonicalEvent::SettlementEvidence(_) => "settlement_evidence",
             CanonicalEvent::TimeAdvance(_) => "time_advance",
             CanonicalEvent::AdminAction(_) => "admin_action",
+            CanonicalEvent::InteractionFactBatch(_) => "interaction_fact_batch",
         }
     }
 
@@ -1393,9 +1437,312 @@ pub mod wire {
         Ok((decode_scope(reader)?, decode_causal(reader)?))
     }
 
-    pub fn encode_event(event: &CanonicalEvent) -> Vec<u8> {
+    pub fn interaction_fact_kind_code(kind: InteractionFactKindV1) -> u8 {
+        match kind {
+            InteractionFactKindV1::InboundObserved => 1,
+            InteractionFactKindV1::FollowUpRequested => 2,
+            InteractionFactKindV1::FollowUpResolved => 3,
+            InteractionFactKindV1::BoundarySet => 4,
+            InteractionFactKindV1::ContactGranted => 5,
+            InteractionFactKindV1::ContactPaused => 6,
+            InteractionFactKindV1::ContactResumed => 7,
+            InteractionFactKindV1::RelationEnded => 8,
+            InteractionFactKindV1::ExplicitOutcomeReported => 9,
+        }
+    }
+
+    pub fn interaction_fact_kind_from_code(code: u8) -> Option<InteractionFactKindV1> {
+        Some(match code {
+            1 => InteractionFactKindV1::InboundObserved,
+            2 => InteractionFactKindV1::FollowUpRequested,
+            3 => InteractionFactKindV1::FollowUpResolved,
+            4 => InteractionFactKindV1::BoundarySet,
+            5 => InteractionFactKindV1::ContactGranted,
+            6 => InteractionFactKindV1::ContactPaused,
+            7 => InteractionFactKindV1::ContactResumed,
+            8 => InteractionFactKindV1::RelationEnded,
+            9 => InteractionFactKindV1::ExplicitOutcomeReported,
+            _ => return None,
+        })
+    }
+
+    pub fn interaction_source_authority_code(authority: InteractionSourceAuthorityV1) -> u8 {
+        match authority {
+            InteractionSourceAuthorityV1::ExplicitControl => 1,
+            InteractionSourceAuthorityV1::AstrbotMetadata => 2,
+            InteractionSourceAuthorityV1::DeterministicRule => 3,
+            InteractionSourceAuthorityV1::ModelCandidate => 4,
+        }
+    }
+
+    pub fn interaction_source_authority_from_code(
+        code: u8,
+    ) -> Option<InteractionSourceAuthorityV1> {
+        Some(match code {
+            1 => InteractionSourceAuthorityV1::ExplicitControl,
+            2 => InteractionSourceAuthorityV1::AstrbotMetadata,
+            3 => InteractionSourceAuthorityV1::DeterministicRule,
+            4 => InteractionSourceAuthorityV1::ModelCandidate,
+            _ => return None,
+        })
+    }
+
+    pub fn interaction_value_code(value: InteractionValueCodeV1) -> u8 {
+        match value {
+            InteractionValueCodeV1::FollowUp => 1,
+            InteractionValueCodeV1::FollowUpResolved => 2,
+            InteractionValueCodeV1::NoContactBoundary => 3,
+            InteractionValueCodeV1::Grant => 4,
+            InteractionValueCodeV1::Pause => 5,
+            InteractionValueCodeV1::Resume => 6,
+            InteractionValueCodeV1::End => 7,
+            InteractionValueCodeV1::OutcomePositive => 8,
+            InteractionValueCodeV1::OutcomeNeutral => 9,
+            InteractionValueCodeV1::OutcomeNegative => 10,
+        }
+    }
+
+    pub fn interaction_value_from_code(code: u8) -> Option<InteractionValueCodeV1> {
+        Some(match code {
+            1 => InteractionValueCodeV1::FollowUp,
+            2 => InteractionValueCodeV1::FollowUpResolved,
+            3 => InteractionValueCodeV1::NoContactBoundary,
+            4 => InteractionValueCodeV1::Grant,
+            5 => InteractionValueCodeV1::Pause,
+            6 => InteractionValueCodeV1::Resume,
+            7 => InteractionValueCodeV1::End,
+            8 => InteractionValueCodeV1::OutcomePositive,
+            9 => InteractionValueCodeV1::OutcomeNeutral,
+            10 => InteractionValueCodeV1::OutcomeNegative,
+            _ => return None,
+        })
+    }
+
+    pub fn contact_purpose_code(purpose: ContactPurposeV1) -> u8 {
+        match purpose {
+            ContactPurposeV1::ScheduledCheckIn => 1,
+            ContactPurposeV1::ExplicitFollowUp => 2,
+            ContactPurposeV1::RepairInvitation => 3,
+        }
+    }
+
+    pub fn contact_purpose_from_code(code: u8) -> Option<ContactPurposeV1> {
+        Some(match code {
+            1 => ContactPurposeV1::ScheduledCheckIn,
+            2 => ContactPurposeV1::ExplicitFollowUp,
+            3 => ContactPurposeV1::RepairInvitation,
+            _ => return None,
+        })
+    }
+
+    pub fn contact_channel_code(channel: ContactChannelV1) -> u8 {
+        match channel {
+            ContactChannelV1::AstrbotSession => 1,
+        }
+    }
+
+    pub fn contact_channel_from_code(code: u8) -> Option<ContactChannelV1> {
+        Some(match code {
+            1 => ContactChannelV1::AstrbotSession,
+            _ => return None,
+        })
+    }
+
+    fn alpha3_contract_wire_error(error: Alpha3ContractError) -> WireError {
+        match error {
+            Alpha3ContractError::EmptyInteractionFacts => WireError::EmptyInteractionFacts,
+            Alpha3ContractError::TooManyInteractionFacts => WireError::TooManyInteractionFacts,
+            Alpha3ContractError::TooManySourceRefs => WireError::TooManyAlpha3SourceRefs,
+            Alpha3ContractError::SchemaUnsupported => {
+                WireError::InvalidAlpha3Contract("schema version")
+            }
+            Alpha3ContractError::VectorBound => WireError::InvalidAlpha3Contract("vector bound"),
+            Alpha3ContractError::DuplicateValue => {
+                WireError::InvalidAlpha3Contract("duplicate value")
+            }
+            Alpha3ContractError::FixedOutOfRange => {
+                WireError::InvalidAlpha3Contract("fixed-point range")
+            }
+            Alpha3ContractError::InvalidInteractionFact => {
+                WireError::InvalidAlpha3Contract("interaction fact fields")
+            }
+            Alpha3ContractError::PayloadKindMismatch => {
+                WireError::InvalidAlpha3Contract("payload kind")
+            }
+            Alpha3ContractError::InvalidTimeRange => WireError::InvalidAlpha3Contract("time range"),
+            Alpha3ContractError::InvalidWorldAnchor => {
+                WireError::InvalidAlpha3Contract("world anchor")
+            }
+            Alpha3ContractError::CodeTooLong => WireError::StringTooLong,
+            Alpha3ContractError::InvalidProviderUsage => {
+                WireError::InvalidAlpha3Contract("provider usage")
+            }
+            Alpha3ContractError::DreamMustBeNonFact => {
+                WireError::InvalidAlpha3Contract("dream non-fact")
+            }
+            Alpha3ContractError::ScopedLocatorChecksumFailed => {
+                WireError::InvalidAlpha3Contract("public reference authentication")
+            }
+            Alpha3ContractError::InvalidEffectiveFrequency => {
+                WireError::InvalidAlpha3Contract("effective proactive frequency")
+            }
+            Alpha3ContractError::InvalidAffectProjection => {
+                WireError::InvalidAlpha3Contract("affect projection")
+            }
+        }
+    }
+
+    pub fn ensure_interaction_batch_bounds(
+        batch: &InteractionFactBatchV1,
+    ) -> Result<(), WireError> {
+        validate_interaction_fact_batch(batch).map_err(alpha3_contract_wire_error)
+    }
+
+    fn encode_consent_terms(out: &mut Vec<u8>, terms: &ConsentTermsV1) {
+        out.push(terms.purposes.len() as u8);
+        for purpose in &terms.purposes {
+            out.push(contact_purpose_code(*purpose));
+        }
+        out.push(terms.channels.len() as u8);
+        for channel in &terms.channels {
+            out.push(contact_channel_code(*channel));
+        }
+        push_opt_u64(out, terms.valid_until_utc_ms);
+        push_opt_u64(out, terms.pause_until_utc_ms);
+    }
+
+    fn decode_consent_terms(reader: &mut Reader<'_>) -> Result<ConsentTermsV1, WireError> {
+        let purpose_count = reader.u8()? as usize;
+        if purpose_count > 3 {
+            return Err(WireError::InvalidAlpha3Contract("consent purpose count"));
+        }
+        let mut purposes = Vec::with_capacity(purpose_count);
+        for _ in 0..purpose_count {
+            purposes.push(
+                contact_purpose_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("contact purpose"))?,
+            );
+        }
+        let channel_count = reader.u8()? as usize;
+        if channel_count > 1 {
+            return Err(WireError::InvalidAlpha3Contract("consent channel count"));
+        }
+        let mut channels = Vec::with_capacity(channel_count);
+        for _ in 0..channel_count {
+            channels.push(
+                contact_channel_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("contact channel"))?,
+            );
+        }
+        Ok(ConsentTermsV1 {
+            purposes,
+            channels,
+            valid_until_utc_ms: reader.opt_u64()?,
+            pause_until_utc_ms: reader.opt_u64()?,
+        })
+    }
+
+    fn encode_interaction_fact(out: &mut Vec<u8>, fact: &InteractionFactV1) {
+        push_id(out, &fact.fact_id);
+        out.push(interaction_fact_kind_code(fact.kind));
+        push_u64(out, fact.observed_at_utc_ms);
+        out.push(interaction_source_authority_code(fact.source_authority));
+        push_digest(out, &fact.source_digest);
+        push_digest(out, &fact.extractor_digest);
+        out.extend_from_slice(&encode_fixed(fact.confidence));
+        push_bool(out, fact.value_code.is_some());
+        if let Some(value) = fact.value_code {
+            out.push(interaction_value_code(value));
+        }
+        push_opt_digest(out, &fact.subject_public_ref);
+        push_bool(out, fact.consent_terms.is_some());
+        if let Some(terms) = &fact.consent_terms {
+            encode_consent_terms(out, terms);
+        }
+        push_opt_u64(out, fact.scheduled_at_utc_ms);
+        push_opt_u64(out, fact.expires_at_utc_ms);
+    }
+
+    fn decode_interaction_fact(reader: &mut Reader<'_>) -> Result<InteractionFactV1, WireError> {
+        let fact_id = reader.id()?;
+        let kind = interaction_fact_kind_from_code(reader.u8()?)
+            .ok_or(WireError::InvalidEnum("interaction fact kind"))?;
+        let observed_at_utc_ms = reader.u64()?;
+        let source_authority = interaction_source_authority_from_code(reader.u8()?)
+            .ok_or(WireError::InvalidEnum("interaction source authority"))?;
+        let source_digest = reader.digest()?;
+        let extractor_digest = reader.digest()?;
+        let confidence = reader.fixed()?;
+        let value_code = if reader.bool()? {
+            Some(
+                interaction_value_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("interaction value"))?,
+            )
+        } else {
+            None
+        };
+        let subject_public_ref = reader.opt_digest()?;
+        let consent_terms = if reader.bool()? {
+            Some(decode_consent_terms(reader)?)
+        } else {
+            None
+        };
+        Ok(InteractionFactV1 {
+            fact_id,
+            kind,
+            observed_at_utc_ms,
+            source_authority,
+            source_digest,
+            extractor_digest,
+            confidence,
+            value_code,
+            subject_public_ref,
+            consent_terms,
+            scheduled_at_utc_ms: reader.opt_u64()?,
+            expires_at_utc_ms: reader.opt_u64()?,
+        })
+    }
+
+    fn encode_interaction_batch(out: &mut Vec<u8>, batch: &InteractionFactBatchV1) {
+        push_id(out, &batch.event_id);
+        out.extend_from_slice(&encode_scope(&batch.scope));
+        encode_causal(&batch.causal, out);
+        out.push(batch.facts.len() as u8);
+        for fact in &batch.facts {
+            encode_interaction_fact(out, fact);
+        }
+    }
+
+    fn validate_existing_event_bounds(event: &CanonicalEvent) -> Result<(), WireError> {
+        match event {
+            CanonicalEvent::SelfActionCandidate(event) if event.claims.len() > MAX_CLAIMS => {
+                Err(WireError::TooManyClaims)
+            }
+            CanonicalEvent::TimeAdvance(event)
+                if event.frozen.persona_tzid.len() > MAX_WIRE_STRING
+                    || event.frozen.relation_tzid.len() > MAX_WIRE_STRING =>
+            {
+                Err(WireError::StringTooLong)
+            }
+            CanonicalEvent::AdminAction(event) if event.operation.len() > MAX_WIRE_STRING => {
+                Err(WireError::StringTooLong)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn encode_event_checked(event: &CanonicalEvent) -> Result<Vec<u8>, WireError> {
+        validate_existing_event_bounds(event)?;
+        if let CanonicalEvent::InteractionFactBatch(batch) = event {
+            ensure_interaction_batch_bounds(batch)?;
+        }
         let mut out = Vec::with_capacity(128);
-        push_u16(&mut out, WIRE_SCHEMA_VERSION);
+        let schema_version = if matches!(event, CanonicalEvent::InteractionFactBatch(_)) {
+            WIRE_SCHEMA_VERSION
+        } else {
+            LEGACY_EVENT_WIRE_SCHEMA_VERSION
+        };
+        push_u16(&mut out, schema_version);
         out.push(event_kind_code(event));
         match event {
             CanonicalEvent::UserStimulus(e) => {
@@ -1468,7 +1815,30 @@ pub mod wire {
             CanonicalEvent::TimeAdvance(e) => {
                 push_id(&mut out, &e.event_id);
                 out.extend_from_slice(&encode_scope(&e.scope));
-                push_u64(&mut out, e.elapsed_ms);
+                push_u64(&mut out, e.expected_generation);
+                push_u16(&mut out, e.frozen.schema_version);
+                push_u64(&mut out, e.frozen.observed_now_utc_ms);
+                push_u64(&mut out, e.frozen.effective_now_utc_ms);
+                push_string(&mut out, &e.frozen.persona_tzid);
+                push_i32(&mut out, e.frozen.persona_utc_offset_seconds);
+                push_u16(&mut out, e.frozen.persona_local_minute);
+                push_i32(&mut out, e.frozen.persona_day_ordinal);
+                push_string(&mut out, &e.frozen.relation_tzid);
+                push_i32(&mut out, e.frozen.relation_utc_offset_seconds);
+                push_u16(&mut out, e.frozen.relation_local_minute);
+                push_i32(&mut out, e.frozen.relation_day_ordinal);
+                push_u64(&mut out, e.frozen.budget_day_start_utc_ms);
+                push_u64(&mut out, e.frozen.budget_next_day_start_utc_ms);
+                push_bool(&mut out, e.frozen.next_timezone_transition_utc_ms.is_some());
+                if let Some(value) = e.frozen.next_timezone_transition_utc_ms {
+                    push_u64(&mut out, value);
+                }
+                push_digest(&mut out, &e.frozen.tzdb_fingerprint);
+                push_digest(&mut out, &e.frozen_input_digest);
+                out.extend_from_slice(&encode_fixed(e.stimulus.arousal));
+                out.extend_from_slice(&encode_fixed(e.stimulus.urgency));
+                push_bool(&mut out, e.stimulus.emergency_authorized);
+                push_digest(&mut out, &e.stimulus.source_digest);
             }
             CanonicalEvent::AdminAction(e) => {
                 push_id(&mut out, &e.event_id);
@@ -1476,17 +1846,28 @@ pub mod wire {
                 push_string(&mut out, &e.operation);
                 push_digest(&mut out, &e.nonce_digest);
             }
+            CanonicalEvent::InteractionFactBatch(batch) => {
+                encode_interaction_batch(&mut out, batch);
+            }
         }
-        out
+        Ok(out)
+    }
+
+    pub fn encode_event(event: &CanonicalEvent) -> Vec<u8> {
+        encode_event_checked(event)
+            .expect("canonical event violated its pre-persistence wire contract")
     }
 
     pub fn decode_event(bytes: &[u8]) -> Result<CanonicalEvent, WireError> {
         let mut reader = Reader::new(bytes);
         let schema_version = reader.u16()?;
-        if schema_version != WIRE_SCHEMA_VERSION {
+        if !(1..=WIRE_SCHEMA_VERSION).contains(&schema_version) {
             return Err(WireError::SchemaVersion(schema_version));
         }
         let kind = reader.u8()?;
+        if schema_version == 1 && kind == KIND_TIME_ADVANCE {
+            return Err(WireError::UnsupportedSchema(0));
+        }
         let event = match kind {
             KIND_USER_STIMULUS => {
                 let event_id = reader.id()?;
@@ -1604,10 +1985,44 @@ pub mod wire {
             KIND_TIME_ADVANCE => {
                 let event_id = reader.id()?;
                 let scope = decode_scope(&mut reader)?;
-                CanonicalEvent::TimeAdvance(TimeAdvance {
+                let expected_generation = reader.u64()?;
+                let frozen = FrozenTimeInputV1 {
+                    schema_version: reader.u16()?,
+                    observed_now_utc_ms: reader.u64()?,
+                    effective_now_utc_ms: reader.u64()?,
+                    persona_tzid: reader.string()?,
+                    persona_utc_offset_seconds: reader.i32()?,
+                    persona_local_minute: reader.u16()?,
+                    persona_day_ordinal: reader.i32()?,
+                    relation_tzid: reader.string()?,
+                    relation_utc_offset_seconds: reader.i32()?,
+                    relation_local_minute: reader.u16()?,
+                    relation_day_ordinal: reader.i32()?,
+                    budget_day_start_utc_ms: reader.u64()?,
+                    budget_next_day_start_utc_ms: reader.u64()?,
+                    next_timezone_transition_utc_ms: if reader.bool()? {
+                        Some(reader.u64()?)
+                    } else {
+                        None
+                    },
+                    tzdb_fingerprint: reader.digest()?,
+                };
+                CanonicalEvent::TimeAdvance(TimeAdvanceV1 {
                     event_id,
                     scope,
-                    elapsed_ms: reader.u64()?,
+                    expected_generation,
+                    frozen,
+                    frozen_input_digest: reader.digest()?,
+                    stimulus: if schema_version >= 4 {
+                        AutonomousStimulusV1 {
+                            arousal: reader.fixed()?,
+                            urgency: reader.fixed()?,
+                            emergency_authorized: reader.bool()?,
+                            source_digest: reader.digest()?,
+                        }
+                    } else {
+                        AutonomousStimulusV1::default()
+                    },
                 })
             }
             KIND_ADMIN_ACTION => {
@@ -1619,6 +2034,33 @@ pub mod wire {
                     operation: reader.string()?,
                     nonce_digest: reader.digest()?,
                 })
+            }
+            KIND_INTERACTION_FACT_BATCH => {
+                if schema_version != WIRE_SCHEMA_VERSION {
+                    return Err(WireError::UnsupportedSchema(schema_version));
+                }
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                let fact_count = reader.u8()? as usize;
+                if fact_count == 0 {
+                    return Err(WireError::EmptyInteractionFacts);
+                }
+                if fact_count > MAX_INTERACTION_FACTS {
+                    return Err(WireError::TooManyInteractionFacts);
+                }
+                let mut facts = Vec::with_capacity(fact_count);
+                for _ in 0..fact_count {
+                    facts.push(decode_interaction_fact(&mut reader)?);
+                }
+                let batch = InteractionFactBatchV1 {
+                    schema_version: ALPHA3_SCHEMA_VERSION,
+                    event_id,
+                    scope,
+                    causal,
+                    facts,
+                };
+                ensure_interaction_batch_bounds(&batch)?;
+                CanonicalEvent::InteractionFactBatch(batch)
             }
             other => return Err(WireError::UnknownKind(other)),
         };
@@ -1895,6 +2337,35 @@ mod tests {
         }
     }
 
+    fn time_advance(id: u8, now_ms: u64) -> TimeAdvanceV1 {
+        let frozen = FrozenTimeInputV1 {
+            schema_version: AUTONOMY_SCHEMA_VERSION,
+            observed_now_utc_ms: now_ms,
+            effective_now_utc_ms: now_ms,
+            persona_tzid: "UTC".to_string(),
+            persona_utc_offset_seconds: 0,
+            persona_local_minute: 0,
+            persona_day_ordinal: 0,
+            relation_tzid: "UTC".to_string(),
+            relation_utc_offset_seconds: 0,
+            relation_local_minute: 0,
+            relation_day_ordinal: 0,
+            budget_day_start_utc_ms: 0,
+            budget_next_day_start_utc_ms: 86_400_000,
+            next_timezone_transition_utc_ms: None,
+            tzdb_fingerprint: [7; 32],
+        };
+        let digest = wire::domain_hash(b"ae.frozen-time-input.v1", &[&now_ms.to_le_bytes()]);
+        TimeAdvanceV1 {
+            event_id: [id; 16],
+            scope: scope(),
+            expected_generation: 0,
+            frozen,
+            frozen_input_digest: digest,
+            stimulus: AutonomousStimulusV1::default(),
+        }
+    }
+
     fn sample_manifest() -> GenesisManifest {
         let mut manifest = GenesisManifest {
             schema_version: 1,
@@ -1969,12 +2440,8 @@ mod tests {
 
     #[test]
     fn canonical_event_rejects_unknown_json_field() {
-        let mut json = serde_json::to_value(CanonicalEvent::TimeAdvance(TimeAdvance {
-            event_id: [1; 16],
-            scope: scope(),
-            elapsed_ms: 5,
-        }))
-        .unwrap();
+        let mut json =
+            serde_json::to_value(CanonicalEvent::TimeAdvance(time_advance(1, 5))).unwrap();
         json["payload"]["secret"] = serde_json::json!(1);
         let err = serde_json::from_value::<CanonicalEvent>(json).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{err}");
@@ -2065,11 +2532,7 @@ mod tests {
                 evidence_digest: [18; 32],
                 observed_at_ms: 19,
             }),
-            CanonicalEvent::TimeAdvance(TimeAdvance {
-                event_id: [20; 16],
-                scope: scope(),
-                elapsed_ms: 21,
-            }),
+            CanonicalEvent::TimeAdvance(time_advance(20, 21)),
             CanonicalEvent::AdminAction(AdminAction {
                 event_id: [22; 16],
                 scope: scope(),
@@ -2087,11 +2550,7 @@ mod tests {
 
     #[test]
     fn event_decode_rejects_trailing_bytes_and_unknown_kind() {
-        let event = CanonicalEvent::TimeAdvance(TimeAdvance {
-            event_id: [1; 16],
-            scope: scope(),
-            elapsed_ms: 1,
-        });
+        let event = CanonicalEvent::TimeAdvance(time_advance(1, 1));
         let mut bytes = encode_event(&event);
         bytes.push(0xFF);
         assert_eq!(
@@ -2103,6 +2562,26 @@ mod tests {
             decode_event(&bytes).unwrap_err(),
             WireError::UnknownKind(99)
         );
+    }
+
+    #[test]
+    fn time_advance_v3_fixture_migrates_without_stimulus() {
+        let event = CanonicalEvent::TimeAdvance(time_advance(31, 32));
+        let mut legacy = encode_event(&event);
+        legacy[0..2].copy_from_slice(&3_u16.to_le_bytes());
+        legacy.truncate(legacy.len() - (8 + 8 + 1 + 32));
+        let decoded = decode_event(&legacy).unwrap();
+        let CanonicalEvent::TimeAdvance(decoded) = decoded else {
+            panic!("expected time advance");
+        };
+        assert_eq!(decoded.stimulus, AutonomousStimulusV1::default());
+    }
+
+    #[test]
+    fn time_advance_json_requires_explicit_stimulus() {
+        let mut value = serde_json::to_value(time_advance(33, 34)).unwrap();
+        value.as_object_mut().unwrap().remove("stimulus");
+        assert!(serde_json::from_value::<TimeAdvanceV1>(value).is_err());
     }
 
     #[test]

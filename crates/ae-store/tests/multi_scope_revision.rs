@@ -1,12 +1,12 @@
 use ae_continuum::CommitEnvelope;
 use ae_contracts::{
-    wire, CanonicalEvent, CommitStatus, InvariantResiduals, ScopeRef, TimeAdvance,
+    wire, AdminAction, CanonicalEvent, CommitStatus, InvariantResiduals, ScopeRef,
     TransitionReceipt,
 };
 use ae_store::Store;
 
 fn time_advance(event_id: u8, bot: u8, persona: u8) -> CanonicalEvent {
-    CanonicalEvent::TimeAdvance(TimeAdvance {
+    CanonicalEvent::AdminAction(AdminAction {
         event_id: [event_id; 16],
         scope: ScopeRef {
             bot_token: [bot; 16],
@@ -14,7 +14,8 @@ fn time_advance(event_id: u8, bot: u8, persona: u8) -> CanonicalEvent {
             relation_token: None,
             session_token: [event_id; 16],
         },
-        elapsed_ms: u64::from(event_id),
+        operation: "journal_test".into(),
+        nonce_digest: [event_id; 32],
     })
 }
 
@@ -31,7 +32,7 @@ fn envelope(
     let scope_digest = wire::persona_scope_digest(&[bot; 16], &[persona; 16], None);
 
     CommitEnvelope {
-        event_kind: "time_advance".to_owned(),
+        event_kind: "admin_action".to_owned(),
         event_bytes,
         receipt: TransitionReceipt {
             schema_version: 1,

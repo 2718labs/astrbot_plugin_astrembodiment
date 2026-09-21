@@ -1,8 +1,8 @@
 name: astrbot_plugin_astrembodiment
 display_name: AstrEmbodiment
-desc: Open-source alpha source snapshot of an incomplete Rust-native embodiment runtime for AstrBot; not a functional release.
-short_desc: Open-source alpha source snapshot; the semantic reaction chain is not implemented.
-version: "v1.0.0-alpha.1"
+desc: Rust-native persona emotion, semantic appraisal and deterministic embodiment clock for AstrBot.
+short_desc: Persona emotion and embodiment clock core for AstrBot.
+version: "1.1.0"
 author: 2718labs
 repo: https://github.com/2718labs/astrbot_plugin_astrembodiment
 astrbot_version: ">=4.16,<5"
@@ -10,8 +10,7 @@ support_platforms:
   - aiocqhttp
 tags:
   - agent
-  - emotion
   - embodiment
   - rust
-  - persona
+  - safety
   - preview

@@ -1,0 +1,72 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task3-graph-development-exact",
+  "target_commit": "7f1624518b07626bd68525d930b79417eb27f025",
+  "command": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-neurofield",
+    "--test",
+    "deterministic_graph_development",
+    "v1_golden_vector_is_cross_process_and_cross_platform_stable",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-task03-target",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task3-v1/graph-development-exact.stdout.log",
+      "sha256": "30257850e57a176f7b6ee10933e3351b145c9ff88e9c08abd282fbb6e04874fa"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task3-v1/graph-development-exact.stderr.log",
+      "sha256": "5542c8b0408e50a998ad28c07977f8667de9ada76024a9e536490affa04c3e5e"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "5e9f34c176b3de968d2a55f1182eca6bc780b268a0bf5373b3c15918428ce7c8"
+    },
+    {
+      "path": "crates/ae-neurofield/Cargo.toml",
+      "sha256": "a49cb3ab041dece44c1d59a2bd0639cf78a8e4deb544f0342b1fdd04bdf0c0a2"
+    },
+    {
+      "path": "crates/ae-neurofield/src/lib.rs",
+      "sha256": "eda270f8e8ff2c9e20e7ea547ab8ba8016701923f601f9999f044c6ded80fec9"
+    },
+    {
+      "path": "crates/ae-neurofield/src/graph_development.rs",
+      "sha256": "d014151e501e55938200b2773e94a5a2f290ad09cda5c615fff5a6f9969ed00e"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/deterministic_graph_development.rs",
+      "sha256": "847a400b15df10f5a151dad5d4abce887b78b52aaecfe684b4e45ea0f147d02d"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/vectors/graph-development-v1.json",
+      "sha256": "de634bff3f589ce9a70018e1bc685de8ab22c4276d5a76e9dac9111bcc8b0615"
+    }
+  ]
+}

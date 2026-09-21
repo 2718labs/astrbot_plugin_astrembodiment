@@ -1,9 +1,8 @@
-"""Genesis singleflight coordinator and first-message barrier.
+"""Genesis singleflight coordinator and delivery fact adapter.
 
 In-process singleflight: concurrent first turns for the same
 (Bot, Persona, persona_source_digest) join one compiler Future, so the main
-provider is called exactly once. The original message is applied exactly once
-after the committed Genesis exists; a compiler failure never creates a default
+provider is called exactly once. A compiler failure never creates a default
 brain and never writes production state.
 """
 
@@ -22,8 +21,6 @@ from .bridge import (
 )
 from .contracts import (
     ScopeTokens,
-    build_delivery_outcome_json,
-    build_user_stimulus_json,
 )
 from .persona_genesis import (
     PersonaCompilerMalformed,
@@ -47,7 +44,7 @@ class GenesisCoordinator:
         self._bridge = bridge
         self._inflight: dict[str, asyncio.Future] = {}
         self._committed: dict[str, dict[str, Any]] = {}
-        self._applied: dict[str, dict[str, Any]] = {}
+        self._persona_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     @staticmethod
     def _scope_key(scope: ScopeTokens, source_digest: str) -> str:
@@ -131,7 +128,9 @@ class GenesisCoordinator:
 
         for attempt in range(_RETRY_WAIT_ATTEMPTS):
             try:
-                return self._bridge.ensure_genesis(closed_request)
+                key = (scope.bot_token, scope.persona_token)
+                async with self._persona_locks.setdefault(key, asyncio.Lock()):
+                    return self._bridge.ensure_genesis(closed_request)
             except RetryWait:
                 await asyncio.sleep(_RETRY_WAIT_DELAY_S)
         raise GenesisUnavailable(
@@ -139,114 +138,6 @@ class GenesisCoordinator:
             "genesis lease stayed in flight; no default brain was created",
         )
 
-    async def first_turn(
-        self,
-        *,
-        scope: ScopeTokens,
-        event_id: str,
-        turn_id: str,
-        base_revision: int,
-        observed_at_ms: int,
-        source: PersonaSourceSnapshot,
-        selection: str,
-        compiler: Compiler,
-        compiler_protocol_digest: str,
-        compiler_model_digest: str,
-    ) -> dict[str, Any]:
-        """First-message barrier: genesis first, then apply exactly once."""
-        genesis = await self.ensure_genesis(
-            scope=scope,
-            source=source,
-            selection=selection,
-            compiler=compiler,
-            compiler_protocol_digest=compiler_protocol_digest,
-            compiler_model_digest=compiler_model_digest,
-            observed_at_ms=observed_at_ms,
-        )
-        decision = await self.apply_stimulus(
-            scope=scope,
-            event_id=event_id,
-            turn_id=turn_id,
-            base_revision=base_revision,
-            observed_at_ms=observed_at_ms,
-        )
-        # Keep the native identity receipt alongside the turn decision so the
-        # host can persist and expose SeedCode without reconstructing identity
-        # in Python.
-        result = dict(decision)
-        result["genesis"] = genesis
-        result["seed_code"] = genesis.get("seed_code", "")
-        result["seed_code_short"] = genesis.get("seed_code_short", "")
-        result["incarnation_id"] = genesis.get("incarnation_id", "")
-        return result
-
-    async def apply_stimulus(
-        self,
-        *,
-        scope: ScopeTokens,
-        event_id: str,
-        turn_id: str,
-        base_revision: int,
-        observed_at_ms: int,
-    ) -> dict[str, Any]:
-        event = build_user_stimulus_json(
-            scope=scope,
-            event_id=event_id,
-            turn_id=turn_id,
-            base_revision=base_revision,
-            observed_at_ms=observed_at_ms,
-        )
-        return await self._apply_once(scope, event_id, event)
-
-    async def apply_delivery(
-        self,
-        *,
-        scope: ScopeTokens,
-        event_id: str,
-        turn_id: str,
-        base_revision: int,
-        delivered: bool,
-        visible_action_digest: str,
-        delivered_at_ms: int,
-    ) -> dict[str, Any]:
-        event = build_delivery_outcome_json(
-            scope=scope,
-            event_id=event_id,
-            turn_id=turn_id,
-            base_revision=base_revision,
-            delivered=delivered,
-            visible_action_digest=visible_action_digest,
-            delivered_at_ms=delivered_at_ms,
-        )
-        return await self._apply_once(scope, event_id, event)
-
-    async def _apply_once(
-        self,
-        scope: ScopeTokens,
-        event_id: str,
-        event: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Deduplicate by event id; the native lane also rejects re-application."""
-        memo_key = f"{scope.bot_token}:{scope.persona_token}:{event_id}"
-        previous = self._applied.get(memo_key)
-        if previous is not None:
-            previous = dict(previous)
-            previous["deduplicated"] = True
-            return previous
-
-        decision = self._bridge.apply_event(scope.scope_json(), event)
-        if decision.get("deduplicated"):
-            # The native lane had already applied this exact event: reuse the
-            # original decision instead of double-applying.
-            self._applied[memo_key] = dict(decision)
-        else:
-            self._applied[memo_key] = dict(decision)
-        return decision
-
-    def applied_count(self) -> int:
-        return len(self._applied)
-
     def reset(self) -> None:
         self._inflight.clear()
         self._committed.clear()
-        self._applied.clear()

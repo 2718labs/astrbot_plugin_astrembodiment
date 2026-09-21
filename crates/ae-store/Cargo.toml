@@ -4,11 +4,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Never enabled by production builds. Integration acceptance may opt in to
+# deterministic crash seams without exposing them in ae-store's default API.
+migration-test-hooks = []
+# Historical authority tests may opt in explicitly. This feature is absent
+# from every production/default build and never reaches the Python extension.
+legacy-semantic-test-api = []
 [dependencies]
 ae-contracts.workspace = true
 ae-continuum.workspace = true
+ae-authority.workspace = true
 ae-genesis.workspace = true
 ae-fixed.workspace = true
+ae-attention.workspace = true
+ae-neurofield.workspace = true
+ae-semantic-core.workspace = true
+ae-renorm.workspace = true
+ae-autonomy.workspace = true
+ae-platform-fs.workspace = true
+blake3.workspace = true
+constant_time_eq.workspace = true
+getrandom.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-rusqlite.workspace = true
+sha2 = "0.10.9"
+rusqlite = { workspace = true, features = ["backup"] }
 thiserror.workspace = true
+
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["hooks", "limits"] }

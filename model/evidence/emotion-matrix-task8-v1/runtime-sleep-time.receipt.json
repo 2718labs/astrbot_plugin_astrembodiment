@@ -1,0 +1,109 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task8-v1-runtime-sleep-time",
+  "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405",
+  "command": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_time --jobs 1 sleep_time_advance_relaxes_without_inventing_evidence -- --exact --nocapture",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-runtime",
+    "--test",
+    "emotion_matrix_time",
+    "--jobs",
+    "1",
+    "sleep_time_advance_relaxes_without_inventing_evidence",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t8-evidence-49b3866",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "passed": 1,
+    "failed": 0,
+    "filtered_out": 3
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task8-v1/runtime-sleep-time.stdout.log",
+        "sha256": "1f6de1aa907d68fed73809ab1a0f62b88b9efa4fbb2e3bdb9284dc56f73e5f08"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task8-v1/runtime-sleep-time.stderr.log",
+      "sha256": "9116b445dacc695d39267eff9c245b4f2dea2bc806f43234fb91ded0fd017dfb"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "f6c840552aa97f04f535bb92f1cdd52bb36e70dfa61fda0562d56217d1954531"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5708e225a0e63e77786c2f60c41b0ef9d00cdacb86dcff8ea47b6285d34e920a"
+    },
+    {
+      "path": "crates/ae-contracts/src/autonomy.rs",
+      "sha256": "5b560d926ecfae6be0007ee2e62ba1b5a9bcc1fe03b5bbd35e9e45686dfd025b"
+    },
+    {
+      "path": "crates/ae-contracts/src/emotion_matrix.rs",
+      "sha256": "06172d6132adcaf8a4849a4fdd802091f06ea49fe55fbc6c10f98cfb7e12ef39"
+    },
+    {
+      "path": "crates/ae-runtime/src/autonomy.rs",
+      "sha256": "d9bd80dfbc3e4b0b2a2f14c5f5641a182f85849ff7368df6901d9a165997cf08"
+    },
+    {
+      "path": "crates/ae-runtime/src/lib.rs",
+      "sha256": "1143f65e3803518b065a2adabb069a7cf8677ba341e3367113b56b12ec301b30"
+    },
+    {
+      "path": "crates/ae-runtime/src/matrix_time.rs",
+      "sha256": "432ac3b57475e4a3225b54a8368d458c860fc9a028c8c1f0396962e48ba27a91"
+    },
+    {
+      "path": "crates/ae-runtime/tests/emotion_matrix_time.rs",
+      "sha256": "10630e4cb9f76e1023ae918463945d6fb06b3ac4760d5a6ab9e7e5104ff5680e"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/codec.rs",
+      "sha256": "4acfee2f9fa86b7cb0e052b4a1d4562db215abd94172bc014db0b7028f954488"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/lib.rs",
+      "sha256": "855202344c08e6643166c442456007790a75b6b29007946a66010e81c8ee3ec9"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/matrix_time.rs",
+      "sha256": "9c7eec017fbf89bd971715dd82dfa7769cbef92da5876eda01ea877ed9745cc1"
+    },
+    {
+      "path": "crates/ae-store/src/autonomy.rs",
+      "sha256": "99f9bf30728230cdf9e3937b1064355e5f58df8b429bec747d6e00553ef76c44"
+    },
+    {
+      "path": "crates/ae-store/src/semantic.rs",
+      "sha256": "9b8887887a496d00e9a66d08c8083679f577753f4271eb7983e678a60e4cad9b"
+    }
+  ]
+}

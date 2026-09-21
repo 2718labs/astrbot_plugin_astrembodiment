@@ -1,0 +1,376 @@
+warning: variant `JournalOnly` is never constructed
+   --> crates\ae-store\src\lib.rs:471:5
+    |
+470 | pub(crate) enum JournalCommitLane {
+    |                 ----------------- variant in this enum
+471 |     JournalOnly,
+    |     ^^^^^^^^^^^
+    |
+    = note: `JournalCommitLane` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `enforce_core_boundary_v9_retired` and `journal_row_from_prepared` are never used
+    --> crates\ae-store\src\lib.rs:781:8
+     |
+ 684 | impl Store {
+     | ---------- associated items in this implementation
+...
+ 781 |     fn enforce_core_boundary_v9_retired(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+2062 |     pub(crate) fn journal_row_from_prepared(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_BODY_BYTES` is never used
+ --> crates\ae-store\src\alpha3\interaction.rs:6:7
+  |
+6 | const MAX_BODY_BYTES: usize = 256 * 1024;
+  |       ^^^^^^^^^^^^^^
+
+warning: constant `MAX_EVENT_BYTES` is never used
+ --> crates\ae-store\src\alpha3\interaction.rs:7:7
+  |
+7 | const MAX_EVENT_BYTES: usize = 256 * 1024;
+  |       ^^^^^^^^^^^^^^^
+
+warning: constant `MAX_DELTA_BYTES` is never used
+ --> crates\ae-store\src\alpha3\interaction.rs:8:7
+  |
+8 | const MAX_DELTA_BYTES: usize = 1024 * 1024;
+  |       ^^^^^^^^^^^^^^^
+
+warning: constant `REPETITION_SUBMISSION_STEP_RAW` is never used
+ --> crates\ae-store\src\alpha3\interaction.rs:9:7
+  |
+9 | const REPETITION_SUBMISSION_STEP_RAW: i64 = 250_000;
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `CLAIM_LEASE_MS` is never used
+ --> crates\ae-store\src\alpha3\projection.rs:8:7
+  |
+8 | const CLAIM_LEASE_MS: u64 = 120_000;
+  |       ^^^^^^^^^^^^^^
+
+warning: constant `MAX_ALPHA3_OBSERVER_SCAN_ROWS` is never used
+ --> crates\ae-store\src\alpha3\projection.rs:9:7
+  |
+9 | const MAX_ALPHA3_OBSERVER_SCAN_ROWS: usize = 128;
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `GateAuthority` is never constructed
+  --> crates\ae-store\src\alpha3\projection.rs:38:8
+   |
+38 | struct GateAuthority {
+   |        ^^^^^^^^^^^^^
+
+warning: struct `GateAuthorityDeadlinesV1` is never constructed
+  --> crates\ae-store\src\alpha3\projection.rs:54:8
+   |
+54 | struct GateAuthorityDeadlinesV1 {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `GateAuthoritySnapshotV1` is never constructed
+  --> crates\ae-store\src\alpha3\projection.rs:66:8
+   |
+66 | struct GateAuthoritySnapshotV1 {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BODY_PROJECTION_TTL_MS` is never used
+   --> crates\ae-store\src\alpha3\projection.rs:394:7
+    |
+394 | const BODY_PROJECTION_TTL_MS: u64 = 60_000;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BUDGET_DAY_MS` is never used
+   --> crates\ae-store\src\alpha3\projection.rs:395:7
+    |
+395 | const BUDGET_DAY_MS: u64 = 86_400_000;
+    |       ^^^^^^^^^^^^^
+
+warning: struct `BodyRuntimeProjectionRow` is never constructed
+   --> crates\ae-store\src\alpha3\projection.rs:399:8
+    |
+399 | struct BodyRuntimeProjectionRow {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `IntentionProjectionBody` is never constructed
+   --> crates\ae-store\src\alpha3\projection.rs:412:8
+    |
+412 | struct IntentionProjectionBody {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `OutboundProjectionBody` is never constructed
+   --> crates\ae-store\src\alpha3\projection.rs:424:8
+    |
+424 | struct OutboundProjectionBody {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `IntentionProjectionRow` is never constructed
+   --> crates\ae-store\src\alpha3\projection.rs:434:8
+    |
+434 | struct IntentionProjectionRow {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `OutboundProjectionRow` is never constructed
+   --> crates\ae-store\src\alpha3\projection.rs:445:8
+    |
+445 | struct OutboundProjectionRow {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `semantic_health` is never read
+   --> crates\ae-store\src\alpha3\projection.rs:528:5
+    |
+526 | pub(crate) struct AffectObserverFieldsV1 {
+    |                   ---------------------- field in this struct
+527 |     affect: ProjectionFieldV1<AffectProjectionV1>,
+528 |     semantic_health: ProjectionFieldV1<SemanticProjectionHealthV1>,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `AffectObserverFieldsV1` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: constant `MAX_INTENTIONS_PER_WAKE` is never used
+  --> crates\ae-store\src\autonomy.rs:23:7
+   |
+23 | const MAX_INTENTIONS_PER_WAKE: usize = 1024;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple variants are never constructed
+    --> crates\ae-store\src\core_boundary_v9.rs:1584:5
+     |
+1583 | pub(crate) enum RetiredOperationTagV1 {
+     |                 --------------------- variants in this enum
+1584 |     upsert_temporal_profile,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+1585 |     upsert_relation_policy,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+1586 |     record_relation_inbound,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+1587 |     store_outbound_target,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+1588 |     initialize_autonomous_state,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1589 |     upsert_autonomy_scope,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+1590 |     list_autonomy_scopes,
+     |     ^^^^^^^^^^^^^^^^^^^^
+1591 |     list_autonomy_scopes_for_persona,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1592 |     rebuild_autonomy_scope_bindings_from_journal,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1593 |     load_temporal_profile,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+1594 |     load_relation_policy,
+     |     ^^^^^^^^^^^^^^^^^^^^
+1595 |     load_intention,
+     |     ^^^^^^^^^^^^^^
+1596 |     load_current_outbound_target,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1597 |     load_autonomous_state,
+     |     ^^^^^^^^^^^^^^^^^^^^^
+1598 |     list_autonomous_states,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+1599 |     claim_wake,
+     |     ^^^^^^^^^^
+1600 |     claim_wake_proposal,
+     |     ^^^^^^^^^^^^^^^^^^^
+1601 |     load_wake_claim,
+     |     ^^^^^^^^^^^^^^^
+1602 |     write_autonomy_snapshot,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+1603 |     read_autonomy_snapshot,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+1604 |     load_wake_time_settlement_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1605 |     commit_autonomous_wake,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+1606 |     commit_autonomous_wake_claim_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1607 |     commit_alpha3_wake,
+     |     ^^^^^^^^^^^^^^^^^^
+1608 |     gate_and_claim_externalization,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1609 |     settle_externalization,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+1610 |     gate_and_claim_dispatch,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+1611 |     settle_dispatch,
+     |     ^^^^^^^^^^^^^^^
+1612 |     load_outbound_for_intention,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1613 |     outbound_submission_metrics,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1614 |     recover_orphaned_dispatches,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1615 |     recover_orphaned_externalizations,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1616 |     externalization_reserved_tokens,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1617 |     list_pending_autonomy_work,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+1618 |     list_pending_autonomy_work_for_relation,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1619 |     verify_autonomy_projection,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+1620 |     has_autonomy_journal_delta,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+1621 |     rebuild_autonomy_projection,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1622 |     load_relation_contact_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+1623 |     load_relation_consent_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+1624 |     load_contact_intention_basis_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1625 |     load_interaction_facts_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+1626 |     recover_retired_wake_v2_claims,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1627 |     claim_wake_v2,
+     |     ^^^^^^^^^^^^^
+1628 |     load_wake_claim_v2,
+     |     ^^^^^^^^^^^^^^^^^^
+1629 |     apply_interaction_fact_batch_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1630 |     apply_interaction_fact_batch_with_appraisal_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1631 |     upsert_relation_budget_policy_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1632 |     relation_budget_ledger_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+1633 |     gate_and_claim_externalization_v2,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1634 |     settle_externalization_v2,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+1635 |     observe_body_snapshot_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^
+1636 |     observe_execution_receipt_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1637 |     observe_budget_summary_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+1638 |     observe_gate_reasons_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+1639 |     intention_scoped_locator_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1640 |     execution_scoped_locator_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1641 |     observe_snapshot_v2,
+     |     ^^^^^^^^^^^^^^^^^^^
+1642 |     alpha3_authoritative_fingerprint_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1643 |     gate_and_claim_dispatch_v2,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+1644 |     settle_dispatch_v2,
+     |     ^^^^^^^^^^^^^^^^^^
+1645 |     grant_ecosystem_capability_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1646 |     ecosystem_observe_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^
+1647 |     ecosystem_propose_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^
+1648 |     verify_lived_world_replay_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1649 |     load_world_anchor_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^
+1650 |     load_lived_day_v1,
+     |     ^^^^^^^^^^^^^^^^^
+1651 |     load_dream_residues_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+1652 |     load_accepted_activity_proposals_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1653 |     conversation_context_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+1654 |     review_dream_residue_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^
+1655 |     review_dream_residue_with_authority_v1,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1656 |     apply_event,
+     |     ^^^^^^^^^^^
+1657 |     ensure_relation_authority_tx,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1658 |     record_adapter_submission_tx,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+1659 |     persist_alpha3_wake_tx,
+     |     ^^^^^^^^^^^^^^^^^^^^^^
+1660 |     persist_lived_world_wake_tx,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `RetiredOperationTagV1` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: `ae-store` (lib) generated 21 warnings
+warning: fields `identity`, `semantic_formula_digest`, `field`, `graph`, and `initial_snapshot_digest` are never read
+   --> crates\ae-runtime\src\lib.rs:128:5
+    |
+124 | struct HotBrain {
+    |        -------- fields in this struct
+...
+128 |     identity: ae_genesis::GenesisIdentity,
+    |     ^^^^^^^^
+129 |     semantic_formula_digest: Digest,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+130 |     field: NeuralField,
+    |     ^^^^^
+131 |     graph: SparseGraph,
+    |     ^^^^^
+132 |     initial_snapshot_digest: Digest,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fixed_zero_vector` is never used
+   --> crates\ae-runtime\src\lib.rs:142:4
+    |
+142 | fn fixed_zero_vector() -> InvariantResiduals {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: `ae-runtime` (lib) generated 2 warnings
+   Compiling ae-runtime v1.1.0-alpha4 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-runtime)
+   Compiling ae-semantic-core v1.1.0-alpha4 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-semantic-core)
+   Compiling ae-attention v1.1.0-alpha4 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-attention)
+   Compiling ae-neurofield v1.1.0-alpha4 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-neurofield)
+   Compiling ae-contracts v1.1.0-alpha4 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-contracts)
+    Finished `test` profile [unoptimized] target(s) in 3.23s
+     Running tests\emotion_matrix_route.rs (target\debug\deps\emotion_matrix_route-244e4193c9f2721a.exe)
+
+running 1 test
+test all_fifteen_dimensions_route_through_one_frozen_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\emotion_matrix_contract.rs (target\debug\deps\emotion_matrix_contract-466103d8e0ba5654.exe)
+
+running 1 test
+test all_fifteen_dimensions_have_frozen_order_and_routes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\deterministic_graph_development.rs (target\debug\deps\deterministic_graph_development-a59858e1a92a985b.exe)
+
+running 4 tests
+test distinct_development_seeds_produce_a_controlled_graph_difference ... ok
+test resource_envelope_cannot_change_v1_graph_bytes_or_digest ... ok
+test same_birth_inputs_produce_byte_identical_nonempty_canonical_graph ... ok
+test v1_golden_vector_is_cross_process_and_cross_platform_stable ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.54s
+
+     Running tests\emotion_matrix_dynamics.rs (target\debug\deps\emotion_matrix_dynamics-44b46365410601ba.exe)
+
+running 2 tests
+test full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens ... ok
+test overflow_and_invalid_shape_fail_without_partial_field ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests\matrix_time.rs (target\debug\deps\matrix_time-5ea9cfd9b869fb0d.exe)
+
+running 8 tests
+test cumulative_epoch_makes_time_chunking_exact ... ok
+test elapsed_is_bounded_and_invalid_epoch_fails_closed ... ok
+test frozen_one_quantum_and_mixed_phase_values_pin_rounding_and_coefficients ... ok
+test phase_order_is_fixed_across_different_event_chunking ... ok
+test sleep_time_advance_relaxes_without_inventing_evidence ... ok
+test sub_quantum_time_keeps_its_sleep_phase_attribution ... ok
+test time_snapshot_is_strict_and_contains_no_evidence_receipt_or_telemetry ... ok
+test time_snapshot_rejects_inconsistent_elapsed_projection ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s

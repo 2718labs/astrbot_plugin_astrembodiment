@@ -1,0 +1,12 @@
+[package]
+name = "ae-semantic-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ae-fixed.workspace = true
+ae-contracts.workspace = true
+ae-attention.workspace = true
+ae-neurofield.workspace = true
+thiserror.workspace = true

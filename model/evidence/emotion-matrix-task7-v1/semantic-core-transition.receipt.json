@@ -1,0 +1,106 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task7-v1-semantic-core-transition",
+  "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf",
+  "command": "cargo test --locked --offline -p ae-semantic-core --test user_stimulus_transition --jobs 1 pure_transition_preserves_the_frozen_dynamics_and_wire_closure -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-semantic-core",
+    "--test",
+    "user_stimulus_transition",
+    "--jobs",
+    "1",
+    "pure_transition_preserves_the_frozen_dynamics_and_wire_closure",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t7-evidence",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.stdout.log",
+      "sha256": "8118be678e610673ba2dafe351c46f640072f8879bb4fb03b4b53e36ae211f22"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.stderr.log",
+      "sha256": "1a186bf33214926f0f3dee20704c9f30d9e48b23dae97f8881e81ded9df954d8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "283785721f19a451c741a3515c9d540765bfaaf8510dec11de8122c94a0192c7"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5708e225a0e63e77786c2f60c41b0ef9d00cdacb86dcff8ea47b6285d34e920a"
+    },
+    {
+      "path": "crates/ae-contracts/Cargo.toml",
+      "sha256": "82d868d9c57ab16ec502d6bf89e4c3aef52ff9d3ffbcfafa65b1661fd5476eba"
+    },
+    {
+      "path": "crates/ae-contracts/src/emotion_matrix.rs",
+      "sha256": "300233d62589cab536b33d153f7b97e5a419336cd14a57e153b60612b97e5708"
+    },
+    {
+      "path": "crates/ae-attention/Cargo.toml",
+      "sha256": "b2710862cd9fd7b1ea340946f914980db36c81c74bbe2d7003e54dfcfcbddad4"
+    },
+    {
+      "path": "crates/ae-attention/src/emotion_matrix.rs",
+      "sha256": "d7d181a10543114ba406597e503fae2e705cf4be1ddf0cc78dc02306fa64ba6c"
+    },
+    {
+      "path": "crates/ae-neurofield/Cargo.toml",
+      "sha256": "a49cb3ab041dece44c1d59a2bd0639cf78a8e4deb544f0342b1fdd04bdf0c0a2"
+    },
+    {
+      "path": "crates/ae-neurofield/src/lib.rs",
+      "sha256": "eda270f8e8ff2c9e20e7ea547ab8ba8016701923f601f9999f044c6ded80fec9"
+    },
+    {
+      "path": "crates/ae-semantic-core/Cargo.toml",
+      "sha256": "7e88edf3ddb1e6bee50bafe3969fcc0ed393e4f2bc0c0dc274b56fd18ce78028"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/lib.rs",
+      "sha256": "57869e5e4ddfebaf1fef8d3cb7b6243eb545f0e26b61c07181e5af4f7ac39db5"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/codec.rs",
+      "sha256": "fb70cf4f10a47a3be45a3dcebcf9809220a854d604fea1c3160f606a45f5ad03"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/semantic_dynamics_v2.rs",
+      "sha256": "4f07236d1f1898c64ae532aacc2db956635d1406ae25ff215031073efe6e71e7"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/semantic_telemetry_v1.rs",
+      "sha256": "2d326138833646ca2bbd7189daf253f094498f4526cb4ea27b380b3302e2e9cc"
+    },
+    {
+      "path": "crates/ae-semantic-core/tests/user_stimulus_transition.rs",
+      "sha256": "091328d73d9caf5f1c2b502e00ed996c3d04ef41bea5c88da5202cc0db4e949f"
+    }
+  ]
+}

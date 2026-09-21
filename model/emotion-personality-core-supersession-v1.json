@@ -1,0 +1,346 @@
+{
+  "schema": "ae.emotion-personality-core-supersession.v1",
+  "approved_specs": [
+    {
+      "path": "docs/superpowers/specs/2026-08-30-emotion-matrix-forward-port-design.md",
+      "commit": "8a8b5b233f34911e3af774a7f30d28b91a58c0b4",
+      "blob": "6bd9a4756de57421807c9349fd6ce6a3cf5a8c8c"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-31-emotion-personality-core-boundary-design.md",
+      "commit": "8a8b5b233f34911e3af774a7f30d28b91a58c0b4",
+      "blob": "2e2b4f2460136c1624b7a2e654b9bf7b14fe27a5"
+    }
+  ],
+  "superseded_plans": [
+    {
+      "plan_id": "emotion-matrix-forward-port",
+      "path": "docs/superpowers/plans/2026-08-30-emotion-matrix-forward-port.md",
+      "commit": "459069d28026b7d8b93a289d67c7b1b8a4b2b0c2",
+      "blob": "3eec50c4a5229c97d4399e7d9a1d52e6b7b906a8",
+      "task_universe": [
+        "task-01",
+        "task-02",
+        "task-03",
+        "task-04",
+        "task-05",
+        "task-06",
+        "task-07",
+        "task-08",
+        "task-09",
+        "interleave-p4",
+        "task-10",
+        "interleave-p5",
+        "task-11",
+        "task-12",
+        "task-13"
+      ],
+      "task_dispositions": [
+        {
+          "legacy_task_id": "task-01",
+          "disposition": "COMPLETED_PRESERVED",
+          "replacement_current_task_ids": [
+            "task-01"
+          ]
+        },
+        {
+          "legacy_task_id": "task-02",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-02"
+          ]
+        },
+        {
+          "legacy_task_id": "task-03",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-03"
+          ]
+        },
+        {
+          "legacy_task_id": "task-04",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-04"
+          ]
+        },
+        {
+          "legacy_task_id": "task-05",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-05"
+          ]
+        },
+        {
+          "legacy_task_id": "task-06",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-06"
+          ]
+        },
+        {
+          "legacy_task_id": "task-07",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-07"
+          ]
+        },
+        {
+          "legacy_task_id": "task-08",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-08"
+          ]
+        },
+        {
+          "legacy_task_id": "task-09",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-09"
+          ]
+        },
+        {
+          "legacy_task_id": "interleave-p4",
+          "disposition": "CANCELLED_ACTIVE_SEND",
+          "replacement_current_task_ids": [
+            "task-12"
+          ]
+        },
+        {
+          "legacy_task_id": "task-10",
+          "disposition": "CANCELLED_ACTIVE_SEND",
+          "replacement_current_task_ids": [
+            "task-12",
+            "task-13"
+          ]
+        },
+        {
+          "legacy_task_id": "interleave-p5",
+          "disposition": "CANCELLED_ACTIVE_SEND",
+          "replacement_current_task_ids": [
+            "task-12"
+          ]
+        },
+        {
+          "legacy_task_id": "task-11",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-12",
+            "task-14"
+          ]
+        },
+        {
+          "legacy_task_id": "task-12",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-15"
+          ]
+        },
+        {
+          "legacy_task_id": "task-13",
+          "disposition": "ADAPTED_BY_THIS_PLAN",
+          "replacement_current_task_ids": [
+            "task-16"
+          ]
+        }
+      ]
+    },
+    {
+      "plan_id": "proactive-settings-simplification",
+      "path": "docs/superpowers/plans/2026-08-30-proactive-settings-simplification.md",
+      "commit": "88a81da65cb5800e1e8fd1d78c16f43eff0792fb",
+      "blob": "f683d80d921b3e3d60d67f98a78824ece1c4c48e",
+      "task_universe": [
+        "task-01",
+        "task-02",
+        "task-03",
+        "task-04",
+        "task-05",
+        "task-06",
+        "task-07"
+      ],
+      "task_dispositions": [
+        {
+          "legacy_task_id": "task-01",
+          "disposition": "HISTORY_PRESERVED_RUNTIME_RETIRED",
+          "replacement_current_task_ids": [
+            "task-12"
+          ]
+        },
+        {
+          "legacy_task_id": "task-02",
+          "disposition": "HISTORY_PRESERVED_RUNTIME_RETIRED",
+          "replacement_current_task_ids": [
+            "task-12"
+          ]
+        },
+        {
+          "legacy_task_id": "task-03",
+          "disposition": "HISTORY_PRESERVED_RUNTIME_RETIRED",
+          "replacement_current_task_ids": [
+            "task-12"
+          ]
+        },
+        {
+          "legacy_task_id": "task-04",
+          "disposition": "CANCELLED_ACTIVE_SEND",
+          "replacement_current_task_ids": [
+            "task-12"
+          ]
+        },
+        {
+          "legacy_task_id": "task-05",
+          "disposition": "CANCELLED_ACTIVE_SEND",
+          "replacement_current_task_ids": [
+            "task-12"
+          ]
+        },
+        {
+          "legacy_task_id": "task-06",
+          "disposition": "SUPERSEDED_RELEASE_GATES",
+          "replacement_current_task_ids": [
+            "task-15"
+          ]
+        },
+        {
+          "legacy_task_id": "task-07",
+          "disposition": "SUPERSEDED_RELEASE_GATES",
+          "replacement_current_task_ids": [
+            "task-16"
+          ]
+        }
+      ]
+    }
+  ],
+  "preserved_commits": {
+    "matrix_provenance_task_1": [
+      "ef2a1f6df08800dcd4fee794349c6f883e409013",
+      "f700f49b59b62a8461993c0e7b036793dea11288",
+      "ece92b3f21c85d3ed4319283326f25f1ceb01ad0",
+      "e60549f816d209e6b0d82097eb7395c74836bf7c"
+    ],
+    "old_proactive_tasks_1_to_3": [
+      "3c60c06bd132cc5d1659cb02ea238317c9fb24e4",
+      "39f61c9f59eed8dfba81aa2afc5cca8ad9fa2da5",
+      "952798ae74b34300eca7a4bd5085c3fe92e560fc",
+      "26fa25db03a1901c627ea56c76fbae9d471f30b3",
+      "e2900333cf5400b1da93ddffaa8b86d4213e54fc",
+      "565cd2f2725bd59acddd769df895dd12ff882464",
+      "cf3cd7a96f76171732f4534fab9ffe8dd81390d5",
+      "1e67b3602a15597e1500f2d358184f7b53bd2621",
+      "b05d7b58eb21b91c2d931d8b7efcbcace4175381"
+    ]
+  },
+  "frozen_provenance": {
+    "path": "model/emotion-matrix-provenance-v1.json",
+    "frozen_at_commit": "e60549f816d209e6b0d82097eb7395c74836bf7c",
+    "blob": "1747b5550aa986b55535f688c418bfe6bec8a34f",
+    "path_commits": [
+      "ece92b3f21c85d3ed4319283326f25f1ceb01ad0",
+      "ef2a1f6df08800dcd4fee794349c6f883e409013"
+    ],
+    "task_commits": [
+      "ef2a1f6df08800dcd4fee794349c6f883e409013",
+      "f700f49b59b62a8461993c0e7b036793dea11288",
+      "ece92b3f21c85d3ed4319283326f25f1ceb01ad0",
+      "e60549f816d209e6b0d82097eb7395c74836bf7c"
+    ]
+  },
+  "active_plan": {
+    "path": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock.md",
+    "commit": "43a3d9abfe59430498cd3ff946af95bac61a48d4",
+    "blob": "2817cca5fced3c1b53f744fb3141aa1c5ae71839"
+  },
+  "parity_capability_count": 43,
+  "matrix_provenance_task_1": "COMPLETED_PRESERVED",
+  "old_matrix_tasks_2_to_9": "ADAPTED_BY_THIS_PLAN",
+  "old_matrix_task_10": "CANCELLED_ACTIVE_SEND",
+  "old_proactive_tasks_1_to_3": "HISTORY_PRESERVED_RUNTIME_RETIRED",
+  "old_proactive_tasks_4_to_5": "CANCELLED_ACTIVE_SEND",
+  "old_proactive_tasks_6_to_7": "SUPERSEDED_RELEASE_GATES",
+  "forbidden_active_capabilities": [
+    "proactive.scheduler",
+    "proactive.send_time",
+    "host.pending_autonomy_work",
+    "host.recover_autonomy",
+    "recipient.enumerate",
+    "recipient.rank",
+    "recipient.select",
+    "proactive.provider.select",
+    "proactive.provider.generate",
+    "proactive.provider.usage_settlement",
+    "proactive.provider.token_budget",
+    "proactive.outbox.materialize",
+    "proactive.outbox.recover",
+    "proactive.outbox.retry",
+    "host.submit_proactive_message",
+    "platform.proactive_delivery",
+    "network.background_client",
+    "proactive.externalization.claim",
+    "proactive.externalization.settlement",
+    "proactive.dispatch.claim",
+    "proactive.dispatch.settlement"
+  ],
+  "forbidden_capability_categories": {
+    "supervisor": [
+      "proactive.scheduler",
+      "proactive.send_time",
+      "host.pending_autonomy_work",
+      "host.recover_autonomy"
+    ],
+    "recipient discovery": [
+      "recipient.enumerate",
+      "recipient.rank",
+      "recipient.select"
+    ],
+    "proactive LLM generation": [
+      "proactive.provider.select",
+      "proactive.provider.generate"
+    ],
+    "proactive token budget": [
+      "proactive.provider.usage_settlement",
+      "proactive.provider.token_budget"
+    ],
+    "outbox retry": [
+      "proactive.outbox.materialize",
+      "proactive.outbox.recover",
+      "proactive.outbox.retry"
+    ],
+    "platform proactive delivery": [
+      "host.submit_proactive_message",
+      "platform.proactive_delivery",
+      "network.background_client"
+    ],
+    "externalization claim": [
+      "proactive.externalization.claim",
+      "proactive.externalization.settlement"
+    ],
+    "dispatch claim": [
+      "proactive.dispatch.claim",
+      "proactive.dispatch.settlement"
+    ]
+  },
+  "previous_active_plan": {
+    "path": "docs/superpowers/plans/2026-08-31-emotion-personality-core.md",
+    "commit": "fa5c003fd437b0ab5b0e8b0d7b80066964204cde",
+    "blob": "68479e6b41e99d38d279548bb658b59bd44384f4"
+  },
+  "core_boundary_addendum": {
+    "authority_id": "AE-T11T12-CORE-BOUNDARY-R2",
+    "previous_plan_dispositions": {
+      "tasks-01-to-10": "PRESERVED_UNLESS_CONFLICTING_WITH_CORE_BOUNDARY",
+      "task-11": "SUPERSEDED_BY_11A_11B_11C",
+      "task-12": "SUPERSEDED_BY_12A_12B",
+      "task-13": "CANCELLED_CONTACT_INTENT_PROJECTION",
+      "task-14": "CANCELLED_CONTACT_INTENT_PROJECTION",
+      "tasks-15-to-16": "SUPERSEDED_RELEASE_GATES_12B"
+    },
+    "historical_task_mapping_scope": "Earlier replacement_current_task_ids refer to the preserved 2026-08-31 plan snapshot; they are not current execution authorization.",
+    "current_matrix_gate": "crates/ae-runtime/tests/core_matrix_regression.rs",
+    "pending_release_capability_ids": [
+      "windows-native-export",
+      "linux-native-export",
+      "universal-package-members"
+    ]
+  }
+}

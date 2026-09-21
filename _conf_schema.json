@@ -3,8 +3,16 @@
     "description": "运行资源档位",
     "hint": "只影响运行时资源包络，不改变身份公式或行为。",
     "type": "string",
-    "options": ["auto", "reference-2c2g-v1", "compat-1c1g-v1"],
-    "labels": ["自动", "参考资源档位（2 核 2G）", "兼容资源档位（1 核 1G）"],
+    "options": [
+      "auto",
+      "reference-2c2g-v1",
+      "compat-1c1g-v1"
+    ],
+    "labels": [
+      "自动",
+      "参考资源档位（2 核 2G）",
+      "兼容资源档位（1 核 1G）"
+    ],
     "default": "auto"
   },
   "native_data_dir": {
@@ -13,17 +21,50 @@
     "type": "string",
     "default": ""
   },
-  "observatory_enabled": {
-    "description": "启用只读诊断",
-    "hint": "只记录不含消息正文的运行状态信息。",
+  "embodiment_clock_enabled": {
+    "description": "启用角色生理时钟",
+    "hint": "本地确定性时钟，不调用模型、不发送消息、不消耗 Token。",
     "type": "bool",
     "default": true
   },
-  "proactive_enabled": {
-    "description": "允许提出主动联系建议",
-    "hint": "实际发送仍由 AstrBot 和用户控制；MVP 默认关闭。",
-    "type": "bool",
-    "default": false
+  "persona_timezone": {
+    "description": "角色独立时区",
+    "type": "string",
+    "default": "America/Los_Angeles"
+  },
+  "persona_sleep": {
+    "description": "角色睡眠",
+    "type": "object",
+    "items": {
+      "mode": {
+        "description": "睡眠模式",
+        "type": "string",
+        "options": [
+          "auto",
+          "fixed"
+        ],
+        "default": "auto"
+      },
+      "sleep": {
+        "description": "固定模式入睡时间",
+        "type": "string",
+        "default": "01:30"
+      },
+      "wake": {
+        "description": "固定模式醒来时间",
+        "type": "string",
+        "default": "09:30"
+      }
+    },
+    "default": {}
+  },
+  "semantic_appraisal_token_daily_max": {
+    "description": "语义情感评估每日预算",
+    "hint": "按角色与原生 UTC 日独立结算；默认 16384，设为 0 可完全关闭语义评估，最大 1000000。未知用量按本次完整预留量收费。",
+    "type": "int",
+    "default": 16384,
+    "min": 0,
+    "max": 1000000
   },
   "model_settings": {
     "description": "模型辅助设置",
@@ -32,6 +73,13 @@
       "assistant_provider_id": {
         "description": "辅助模型 Provider",
         "hint": "非空时强制使用该 Provider；留空时使用当前会话模型。",
+        "type": "string",
+        "_special": "select_provider",
+        "default": ""
+      },
+      "semantic_estimator_provider_id": {
+        "description": "语义情感评估 Provider",
+        "hint": "留空时依次使用辅助模型 Provider、当前会话 Provider。每个授权入站最多调用一次。",
         "type": "string",
         "_special": "select_provider",
         "default": ""

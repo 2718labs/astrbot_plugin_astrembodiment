@@ -1,0 +1,6 @@
+
+running 2 tests
+test semantic::tests::semantic_v4_time_limit_is_persona_local_not_database_global ... ok
+test semantic::tests::semantic_v4_time_walk_is_keyset_scoped_by_persona ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.00s

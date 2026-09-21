@@ -1,0 +1,403 @@
+{
+  "schema": "ae.emotion-matrix-task7-evidence-custody.v1",
+  "status": "EARNED_AFTER_REVIEW",
+  "code_anchor": "eb09cbf4aabf1a13cfebec85024d07d045de59cf",
+  "review_preconditions": {
+    "code_spec": "APPROVED",
+    "quality": "APPROVED",
+    "reviewed_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+  },
+  "prior_parity": {
+    "mapped_capability_count": 25,
+    "unmapped_capability_count": 18,
+    "release_gate": "NO_GO"
+  },
+  "newly_mapped_capability_ids": [
+    "evidence-canonical-codec",
+    "independent-semantic-cursor",
+    "relation-private-evidence",
+    "persona-global-mood"
+  ],
+  "primary_receipts": {
+    "evidence-canonical-codec": {
+      "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+      "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    "independent-semantic-cursor": {
+      "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+      "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    "relation-private-evidence": {
+      "locator": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.receipt.json",
+      "sha256": "43a59bf6637805bcdef27cfac6588997436d7bc5660b8e67736dff9644718258",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    "persona-global-mood": {
+      "locator": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.receipt.json",
+      "sha256": "43a59bf6637805bcdef27cfac6588997436d7bc5660b8e67736dff9644718258",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    }
+  },
+  "supporting_claim_receipts": {
+    "paired-atomic-commit": [
+      {
+        "claims": [
+          "evidence-canonical-codec",
+          "independent-semantic-cursor",
+          "paired-atomic-commit",
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+        "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "paired-atomic-commit",
+          "stale-base-rejection"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/runtime-invalid-stale-atomic.receipt.json",
+        "sha256": "dc780c67d1aefbeda11e0d2de00029d885e875345a07c9313d8811b3aa4b2f8e",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "paired-atomic-commit",
+          "event-deduplication",
+          "stale-base-rejection",
+          "identity-conflict-rejection"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/store-dedupe-stale-identity.receipt.json",
+        "sha256": "8b879a18e26415fba532d0d35ea609faa90e2a746261fa7573f2df8f6dc04038",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "event-deduplication": [
+      {
+        "claims": [
+          "event-deduplication",
+          "host-trust-boundary"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/host-origin-authority-retry.receipt.json",
+        "sha256": "0e31a8bb7bb250646269535c217b288084f0544fc684d482c9891d21026db224",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "paired-atomic-commit",
+          "event-deduplication",
+          "stale-base-rejection",
+          "identity-conflict-rejection"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/store-dedupe-stale-identity.receipt.json",
+        "sha256": "8b879a18e26415fba532d0d35ea609faa90e2a746261fa7573f2df8f6dc04038",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "stale-base-rejection": [
+      {
+        "claims": [
+          "paired-atomic-commit",
+          "stale-base-rejection"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/runtime-invalid-stale-atomic.receipt.json",
+        "sha256": "dc780c67d1aefbeda11e0d2de00029d885e875345a07c9313d8811b3aa4b2f8e",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "paired-atomic-commit",
+          "event-deduplication",
+          "stale-base-rejection",
+          "identity-conflict-rejection"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/store-dedupe-stale-identity.receipt.json",
+        "sha256": "8b879a18e26415fba532d0d35ea609faa90e2a746261fa7573f2df8f6dc04038",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "identity-conflict-rejection": [
+      {
+        "claims": [
+          "relation-private-evidence",
+          "persona-global-mood",
+          "identity-conflict-rejection"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.receipt.json",
+        "sha256": "43a59bf6637805bcdef27cfac6588997436d7bc5660b8e67736dff9644718258",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "paired-atomic-commit",
+          "event-deduplication",
+          "stale-base-rejection",
+          "identity-conflict-rejection"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/store-dedupe-stale-identity.receipt.json",
+        "sha256": "8b879a18e26415fba532d0d35ea609faa90e2a746261fa7573f2df8f6dc04038",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "semantic-vector-receipt-v2": [
+      {
+        "claims": [
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write",
+          "energy-telemetry",
+          "capacity-telemetry",
+          "renormalization-residual-telemetry"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.receipt.json",
+        "sha256": "ce17394c7d36f21623890f82b51f8c80070ab5682e34e6c7b533dbdb302002c2",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "evidence-canonical-codec",
+          "independent-semantic-cursor",
+          "paired-atomic-commit",
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+        "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "aesem3-current-write": [
+      {
+        "claims": [
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write",
+          "energy-telemetry",
+          "capacity-telemetry",
+          "renormalization-residual-telemetry"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.receipt.json",
+        "sha256": "ce17394c7d36f21623890f82b51f8c80070ab5682e34e6c7b533dbdb302002c2",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "evidence-canonical-codec",
+          "independent-semantic-cursor",
+          "paired-atomic-commit",
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+        "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "energy-telemetry": [
+      {
+        "claims": [
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write",
+          "energy-telemetry",
+          "capacity-telemetry",
+          "renormalization-residual-telemetry"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.receipt.json",
+        "sha256": "ce17394c7d36f21623890f82b51f8c80070ab5682e34e6c7b533dbdb302002c2",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "capacity-telemetry": [
+      {
+        "claims": [
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write",
+          "energy-telemetry",
+          "capacity-telemetry",
+          "renormalization-residual-telemetry"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.receipt.json",
+        "sha256": "ce17394c7d36f21623890f82b51f8c80070ab5682e34e6c7b533dbdb302002c2",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "renormalization-residual-telemetry": [
+      {
+        "claims": [
+          "semantic-vector-receipt-v2",
+          "aesem3-current-write",
+          "energy-telemetry",
+          "capacity-telemetry",
+          "renormalization-residual-telemetry"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.receipt.json",
+        "sha256": "ce17394c7d36f21623890f82b51f8c80070ab5682e34e6c7b533dbdb302002c2",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ]
+  },
+  "exact_receipts": [
+    {
+      "claims": [
+        "semantic-vector-receipt-v2",
+        "aesem3-current-write",
+        "energy-telemetry",
+        "capacity-telemetry",
+        "renormalization-residual-telemetry"
+      ],
+      "locator": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.receipt.json",
+      "sha256": "ce17394c7d36f21623890f82b51f8c80070ab5682e34e6c7b533dbdb302002c2",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    {
+      "claims": [
+        "evidence-canonical-codec",
+        "independent-semantic-cursor",
+        "paired-atomic-commit",
+        "semantic-vector-receipt-v2",
+        "aesem3-current-write"
+      ],
+      "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+      "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    {
+      "claims": [
+        "relation-private-evidence",
+        "persona-global-mood",
+        "identity-conflict-rejection"
+      ],
+      "locator": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.receipt.json",
+      "sha256": "43a59bf6637805bcdef27cfac6588997436d7bc5660b8e67736dff9644718258",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    {
+      "claims": [
+        "paired-atomic-commit",
+        "stale-base-rejection"
+      ],
+      "locator": "model/evidence/emotion-matrix-task7-v1/runtime-invalid-stale-atomic.receipt.json",
+      "sha256": "dc780c67d1aefbeda11e0d2de00029d885e875345a07c9313d8811b3aa4b2f8e",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    {
+      "claims": [
+        "paired-atomic-commit",
+        "event-deduplication",
+        "stale-base-rejection",
+        "identity-conflict-rejection"
+      ],
+      "locator": "model/evidence/emotion-matrix-task7-v1/store-dedupe-stale-identity.receipt.json",
+      "sha256": "8b879a18e26415fba532d0d35ea609faa90e2a746261fa7573f2df8f6dc04038",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    {
+      "claims": [
+        "event-deduplication",
+        "host-trust-boundary"
+      ],
+      "locator": "model/evidence/emotion-matrix-task7-v1/host-origin-authority-retry.receipt.json",
+      "sha256": "0e31a8bb7bb250646269535c217b288084f0544fc684d482c9891d21026db224",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    },
+    {
+      "claims": [
+        "host-trust-boundary"
+      ],
+      "locator": "model/evidence/emotion-matrix-task7-v1/host-nonhost-rejection.receipt.json",
+      "sha256": "e31b85158268c245bf099823830dfee7c25c7744a173e33b571c6bb3703d6399",
+      "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+    }
+  ],
+  "semantic_core_extraction": {
+    "extraction_commit": "616c9839b20fa000782be13eab0e8caebbfe92f8",
+    "pre_extraction_parent": "1202e1f95daecd6a9f1c5761fec1207b92eb4201",
+    "exact_blob_equivalence": {
+      "scope": "whole-file semantic_dynamics_v2 only",
+      "source": {
+        "commit": "1202e1f95daecd6a9f1c5761fec1207b92eb4201",
+        "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+        "git_blob": "69d6a27fed7faec98c8a7eddd1a09484dfcd758d"
+      },
+      "extracted": {
+        "commit": "616c9839b20fa000782be13eab0e8caebbfe92f8",
+        "path": "crates/ae-semantic-core/src/semantic_dynamics_v2.rs",
+        "git_blob": "69d6a27fed7faec98c8a7eddd1a09484dfcd758d"
+      },
+      "reviewed_head": {
+        "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf",
+        "path": "crates/ae-semantic-core/src/semantic_dynamics_v2.rs",
+        "git_blob": "69d6a27fed7faec98c8a7eddd1a09484dfcd758d"
+      }
+    },
+    "adapted_core_blobs": [
+      {
+        "path": "crates/ae-semantic-core/src/codec.rs",
+        "git_blob": "3faeb8f5dd9e62459b32d383393385952991b4de",
+        "sha256": "fb70cf4f10a47a3be45a3dcebcf9809220a854d604fea1c3160f606a45f5ad03"
+      },
+      {
+        "path": "crates/ae-semantic-core/src/lib.rs",
+        "git_blob": "749bb910ae809e5b24b8d29e69e39cb3e69a07aa",
+        "sha256": "57869e5e4ddfebaf1fef8d3cb7b6243eb545f0e26b61c07181e5af4f7ac39db5"
+      },
+      {
+        "path": "crates/ae-semantic-core/src/semantic_telemetry_v1.rs",
+        "git_blob": "349fade49acb83b82231b655a6015bdd26a04394",
+        "sha256": "2d326138833646ca2bbd7189daf253f094498f4526cb4ea27b380b3302e2e9cc"
+      }
+    ],
+    "adapted_equivalence_evidence": "model/evidence/emotion-matrix-task7-v1/semantic-core-transition.receipt.json"
+  },
+  "host_trust_boundary": {
+    "assumption": "AstrBot Host metadata is trusted to label a genuinely observed inbound interaction; native code does not authenticate the external network origin itself.",
+    "native_enforcement": [
+      "a challenge is minted only from a committed InboundObserved fact carrying AstrbotMetadata authority",
+      "wrong origin, nonce, scope, or non-Host source produces zero semantic writes",
+      "a consumed challenge permits only exact replay of the already committed proposal"
+    ],
+    "receipts": [
+      {
+        "claims": [
+          "event-deduplication",
+          "host-trust-boundary"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/host-origin-authority-retry.receipt.json",
+        "sha256": "0e31a8bb7bb250646269535c217b288084f0544fc684d482c9891d21026db224",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      },
+      {
+        "claims": [
+          "host-trust-boundary"
+        ],
+        "locator": "model/evidence/emotion-matrix-task7-v1/host-nonhost-rejection.receipt.json",
+        "sha256": "e31b85158268c245bf099823830dfee7c25c7744a173e33b571c6bb3703d6399",
+        "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+      }
+    ],
+    "pyo3_boundary": {
+      "code_anchor": "eb09cbf4aabf1a13cfebec85024d07d045de59cf",
+      "path": "crates/ae-pyo3/src/lib.rs",
+      "git_blob": "1c370d72dd17784e294faf920405d60153d7ea0c",
+      "sha256": "d7287c557e9d3eb456c21bdffee07796dbae7c0ffd1bb322d93e5f3867d427a8",
+      "arbitrary_challenge_mint_exported": false,
+      "raw_user_stimulus_export_rejected": true,
+      "authenticated_proposal_entry_exported": "apply_perception_proposal_v1"
+    }
+  },
+  "non_vacuity": {
+    "exact_receipt_count": 7,
+    "passed_exact_test_count": 7,
+    "distinct_exact_test_identity_count": 7,
+    "runtime_end_to_end_exact_count": 5,
+    "semantic_core_exact_count": 1,
+    "store_exact_count": 1
+  },
+  "parity_after_task7": {
+    "mapped_capability_count": 29,
+    "unmapped_capability_count": 14,
+    "release_gate": "NO_GO"
+  },
+  "custody_note": "Only the four Task 7 capability rows are newly mapped. Earlier dispositions and primary receipts remain unchanged; Task 7 receipts are additional end-to-end support. The release remains NO_GO while any capability is UNMAPPED."
+}

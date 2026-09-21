@@ -1,0 +1,19 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task5-store-api-hooks-list",
+  "target_commit": "91cb4acbeb089eee001b51625b2ced3b66a5af86",
+  "command": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --features migration-test-hooks --jobs 1 -- --list",
+  "argv": ["test", "--locked", "--offline", "-p", "ae-store", "--test", "emotion_matrix_migration_v2", "--features", "migration-test-hooks", "--jobs", "1", "--", "--list"],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {"exit_code": 0, "locked": true, "offline": true, "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-task05-final-target", "cargo_term_color": "never"},
+  "toolchain": {"cargo": "cargo 1.97.0 (c980f4866 2026-06-30)", "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)", "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3", "host": "x86_64-pc-windows-msvc", "llvm": "22.1.6"},
+  "logs": {"normalization": "utf8-lf", "stdout": {"path": "model/evidence/emotion-matrix-task5-v1/store-api-hooks-list.stdout.log", "sha256": "e31c1e541ccddce9b1c125405dd760e17eade9d5a5a0309838553e7fe8b69094"}, "stderr": {"path": "model/evidence/emotion-matrix-task5-v1/store-api-hooks-list.stderr.log", "sha256": "8bd0268a7179ca121900d165b033f383f93610623286c0c1a1df31d8c92f5f85"}},
+  "artifacts": [
+    {"path": "Cargo.lock", "sha256": "876e85b277b52092656ba564ec133b372693be10ab91f338d8d65381a631ec6d"},
+    {"path": "crates/ae-store/Cargo.toml", "sha256": "f6c3414f30d2015a3b143003a6ebec5fec9a55e46e7c44eaad152659f9d9744d"},
+    {"path": "crates/ae-store/src/lib.rs", "sha256": "1740b09465f3af36602f9b62779e71e7faf7c5c16933ecfb3e126ac9bd4d8319"},
+    {"path": "crates/ae-store/tests/emotion_matrix_migration_v2.rs", "sha256": "df7e40fc3b74a123f261df51354bc4712be28412b897fb677165bcdae9379181"}
+  ]
+}

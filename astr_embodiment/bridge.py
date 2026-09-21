@@ -18,10 +18,8 @@ from typing import Any
 
 _STORE_FILENAME = "astrembodiment.sqlite3"
 
-
 class NativeCoreUnavailable(RuntimeError):
     """Raised when the bundled platform wheel cannot be imported."""
-
 
 class NativeCoreError(RuntimeError):
     """Raised by the native core with a stable machine-readable code."""
@@ -31,42 +29,44 @@ class NativeCoreError(RuntimeError):
         self.code = code
         self.detail = detail
 
-
 class GenesisUnavailable(NativeCoreError):
     pass
-
 
 class RetryWait(NativeCoreError):
     pass
 
-
 class SeedDigestCollision(NativeCoreError):
     pass
-
 
 class StaleRevision(NativeCoreError):
     pass
 
-
 class ClosedSchemaViolation(NativeCoreError):
     pass
-
 
 class UnsupportedEventKind(NativeCoreError):
     pass
 
-
 class GenesisRequired(NativeCoreError):
     pass
-
 
 class GenesisManifestMismatch(NativeCoreError):
     pass
 
-
 class StaleCausalBase(NativeCoreError):
     pass
 
+class SemanticAppraisalRetryExpiredOrUnknown(NativeCoreError):
+    """A semantic-appraisal retry can no longer be resolved safely."""
+
+class ObserveInvalidRequest(NativeCoreError):
+    """The closed observation request was rejected by Native."""
+
+class ObserveInvalidCursor(NativeCoreError):
+    """The observation cursor is invalid for its requested persona scope."""
+
+class ObserveProjectionUnavailable(NativeCoreError):
+    """Native could not prove a safe committed observation projection."""
 
 _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "GENESIS_UNAVAILABLE": GenesisUnavailable,
@@ -78,8 +78,13 @@ _ERROR_TYPES: dict[str, type[NativeCoreError]] = {
     "GENESIS_REQUIRED": GenesisRequired,
     "GENESIS_MANIFEST_MISMATCH": GenesisManifestMismatch,
     "STALE_CAUSAL_BASE": StaleCausalBase,
+    "SEMANTIC_APPRAISAL_RETRY_EXPIRED_OR_UNKNOWN": (
+        SemanticAppraisalRetryExpiredOrUnknown
+    ),
+    "OBSERVE_INVALID_REQUEST": ObserveInvalidRequest,
+    "OBSERVE_INVALID_CURSOR": ObserveInvalidCursor,
+    "OBSERVE_PROJECTION_UNAVAILABLE": ObserveProjectionUnavailable,
 }
-
 
 @dataclass(frozen=True, slots=True)
 class NativeHealth:
@@ -87,7 +92,6 @@ class NativeHealth:
     formula: str
     neuron_slots: int
     version: str
-
 
 def _classify(error: BaseException) -> NativeCoreError:
     message = str(error)
@@ -98,18 +102,15 @@ def _classify(error: BaseException) -> NativeCoreError:
     error_type = _ERROR_TYPES.get(code, NativeCoreError)
     return error_type(code, detail)
 
-
 def _parse_payload(result: str) -> dict[str, Any]:
     payload = json.loads(result)
     if not isinstance(payload, dict):
         raise NativeCoreUnavailable("native core returned invalid payload")
     return payload
 
-
 def _bundled_native_package_dir() -> Path:
     """Return the native package beside the plugin's Python packages."""
     return Path(__file__).resolve().parents[1] / "astrembodiment_core"
-
 
 def _native_import_diagnostics(error: ImportError) -> str:
     """Keep the loader's root cause visible in the AstrBot install log."""
@@ -122,7 +123,6 @@ def _native_import_diagnostics(error: ImportError) -> str:
         f"system={platform.system()} "
         f"executable={sys.executable}"
     )
-
 
 def _load_bundled_native() -> Any:
     """Load the bundled core when a host does not expose the plugin root.
@@ -163,7 +163,6 @@ def _load_bundled_native() -> Any:
         sys.modules.pop(module_name, None)
         raise
     return module
-
 
 class NativeBridge:
     def __init__(self) -> None:
@@ -233,18 +232,85 @@ class NativeBridge:
             raise _classify(exc) from exc
         return _parse_payload(result)
 
-    def apply_event(
-        self, scope: dict[str, Any], event: dict[str, Any]
+    def commit_core_inbound_v1(self, request: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.commit_core_inbound_v1(json.dumps(request, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def compile_core_host_request_v1(self, operation: str, request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _parse_payload(self._require().compile_core_host_request_v1(
+                operation, json.dumps(request, ensure_ascii=False, sort_keys=True)
+            ))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def commit_core_delivery_outcome_v1(self, request: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.commit_core_delivery_outcome_v1(json.dumps(request, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def list_embodiment_personas_v1(self, request: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.list_embodiment_personas_v1(json.dumps(request, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def read_embodiment_profile_v1(self, scope: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.read_embodiment_profile_v1(json.dumps(scope, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def get_embodiment_persona_v1(self, scope: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.get_embodiment_persona_v1(json.dumps(scope, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def embodiment_clock_status_v1(self, request: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.embodiment_clock_status_v1(json.dumps(request, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def compare_and_swap_embodiment_profile_v1(self, request: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.compare_and_swap_embodiment_profile_v1(json.dumps(request, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def advance_embodiment_time_v1(self, request_bytes: bytes | list[int]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.advance_embodiment_time_v1(bytes(request_bytes)))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def create_embodiment_persona_if_missing_v1(self, request: dict[str, Any]) -> dict[str, Any]:
+        native = self._require()
+        try:
+            return _parse_payload(native.create_embodiment_persona_if_missing_v1(json.dumps(request, sort_keys=True, separators=(",", ":"))))
+        except Exception as exc:
+            raise _classify(exc) from exc
+
+    def settle_semantic_appraisal_v1(
+        self, request: dict[str, Any]
     ) -> dict[str, Any]:
         native = self._require()
         try:
-            result = native.apply_event(
-                json.dumps(scope, ensure_ascii=False, sort_keys=True),
-                json.dumps(event, ensure_ascii=False, sort_keys=True),
-            )
+            return _parse_payload(native.settle_semantic_appraisal_v1(json.dumps(request, sort_keys=True, separators=(",", ":"))))
         except Exception as exc:
             raise _classify(exc) from exc
-        return _parse_payload(result)
 
     def inspect(self, scope: dict[str, Any]) -> dict[str, Any]:
         native = self._require()

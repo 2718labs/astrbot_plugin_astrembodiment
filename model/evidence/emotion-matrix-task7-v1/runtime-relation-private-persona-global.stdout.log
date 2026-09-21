@@ -1,0 +1,6 @@
+
+running 1 test
+test relation_evidence_is_private_while_persona_mood_is_continuous ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 12.53s
+
