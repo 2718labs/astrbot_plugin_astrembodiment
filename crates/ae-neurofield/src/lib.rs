@@ -12,17 +12,22 @@ use ae_contracts::{wire, Digest, GenesisManifest};
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
 
-mod graph_development;
-mod graph_replay;
-mod structural_delta;
+pub mod graph_development;
+pub mod graph_replay;
+pub mod structural_delta;
 
 pub use graph_development::{develop_graph, GraphDevelopmentError, GraphFormula};
 pub use graph_replay::{
-    bind_delta_to_graph_replay_rule, graph_replay_rule_descriptor, graph_replay_rule_digest,
-    graph_replay_rule_digest_for_descriptor, GraphReplayError, GraphReplayV1, GraphSnapshotV1,
-    GRAPH_REPLAY_FORMULA_V1,
+    bind_delta_to_graph_replay_rule, graph_admission_profile_descriptor,
+    graph_admission_profile_digest, graph_replay_rule_descriptor, graph_replay_rule_digest,
+    graph_replay_rule_digest_for_descriptor, legacy_graph_replay_rule_digest,
+    GraphAdmissionProfileV1, GraphReplayError, GraphReplayV1, GraphSnapshotV1,
+    GRAPH_ADMISSION_DOMAIN_V1, GRAPH_ADMISSION_PROFILE_VERSION_V1, GRAPH_REPLAY_FORMULA_V1,
+    MAX_REPLAY_DELTAS_V1, MAX_SNAPSHOT_CANONICAL_BYTES_V1,
 };
-pub use structural_delta::{apply_delta, DeltaError, EdgeOperationV1, StructuralDeltaV1};
+pub use structural_delta::{
+    apply_delta, DeltaError, EdgeOperationV1, StructuralDeltaV1, MAX_OPERATIONS_PER_DELTA_V1,
+};
 
 pub const NEURON_SLOTS: usize = 16_384;
 pub const EDGE_CAPACITY: usize = 524_288;
@@ -93,6 +98,7 @@ impl NeuralField {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Synapse {
     pub target: u32,
     pub weight: i16,

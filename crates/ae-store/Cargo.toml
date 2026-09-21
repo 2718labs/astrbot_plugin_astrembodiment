@@ -4,25 +4,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Never enabled by production builds. Integration acceptance may opt in to
+# deterministic crash seams without exposing them in ae-store's default API.
+migration-test-hooks = []
+# Historical authority tests may opt in explicitly. This feature is absent
+# from every production/default build and never reaches the Python extension.
+legacy-semantic-test-api = []
 [dependencies]
 ae-contracts.workspace = true
 ae-continuum.workspace = true
+ae-authority.workspace = true
 ae-genesis.workspace = true
 ae-fixed.workspace = true
-ae-authority.workspace = true
 ae-attention.workspace = true
 ae-neurofield.workspace = true
-ae-context-projector.workspace = true
-serde_json.workspace = true
-rusqlite.workspace = true
-thiserror.workspace = true
-sha2 = "0.10"
+ae-semantic-core.workspace = true
+ae-renorm.workspace = true
+ae-autonomy.workspace = true
+ae-platform-fs.workspace = true
+blake3.workspace = true
+constant_time_eq.workspace = true
 getrandom.workspace = true
-aes-gcm.workspace = true
-zeroize.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+rusqlite = { workspace = true, features = ["backup"] }
+thiserror.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Threading"] }
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["hooks", "limits"] }

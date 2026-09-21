@@ -1,169 +1,77 @@
 # AstrEmbodiment
 
-让你的 Bot 不只记住经历，更能延续「Ta 是谁」。
+AstrEmbodiment 是 AstrBot 的 Rust 原生人格情绪、语义评价和确定性身体时钟核心。Genesis 与 SeedCode 为 Persona 建立身份起点；普通对话通过类型化入口提交输入、语义评价和实际投递结果。
 
-<p align="center">
-  <img src="logo.png" alt="AstrEmbodiment" width="260" />
-</p>
+当前源码版本统一为 `1.1.0`（Rust、Python/wheel 与插件元数据）。该版本保留现有无头人格情绪、语义评价、确定性身体时钟核心，并安全兼容精确识别的历史旧 schema。版本去除 alpha 标记仅表示当前源码身份定版，不代表已重建 `1.1.0` 安装包，也不代表 AstrBot 实机安装、对话、重启或生产发布验收；这些仍须以对应外部验证回执为准。生产发布授权门禁仍为 **NO_GO**，既有 alpha5 与更早交付产物保持不变。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/版本-1.0.0-0f766e?style=flat-square" alt="版本 1.0.0">
-  <img src="https://img.shields.io/badge/AstrBot-%3E%3D4.16%2C%3C5-f08c46?style=flat-square" alt="AstrBot >=4.16,<5">
-  <img src="https://img.shields.io/badge/平台-Windows%20x64%20%7C%20Linux%20x86__64-475569?style=flat-square" alt="Windows x64 and Linux x86_64">
-  <img src="https://img.shields.io/badge/许可证-AGPL--3.0--or--later-5b403a?style=flat-square" alt="AGPL-3.0-or-later">
-</p>
+## 能力与边界
 
-AstrEmbodiment 是面向 AstrBot 的 Rust 原生人格连续性运行时。它把当轮互动转化为可验证的语义证据，持续影响后续表达倾向，同时不保存长期聊天正文；当前正式版为 **1.0.0**。
+用户话语 → 15 维闭合语义证据 → 原生状态原子提交 → 受限表达投影。插件升级后继续从持久化原生状态恢复；这种工程状态不等同于意识、主观感受或真实关系。
 
-它以 Rust 原生状态、15 维闭合语义证据和受限表达投影来工作。AstrEmbodiment 不替换 AstrBot 的主模型、事实判断、安全策略、工具策略或权限；它为已有对话能力提供持续而克制的表达上下文。
+- 保留 Persona Genesis、SeedCode、核心情绪状态、语义评价，以及普通对话的投递结算。
+- Persona 独立身体时钟使用随包冻结的 IANA 2026c 数据；时区、日程、单调性和重启状态由原生类型化接口管理。
+- Native 与 Python 包装器仅开放契约规定的 19 个方法，包括无数据库能力的 `compile_core_host_request_v1`。
+- 历史 kind-8 DTO 与 codec 仅用于只读回放、摘要核验和迁移验证，不提供事件提交路径。
+- 主动消息、接触意图、目标/密钥访问、派发和发送执行入口已退休；Pages、Observatory、旧实时心智入口和 AstrCyberHuman 依赖不属于本包。
 
-## 安装
+完整边界见 [Task 11/12 契约](docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/contracts/retired-surface-release.md)。既有配置、数据库、密文和密钥文件不属于源码发布工具的写入范围。
 
-| 要求 | 说明 |
-| --- | --- |
-| AstrBot | `>=4.16,<5` |
-| 平台 | Windows x64 与 Linux x86_64 |
-| 适配器 | 当前支持 `aiocqhttp` |
+## 安装与配置
 
-1. 打开 AstrBot WebUI，进入“插件管理 → 插件市场”，搜索 **AstrEmbodiment**。
-2. 确认作者为 **2718labs** 后安装并启用插件；插件市场会完成兼容包下载。
-3. 升级时保留 AstrBot 分配的插件数据目录；若使用自定义目录，请继续沿用原路径。
+取得已通过同源 Windows x64 与 Linux x86_64 实机导入验证的 universal ZIP 后，使用 AstrBot 插件管理页安装。要求 AstrBot `>=4.16,<5`、CPython 3.12+；Linux 使用兼容 glibc 的 x86_64 wheel。
 
-## 快速开始
+命令 `ae` 显示核心状态，`ae_seed` 查询或生成并保存 SeedCode。首次使用先检查原生加载、Genesis 与普通对话投递，再观察身体时钟在重启后的连续性。
 
-1. 在插件配置页选择“辅助模型 Provider”；留空时使用当前会话 Provider。
-2. 保存配置并开始一次正常对话；首次使用会建立当前 Persona 的 Genesis 与 SeedCode。
-3. 使用 `<命令前缀>ae` 查看运行状态与当前原生运行时信息。
-4. 使用 `<命令前缀>ae_seed` 查看或生成当前人格的 SeedCode。
+配置字段以 [_conf_schema.json](_conf_schema.json) 为准，包括 `runtime_envelope`、`native_data_dir`、`model_settings` 和 `seed_code`。SeedCode 由 AstrBot 保存接口持久化；不要在安装或升级时删除已有 SeedCode、数据库、密文或密钥。退休配置字段不再提供主动执行能力。
 
-完成后，Bot 会在正常对话中逐步形成受限的表达倾向。无需为每次消息手动打标签，也无需迁移或上传历史聊天记录。
+升级兼容以保全现有数据为前提：仅精确识别历史提交 `1774023` 或 `ee10648` 中的已知旧表结构，并且仅在对应 upgrade 表、备份表与 authority 表均为空、且不存在 `AE-LSU1` 升级历史时，才允许在事务内兼容到当前结构。普通业务历史数据完整保留，此门禁不要求整个数据库为空。upgrade 表非空、证据不足或结构未知时，安装必须保全原库并拒绝继续，不得通过删除、清空或重建数据库绕过门禁。
 
-## 核心能力
+## 源码检查与构建
 
-### A｜能力闭环
+源码准备阶段运行：
 
-**用户话语 → 15 维闭合语义证据 → 原生状态原子提交 → 受限表达投影**。
-
-辅助模型负责理解当轮互动，Rust 原生核心负责验证和提交。通过验证的投影只影响当前及后续回复的风格倾向，例如更温和、更谨慎或更重视边界；它不会替主模型作出事实判断或调用工具。
-
-当辅助模型较慢时，主对话会在短暂等待后继续，语义处理转入受限的持久后台任务。未完成的结果不会伪装成本轮已经应用的表达投影，后续也只会使用经过验证的状态。
-
-### B｜人格连续性
-
-同一 Persona 的互动经历保存在持久化原生状态中。普通重载以及**插件升级后继续从持久化原生状态恢复**，因此不必依赖长期聊天正文来维持表达一致性。
-
-SeedCode 是人格连续性的身份标记，不是密码、API 密钥或聊天记录。需要重新开始时，明确删空 SeedCode 并保存即可触发受控重生；普通升级、重载或配置读取异常不会自动重置人格。
-
-这是一种受限、可回放的工程状态，**不等同于意识、主观感受或真实关系**。它不会将 Bot 描述为具有真实情感，也不保存用户画像。
-
-### C｜可观测性
-
-管理员可以查看运行状态、修订进展和聚合诊断。**简洁模式**适合日常运行时的一行摘要；**调试模式**提供结构化的聚合信息，便于定位配置和运行问题。
-
-Observatory 是只读旁路，不能改变生产状态。无论使用哪种模式，都不会记录用户正文、Provider 原始输出、SeedCode 或内部神经拓扑。
-
-## 15 维语义证据
-
-15 维证据描述的是“这一轮互动呈现了什么信号”，不是对用户或 Bot 的心理诊断，也不是一份可长期保存的聊天档案。每个维度使用受限值表达强弱，未出现的信号保持中性。
-
-| 维度 | 面向互动的含义 |
-| --- | --- |
-| `positive` | 友好、肯定或积极反馈 |
-| `affiliation` | 亲近、协作或关系靠近 |
-| `harm` | 伤害、威胁或损害线索 |
-| `boundary` | 边界触碰、越界或边界维护 |
-| `repair` | 道歉、修复或缓和互动 |
-| `repetition` | 重复请求、重复刺激或持续施压 |
-| `new_information` | 新事实、新线索或信息增量 |
-| `constraint_instability` | 要求冲突、规则漂移或约束不稳定 |
-| `epistemic_conflict` | 事实判断、知识或可信度冲突 |
-| `self_responsibility` | 对自身责任的承认或承担 |
-| `other_responsibility` | 对他者责任的归因 |
-| `hostility` | 敌意、攻击或对抗 |
-| `publicness` | 公开场景、旁观压力或社会暴露 |
-| `engagement` | 参与意愿和持续交流投入 |
-| `rejection` | 拒绝、排斥或中止互动 |
-
-这些证据由辅助模型归纳，再由原生核心校验；自由文本不会直接进入原生状态。各维度的数据形状与边界见[数据契约](docs/engineering/DATA_CONTRACTS.md)。
-
-## 工作原理
-
-```mermaid
-flowchart LR
-    U[用户话语] --> P[辅助模型]
-    P --> E[15 维闭合语义证据]
-    E --> R[Rust 原生状态]
-    R --> X[受限表达投影]
-    X --> A[AstrBot 回复]
-    O[Observatory 只读旁路] -. 观察 .-> R
+```text
+cargo check -p astrembodiment-core --offline -j 1
+python scripts/validate_kit.py
+python scripts/scan_core_boundary.py
+python -m pytest tests/test_release_contracts.py tests/test_static_contracts.py
+git diff --check
 ```
 
-每次对话先在当前 Persona 下读取已有状态，再对本轮互动进行受限语义归纳。只有符合闭合语义要求的证据才会更新原生状态；AstrBot 的主模型仍独立生成最终回复。
+发布单元契约使用 `tests/test_release_contracts.py`、`tests/test_production_release_contract.py`、`tests/test_release_workflow_pipeline.py` 和 `tests/test_release_archive_verifier.py`。合成 wheel fixture 仅验证拒绝规则与打包逻辑，不能替代真实 Native 导入或最终归档验收。
 
-这种设计让持续性来自可控状态，而非把聊天正文、摘要、embedding 或用户事实画像当作长期记忆保存。它也不提供主动消息、TTS、社交媒体发布、独立 WebUI 或 HTTP 服务。
+最终构建必须在所有源码和回归迁移提交完成后的干净工作树执行，以同一个完整 40 位 Git SHA 替换下方 `SOURCE_SHA`。构建输出使用新的目录；构建脚本把 SHA 注入 Native，同时将编译身份写入 wheel 的 `astrembodiment_core/build_identity.json` 并更新 RECORD。
 
-## 人格连续性与 SeedCode
+Windows：
 
-Genesis 为 Persona 建立初始身份状态，SeedCode 用于标识同一连续人格。它能帮助管理员确认当前对话使用的是哪个身份，而不会暴露聊天内容。
+```text
+python scripts/package_plugin.py --build-native --source-sha SOURCE_SHA --output dist/1.1.0-win --target x86_64-pc-windows-msvc
+python scripts/package_plugin.py --verify-wheel dist/1.1.0-win/astrembodiment_core-1.1.0-cp312-abi3-win_amd64.whl --output dist/1.1.0-win-import.json
+```
 
-保留插件数据目录即可在日常重载和升级后恢复原有状态。若确实需要为某个 Persona 开启新的经历轨迹，请在配置中明确清空 SeedCode 并保存；这会启动新的受控重生流程。
+Linux 构建（可使用受控交叉工具链，但导入必须发生在实际 Linux x86_64 上）：
 
-不要通过删除插件数据目录来“修复”问题。这样会丢失既有状态，也会让后续诊断缺少必要上下文；优先确认数据目录路径和插件配置是否保持不变。
+```text
+python scripts/package_plugin.py --build-native --source-sha SOURCE_SHA --output dist/1.1.0-linux --target x86_64-unknown-linux-gnu --compatibility manylinux_2_17 --zig
+python scripts/package_plugin.py --verify-wheel PATH_TO_LINUX_WHEEL --output dist/1.1.0-linux-import.json
+```
 
-## 常用配置
+构建入口支持 `--maturin PATH`。实际 wheel 名称以构建输出为准；Linux 导入所在工作树也须处于同一干净 SHA。实机凭据记录解释器、平台、Native 方法集合、wheel/二进制哈希及导入的构建身份。
 
-| 配置 | 使用说明 |
-| --- | --- |
-| 辅助模型 Provider | 选择语义估计所用 Provider；留空使用当前会话 Provider。 |
-| 运行资源档位 | 默认 `auto`；仅资源受限环境需要调整。 |
-| 只读诊断 | 默认开启简洁模式；调试模式仅输出聚合信息。 |
-| 原生数据目录 | 默认使用 AstrBot 分配目录；自定义后升级时保持路径不变。 |
-| SeedCode | 通常无需手动修改；明确删空并保存会触发受控重生流程。 |
+两侧导入通过后才可组装：
 
-这些配置面向部署与日常管理。完整配置范围和默认值请参阅 [`_conf_schema.json`](_conf_schema.json)；二次开发时请以数据契约和源码为准。
+```text
+python scripts/package_plugin.py --source-sha SOURCE_SHA --native-wheel PATH_TO_WINDOWS_WHEEL --native-wheel PATH_TO_LINUX_WHEEL --import-receipt dist/1.1.0-win-import.json --import-receipt dist/1.1.0-linux-import.json --output dist/astrbot_plugin_astrembodiment-1.1.0-universal.zip
+```
 
-## 可观测性与隐私
+现有 `astrembodiment_core/_bundled/manifest.json` 记录双平台 wheel、二进制、同源身份和导入凭据。归档生成后仍需对精确 ZIP 完成 artifact parity、保护样本哈希核验和独立审查。导入凭据是构建证据记录，不是签名或发布授权。
 
-简洁模式提供适合日常查看的一行运行摘要。调试模式提供结构化聚合信息，以便管理员了解语义处理与状态进展；两种模式都没有状态写入权。
+## 自动验证与发布
 
-原始用户文本不会写入原生状态库。日志和 Observatory 不包含用户正文、Provider 原始输出、SeedCode、节点/边数组、权重或拓扑，因此可用于运维观察而不复制对话内容。
+PR CI 在 Windows x64 与实际 Linux x86_64 上，以同一完整 SHA 构建原生 wheel、执行真实导入并生成身份凭据；只有两份凭据与 wheel 的哈希、19 项 API 和源码身份全部匹配才组装 universal ZIP。随后两种系统分别从同一个精确 ZIP 验证 Native 身份、fresh 数据库和历史 `1774023` schema 的 open/close/reopen，以及非空升级证据拒绝后数据保全。退休 `.native-authority` 目录不再自动创建；人为放置的链接、目标内容和既有数据库必须在重开后保持不变，这不表示已验证该路径遭原生拒绝或从未被读取。现役迁移备份校验仍保留。
 
-若语义处理尚未在前台完成，AstrEmbodiment 会让主对话继续，并在后台完成受限处理。已有合法状态会继续保留，不会为了填补等待而制造新的语义结果。
+正式发布仍保留当前 master、成功 CI 来源、annotated tag 对象防漂移、草稿恢复和最小写权限门禁。GitHub Release 只上传确定性 ZIP 与 SHA-256 sidecar；双平台验证回执保存在同次 Actions 运行的 artifacts，ZIP 内记录 wheel 导入凭据。本次 PR 适配本身不代表已经触发发布或完成 AstrBot 实机验收。
 
-## 兼容性与限制
+## 许可
 
-| 项目 | 支持范围 |
-| --- | --- |
-| AstrBot | `>=4.16,<5` |
-| 原生平台 | Windows x64 与 Linux x86_64 |
-| 适配器 | `aiocqhttp` |
-
-未列出的系统架构不在支持范围内。AstrEmbodiment 不保存长期聊天正文，不替换 AstrBot 的主模型、安全策略、工具策略或权限，也不提供独立 WebUI 或 HTTP 服务。
-
-## 常见问题
-
-### 插件没有加载？
-
-请确认插件已经启用，再检查 AstrBot 版本、操作系统和 CPU 架构是否位于支持范围内。
-
-### 为什么本轮没有立刻看到语义结果？
-
-辅助模型可能已转入后台处理。主对话不会因等待 Provider 而长期阻塞，后台结果只会在完成验证后影响后续表达。
-
-### 升级后状态异常怎么办？
-
-先确认插件数据目录没有改变，并检查自定义目录配置是否仍指向原路径。不要通过删除目录来“修复”，以免丢失既有连续状态。
-
-## 开发者资料
-
-- [架构概览](docs/architecture/MVP_ARCHITECTURE.md)
-- [组件目录](docs/architecture/COMPONENT_CATALOG.md)
-- [数据契约](docs/engineering/DATA_CONTRACTS.md)
-- [资源包络](docs/engineering/RESOURCE_ENVELOPES.md)
-- [变更记录](CHANGELOG.md)
-
-二次开发请以源码、数据契约与**共享 API 头**为准；README 不承诺未公开的内部接口。
-
-## 许可证
-
-AstrEmbodiment 使用 [GNU AGPL-3.0-or-later](LICENSE) 发布。
+[AGPL-3.0-or-later](LICENSE)。版本历史见 [CHANGELOG.md](CHANGELOG.md)。

@@ -1,0 +1,66 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task9-v1-contracts-legacy-affect-serde",
+  "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+  "command": "cargo test --locked --offline -p ae-contracts --test alpha3_contracts --jobs 1 legacy_experience_json_without_affect_defaults_to_not_initialized -- --exact --nocapture",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-contracts",
+    "--test",
+    "alpha3_contracts",
+    "--jobs",
+    "1",
+    "legacy_experience_json_without_affect_defaults_to_not_initialized",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t9-evidence-c663f1d",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 4
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task9-v1/contracts-legacy-affect-serde.stdout.log",
+      "sha256": "00920dac6c7f994eed261b5ceb8b77df854fe17a36e901ba7e78b7d62d380caf"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task9-v1/contracts-legacy-affect-serde.stderr.log",
+      "sha256": "621a12bc69ea1830443f3fdc23d399edf276fc7f6feabcff9084ea3e24303266"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "crates/ae-contracts/src/alpha3.rs",
+      "sha256": "7b15921084e497b57e789c10562fdce26758a959439d240fabbbe4e25e827375"
+    },
+    {
+      "path": "crates/ae-contracts/tests/alpha3_contracts.rs",
+      "sha256": "aa82bc1042483b01a71d3ab22419c4d450ebe9fe50da1f252d0bbbe90c227002"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+
+running 1 test
+test dream_residue_and_endogenous_intent_remain_local_and_deterministic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 22.49s

@@ -1,0 +1,3 @@
+   Compiling ae-neurofield v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-neurofield)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.12s
+     Running tests\deterministic_graph_development.rs (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-task03-target\debug\deps\deterministic_graph_development-a63018294335e075.exe)

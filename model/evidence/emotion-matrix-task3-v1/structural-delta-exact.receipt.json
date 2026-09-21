@@ -1,0 +1,88 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task3-structural-delta-exact",
+  "target_commit": "eb3f4d75667b72003ea391286d5104949eabed73",
+  "command": "cargo test --locked --offline -p ae-neurofield --test graph_admission_equivalence composite_add_update_remove_matches_immutable_source_bytes_and_digest -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-neurofield",
+    "--test",
+    "graph_admission_equivalence",
+    "composite_add_update_remove_matches_immutable_source_bytes_and_digest",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-task03-target",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task3-v1/structural-delta-exact.stdout.log",
+      "sha256": "bc9ded7ba0c6d874ad5a8293c478640394a8179af41f803cee172b43ffec77ea"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task3-v1/structural-delta-exact.stderr.log",
+      "sha256": "fa842c5cd05ab2f0b69431d79d06d235bc5f5abd037b86d9d7bbb81aa6072afd"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "5e9f34c176b3de968d2a55f1182eca6bc780b268a0bf5373b3c15918428ce7c8"
+    },
+    {
+      "path": "crates/ae-neurofield/Cargo.toml",
+      "sha256": "a49cb3ab041dece44c1d59a2bd0639cf78a8e4deb544f0342b1fdd04bdf0c0a2"
+    },
+    {
+      "path": "crates/ae-neurofield/src/lib.rs",
+      "sha256": "eda270f8e8ff2c9e20e7ea547ab8ba8016701923f601f9999f044c6ded80fec9"
+    },
+    {
+      "path": "crates/ae-neurofield/src/graph_development.rs",
+      "sha256": "d014151e501e55938200b2773e94a5a2f290ad09cda5c615fff5a6f9969ed00e"
+    },
+    {
+      "path": "crates/ae-neurofield/src/graph_replay.rs",
+      "sha256": "56d47050e85a741c7670908481e727e72302524db98175eaf76eec9fc4f19c1e"
+    },
+    {
+      "path": "crates/ae-neurofield/src/structural_delta.rs",
+      "sha256": "33043fa6e509eaf761c8c8c5134ce27219cee6c86960f3585eca7caee4af5123"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/graph_admission_equivalence.rs",
+      "sha256": "a484282823a1b5944e8729d45b91adc315f8d989fd467030222f2d0f4597efb7"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/vectors/graph-replay-source-v1-nonempty.json",
+      "sha256": "8dbce3645097d566c7b5db5b87b6f774c226e4c077293342ea423862d0deace0"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/vectors/structural-delta-source-v1-composite.bin",
+      "sha256": "2d1cd77abf21cf0224ab409b2ec7121eee17ef034a0d0941874c88163769183c"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/vectors/task3-adapted-source-v1-fixtures.provenance.json",
+      "sha256": "26e3efa2d679695781fdfc31e74e04b433762c8ae0a867ff439aa7bbefbff9e8"
+    }
+  ]
+}

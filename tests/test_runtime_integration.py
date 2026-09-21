@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import inspect
 import json
+import os
 import shutil
 import sys
+import time
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,55 +21,133 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import astr_embodiment.bridge as bridge_module  # noqa: E402
-import main as main_module  # noqa: E402
-from astr_embodiment.auxiliary_transport import AuxiliaryTransportError  # noqa: E402
-from astr_embodiment.contracts import FrozenTurn, ScopeTokens  # noqa: E402
+from astr_embodiment.contracts import ScopeTokens  # noqa: E402
 from astr_embodiment.coordinator import GenesisCoordinator  # noqa: E402
-from astr_embodiment.persona_genesis import PersonaGenesisError  # noqa: E402
-from astr_embodiment.semantic_estimator import (  # noqa: E402
-    SemanticEstimateError,
-    build_perception_proposal_v3,
-    make_request_nonce_digest,
-    parse_estimator_output_v3,
+from astr_embodiment.persona_genesis import (  # noqa: E402
+    PersonaGenesisError,
+    PersonaSourceSnapshot,
+    build_closed_request,
 )
+from astr_embodiment.semantic_contract import DIMENSION_NAMES  # noqa: E402
+import main as main_module  # noqa: E402
 from main import AstrEmbodimentPlugin  # noqa: E402
 
 
-def _unreachable_mandatory_native_abi(*_args: object, **_kwargs: object) -> str:
-    raise AssertionError("loader fixture must not invoke mandatory native ABI stubs")
+AUTONOMY_NATIVE_API = {
+    "alpha3_call",
+    "autonomy_status",
+    "begin_semantic_appraisal_v1",
+    "bind_outbound_target",
+    "bootstrap_autonomy",
+    "claim_wake",
+    "gate_and_claim_dispatch",
+    "gate_and_claim_externalization",
+    "gate_externalization",
+    "host_readiness_witness_digest_v1",
+    "integration_availability_v1",
+    "observe_body_snapshot_v1",
+    "observe_budget_summary_v1",
+    "observe_execution_receipt_v1",
+    "observe_gate_reasons_v1",
+    "pending_autonomy_work",
+    "record_relation_inbound",
+    "recover_autonomy",
+    "scope_digests",
+    "settle_dispatch",
+    "settle_externalization",
+    "settle_semantic_appraisal_v1",
+    "settle_wake",
+    "verify_autonomy_projection",
+    "wake_caller_incarnation_v2",
+}
 
 
-def _install_seed_config_lifecycle_v1(
-    instance: AstrEmbodimentPlugin, *, seed_code: str | None = None
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Expose the mandatory native seed-config lifecycle to a host fixture."""
+def _install_fake_autonomy_api(native) -> None:
+    for symbol in AUTONOMY_NATIVE_API:
+        setattr(native, symbol, lambda *_args, **_kwargs: "{}")
 
-    reconciliations: list[dict[str, object]] = []
-    acknowledgements: list[dict[str, object]] = []
-    writeback = (
-        {
-            "seed_code": seed_code,
-            "mirror_guard": "a" * 64,
-            "writeback_token": "b" * 64,
-        }
-        if seed_code is not None
-        else None
+
+def _fresh_windows_wheel() -> Path | None:
+    override = os.environ.get("AE_FRESH_WINDOWS_WHEEL")
+    return Path(override) if override else None
+
+
+def _fresh_native_genesis_request(scope: ScopeTokens) -> dict[str, object]:
+    source = PersonaSourceSnapshot.freeze(
+        persona_id="fresh-native-boundary",
+        persona={"prompt": "稳定、克制、诚实", "begin_dialogs": ["你好"]},
+        selection="conversation",
     )
-
-    def reconcile(request: dict[str, object]) -> dict[str, object]:
-        reconciliations.append(dict(request))
-        return {
-            "state": "MIRROR_PENDING" if writeback is not None else "MIRROR_ACTIVE",
-            "writeback": writeback,
-        }
-
-    def acknowledge(request: dict[str, object]) -> dict[str, object]:
-        acknowledgements.append(dict(request))
-        return {"state": "MIRROR_ACTIVE"}
-
-    instance._bridge.reconcile_seed_config_v1 = reconcile  # type: ignore[method-assign]
-    instance._bridge.ack_seed_config_writeback_v1 = acknowledge  # type: ignore[method-assign]
-    return reconciliations, acknowledgements
+    trait_names = (
+        "baseline_warmth",
+        "baseline_patience",
+        "sensitivity",
+        "irritability",
+        "composure",
+        "epistemic_pride",
+        "epistemic_openness",
+        "boundary_strength",
+        "forgiveness",
+        "attachment_propensity",
+        "expression_drive",
+        "curiosity",
+    )
+    proposal = {
+        "traits": {
+            name: {"value": 0.5, "confidence": 0.5} for name in trait_names
+        },
+        "expression": {
+            name: 0.5
+            for name in (
+                "warmth",
+                "directness",
+                "verbosity",
+                "self_disclosure",
+                "humor",
+                "formality",
+            )
+        },
+        "allostasis": {
+            name: 0.5
+            for name in (
+                "energy",
+                "arousal",
+                "contact_need",
+                "quiet_need",
+                "expression_pressure",
+                "exploration_drive",
+            )
+        },
+        "epistemic": {
+            name: 0.5
+            for name in (
+                "verification_drive",
+                "confidence_style",
+                "correction_defensiveness",
+                "repair_after_error",
+            )
+        },
+        "social": {
+            name: 0.5
+            for name in (
+                "stranger_distance",
+                "approach_threshold",
+                "rejection_sensitivity",
+                "reciprocity_expectation",
+            )
+        },
+    }
+    return build_closed_request(
+        scope=scope,
+        source=source,
+        proposal=proposal,
+        selection="conversation",
+        compiler_protocol_digest="51" * 32,
+        compiler_model_digest="52" * 32,
+        formula_digest="53" * 32,
+        incarnation_nonce="54" * 32,
+        observed_at_ms=int(time.time() * 1_000),
+    )
 
 
 class FakeConfig(dict):
@@ -76,11 +158,154 @@ class FakeConfig(dict):
     def save_config(self):
         self.save_calls += 1
 
+    async def save_config_async(self):
+        self.save_calls += 1
+        return True
+
 
 class FailingConfig(FakeConfig):
+    async def save_config_async(self):
+        self.save_calls += 1
+        raise OSError("configuration storage is unavailable")
+
     def save_config(self):
         self.save_calls += 1
         raise OSError("configuration storage is unavailable")
+
+
+def test_proactive_settings_migration_save_and_rollback():
+    legacy = {
+        "proactive_enabled": True,
+        "proactive_daily_max": 2,
+        "min_proactive_cooldown_minutes": 360,
+        "quiet_hours_start": "00:30",
+        "quiet_hours_end": "08:30",
+        "quiet_hours_emergency_bypass": True,
+        "intention_ttl_minutes": 1_440,
+        "unanswered_backoff_base_minutes": 360,
+        "unanswered_hard_stop": 3,
+        "emergency_threshold": 0.9,
+        "inner_activity_token_daily_max": 2_048,
+        "native_data_dir": "unchanged",
+    }
+    legacy_keys = tuple(legacy)
+
+    async def run_success():
+        config = FakeConfig(legacy)
+        before = dict(config)
+        instance = AstrEmbodimentPlugin(FakeContext(), config)
+        await instance._prepare_proactive_settings()
+        return config, before, instance
+
+    success, success_before, success_instance = asyncio.run(run_success())
+    assert success.save_calls == 1
+    assert set(success).difference(success_before) == {
+        "proactive_frequency",
+        "user_quiet_hours",
+        "proactive_settings_revision",
+    }
+    assert {key: success[key] for key in legacy_keys} == success_before
+    assert success["proactive_settings_revision"] == 1
+    assert success["proactive_frequency"] == {
+        "mode": "restrained",
+        "custom_daily_max": 2,
+        "custom_cooldown_minutes": 360,
+    }
+    assert success["user_quiet_hours"] == {
+        "start": "00:30",
+        "end": "08:30",
+        "allow_authorized_emergency_bypass": True,
+    }
+    assert success_instance._proactive_policy.source_kind == "new-restrained"
+    assert success_instance._proactive_policy.migration_patch is None
+
+    class RefusingAsyncConfig(FakeConfig):
+        async def save_config_async(self):
+            self.save_calls += 1
+            return False
+
+    async def run_refused():
+        config = RefusingAsyncConfig(legacy)
+        before = dict(config)
+        instance = AstrEmbodimentPlugin(FakeContext(), config)
+        await instance._prepare_proactive_settings()
+        return config, before, instance
+
+    refused, refused_before, refused_instance = asyncio.run(run_refused())
+    assert refused.save_calls == 1
+    assert dict(refused) == refused_before
+    assert refused_instance._proactive_policy.source_kind == "legacy-restrained"
+    assert refused_instance._proactive_policy.configured_mode.value == "restrained"
+    assert refused_instance._proactive_policy.fixed_daily_max == 2
+    assert refused_instance._proactive_policy.fixed_cooldown_ms == 21_600_000
+    assert refused_instance._proactive_policy.failure_reason == "migration-save-failed"
+
+    replacement = {
+        "mode": "custom",
+        "custom_daily_max": 9,
+        "custom_cooldown_minutes": 90,
+    }
+
+    class ConcurrentReplacementConfig(FakeConfig):
+        async def save_config_async(self):
+            self.save_calls += 1
+            self["proactive_frequency"] = dict(replacement)
+            raise OSError("save lost a race")
+
+    async def run_concurrent_failure():
+        config = ConcurrentReplacementConfig(legacy)
+        instance = AstrEmbodimentPlugin(FakeContext(), config)
+        await instance._prepare_proactive_settings()
+        return config, instance
+
+    concurrent, concurrent_instance = asyncio.run(run_concurrent_failure())
+    assert concurrent.save_calls == 1
+    assert concurrent["proactive_frequency"] == replacement
+    assert "user_quiet_hours" not in concurrent
+    assert "proactive_settings_revision" not in concurrent
+    assert {key: concurrent[key] for key in legacy_keys} == legacy
+    assert concurrent_instance._config_values == dict(concurrent)
+    assert concurrent_instance._proactive_policy.source_kind == "legacy-restrained"
+    assert concurrent_instance._proactive_policy.failure_reason == "migration-save-failed"
+
+    class SecondWriteFailsConfig(FakeConfig):
+        def __setitem__(self, key, value):
+            if key == "user_quiet_hours":
+                raise OSError("second patch write failed")
+            super().__setitem__(key, value)
+
+    async def run_partial_write_failure():
+        config = SecondWriteFailsConfig(legacy)
+        before = dict(config)
+        instance = AstrEmbodimentPlugin(FakeContext(), config)
+        await instance._prepare_proactive_settings()
+        return config, before, instance
+
+    partial, partial_before, partial_instance = asyncio.run(
+        run_partial_write_failure()
+    )
+    assert dict(partial) == partial_before
+    assert partial.save_calls == 0
+    assert partial_instance._config_values == partial_before
+    assert partial_instance._proactive_policy.failure_reason == "migration-save-failed"
+
+    class CancelledSaveConfig(FakeConfig):
+        async def save_config_async(self):
+            self.save_calls += 1
+            raise asyncio.CancelledError
+
+    cancelled = CancelledSaveConfig(legacy)
+    cancelled_before = dict(cancelled)
+    cancelled_instance = AstrEmbodimentPlugin(FakeContext(), cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(cancelled_instance._prepare_proactive_settings())
+    assert dict(cancelled) == cancelled_before
+    assert cancelled.save_calls == 1
+    assert cancelled_instance._config_values == cancelled_before
+    assert (
+        cancelled_instance._proactive_policy.failure_reason
+        == "migration-save-failed"
+    )
 
 
 class SyncAstrBotConfig(dict):
@@ -145,6 +370,18 @@ class FakeEvent:
     def get_extra(self, key: str, default=None):
         return self.extra.get(key, default)
 
+    def get_platform_id(self) -> str:
+        return "test"
+
+    def get_self_id(self) -> str:
+        return "bot-1"
+
+    def get_group_id(self) -> str:
+        return ""
+
+    def get_sender_id(self) -> str:
+        return "user-1"
+
 
 class FakeRequest:
     def __init__(self):
@@ -184,146 +421,25 @@ class DefaultPersonaManager(FakePersonaManager):
 
 
 def plugin(config=None, context=None):
-    return AstrEmbodimentPlugin(context or FakeContext(), config or FakeConfig())
+    instance = AstrEmbodimentPlugin(context or FakeContext(), config or FakeConfig())
+    instance._bridge.scope_digests = lambda _scope: {
+        "persona_scope": "a1" * 32,
+        "relation_scope": "b2" * 32,
+    }
+    instance._bridge.bootstrap_autonomy = lambda _request: {}
 
+    def apply_interaction(request):
+        base_revision = request["causal"]["base_revision"]
+        return {
+            "receipt": {
+                "canonical_revision": base_revision + 1,
+                "event_id": request["event_id"],
+            },
+            "applied_fact_count": len(request["facts"]),
+        }
 
-def test_bound_scope_reuses_durable_identity_without_calling_genesis():
-    # format_incarnation_id(&[0; 32]) from ae-genesis: 13 Crockford groups.
-    durable_incarnation_id = (
-        "AE-I1-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000"
-    )
-
-    class BoundBridge:
-        loaded = True
-
-        def __init__(self) -> None:
-            self.genesis_calls = 0
-            self.apply_calls = 0
-
-        def inspect(self, _scope):
-            return {
-                "bound": True,
-                "seed_code": "AE-S1-0123456789ABCDEF",
-                "incarnation_id": durable_incarnation_id,
-                "revision": 14,
-            }
-
-        def ensure_genesis(self, _request):
-            self.genesis_calls += 1
-            raise AssertionError("ordinary reopen must not call ensure_genesis")
-
-        def apply_event(self, _scope, _event):
-            self.apply_calls += 1
-            return {
-                "schema": "astrembodiment.decision.v1",
-                "revision": 15,
-                "deduplicated": False,
-                "context_summary": {
-                    "schema": "astrembodiment.context-summary.v1",
-                    "summary_revision": 1,
-                    "source_continuum_revision": 15,
-                    "dimensions_ema_fxp6": [0] * 15,
-                    "unresolved_boundary": False,
-                    "unresolved_repair": False,
-                    "repetition_count": 1,
-                    "delivery_outcome": "pending",
-                    "summary_digest": "cd" * 32,
-                },
-            }
-
-    async def run():
-        instance = plugin()
-        bridge = BoundBridge()
-        instance._bridge = bridge
-        instance._coordinator = GenesisCoordinator(bridge)  # type: ignore[arg-type]
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
-        bound_keys: list[str] = []
-
-        class BindingRecorder:
-            def bind_semantic_key(self, key: str) -> None:
-                bound_keys.append(key)
-
-        async def resolve(*_args, **_kwargs):
-            return "persona-a", {"prompt": "already durable"}, "conversation"
-
-        instance.resolve_effective_persona = resolve
-        result = await instance._run_genesis(
-            FakeEvent(),
-            FakeRequest(),
-            apply_stimulus=True,
-            transport_context=BindingRecorder(),  # type: ignore[arg-type]
-        )
-        return bridge, result, bound_keys, instance, reconciliations, acknowledgements
-
-    bridge, result, bound_keys, instance, reconciliations, acknowledgements = (
-        asyncio.run(run())
-    )
-    decision, scope, session_key, seq, _turn, base_revision = result
-    assert bridge.genesis_calls == 0
-    assert bridge.apply_calls == 1
-    assert base_revision == 14
-    assert bound_keys == [instance._semantic_request_key(scope, session_key, seq)]
-    assert decision["incarnation_id"] == durable_incarnation_id
-    assert decision["seed_code"] == "AE-S1-0123456789ABCDEF"
-    assert [request["origin"] for request in reconciliations] == [
-        "STARTUP_READ",
-        "PLUGIN_WRITEBACK",
-    ]
-    assert acknowledgements == []
-
-
-def test_first_genesis_binds_auxiliary_context_once_to_its_final_turn_key():
-    class AdvancingBridge:
-        loaded = True
-
-        def __init__(self) -> None:
-            self.revision = 0
-
-        def inspect(self, _scope: str) -> dict[str, object]:
-            return {"bound": self.revision > 0, "revision": self.revision}
-
-    class AdvancingCoordinator:
-        async def ensure_genesis(self, **_kwargs: object) -> dict[str, object]:
-            bridge.revision = 7
-            return {}
-
-        async def first_turn(self, **_kwargs: object) -> dict[str, object]:
-            return {"schema": "astrembodiment.decision.v1", "revision": 7}
-
-    class BindingRecorder:
-        def __init__(self) -> None:
-            self.keys: list[str] = []
-
-        def bind_semantic_key(self, key: str) -> None:
-            self.keys.append(key)
-
-    async def run():
-        instance = plugin()
-        recorder = BindingRecorder()
-        instance._bridge = bridge
-        instance._coordinator = AdvancingCoordinator()  # type: ignore[assignment]
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
-
-        async def resolve(*_args, **_kwargs):
-            return "persona-a", {"prompt": "new durable persona"}, "conversation"
-
-        instance.resolve_effective_persona = resolve
-        result = await instance._run_genesis(
-            FakeEvent(),
-            FakeRequest(),
-            apply_stimulus=True,
-            transport_context=recorder,  # type: ignore[arg-type]
-        )
-        return instance, recorder, result, reconciliations, acknowledgements
-
-    bridge = AdvancingBridge()
-    instance, recorder, result, reconciliations, acknowledgements = asyncio.run(run())
-    _decision, scope, session_key, seq, _turn, base_revision = result
-
-    assert base_revision == 7
-    assert recorder.keys == [instance._semantic_request_key(scope, session_key, seq)]
-    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
-    assert acknowledgements == []
+    instance._bridge.apply_interaction_v1 = apply_interaction
+    return instance
 
 
 def test_explicit_assistant_provider_is_used_without_fallback():
@@ -331,7 +447,7 @@ def test_explicit_assistant_provider_is_used_without_fallback():
         context = FakeContext(configured_provider="helper", current_provider="chat")
         instance = plugin(FakeConfig(assistant_provider_id="helper"), context)
 
-        response = await instance._llm_generate(
+        response = await instance._genesis_generate(
             FakeEvent(), prompt="compile", system_prompt="compiler"
         )
 
@@ -339,161 +455,11 @@ def test_explicit_assistant_provider_is_used_without_fallback():
 
     context, response = asyncio.run(run())
 
-    assert response == '{"ok": true}'
+    assert response.completion_text == '{"ok": true}'
     assert context.current_calls == 0
-    assert context.generate_calls[0] == {
-        "chat_provider_id": "helper",
-        "prompt": "compile",
-        "system_prompt": "compiler",
-        "tools": None,
-    }
-
-
-@pytest.mark.parametrize(
-    (
-        "assistant_provider_id",
-        "legacy_provider_id",
-        "configured_provider",
-        "expected_provider",
-        "expected_current_calls",
-    ),
-    [
-        ("assistant", "legacy", "assistant", "assistant", 0),
-        ("   ", "legacy", "legacy", "legacy", 0),
-        ("   ", "   ", "chat", "chat", 2),
-    ],
-)
-def test_unified_auxiliary_provider_selection_is_shared_by_compiler_and_v3(
-    assistant_provider_id: str,
-    legacy_provider_id: str,
-    configured_provider: str,
-    expected_provider: str,
-    expected_current_calls: int,
-):
-    async def run():
-        context = FakeContext(
-            configured_provider=configured_provider,
-            current_provider="chat",
-        )
-
-        async def generate(**kwargs):
-            context.generate_calls.append(kwargs)
-            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
-
-        context.llm_generate = generate
-        instance = plugin(
-            FakeConfig(
-                model_settings={
-                    "assistant_provider_id": assistant_provider_id,
-                    "semantic_estimator_provider_id": legacy_provider_id,
-                },
-                observatory_enabled=False,
-            ),
-            context,
-        )
-        await instance._llm_generate(
-            FakeEvent(), prompt="compile", system_prompt="compiler"
-        )
-        estimate = await instance._semantic_estimate_v3(
-            FakeEvent(),
-            {
-                "current_turn_text": "current turn",
-                "system_prompt": main_module.SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
-                "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
-                "input": {"context_summary": {}},
-            },
-        )
-        return context, estimate
-
-    context, estimate = asyncio.run(run())
-
-    assert estimate.as_json() == _v3_test_estimate()
-    assert [call["chat_provider_id"] for call in context.generate_calls] == [
-        expected_provider,
-        expected_provider,
-    ]
-    assert context.current_calls == expected_current_calls
-
-
-@pytest.mark.parametrize(
-    ("model_settings", "lookup_raises"),
-    [
-        (
-            {
-                "assistant_provider_id": "assistant-provider-private-id",
-                "semantic_estimator_provider_id": "legacy",
-            },
-            False,
-        ),
-        (
-            {
-                "assistant_provider_id": "   ",
-                "semantic_estimator_provider_id": "legacy-provider-private-id",
-            },
-            True,
-        ),
-    ],
-)
-def test_unified_auxiliary_provider_unavailable_is_fail_closed_for_both_consumers(
-    model_settings: dict[str, str],
-    lookup_raises: bool,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class RecordingLogger:
-        def __init__(self) -> None:
-            self.warning_messages: list[str] = []
-
-        def warning(self, template: str, *args: object) -> None:
-            self.warning_messages.append(template % args if args else template)
-
-    raw_provider_id = next(
-        value for value in model_settings.values() if value not in {"legacy", "   "}
-    )
-    recorder = RecordingLogger()
-    monkeypatch.setattr(main_module, "logger", recorder)
-
-    async def run():
-        context = FakeContext(configured_provider="legacy", current_provider="chat")
-        if lookup_raises:
-
-            def get_provider_by_id(provider_id: str):
-                context.provider_calls.append(provider_id)
-                raise RuntimeError(f"provider lookup failed: {provider_id}")
-
-            context.get_provider_by_id = get_provider_by_id
-        instance = plugin(FakeConfig(model_settings=model_settings), context)
-        event = FakeEvent()
-        request_mapping = {
-            "current_turn_text": "current turn",
-            "system_prompt": main_module.SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
-            "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
-            "input": {"context_summary": {}},
-        }
-        with pytest.raises(AuxiliaryTransportError) as compiler_error:
-            await instance._llm_generate(
-                event, prompt="compile", system_prompt="compiler"
-            )
-        with pytest.raises(SemanticEstimateError) as semantic_error:
-            await instance._semantic_estimate_v3(event, request_mapping)
-        await instance._stop_genesis_turn(event, str(compiler_error.value))
-        return context, event, compiler_error.value, semantic_error.value
-
-    context, event, compiler_error, semantic_error = asyncio.run(run())
-
-    assert context.current_calls == 0
-    assert context.generate_calls == []
-    assert str(compiler_error) == "ESTIMATOR_UNAVAILABLE"
-    assert semantic_error.code == "ESTIMATOR_UNAVAILABLE"
-    assert semantic_error.transport_meta is not None
-    expected_subcode = (
-        "PROVIDER_RESOLUTION_FAILED" if lookup_raises else "PROVIDER_NOT_FOUND"
-    )
-    assert compiler_error.meta.transport_subcode == expected_subcode
-    assert semantic_error.transport_meta.transport_subcode == expected_subcode
-    assert compiler_error.meta.attempted is False
-    assert compiler_error.meta.attempt_count == 0
-    assert raw_provider_id not in "\n".join(recorder.warning_messages)
-    assert raw_provider_id not in "\n".join(event.sent)
+    assert context.generate_calls[0]["chat_provider_id"] == "helper"
+    assert context.generate_calls[0]["contexts"] is None
+    assert context.generate_calls[0]["tools"] is None
 
 
 def test_empty_assistant_provider_uses_current_chat_provider():
@@ -501,7 +467,7 @@ def test_empty_assistant_provider_uses_current_chat_provider():
         context = FakeContext(configured_provider="helper", current_provider="chat")
         instance = plugin(FakeConfig(assistant_provider_id="   "), context)
 
-        await instance._llm_generate(
+        await instance._genesis_generate(
             FakeEvent(), prompt="compile", system_prompt="compiler"
         )
         return context
@@ -519,7 +485,7 @@ def test_nested_assistant_provider_is_used():
             FakeConfig(model_settings={"assistant_provider_id": "helper"}), context
         )
 
-        await instance._llm_generate(
+        await instance._genesis_generate(
             FakeEvent(), prompt="compile", system_prompt="compiler"
         )
         return context
@@ -603,7 +569,7 @@ def test_empty_assistant_provider_uses_current_chat_provider_when_unconfigured()
         context = FakeContext(configured_provider="helper", current_provider="main")
         instance = plugin(FakeConfig(), context)
 
-        await instance._llm_generate(
+        await instance._genesis_generate(
             FakeEvent(), prompt="compile", system_prompt="compiler"
         )
         return context
@@ -614,44 +580,31 @@ def test_empty_assistant_provider_uses_current_chat_provider_when_unconfigured()
     assert context.generate_calls[0]["chat_provider_id"] == "main"
 
 
-def test_invalid_explicit_assistant_provider_does_not_fallback_or_expose_raw_id():
+def test_invalid_explicit_assistant_provider_does_not_fallback():
     async def run():
         context = FakeContext(configured_provider="helper", current_provider="chat")
-        raw_provider_id = "missing-provider-id"
-        instance = plugin(FakeConfig(assistant_provider_id=raw_provider_id), context)
+        instance = plugin(FakeConfig(assistant_provider_id="missing"), context)
 
-        with pytest.raises(
-            AuxiliaryTransportError, match="ESTIMATOR_UNAVAILABLE"
-        ) as exc_info:
-            await instance._llm_generate(
+        with pytest.raises(RuntimeError, match="ESTIMATOR_UNAVAILABLE"):
+            await instance._genesis_generate(
                 FakeEvent(), prompt="compile", system_prompt="compiler"
             )
-        return context, raw_provider_id, exc_info.value
+        return context
 
-    context, raw_provider_id, error = asyncio.run(run())
+    context = asyncio.run(run())
 
     assert context.current_calls == 0
     assert context.generate_calls == []
-    assert raw_provider_id not in str(error)
-    assert error.meta.transport_subcode == "PROVIDER_NOT_FOUND"
-    assert error.meta.attempted is False
-    assert error.meta.attempt_count == 0
 
 
-def test_seed_mirror_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: Path):
+def test_seed_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: Path):
     config_path = tmp_path / "plugin.json"
     first = FakeConfig(seed_code="")
     instance = plugin(first, FakeContext())
 
-    asyncio.run(
-        instance._persist_seed_mirror_v1(
-            seed_code="AE-S1-0123456789ABCDEF",
-            mirror_guard="a" * 64,
-        )
-    )
+    asyncio.run(instance._persist_seed("AE-S1-0123456789ABCDEF"))
 
     assert first["seed_code"] == "AE-S1-0123456789ABCDEF"
-    assert first["seed_mirror_guard_v1"] == "a" * 64
     assert first.save_calls == 1
 
     second = FakeConfig(seed_code=first["seed_code"])
@@ -661,17 +614,12 @@ def test_seed_mirror_is_saved_and_is_visible_to_a_new_plugin_instance(tmp_path: 
     )  # persistence belongs to AstrBotConfig, not plugin files
 
 
-def test_seed_mirror_persistence_rolls_back_when_astrbot_config_save_fails():
+def test_seed_persistence_rolls_back_when_astrbot_config_save_fails():
     config = FailingConfig(seed_code="AE-S1-PREVIOUS")
     instance = plugin(config, FakeContext())
 
     with pytest.raises(OSError, match="storage is unavailable"):
-        asyncio.run(
-            instance._persist_seed_mirror_v1(
-                seed_code="AE-S1-NOT-PERSISTED",
-                mirror_guard="b" * 64,
-            )
-        )
+        asyncio.run(instance._persist_seed("AE-S1-NOT-PERSISTED"))
 
     assert config["seed_code"] == "AE-S1-PREVIOUS"
     assert instance._config_values["seed_code"] == "AE-S1-PREVIOUS"
@@ -691,9 +639,9 @@ def test_request_injection_preserves_original_prompt_and_is_idempotent():
         "may_set_boundary": True,
     }
 
-    instance._inject_request(request, "AE-S1-0123456789ABCDEF", contract)
+    instance._inject_request(request, "AE-S1-0123456789ABCDEF", contract, None)
     first_prompt = request.system_prompt
-    instance._inject_request(request, "AE-S1-0123456789ABCDEF", contract)
+    instance._inject_request(request, "AE-S1-0123456789ABCDEF", contract, None)
 
     assert request.prompt == "用户原始问题"
     assert request.contexts == [{"role": "user", "content": "历史"}]
@@ -716,35 +664,36 @@ def test_on_llm_request_mutates_the_provider_request_with_native_decision():
     async def run():
         instance = plugin(FakeConfig(), FakeContext())
         seed = "AE-S1-0123456789ABCDEF"
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
-            instance, seed_code=seed
-        )
 
-        async def resolve(_event, _request=None):
-            return "persona-1", {"prompt": "你是一个测试人格"}, "conversation"
-
-        async def first_turn(**_kwargs):
-            return {
-                "genesis": {
+        async def run_inbound(_event, _request):
+            return (
+                {
+                    "genesis": {
+                        "seed_code": seed,
+                        "incarnation_id": "AE-I1-0123456789ABCDEF",
+                    },
                     "seed_code": seed,
                     "incarnation_id": "AE-I1-0123456789ABCDEF",
+                    "revision": 1,
+                    "contract": {
+                        "continuous": {"directness": 450000},
+                        "must_verify": True,
+                    },
+                    "reply_affect": None,
                 },
-                "seed_code": seed,
-                "incarnation_id": "AE-I1-0123456789ABCDEF",
-                "revision": 1,
-                "contract": {
-                    "continuous": {"directness": 450000},
-                    "must_verify": True,
-                },
-            }
+                ScopeTokens("bot", "persona", "session"),
+                "session",
+                0,
+                "turn",
+                1,
+            )
 
-        instance.resolve_effective_persona = resolve
-        instance._coordinator.first_turn = first_turn
+        instance._run_inbound = run_inbound
         request = FakeRequest()
         await instance.on_llm_request(FakeEvent(), request)
-        return instance, request, reconciliations, acknowledgements
+        return instance, request
 
-    instance, request, reconciliations, acknowledgements = asyncio.run(run())
+    instance, request = asyncio.run(run())
 
     assert request.prompt == "用户原始问题"
     assert request.contexts == [{"role": "user", "content": "历史"}]
@@ -753,9 +702,197 @@ def test_on_llm_request_mutates_the_provider_request_with_native_decision():
     assert "seed_code=AE-S1-0123456789ABCDEF" in request.system_prompt
     assert "directness=0.450" in request.system_prompt
     assert instance.config["seed_code"] == "AE-S1-0123456789ABCDEF"
-    assert instance.config["seed_mirror_guard_v1"] == "a" * 64
-    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
-    assert acknowledgements[0]["writeback_token"] == "b" * 64
+
+
+def _semantic_budget_receipt(*, exhausted: bool = False):
+    daily_token_limit = 16_384
+    reserved_tokens = 0 if exhausted else 1_024
+    charged_tokens = daily_token_limit if exhausted else 0
+    return {
+        "utc_day": 20_336,
+        "daily_token_limit": daily_token_limit,
+        "reserved_tokens": reserved_tokens,
+        "charged_tokens": charged_tokens,
+        "remaining_tokens": daily_token_limit - reserved_tokens - charged_tokens,
+        "blocked": False,
+    }
+
+
+def test_semantic_inbound_calls_provider_once_and_submits_exact_six_key_proposal():
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+        estimate = {
+            "schema": "astr-embodiment.semantic-estimate.v3",
+            "dimensions": {
+                name: {
+                    "state": "PRESENT" if name == "positive" else "ABSENT",
+                    "intensity_fxp6": 250_000 if name == "positive" else 0,
+                    "confidence_fxp6": 800_000,
+                }
+                for name in DIMENSION_NAMES
+            },
+        }
+
+        async def llm_generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(
+                completion_text=json.dumps(estimate),
+                usage=SimpleNamespace(total=41),
+            )
+
+        context.llm_generate = llm_generate
+        instance = plugin(
+            FakeConfig(semantic_estimator_provider_id="semantic"), context
+        )
+        scope = ScopeTokens("bot", "persona", "session")
+
+        async def genesis(_event, _request=None):
+            receipt = {
+                "seed_code": "AE-S1-SEMANTIC",
+                "incarnation_id": "AE-I1-SEMANTIC",
+            }
+            return (
+                {"genesis": receipt, **receipt},
+                scope,
+                "session",
+                0,
+                None,
+                0,
+            )
+
+        begin_requests = []
+        settle_requests = []
+
+        def begin(request):
+            begin_requests.append(request)
+            return {
+                "status": "claimed",
+                "settlement_nonce_digest": "11" * 32,
+                "interaction": {
+                    "receipt": {
+                        "canonical_revision": 1,
+                        "event_id": request["interaction"]["event_id"],
+                    }
+                },
+                "challenge": {
+                    "request_nonce_digest": "11" * 32,
+                    "origin": {"origin_digest": "22" * 32},
+                },
+                "capacity_reason": None,
+                "budget": _semantic_budget_receipt(),
+                "reply_affect": None,
+            }
+
+        def settle(request):
+            settle_requests.append(request)
+            return {
+                "status": "committed",
+                "charged_tokens": 41,
+                "canonical_revision": 2,
+                "contract": {"continuous": {"directness": 450_000}},
+                "reply_affect": None,
+            }
+
+        instance._run_genesis = genesis
+        instance._native_revision = lambda _scope: 0
+        instance._bridge.begin_semantic_appraisal_v1 = begin
+        instance._bridge.settle_semantic_appraisal_v1 = settle
+        event = FakeEvent()
+        event.message_str = "谢谢你"
+        result = await instance._run_inbound(event, FakeRequest())
+        return context, begin_requests, settle_requests, result
+
+    context, begin_requests, settle_requests, result = asyncio.run(run())
+
+    assert len(context.generate_calls) == 1
+    assert context.generate_calls[0]["chat_provider_id"] == "semantic"
+    assert context.generate_calls[0]["max_tokens"] == 512
+    assert len(begin_requests) == len(settle_requests) == 1
+    assert begin_requests[0]["daily_token_limit"] == 16_384
+    settled = settle_requests[0]
+    assert settled["provider_usage"] == {"known": True, "used_tokens": 41}
+    assert set(settled["proposal"]) == {
+        "schema_version",
+        "origin_digest",
+        "dimensions",
+        "estimator_confidence",
+        "protocol_version",
+        "request_nonce_digest",
+    }
+    assert tuple(settled["proposal"]["dimensions"]) == DIMENSION_NAMES
+    assert result[0]["revision"] == 2
+
+
+def test_semantic_budget_exhaustion_skips_provider_and_keeps_normal_reply_open():
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+        instance = plugin(
+            FakeConfig(semantic_estimator_provider_id="semantic"), context
+        )
+        scope = ScopeTokens("bot", "persona", "session")
+        receipt = {
+            "seed_code": "AE-S1-BUDGET",
+            "incarnation_id": "AE-I1-BUDGET",
+        }
+
+        async def genesis(_event, _request=None):
+            return (
+                {"genesis": receipt, **receipt},
+                scope,
+                "session",
+                0,
+                None,
+                0,
+            )
+
+        def begin(request):
+            return {
+                "status": "budget_exhausted",
+                "settlement_nonce_digest": None,
+                "interaction": {
+                    "receipt": {
+                        "canonical_revision": 1,
+                        "event_id": request["interaction"]["event_id"],
+                    }
+                },
+                "challenge": None,
+                "capacity_reason": None,
+                "budget": _semantic_budget_receipt(exhausted=True),
+                "reply_affect": None,
+            }
+
+        instance._run_genesis = genesis
+        instance._native_revision = lambda _scope: 0
+        instance._bridge.begin_semantic_appraisal_v1 = begin
+        instance._bridge.settle_semantic_appraisal_v1 = lambda _request: (
+            pytest.fail("budget-exhausted claim must not settle")
+        )
+        event = FakeEvent()
+        event.message_str = "今天怎么样？"
+        request = FakeRequest()
+        await instance.on_llm_request(event, request)
+        return context, instance, event, request
+
+    context, instance, event, request = asyncio.run(run())
+
+    assert context.generate_calls == []
+    assert event.stopped is False
+    assert "seed_code=AE-S1-BUDGET" in request.system_prompt
+    assert instance._pending
+
+
+def test_autonomous_externalization_is_zero_provider_zero_send():
+    async def run():
+        context = FakeContext()
+        instance = plugin(FakeConfig(), context)
+        await instance._on_autonomous_externalization(
+            {"message": "must never be sent", "target": "opaque"}
+        )
+        return context
+
+    context = asyncio.run(run())
+
+    assert context.generate_calls == []
 
 
 def test_delivery_revision_synchronizes_native_result():
@@ -771,6 +908,7 @@ def test_delivery_revision_synchronizes_native_result():
             "turn_id": event.turn_token,
             "base_revision": 4,
             "contract": {},
+            "delivery_event_id": "22" * 16,
         }
 
         async def apply_delivery(**kwargs):
@@ -786,113 +924,284 @@ def test_delivery_revision_synchronizes_native_result():
     assert instance._revisions[scope.persona_token] == 5
 
 
+def test_delivery_stale_causal_base_rebuilds_once_with_frozen_evidence(monkeypatch):
+    class FakeBridge:
+        def __init__(self):
+            self.apply_calls: list[tuple[dict, dict]] = []
+            self.inspect_calls: list[dict] = []
+
+        def apply_event(self, scope, event):
+            self.apply_calls.append((scope, event))
+            if len(self.apply_calls) == 1:
+                raise bridge_module.StaleCausalBase(
+                    "STALE_CAUSAL_BASE", "autonomous wake advanced revision"
+                )
+            return {"revision": 3}
+
+        def inspect(self, scope):
+            self.inspect_calls.append(scope)
+            return {"bound": True, "revision": 2}
+
+    async def run():
+        instance = plugin(FakeConfig(), FakeContext())
+        bridge = FakeBridge()
+        instance._coordinator._bridge = bridge
+        event = FakeEvent()
+        scope = instance._scope_for(event, "persona-1")
+        assert scope is not None
+        event.turn_token = "turn-1"
+        instance._turn_seq[scope.session_token] = 1
+        instance._pending[event.turn_token] = {
+            "scope": scope,
+            "turn_id": event.turn_token,
+            "base_revision": 1,
+            "contract": {},
+            "delivery_event_id": "11" * 16,
+        }
+        await instance.after_message_sent(event)
+        return instance, scope, bridge
+
+    clock_calls: list[float] = []
+
+    def frozen_time():
+        clock_calls.append(123.456)
+        return clock_calls[-1]
+
+    monkeypatch.setattr(main_module.time, "time", frozen_time)
+    instance, scope, bridge = asyncio.run(run())
+
+    assert len(bridge.apply_calls) == 2
+    first_scope, first_event = bridge.apply_calls[0]
+    second_scope, second_event = bridge.apply_calls[1]
+    assert first_scope == second_scope == scope.scope_json()
+    first_payload = first_event["payload"]
+    second_payload = second_event["payload"]
+    assert second_payload["event_id"] == first_payload["event_id"]
+    assert second_payload["causal"]["turn_id"] == first_payload["causal"]["turn_id"]
+    assert second_payload["delivered"] == first_payload["delivered"] is True
+    assert (
+        second_payload["visible_action_digest"]
+        == first_payload["visible_action_digest"]
+        == "00" * 32
+    )
+    assert second_payload["delivered_at_ms"] == first_payload["delivered_at_ms"] == 123456
+    assert first_payload["causal"]["base_revision"] == 1
+    assert second_payload["causal"]["base_revision"] == 2
+    assert bridge.inspect_calls == [scope.scope_json()]
+    assert clock_calls == [123.456]
+    assert instance._pending == {}
+    assert instance._revisions[scope.persona_token] == 3
+
+
+def test_delivery_stale_causal_base_second_stale_fails_closed_without_third_attempt():
+    class AlwaysStaleBridge:
+        def __init__(self):
+            self.apply_calls: list[tuple[dict, dict]] = []
+            self.inspect_calls: list[dict] = []
+
+        def apply_event(self, scope, event):
+            self.apply_calls.append((scope, event))
+            raise bridge_module.StaleCausalBase(
+                "STALE_CAUSAL_BASE", "revision changed again"
+            )
+
+        def inspect(self, scope):
+            self.inspect_calls.append(scope)
+            return {"bound": True, "revision": 2}
+
+    scope = ScopeTokens(
+        bot_token="bot",
+        persona_token="persona",
+        session_token="session",
+    )
+    bridge = AlwaysStaleBridge()
+    coordinator = GenesisCoordinator(bridge)
+
+    with pytest.raises(bridge_module.StaleCausalBase):
+        asyncio.run(
+            coordinator.apply_delivery(
+                scope=scope,
+                event_id="event-1",
+                turn_id="turn-1",
+                base_revision=1,
+                delivered=True,
+                visible_action_digest="11" * 32,
+                delivered_at_ms=123456,
+            )
+        )
+
+    assert len(bridge.apply_calls) == 2
+    assert bridge.inspect_calls == [scope.scope_json()]
+
+
+def test_delivery_invalid_event_id_fails_closed_with_redacted_diagnostic():
+    async def run():
+        instance = plugin(FakeConfig(), FakeContext())
+        event = FakeEvent()
+        scope = instance._scope_for(event, "persona-1")
+        assert scope is not None
+        event.turn_token = "turn-1"
+        instance._pending[event.turn_token] = {
+            "scope": scope,
+            "turn_id": event.turn_token,
+            "base_revision": 4,
+            "contract": {},
+            "delivery_event_id": "corrupted",
+        }
+
+        async def must_not_apply(**_kwargs):
+            raise AssertionError("invalid delivery id reached native coordinator")
+
+        instance._coordinator.apply_delivery = must_not_apply
+        await instance.after_message_sent(event)
+        return instance
+
+    instance = asyncio.run(run())
+
+    assert instance._pending == {}
+    diagnostics = instance.delivery_diagnostics
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic["error_code"] == "INVALID_DELIVERY_EVENT_ID"
+    assert diagnostic["event_id"] != "corrupted"
+    assert diagnostic["turn_id"] != "turn-1"
+    assert diagnostic["base_revision"] == 4
+    assert isinstance(diagnostic["recorded_at_ms"], int)
+    assert "error" not in diagnostic
+
+
+def test_delivery_terminal_failure_clears_pending_and_records_diagnostic():
+    class AlwaysStaleBridge:
+        def __init__(self):
+            self.apply_calls = 0
+
+        def apply_event(self, _scope, _event):
+            self.apply_calls += 1
+            raise bridge_module.StaleCausalBase(
+                "STALE_CAUSAL_BASE", "canonical revision changed again"
+            )
+
+        def inspect(self, _scope):
+            return {"bound": True, "revision": 2}
+
+    async def run():
+        instance = plugin(FakeConfig(), FakeContext())
+        bridge = AlwaysStaleBridge()
+        instance._coordinator._bridge = bridge
+        event = FakeEvent()
+        scope = instance._scope_for(event, "persona-1")
+        assert scope is not None
+        event.turn_token = "turn-1"
+        instance._pending[event.turn_token] = {
+            "scope": scope,
+            "turn_id": event.turn_token,
+            "base_revision": 1,
+            "contract": {},
+            "delivery_event_id": "33" * 16,
+        }
+        await instance.after_message_sent(event)
+        return instance, bridge
+
+    instance, bridge = asyncio.run(run())
+
+    assert bridge.apply_calls == 2
+    assert instance._pending == {}
+    diagnostics = instance.delivery_diagnostics
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic["error_code"] == "STALE_CAUSAL_BASE"
+    assert diagnostic["event_id"] != "33" * 16
+    assert diagnostic["turn_id"] != "turn-1"
+    assert diagnostic["base_revision"] == 1
+    assert isinstance(diagnostic["recorded_at_ms"], int)
+    assert "error" not in diagnostic
+
+
 def test_reload_hydrates_revision_and_turn_id_without_reuse():
     async def run():
         instance = plugin(FakeConfig(), FakeContext())
         event = FakeEvent()
-        event.turn_token = "turn-before-plugin-reload"
         request = FakeRequest()
         calls: list[str] = []
-        stimulus: dict = {}
+        interaction: dict = {}
 
         async def resolve(_event, _request=None):
             return "persona-1", {"prompt": "测试人格"}, "conversation"
 
         async def ensure_genesis(**_kwargs):
             calls.append("genesis")
+            return {
+                "seed_code": "AE-S1-RELOAD",
+                "incarnation_id": "AE-I1-RELOAD",
+            }
 
         def inspect(_scope):
             calls.append("inspect")
-            return {
-                "bound": True,
-                "seed_code": "AE-S1-RELOAD",
-                "seed_code_short": "AE-S1-RELOAD",
-                "incarnation_id": (
-                    "AE-I1-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000"
-                ),
-                "revision": 7,
-            }
+            return {"bound": True, "revision": 7}
 
-        async def apply_stimulus(**kwargs):
-            calls.append("stimulus")
-            stimulus.update(kwargs)
+        def apply_interaction(batch):
+            calls.append("interaction")
+            interaction.update(batch)
             return {
-                "revision": 8,
-                "contract": {},
+                "receipt": {
+                    "canonical_revision": batch["causal"]["base_revision"] + 1,
+                    "event_id": batch["event_id"],
+                },
+                "applied_fact_count": len(batch["facts"]),
             }
 
         instance.resolve_effective_persona = resolve
         instance._coordinator.ensure_genesis = ensure_genesis
         instance._bridge._native = object()
         instance._bridge.inspect = inspect
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
-        instance._coordinator.apply_stimulus = apply_stimulus
+        instance._bridge.apply_interaction_v1 = apply_interaction
         await instance.on_llm_request(event, request)
         scope = instance._scope_for(event, "persona-1")
         assert scope is not None
-        return (
-            instance,
-            event,
-            scope,
-            calls,
-            stimulus,
-            reconciliations,
-            acknowledgements,
-        )
+        return instance, event, scope, calls, interaction
 
-    instance, event, scope, calls, stimulus, reconciliations, acknowledgements = (
-        asyncio.run(run())
-    )
+    instance, event, scope, calls, interaction = asyncio.run(run())
 
-    assert calls == ["inspect", "inspect", "stimulus"]
-    assert "genesis" not in calls
-    assert stimulus["base_revision"] == 7
-    assert stimulus["turn_id"] == event.turn_token
-    assert stimulus["turn_id"] != "turn-before-plugin-reload"
+    assert calls == ["genesis", "inspect", "inspect", "interaction"]
+    assert interaction["causal"]["base_revision"] == 7
+    assert interaction["causal"]["turn_id"] == event.turn_token
     assert instance._turn_seq[scope.session_token] == 8
-    assert [request["origin"] for request in reconciliations] == [
-        "STARTUP_READ",
-        "PLUGIN_WRITEBACK",
-    ]
-    assert acknowledgements == []
 
 
 def test_first_genesis_decision_persists_seed_to_astrbot_config():
     async def run():
         context = FakeContext()
         instance = plugin(FakeConfig(), context)
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
-            instance, seed_code="AE-S1-FIRST-GENESIS"
-        )
 
-        async def resolve_default(*_args, **_kwargs):
-            return "default", {"prompt": "默认人格"}, "provider_default"
-
-        instance.resolve_effective_persona = resolve_default
-
-        async def first_turn(**_kwargs):
-            return {
-                "genesis": {
+        async def run_inbound(_event, _request):
+            return (
+                {
+                    "genesis": {
+                        "seed_code": "AE-S1-FIRST-GENESIS",
+                        "incarnation_id": "AE-I1-FIRST-GENESIS",
+                    },
                     "seed_code": "AE-S1-FIRST-GENESIS",
                     "incarnation_id": "AE-I1-FIRST-GENESIS",
+                    "revision": 1,
+                    "contract": {"continuous": {"directness": 500000}},
+                    "reply_affect": None,
                 },
-                "seed_code": "AE-S1-FIRST-GENESIS",
-                "incarnation_id": "AE-I1-FIRST-GENESIS",
-                "revision": 1,
-                "contract": {"continuous": {"directness": 500000}},
-            }
+                ScopeTokens("bot", "persona", "session"),
+                "session",
+                0,
+                "turn",
+                1,
+            )
 
-        instance._coordinator.first_turn = first_turn
+        instance._run_inbound = run_inbound
         request = FakeRequest()
         await instance.on_llm_request(FakeEvent(), request)
-        return instance, reconciliations, acknowledgements
+        return instance
 
-    instance, reconciliations, acknowledgements = asyncio.run(run())
+    instance = asyncio.run(run())
 
     assert instance.config["seed_code"] == "AE-S1-FIRST-GENESIS"
     assert instance.config.save_calls == 1
-    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
-    assert acknowledgements[0]["writeback_token"] == "b" * 64
 
 
 def test_seed_command_uses_main_chat_provider_through_full_genesis_compiler():
@@ -914,9 +1223,6 @@ def test_seed_command_uses_main_chat_provider_through_full_genesis_compiler():
 
         context.llm_generate = llm_generate
         instance = plugin(FakeConfig(), context)
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
-            instance, seed_code="AE-S1-MAIN-PROVIDER"
-        )
 
         async def ensure_genesis(**kwargs):
             proposal = await kwargs["compiler"](kwargs["source"])
@@ -928,19 +1234,18 @@ def test_seed_command_uses_main_chat_provider_through_full_genesis_compiler():
             }
 
         instance._coordinator.ensure_genesis = ensure_genesis
+        instance._native_revision = lambda _scope: 0
         event = FakeEvent()
         results = [item async for item in instance.seed_command(event)]
-        return results, context, instance, reconciliations, acknowledgements
+        return results, context, instance
 
-    results, context, instance, reconciliations, acknowledgements = asyncio.run(run())
+    results, context, instance = asyncio.run(run())
 
     assert results == ["SeedCode: AE-S1-MAIN-PROVIDER"]
     assert context.current_calls == 1
     assert context.generate_calls[0]["chat_provider_id"] == "main-dialogue"
     assert instance.config["seed_code"] == "AE-S1-MAIN-PROVIDER"
     assert instance.config.save_calls == 1
-    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
-    assert acknowledgements[0]["writeback_token"] == "b" * 64
 
 
 def test_on_llm_request_stops_and_reports_when_genesis_fails():
@@ -969,27 +1274,30 @@ def test_on_llm_request_stops_and_reports_when_genesis_fails():
 def test_on_llm_request_rejects_incomplete_native_genesis_receipt():
     async def run():
         instance = plugin(FakeConfig(), FakeContext())
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(instance)
 
-        async def resolve(_event, _request=None):
-            return "persona-1", {"prompt": "测试人格"}, "conversation"
+        async def run_inbound(_event, _request):
+            return (
+                {
+                    "genesis": {"seed_code": "AE-S1-INCOMPLETE"},
+                    "seed_code": "AE-S1-INCOMPLETE",
+                    "revision": 1,
+                    "contract": {},
+                    "reply_affect": None,
+                },
+                ScopeTokens("bot", "persona", "session"),
+                "session",
+                0,
+                "turn",
+                1,
+            )
 
-        async def first_turn(**_kwargs):
-            return {
-                "genesis": {"seed_code": "AE-S1-INCOMPLETE"},
-                "seed_code": "AE-S1-INCOMPLETE",
-                "revision": 1,
-                "contract": {},
-            }
-
-        instance.resolve_effective_persona = resolve
-        instance._coordinator.first_turn = first_turn
+        instance._run_inbound = run_inbound
         event = FakeEvent()
         request = FakeRequest()
         await instance.on_llm_request(event, request)
-        return event, request, instance, reconciliations, acknowledgements
+        return event, request, instance
 
-    event, request, instance, reconciliations, acknowledgements = asyncio.run(run())
+    event, request, instance = asyncio.run(run())
 
     assert event.stopped is True
     assert event.sent == [
@@ -997,94 +1305,89 @@ def test_on_llm_request_rejects_incomplete_native_genesis_receipt():
     ]
     assert request.system_prompt == "原有系统提示"
     assert instance.config.get("seed_code", "") == ""
-    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
-    assert acknowledgements == []
 
 
 def test_persona_text_cannot_bypass_genesis_by_containing_the_injection_marker():
     async def run():
         instance = plugin(FakeConfig(seed_code=""), FakeContext())
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
-            instance, seed_code="AE-S1-MARKER-SAFE"
-        )
         calls = 0
 
-        async def first_turn(*_args, **_kwargs):
+        async def run_inbound(_event, _request):
             nonlocal calls
             calls += 1
-            return {
-                "genesis": {
+            return (
+                {
+                    "genesis": {
+                        "seed_code": "AE-S1-MARKER-SAFE",
+                        "incarnation_id": "AE-I1-MARKER-SAFE",
+                    },
                     "seed_code": "AE-S1-MARKER-SAFE",
                     "incarnation_id": "AE-I1-MARKER-SAFE",
+                    "revision": 1,
+                    "contract": {"continuous": {"directness": 500_000}},
+                    "reply_affect": None,
                 },
-                "seed_code": "AE-S1-MARKER-SAFE",
-                "incarnation_id": "AE-I1-MARKER-SAFE",
-                "revision": 1,
-                "contract": {"continuous": {"directness": 500_000}},
-            }
+                ScopeTokens("bot", "persona", "session"),
+                "session",
+                0,
+                "turn",
+                1,
+            )
 
-        async def resolve(_event, _request=None):
-            return "persona-1", {"prompt": "测试人格"}, "conversation"
-
-        instance.resolve_effective_persona = resolve
-        instance._coordinator.first_turn = first_turn
+        instance._run_inbound = run_inbound
         event = FakeEvent()
         request = FakeRequest()
         request.system_prompt += "\n人格会讨论 AstrEmbodiment Runtime Context。"
         await instance.on_llm_request(event, request)
-        return calls, event, request, reconciliations, acknowledgements
+        return calls, event, request
 
-    calls, event, request, reconciliations, acknowledgements = asyncio.run(run())
+    calls, event, request = asyncio.run(run())
 
     assert calls == 1
     assert event.stopped is False
     assert "seed_code=AE-S1-MARKER-SAFE" in request.system_prompt
-    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
-    assert acknowledgements[0]["writeback_token"] == "b" * 64
 
 
-def test_seed_writeback_failure_keeps_native_generation_and_rolls_back_visible_seed():
+def test_seed_save_failure_stops_the_host_llm_and_rolls_back_visible_seed():
     async def run():
         config = FailingConfig(seed_code="AE-S1-PREVIOUS")
         instance = plugin(config, FakeContext())
-        reconciliations, acknowledgements = _install_seed_config_lifecycle_v1(
-            instance, seed_code="AE-S1-NOT-PERSISTED"
-        )
 
-        async def resolve(_event, _request=None):
-            return "persona-1", {"prompt": "测试人格"}, "conversation"
-
-        async def first_turn(**_kwargs):
-            return {
-                "genesis": {
+        async def genesis(*_args, **_kwargs):
+            return (
+                {
+                    "genesis": {
+                        "seed_code": "AE-S1-NOT-PERSISTED",
+                        "incarnation_id": "AE-I1-NOT-PERSISTED",
+                    },
                     "seed_code": "AE-S1-NOT-PERSISTED",
                     "incarnation_id": "AE-I1-NOT-PERSISTED",
+                    "revision": 1,
+                    "contract": {},
                 },
-                "seed_code": "AE-S1-NOT-PERSISTED",
-                "incarnation_id": "AE-I1-NOT-PERSISTED",
-                "revision": 1,
-                "contract": {},
-            }
+                SimpleNamespace(persona_token="persona"),
+                "session",
+                0,
+                "turn",
+                0,
+            )
 
-        instance.resolve_effective_persona = resolve
-        instance._coordinator.first_turn = first_turn
+        instance._run_inbound = genesis
         event = FakeEvent()
         request = FakeRequest()
         await instance.on_llm_request(event, request)
-        return config, instance, event, request, reconciliations, acknowledgements
+        return config, instance, event, request
 
-    config, instance, event, request, reconciliations, acknowledgements = asyncio.run(
-        run()
-    )
+    config, instance, event, request = asyncio.run(run())
 
-    assert event.stopped is False
-    assert event.sent == []
+    assert event.stopped is True
+    assert event.sent == [
+        "AstrEmbodiment 创世未完成，本轮未调用对话模型：创世结果处理失败"
+    ]
     assert config["seed_code"] == "AE-S1-PREVIOUS"
     assert instance._config_values["seed_code"] == "AE-S1-PREVIOUS"
-    assert config.save_calls == 1
-    assert "seed_code=AE-S1-NOT-PERSISTED" in request.system_prompt
-    assert [request["origin"] for request in reconciliations] == ["PLUGIN_WRITEBACK"]
-    assert acknowledgements == []
+    assert request.system_prompt == "原有系统提示"
+    assert instance._pending == {}
 
 
 def test_invalid_native_contract_stops_before_request_injection():
@@ -1110,7 +1413,7 @@ def test_invalid_native_contract_stops_before_request_injection():
                 0,
             )
 
-        instance._run_genesis = genesis
+        instance._run_inbound = genesis
         event = FakeEvent()
         request = FakeRequest()
         await instance.on_llm_request(event, request)
@@ -1142,7 +1445,7 @@ def test_native_genesis_identity_must_be_present_in_the_nested_receipt():
                 0,
             )
 
-        instance._run_genesis = genesis
+        instance._run_inbound = genesis
         event = FakeEvent()
         request = FakeRequest()
         await instance.on_llm_request(event, request)
@@ -1181,7 +1484,7 @@ def test_native_genesis_identity_mirror_must_match_the_nested_receipt():
                 0,
             )
 
-        instance._run_genesis = genesis
+        instance._run_inbound = genesis
         event = FakeEvent()
         request = FakeRequest()
         await instance.on_llm_request(event, request)
@@ -1210,10 +1513,11 @@ def test_seed_command_echoes_saved_seed_without_regenerating():
     assert context.generate_calls == []
 
 
+@pytest.mark.parametrize("installed_core", [False, True])
 def test_native_bridge_finds_sibling_package_for_top_level_loader(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed_core: bool
 ):
-    """A file-based/top-level host loader must still see the bundled core."""
+    """When normal import is unavailable, load the archive-relative core."""
     plugin_root = tmp_path / "plugin"
     native_root = plugin_root / "astrembodiment_core"
     native_root.mkdir(parents=True)
@@ -1238,21 +1542,40 @@ def version():
     monkeypatch.setattr(
         sys, "path", [entry for entry in sys.path if entry != str(plugin_root)]
     )
-    monkeypatch.delitem(sys.modules, "astrembodiment_core", raising=False)
+    # Register cleanup even when there was no original cached package; the
+    # fallback loader inserts its synthetic package into sys.modules.
+    monkeypatch.setitem(sys.modules, "astrembodiment_core", None)
+    monkeypatch.delitem(sys.modules, "astrembodiment_core")
 
-    original_import_module = bridge_module.import_module
+    if installed_core:
+        # Reproduce a CI environment where the real wheel has been installed.
+        installed_root = tmp_path / "site-packages"
+        installed_package = installed_root / "astrembodiment_core"
+        installed_package.mkdir(parents=True)
+        (installed_package / "__init__.py").write_text(
+            (native_root / "__init__.py").read_text(encoding="utf-8").replace(
+                '"test"', '"installed"'
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(installed_root))
 
-    def missing_top_level_core(name: str, package: str | None = None):
-        if name == "astrembodiment_core" and package is None:
+    original_import = bridge_module.import_module
+    imports = []
+
+    def unavailable_top_level(name, package=None):
+        imports.append(name)
+        if name == "astrembodiment_core":
             raise ModuleNotFoundError(
-                "No module named 'astrembodiment_core'", name="astrembodiment_core"
+                "top-level core intentionally unavailable for fallback test",
+                name="astrembodiment_core",
             )
-        return original_import_module(name, package)
+        return original_import(name, package)
 
-    monkeypatch.setattr(bridge_module, "import_module", missing_top_level_core)
-
+    monkeypatch.setattr(bridge_module, "import_module", unavailable_top_level)
     health = bridge_module.NativeBridge().open(str(tmp_path / "runtime"))
 
+    assert imports == ["astrembodiment_core"]
     assert health.status == "test"
     assert health.version == "test"
 
@@ -1309,27 +1632,12 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
 
         def exec_module(self, native):
             native.apply_event = lambda *_args: "{}"
-            native.contract_info = lambda: json.dumps(
-                {
-                    "schema": "astr-embodiment.node-observability-contract-info.v1",
-                    "contract_id": "astr-embodiment.node-observability-contract.v2",
-                    "node_observability_schema": "astr-embodiment.node-observability.v2",
-                }
-            )
+            _install_fake_autonomy_api(native)
             native.ensure_genesis = lambda *_args: "{}"
             native.flush_and_close = lambda: None
             native.health = lambda: "{}"
             native.inspect = lambda *_args: "{}"
             native.open = lambda *_args: None
-            native.prepare_rebirth_v1 = _unreachable_mandatory_native_abi
-            native.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
-            native.reconcile_seed_config_v1 = _unreachable_mandatory_native_abi
-            native.ack_seed_config_writeback_v1 = _unreachable_mandatory_native_abi
-            native.semantic_outbox_crypto_status_v1 = _unreachable_mandatory_native_abi
-            native.semantic_outbox_seal_v1 = _unreachable_mandatory_native_abi
-            native.semantic_outbox_open_v1 = _unreachable_mandatory_native_abi
-            native.semantic_revision_v1 = _unreachable_mandatory_native_abi
-            native.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             native.verify_replay = lambda *_args: "{}"
             native.version = lambda: "compat"
 
@@ -1360,67 +1668,48 @@ def test_native_initializer_accepts_core_without_optional_exception_export(
         sys.modules.pop(module_name, None)
         sys.modules.pop(f"{module_name}._native", None)
     assert module.version() == "compat"
-    assert module.contract_info() == json.dumps(
-        {
-            "schema": "astr-embodiment.node-observability-contract-info.v1",
-            "contract_id": "astr-embodiment.node-observability-contract.v2",
-            "node_observability_schema": "astr-embodiment.node-observability.v2",
-        }
-    )
-    assert "contract_info" in module.__all__
-    for symbol in (
-        "semantic_outbox_crypto_status_v1",
-        "semantic_outbox_seal_v1",
-        "semantic_outbox_open_v1",
-    ):
-        assert callable(getattr(module, symbol))
-        assert symbol in module.__all__
+    assert callable(module.autonomy_status)
     assert issubclass(module.NativeCoreError, RuntimeError)
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="requires the Windows fresh wheel")
-def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
+@pytest.mark.skipif(
+    sys.platform != "win32" or _fresh_windows_wheel() is None,
+    reason="requires AE_FRESH_WINDOWS_WHEEL pointing to a current Windows wheel",
+)
+def test_fresh_windows_native_initializer_and_semantic_boundary(
     tmp_path: Path,
 ):
-    """The package must not let a stale root module shadow the fresh stage."""
-    staged_package = ROOT / "astrembodiment_core"
-    manifest_path = staged_package / "_bundled" / "manifest.json"
-    if not manifest_path.is_file():
-        pytest.fail(
-            "current fresh Windows native stage is required at "
-            f"{manifest_path}; do not substitute a historical wheel"
-        )
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert isinstance(manifest, dict), "fresh stage manifest must be an object"
-    assert manifest.get("schema") == "astrembodiment-native-bundle-v1", (
-        "fresh stage must use the content-addressed native manifest"
-    )
-    platforms = manifest.get("platforms") if isinstance(manifest, dict) else None
-    entry = platforms.get("win32") if isinstance(platforms, dict) else None
-    assert isinstance(entry, dict), "fresh stage must contain the win32 entry"
-    build_id = entry.get("build_id")
-    native_filename = entry.get("filename")
-    assert isinstance(build_id, str) and len(build_id) == 64
-    assert isinstance(native_filename, str) and native_filename.endswith(".pyd")
-    staged_native = staged_package / "_bundled" / build_id / native_filename
-    assert staged_native.is_file(), "fresh stage must contain its manifest binary"
-    bundled_payload = staged_native.read_bytes()
-    assert hashlib.sha256(bundled_payload).hexdigest() == build_id
-
+    """Load the fresh pyd, then exercise the durable begin/settle ABI."""
+    wheel_path = _fresh_windows_wheel()
+    assert wheel_path is not None
     package_dir = tmp_path / "astrembodiment_core"
+    with zipfile.ZipFile(wheel_path) as wheel:
+        bundled_payload = wheel.read("astrembodiment_core/_native.pyd")
+    build_id = hashlib.sha256(bundled_payload).hexdigest()
     bundled_dir = package_dir / "_bundled" / build_id
     bundled_dir.mkdir(parents=True)
-    copied_native = bundled_dir / native_filename
-    copied_native.write_bytes(bundled_payload)
-    assert hashlib.sha256(copied_native.read_bytes()).hexdigest() == build_id
-    shutil.copyfile(manifest_path, package_dir / "_bundled" / "manifest.json")
+    (bundled_dir / "_native.pyd").write_bytes(bundled_payload)
+    (package_dir / "_bundled" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "astrembodiment-native-bundle-v1",
+                "platforms": {
+                    "win32": {"build_id": build_id, "filename": "_native.pyd"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     (package_dir / "_native.py").write_text(
         "version=lambda: 'stale-root'\nhealth=lambda: '{}'\n",
         encoding="utf-8",
     )
-    staged_initializer = staged_package / "__init__.py"
-    assert staged_initializer.is_file(), "fresh stage must contain its initializer"
-    shutil.copyfile(staged_initializer, package_dir / "__init__.py")
+    (package_dir / "__init__.py").write_text(
+        (ROOT / "python" / "astrembodiment_core" / "__init__.py").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
 
     module_name = "_astrembodiment_core_bundled_regression"
     spec = importlib.util.spec_from_file_location(
@@ -1433,14 +1722,131 @@ def test_native_initializer_ignores_stale_root_module_for_bundled_extension(
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-        assert module.version() == "1.0.0"
+        assert module.version() == "1.1.0-alpha3"
         assert callable(module.apply_event)
         assert Path(sys.modules[f"{module_name}._native"].__file__).parts[-3:] == (
             "_bundled",
             build_id,
-            native_filename,
+            "_native.pyd",
         )
+        assert not hasattr(module, "apply_perception_proposal_v1")
+
+        module.open(str(tmp_path / "semantic-boundary.db"))
+        scope = ScopeTokens(
+            bot_token="61" * 16,
+            persona_token="62" * 16,
+            relation_token="63" * 16,
+            session_token="64" * 16,
+        )
+        module.ensure_genesis(
+            json.dumps(_fresh_native_genesis_request(scope), sort_keys=True)
+        )
+        scope_payload = scope.scope_json()
+        digests = json.loads(module.scope_digests(json.dumps(scope_payload)))
+        module.bootstrap_autonomy(
+            json.dumps(
+                {
+                    "scope": scope_payload,
+                    "profile": {
+                        "schema_version": 1,
+                        "persona_scope": digests["persona_scope"],
+                        "home_timezone": "UTC",
+                        "current_timezone": "UTC",
+                        "chronotype": "intermediate",
+                        "preferred_sleep_local_minute": 1_380,
+                        "preferred_wake_local_minute": 420,
+                        "sleep_flex_minutes": 90,
+                        "entrainment_rate_minutes_per_day": 60,
+                        "revision": 1,
+                    },
+                    "relation": {
+                        "schema_version": 1,
+                        "relation_scope": digests["relation_scope"],
+                        "user_timezone": "UTC",
+                        "timezone_source": "explicit",
+                        "quiet_hours_start_minute": 0,
+                        "quiet_hours_end_minute": 0,
+                        "quiet_hours_emergency_bypass": False,
+                        "proactive_enabled": False,
+                        "proactive_daily_max": 0,
+                        "min_proactive_cooldown_ms": 0,
+                        "intention_ttl_ms": 86_400_000,
+                        "unanswered_backoff_base_ms": 0,
+                        "unanswered_hard_stop": 3,
+                        "emergency_threshold": 1_000_000,
+                        "daily_submitted": 0,
+                        "consecutive_unanswered": 0,
+                        "last_inbound_utc_ms": None,
+                        "last_proactive_submitted_utc_ms": None,
+                        "revision": 1,
+                        "auto_policy_version": 0,
+                        "next_claim_reservation_tokens": 256,
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        # Historical pre-1.1 native harness; not part of typed-core acceptance.
+        from astr_embodiment.interaction import build_interaction_batch_v1
+
+        interaction = build_interaction_batch_v1(
+            scope=scope,
+            message="真实 PyO3 边界",
+            turn_id="65" * 16,
+            event_id="66" * 16,
+            base_revision=0,
+            observed_at_utc_ms=int(time.time() * 1_000),
+        )
+        begin = json.loads(
+            module.begin_semantic_appraisal_v1(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "interaction": interaction,
+                        "daily_token_limit": 16_384,
+                        "reserved_tokens": 1_024,
+                        "provider_digest": "67" * 32,
+                    },
+                    sort_keys=True,
+                )
+            )
+        )
+        assert begin["status"] == "claimed"
+        assert (
+            begin["settlement_nonce_digest"]
+            == begin["challenge"]["request_nonce_digest"]
+        )
+        settle_request = {
+            "schema_version": 1,
+            "scope": scope_payload,
+            "request_nonce_digest": begin["challenge"]["request_nonce_digest"],
+            "outcome": "timeout",
+            "provider_usage": {"known": False, "used_tokens": None},
+            "proposal": None,
+        }
+        first = json.loads(
+            module.settle_semantic_appraisal_v1(
+                json.dumps(settle_request, sort_keys=True)
+            )
+        )
+        replay = json.loads(
+            module.settle_semantic_appraisal_v1(
+                json.dumps(settle_request, sort_keys=True)
+            )
+        )
+        assert first == replay
+        assert first["status"] == "zero_mutation"
+        assert first["charged_tokens"] == 1_024
+
+        usage_drift = copy.deepcopy(settle_request)
+        usage_drift["provider_usage"] = {"known": True, "used_tokens": 0}
+        with pytest.raises(module.NativeCoreError, match="INVALID_PERCEPTION_PROPOSAL"):
+            module.settle_semantic_appraisal_v1(
+                json.dumps(usage_drift, sort_keys=True)
+            )
     finally:
+        if hasattr(module, "flush_and_close"):
+            module.flush_and_close()
         sys.modules.pop(module_name, None)
         sys.modules.pop(f"{module_name}._native", None)
 
@@ -1486,40 +1892,11 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
 
         def exec_module(self, module):
             module.version = lambda: Path(module.__spec__.origin).parent.name
-            module.contract_info = _v3_test_node_observability_contract_info
+            _install_fake_autonomy_api(module)
             module.health = lambda: "{}"
             module.open = lambda _data_dir: None
             module.ensure_genesis = lambda *_args: "{}"
             module.apply_event = lambda *_args: "{}"
-            module.prepare_rebirth_v1 = _unreachable_mandatory_native_abi
-            module.confirm_rebirth_v1 = _unreachable_mandatory_native_abi
-            module.reconcile_seed_config_v1 = _unreachable_mandatory_native_abi
-            module.ack_seed_config_writeback_v1 = _unreachable_mandatory_native_abi
-            module.semantic_outbox_crypto_status_v1 = lambda: json.dumps(
-                {
-                    "schema": "astrembodiment.semantic-outbox-crypto-status.v1",
-                    "status": "UNAVAILABLE",
-                    "key_version": 1,
-                },
-                sort_keys=True,
-            )
-            module.semantic_outbox_seal_v1 = lambda _request_json: json.dumps(
-                {
-                    "schema": "astrembodiment.semantic-outbox-sealed.v1",
-                    "key_version": 1,
-                    "envelope_b64": "AA==",
-                },
-                sort_keys=True,
-            )
-            module.semantic_outbox_open_v1 = lambda _request_json: json.dumps(
-                {
-                    "schema": "astrembodiment.semantic-outbox-opened.v1",
-                    "plaintext_b64": "e30=",
-                },
-                sort_keys=True,
-            )
-            module.semantic_revision_v1 = _unreachable_mandatory_native_abi
-            module.apply_perception_proposal_v1 = _unreachable_mandatory_native_abi
             module.inspect = lambda *_args: "{}"
             module.verify_replay = lambda *_args: "{}"
             module.flush_and_close = lambda: None
@@ -1586,37 +1963,20 @@ def test_native_loader_uses_new_physical_build_after_same_process_reload(
         sys.modules.pop(f"{module_name}._native", None)
 
 
-def test_schema_exposes_one_unified_chinese_provider_selector_and_seed_fields():
+def test_schema_exposes_chinese_provider_and_seed_fields():
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
 
-    model_settings = schema["model_settings"]["items"]
-    provider = model_settings["assistant_provider_id"]
-    legacy_provider = model_settings["semantic_estimator_provider_id"]
+    provider = schema["model_settings"]["items"]["assistant_provider_id"]
     seed = schema["seed_code"]
     assert provider["_special"] == "select_provider"
     assert provider["default"] == ""
-    assert (
-        provider["hint"]
-        == "统一用于辅助能力与当前请求的闭合的十五维语义估计；留空时使用当前会话 Provider。"
-    )
-    assert legacy_provider["type"] == "string"
-    assert legacy_provider["default"] == ""
-    assert legacy_provider["invisible"] is True
-    visible_provider_selectors = [
-        key
-        for key, metadata in model_settings.items()
-        if metadata.get("_special") == "select_provider"
-        and not metadata.get("invisible", False)
-    ]
-    assert visible_provider_selectors == ["assistant_provider_id"]
     assert (
         provider["description"]
         != provider["description"].encode("ascii", "ignore").decode()
     )
     assert seed["type"] in {"string", "text"}
     assert seed["default"] == ""
-    assert seed["readonly"] is False
-    assert "主动删除" in seed["hint"]
+    assert seed["readonly"] is True
     assert "种子" in seed["description"]
 
 
@@ -1640,1439 +2000,479 @@ def test_runtime_commands_and_hooks_expose_chinese_descriptions_without_webui():
     assert "无需 WebUI" in inspect.getdoc(AstrEmbodimentPlugin.seed_command)
 
 
-_V3_TEST_DIMENSIONS = (
-    "positive",
-    "affiliation",
-    "harm",
-    "boundary",
-    "repair",
-    "repetition",
-    "new_information",
-    "constraint_instability",
-    "epistemic_conflict",
-    "self_responsibility",
-    "other_responsibility",
-    "hostility",
-    "publicness",
-    "engagement",
-    "rejection",
-)
-_V3_TEST_REGIONS = (
-    ("interoception_allostasis", 2_048),
-    ("affective_valuation", 2_048),
-    ("salience", 1_024),
-    ("epistemic_fallibility", 2_048),
-    ("social_boundary", 2_048),
-    ("temper_inhibitory", 1_024),
-    ("world_model_imagination", 4_096),
-    ("global_workspace", 1_024),
-    ("action_expression", 1_024),
-)
-
-
-class _SemanticRecordingLogger:
-    def __init__(self) -> None:
-        self.warning_messages: list[str] = []
-        self.info_messages: list[str] = []
-
-    def warning(self, template: str, *args: object) -> None:
-        self.warning_messages.append(template % args if args else template)
-
-    def info(self, template: str, *args: object) -> None:
-        self.info_messages.append(template % args if args else template)
-
-    def error(self, _template: str, *_args: object) -> None:
-        return None
-
-    def debug(self, _template: str, *_args: object) -> None:
-        return None
-
-    def exception(self, _template: str, *_args: object) -> None:
-        return None
-
-
-def _v3_test_scope() -> ScopeTokens:
-    return ScopeTokens(
-        bot_token="11" * 16,
-        persona_token="22" * 16,
-        session_token="33" * 16,
-    )
-
-
-def _v3_test_context_summary() -> dict:
-    return {
-        "schema": "astrembodiment.context-summary.v1",
-        "summary_revision": 1,
-        "source_continuum_revision": 8,
-        "dimensions_ema_fxp6": [0] * 15,
-        "unresolved_boundary": False,
-        "unresolved_repair": False,
-        "repetition_count": 1,
-        "delivery_outcome": "pending",
-        "summary_digest": "ab" * 32,
-    }
-
-
-def _v3_test_genesis_result(scope: ScopeTokens) -> tuple:
-    return (
-        {
-            "genesis": {
-                "seed_code": "AE-S1-SEMANTIC",
-                "incarnation_id": "AE-I1-SEMANTIC",
-            },
-            "seed_code": "AE-S1-SEMANTIC",
-            "incarnation_id": "AE-I1-SEMANTIC",
-            "revision": 8,
-            "contract": {"continuous": {"directness": 500_000}},
-            "context_summary": _v3_test_context_summary(),
-        },
-        scope,
-        scope.session_token,
-        0,
-        "44" * 16,
-        7,
-    )
-
-
-def _v3_test_estimate() -> dict:
-    dimensions = {
-        name: {
-            "state": "ABSENT",
-            "intensity_fxp6": 0,
-            "confidence_fxp6": 900_000,
-        }
-        for name in _V3_TEST_DIMENSIONS
-    }
-    dimensions["rejection"] = {
-        "state": "PRESENT",
-        "intensity_fxp6": 900_000,
-        "confidence_fxp6": 900_000,
-    }
-    return {"schema": "astr-embodiment.semantic-estimate.v3", "dimensions": dimensions}
-
-
-def _v3_test_proposal(scope: ScopeTokens) -> dict:
-    turn = FrozenTurn(
-        scope=scope,
-        event_id="44" * 16,
-        turn_id="55" * 16,
-        base_revision=0,
-        observed_at_ms=1,
-    )
-    return build_perception_proposal_v3(
-        scope=scope,
-        turn=turn,
-        estimate=_v3_test_estimate(),
-        base_revision=0,
-        nonce_digest=make_request_nonce_digest(scope, turn),
-    )
-
-
-def test_v3_estimator_accepts_only_one_exact_json_fence():
-    expected = _v3_test_estimate()
-    bare_completion = json.dumps(expected)
-    fenced_completion = f"\t\r\n```json\r\n{bare_completion}\r\n```\n \t"
-
-    assert parse_estimator_output_v3(bare_completion).as_json() == expected
-    assert parse_estimator_output_v3(fenced_completion).as_json() == expected
-
-    for rejected_completion in (
-        f"{bare_completion}\n{bare_completion}",
-        f"explanation:\n{bare_completion}",
-    ):
-        with pytest.raises(SemanticEstimateError) as exc_info:
-            parse_estimator_output_v3(rejected_completion)
-        assert exc_info.value.code == "ESTIMATOR_MALFORMED"
-        assert exc_info.value.subcode == "JSON_DECODE"
-
-
-def _v3_test_native_closure() -> dict:
-    regions = []
-    for region_id, (region_name, capacity) in enumerate(_V3_TEST_REGIONS):
-        selected = 1 if region_name == "affective_valuation" else 0
-        component = {
-            "before_mean_fxp6": 0,
-            "after_mean_fxp6": selected,
-            "delta_mean_fxp6": selected,
-            "changed_node_count": selected,
-            "nonzero_after_count": selected,
-        }
-        regions.append(
-            {
-                "region_id": region_id,
-                "region_name": region_name,
-                "node_capacity": capacity,
-                "selected_node_count": selected,
-                "activated_node_count": selected,
-                "changed_node_count": selected,
-                "potential": dict(component),
-                "excitation": dict(component),
-            }
-        )
-    return {
-        "schema": "astrembodiment.semantic-perception-closure.v1",
-        "receipt": {
-            "schema_version": 1,
-            "formula_digest": "00" * 32,
-            "scope_digest": "11" * 32,
-            "event_digest": "22" * 32,
-            "authority_digest": "33" * 32,
-            "base_revision": 0,
-            "next_revision": 1,
-            "state_before": "44" * 32,
-            "state_after": "55" * 32,
-            "graph_after": "66" * 32,
-            "active_nodes": 1,
-            "active_edges": 0,
-            "residuals": {
-                "authority": 0,
-                "continuity": 0,
-                "energy": 0,
-                "renormalization": 0,
-                "capacity": 0,
-            },
-            "status": "committed",
-        },
-        "semantic_vector_receipt": {
-            "schema": "astr-embodiment.semantic-vector-receipt.v2",
-            "formula": "full-vector-route-neutral-relaxation-v1",
-            "dimension_slot_count": 15,
-            "evaluated_dimension_count": 15,
-            "injected_dimension_count": 15,
-            "nonzero_evidence_dimension_count": 1,
-            "neutral_baseline_dimension_count": 14,
-            "unavailable_dimension_count": 0,
-            "state_changed": True,
-        },
-        "node_observability": {
-            "schema": "astr-embodiment.node-observability.v2",
-            "contract_id": "astr-embodiment.node-observability-contract.v2",
-            "formula": "spc1-node-observability-v1",
-            "revision": 1,
-            "field_node_capacity": 16_384,
-            "region_layout": "regions-v1",
-            "counts": {
-                "selected_node_count": 1,
-                "activated_node_count": 1,
-                "changed_node_count": 1,
-                "potential_nonzero_after_count": 1,
-                "excitation_nonzero_after_count": 1,
-                "signal_nonzero_after_count": 1,
-            },
-            "residuals": {
-                "state": "NOT_COMPUTED",
-                "formula": None,
-                "values_fxp6": None,
-            },
-            "regions": regions,
-        },
-        "revision": 1,
-        "deduplicated": False,
-        "expression_projection": {
-            "schema": "astr-embodiment.expression-projection.v1",
-            "revision": 1,
-            "profile_fxp6": {
-                "warmth": 100_000,
-                "sensitivity": 200_000,
-                "guardedness": 800_000,
-                "repair_orientation": 0,
-                "engagement": 100_000,
-                "epistemic_caution": 300_000,
-            },
-        },
-    }
-
-
-def _v3_test_native_closure_v2() -> dict:
-    closure = _v3_test_native_closure()
-    closure["schema"] = "astrembodiment.semantic-perception-closure.v2"
-    closure["availability"] = "AVAILABLE"
-    closure["migration_subcode"] = None
-    closure["telemetry_receipt"] = {
-        "schema": "native-telemetry-receipt.v1",
-        "formula": "phase0-native-propagation-fxp6-v1",
-        "formula_digest": closure["receipt"]["formula_digest"],
-        "scope_digest": closure["receipt"]["scope_digest"],
-        "event_digest": closure["receipt"]["event_digest"],
-        "source_digest": "77" * 32,
-        "base_revision": closure["receipt"]["base_revision"],
-        "next_revision": closure["receipt"]["next_revision"],
-        "phase": "PREPARE",
-        "state_before": closure["receipt"]["state_before"],
-        "state_after": closure["receipt"]["state_after"],
-        "graph_before": "88" * 32,
-        "graph_after": closure["receipt"]["graph_after"],
-        "local_digest": "99" * 32,
-        "compensation_digest": "aa" * 32,
-        "effective_digest": "bb" * 32,
-        "energy": {
-            "reserve_before": 0,
-            "reserve_after": 0,
-            "recovered": 0,
-            "spent": 0,
-            "headroom": 0,
-            "residual": 0,
-        },
-        "capacity": {
-            "upper_saturated_nodes": 0,
-            "node_limit": 16_384,
-            "node_headroom": 1_000_000,
-            "edge_used": 0,
-            "edge_limit": 524_288,
-            "edge_headroom": 1_000_000,
-            "headroom": 1_000_000,
-            "residual": 0,
-        },
-        "residuals": closure["receipt"]["residuals"],
-        "residual_health": 1_000_000,
-        "native_gate": 0,
-        "checkpoint_digest": "cc" * 32,
-        "telemetry_digest": "dd" * 32,
-    }
-    return closure
-
-
-def _v3_test_native_closure_v2_unavailable_legacy() -> dict:
-    closure = _v3_test_native_closure_v2()
-    closure.update(
-        {
-            "availability": "UNAVAILABLE_LEGACY",
-            "telemetry_receipt": None,
-            "semantic_vector_receipt": None,
-            "node_observability": None,
-            "expression_projection": None,
-        }
-    )
-    return closure
-
-
-def _v3_test_node_observability_contract_info() -> str:
+def _closed_semantic_estimate_json() -> str:
     return json.dumps(
         {
-            "schema": "astr-embodiment.node-observability-contract-info.v1",
-            "contract_id": "astr-embodiment.node-observability-contract.v2",
-            "node_observability_schema": "astr-embodiment.node-observability.v2",
-        }
-    )
-
-
-_NODE_COMPONENT_WITNESSES = (
-    ("potential", 1, 0),
-    ("excitation", 0, 1),
-    ("inhibition", 0, 0),
-    ("adaptation", 0, 0),
-    ("precision", 0, 0),
-    ("prediction_error", 0, 0),
-    ("eligibility", 0, 0),
-    ("metabolic_reserve", 0, 0),
-)
-
-
-def _node_component(*, changed: int = 0, nonzero: int = 0) -> dict[str, int]:
-    return {
-        "before_mean_fxp6": 0,
-        "after_mean_fxp6": 0,
-        "delta_mean_fxp6": 0,
-        "changed_node_count": changed,
-        "nonzero_after_count": nonzero,
-    }
-
-
-def _node_component_witness_closure(
-    *, potential_changed: int, excitation_changed: int
-) -> dict:
-    """A native-owned component table which Python must not reinterpret."""
-
-    closure = _v3_test_native_closure_v2()
-    node_observability = closure["node_observability"]
-    counts = node_observability["counts"]
-    counts.update(
-        {
-            "selected_node_count": 1,
-            "activated_node_count": int(
-                potential_changed != 0 or excitation_changed != 0
-            ),
-            "changed_node_count": 1,
-            "potential_nonzero_after_count": potential_changed,
-            "excitation_nonzero_after_count": excitation_changed,
-            "signal_nonzero_after_count": 1,
-        }
-    )
-    for region in node_observability["regions"]:
-        selected = int(region["region_name"] == "affective_valuation")
-        region["selected_node_count"] = selected
-        region["activated_node_count"] = counts["activated_node_count"] * selected
-        region["changed_node_count"] = selected
-        region["potential"] = _node_component(
-            changed=potential_changed * selected,
-            nonzero=potential_changed * selected,
-        )
-        region["excitation"] = _node_component(
-            changed=excitation_changed * selected,
-            nonzero=excitation_changed * selected,
-        )
-    return closure
-
-
-@pytest.mark.parametrize(
-    ("component_name", "potential_changed", "excitation_changed"),
-    _NODE_COMPONENT_WITNESSES,
-)
-def test_node_observability_accepts_native_component_table_without_python_neural_inference(
-    component_name: str, potential_changed: int, excitation_changed: int
-) -> None:
-    """All eight native state-component witnesses are opaque to this bridge."""
-
-    closure = _node_component_witness_closure(
-        potential_changed=potential_changed,
-        excitation_changed=excitation_changed,
-    )
-
-    result = bridge_module.validate_semantic_result(closure)
-
-    counts = result["node_observability"]["counts"]
-    assert counts == closure["node_observability"]["counts"]
-
-
-def test_node_observability_accepts_real_native_counts_without_python_neural_inference() -> (
-    None
-):
-    """The observed 16384/16383/16384 closure is a valid native projection."""
-
-    closure = _v3_test_native_closure_v2()
-    closure["receipt"]["active_nodes"] = 16_384
-    node_observability = closure["node_observability"]
-    node_observability["counts"] = {
-        "selected_node_count": 16_384,
-        "activated_node_count": 16_383,
-        "changed_node_count": 16_384,
-        "potential_nonzero_after_count": 0,
-        "excitation_nonzero_after_count": 0,
-        "signal_nonzero_after_count": 16_384,
-    }
-    for region in node_observability["regions"]:
-        capacity = region["node_capacity"]
-        region["selected_node_count"] = capacity
-        region["activated_node_count"] = capacity
-        region["changed_node_count"] = capacity
-        region["potential"] = _node_component()
-        region["excitation"] = _node_component()
-    node_observability["regions"][-1]["activated_node_count"] -= 1
-
-    result = bridge_module.validate_semantic_result(closure)
-
-    assert result["node_observability"]["counts"] == node_observability["counts"]
-
-
-def test_node_observability_requires_the_native_owned_contract_id() -> None:
-    """A closure without the v2 native contract identity is not interpretable."""
-
-    closure = _v3_test_native_closure_v2()
-    closure["node_observability"].pop("contract_id")
-
-    with pytest.raises(ValueError):
-        bridge_module.validate_semantic_result(closure)
-
-
-def test_node_observability_rejects_unknown_native_contract_id() -> None:
-    closure = _v3_test_native_closure_v2()
-    closure["node_observability"]["contract_id"] = "unknown-native-contract"
-
-    with pytest.raises(ValueError):
-        bridge_module.validate_semantic_result(closure)
-
-
-@pytest.mark.parametrize(
-    ("contract_info_payload", "has_contract_info", "expected_code"),
-    (
-        (None, False, "NATIVE_SYMBOL_UNAVAILABLE"),
-        ("not-json", True, "NATIVE_MALFORMED"),
-        (
-            json.dumps(
-                {
-                    "schema": "astr-embodiment.node-observability-contract-info.v1",
-                    "contract_id": "unknown-native-contract",
-                    "node_observability_schema": "astr-embodiment.node-observability.v2",
+            "schema": "astr-embodiment.semantic-estimate.v3",
+            "dimensions": {
+                name: {
+                    "state": "PRESENT" if name == "positive" else "ABSENT",
+                    "intensity_fxp6": 250_000 if name == "positive" else 0,
+                    "confidence_fxp6": 800_000,
                 }
-            ),
-            True,
-            "NATIVE_MALFORMED",
-        ),
-    ),
-)
-def test_native_bridge_fails_closed_before_apply_for_invalid_contract_info(
-    contract_info_payload: str | None, has_contract_info: bool, expected_code: str
-) -> None:
-    class NativeAbi:
-        def __init__(self) -> None:
-            self.contract_info_calls = 0
-            self.apply_calls = 0
-            if not has_contract_info:
-                self.contract_info = None
-
-        def contract_info(self) -> str:
-            self.contract_info_calls += 1
-            assert contract_info_payload is not None
-            return contract_info_payload
-
-        def apply_perception_proposal_v1(
-            self, _scope_json: str, _proposal_json: str
-        ) -> str:
-            self.apply_calls += 1
-            raise AssertionError("invalid contract info must fail before native apply")
-
-    native = NativeAbi()
-    bridge = bridge_module.NativeBridge()
-    bridge._native = native
-    scope = _v3_test_scope()
-
-    result = bridge.apply_perception_proposal_v1(scope, _v3_test_proposal(scope))
-
-    assert result == {"status": "DEGRADED", "code": expected_code}
-    assert native.contract_info_calls == int(has_contract_info)
-    assert native.apply_calls == 0
+                for name in DIMENSION_NAMES
+            },
+        }
+    )
 
 
-def test_native_bridge_preserves_unavailable_legacy_after_contract_preflight() -> None:
-    class NativeAbi:
-        def __init__(self) -> None:
-            self.contract_info_calls = 0
-            self.apply_calls = 0
+def _semantic_genesis(scope: ScopeTokens):
+    async def genesis(_event, _request=None):
+        receipt = {
+            "seed_code": "AE-S1-SEMANTIC-BOUNDARY",
+            "incarnation_id": "AE-I1-SEMANTIC-BOUNDARY",
+        }
+        return ({"genesis": receipt, **receipt}, scope, scope.session_token, 0, None, 0)
 
-        def contract_info(self) -> str:
-            self.contract_info_calls += 1
-            return _v3_test_node_observability_contract_info()
-
-        def apply_perception_proposal_v1(
-            self, _scope_json: str, _proposal_json: str
-        ) -> str:
-            self.apply_calls += 1
-            return json.dumps(_v3_test_native_closure_v2_unavailable_legacy())
-
-    native = NativeAbi()
-    bridge = bridge_module.NativeBridge()
-    bridge._native = native
-    scope = _v3_test_scope()
-
-    result = bridge.apply_perception_proposal_v1(scope, _v3_test_proposal(scope))
-
-    assert result["availability"] == "UNAVAILABLE_LEGACY"
-    assert result["node_observability"] is None
-    assert native.contract_info_calls == 1
-    assert native.apply_calls == 1
+    return genesis
 
 
-@pytest.mark.parametrize(
-    ("wire_subcode", "expected_subcode"),
-    (
-        (None, None),
-        ("FIELD_MIGRATION_APPLIED", "FIELD_MIGRATION_APPLIED"),
-    ),
-)
-def test_v2_semantic_closure_accepts_exact_migration_subcodes(
-    wire_subcode: str | None, expected_subcode: str | None
-) -> None:
-    """Native v2 accepts JSON null or one exact frozen migration code."""
-
-    closure = _v3_test_native_closure_v2()
-    closure["migration_subcode"] = wire_subcode
-
-    result = bridge_module.validate_semantic_result(closure)
-
-    assert result["migration_subcode"] == expected_subcode
-
-
-@pytest.mark.parametrize("wire_subcode", ("untrusted-migration-subcode", 17))
-def test_v2_semantic_closure_rejects_nonnull_unknown_migration_subcodes(
-    wire_subcode: object,
-) -> None:
-    """Unknown non-null native success telemetry must never become a closure."""
-
-    closure = _v3_test_native_closure_v2()
-    closure["migration_subcode"] = wire_subcode
-
-    with pytest.raises(ValueError):
-        bridge_module.validate_semantic_result(closure)
-
-
-def test_v3_estimator_delivers_closed_schema_and_logs_malformed_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class HostResponse:
-        def __init__(self, completion_text: str) -> None:
-            self.completion_text = completion_text
-
-    current_turn_text = "private current turn must remain the sole user prompt"
-    canonical_completion = json.dumps(_v3_test_estimate())
-    malformed_estimate = _v3_test_estimate()
-    malformed_estimate["dimensions"]["unexpected_dimension"] = {
-        "private_completion_secret": "must not be logged"
+def _claimed_begin(request, *, nonce: str = "11" * 32):
+    return {
+        "status": "claimed",
+        "settlement_nonce_digest": nonce,
+        "interaction": {
+            "receipt": {
+                "canonical_revision": 1,
+                "event_id": request["interaction"]["event_id"],
+            }
+        },
+        "challenge": {
+            "request_nonce_digest": nonce,
+            "origin": {"origin_digest": "22" * 32},
+        },
+        "capacity_reason": None,
+        "budget": _semantic_budget_receipt(),
+        "reply_affect": None,
     }
-    malformed_completion = json.dumps(malformed_estimate)
 
-    def request_mapping() -> dict:
+
+@pytest.mark.parametrize("status", ["claimed", "budget_exhausted"])
+def test_semantic_begin_without_required_budget_is_rejected_before_provider(status):
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+        instance = plugin(
+            FakeConfig(semantic_estimator_provider_id="semantic"), context
+        )
+        scope = ScopeTokens("bot", "persona", f"missing-budget-{status}")
+        instance._run_genesis = _semantic_genesis(scope)
+        instance._native_revision = lambda _scope: 0
+        instance._bridge.apply_interaction_v1 = lambda _request: pytest.fail(
+            "malformed begin receipts must not perform a raw interaction apply"
+        )
+        settlements = []
+
+        def begin(request):
+            if status == "claimed":
+                result = _claimed_begin(request)
+                result.pop("budget", None)
+                return result
+            return {
+                "status": "budget_exhausted",
+                "settlement_nonce_digest": None,
+                "interaction": {
+                    "receipt": {
+                        "canonical_revision": 1,
+                        "event_id": request["interaction"]["event_id"],
+                    }
+                },
+                "challenge": None,
+                "capacity_reason": None,
+                "reply_affect": None,
+            }
+
+        def settle(payload):
+            settlements.append(copy.deepcopy(payload))
+            return {
+                "status": "zero_mutation",
+                "charged_tokens": 1_024,
+                "canonical_revision": 1,
+                "contract": None,
+                "reply_affect": None,
+            }
+
+        instance._bridge.begin_semantic_appraisal_v1 = begin
+        instance._bridge.settle_semantic_appraisal_v1 = settle
+        event = FakeEvent()
+        event.message_str = f"missing budget: {status}"
+        with pytest.raises(main_module.SemanticAppraisalRuntimeError) as raised:
+            await instance._run_inbound(event, FakeRequest())
+        return context, settlements, raised.value
+
+    context, settlements, error = asyncio.run(run())
+    assert str(error) == "SEMANTIC_BEGIN_STATUS_INVALID"
+    assert context.generate_calls == []
+    if status == "claimed":
+        assert len(settlements) == 1
+        assert settlements[0] == {
+            "schema_version": 1,
+            "scope": ScopeTokens(
+                "bot", "persona", "missing-budget-claimed"
+            ).scope_json(),
+            "request_nonce_digest": "11" * 32,
+            "outcome": "malformed",
+            "provider_usage": {"known": False, "used_tokens": None},
+            "proposal": None,
+        }
+    else:
+        assert settlements == []
+
+
+def test_semantic_capacity_deferred_and_retry_expired_paths_are_closed():
+    error_code = "SEMANTIC_APPRAISAL_RETRY_EXPIRED_OR_UNKNOWN"
+    classified = bridge_module._classify(RuntimeError(f"{error_code}::terminal folded"))
+    assert isinstance(
+        classified, bridge_module.SemanticAppraisalRetryExpiredOrUnknown
+    )
+    assert classified.code == error_code
+
+    async def run_case(case: str):
+        context = FakeContext(configured_provider="semantic")
+        instance = plugin(
+            FakeConfig(semantic_estimator_provider_id="semantic"), context
+        )
+        scope = ScopeTokens("bot", "persona", f"{case}-session")
+        genesis_calls = 0
+        base_genesis = _semantic_genesis(scope)
+
+        async def genesis(event, request=None):
+            nonlocal genesis_calls
+            genesis_calls += 1
+            return await base_genesis(event, request)
+
+        current_revision = 7 if case == "begin_retry" else 2
+        revision_reads = iter((0, current_revision))
+        instance._run_genesis = genesis
+        instance._native_revision = lambda _scope: next(revision_reads)
+        instance._bridge.apply_interaction_v1 = lambda _request: pytest.fail(
+            "semantic terminal paths must not perform a raw interaction apply"
+        )
+        begin_requests = []
+        settlements = []
+
+        def begin(payload):
+            begin_requests.append(copy.deepcopy(payload))
+            if case == "begin_retry":
+                raise bridge_module.SemanticAppraisalRetryExpiredOrUnknown(
+                    error_code, "terminal folded"
+                )
+            if case.startswith("capacity"):
+                result = {
+                    "status": "capacity_deferred",
+                    "capacity_reason": "retention_capacity_unavailable",
+                    "interaction": {
+                        "receipt": {
+                            "canonical_revision": 1,
+                            "event_id": payload["interaction"]["event_id"],
+                        }
+                    },
+                    "challenge": None,
+                    "reply_affect": None,
+                }
+                if case == "capacity_with_budget":
+                    result["budget"] = _semantic_budget_receipt()
+                return result
+            return _claimed_begin(payload)
+
+        def settle(payload):
+            settlements.append(copy.deepcopy(payload))
+            if case == "settle_retry":
+                raise bridge_module.SemanticAppraisalRetryExpiredOrUnknown(
+                    error_code, "terminal folded"
+                )
+            pytest.fail("non-claimed semantic terminal paths must not settle")
+
+        instance._bridge.begin_semantic_appraisal_v1 = begin
+        instance._bridge.settle_semantic_appraisal_v1 = settle
+        event = FakeEvent()
+        event.message_str = f"closed semantic path: {case}"
+        request = FakeRequest()
+        await instance.on_llm_request(event, request)
         return {
-            "current_turn_text": current_turn_text,
-            "system_prompt": main_module.SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
-            "structured_schema": main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
-            "input": {"context_summary": {}},
+            "case": case,
+            "context": context,
+            "instance": instance,
+            "event": event,
+            "request": request,
+            "scope": scope,
+            "genesis_calls": genesis_calls,
+            "begin_requests": begin_requests,
+            "settlements": settlements,
+            "expected_revision": (
+                1 if case.startswith("capacity") else current_revision
+            ),
         }
 
-    def instance_for(completion_text: str):
-        context = FakeContext(configured_provider="semantic")
-
-        async def generate(**kwargs):
-            context.generate_calls.append(kwargs)
-            return HostResponse(completion_text)
-
-        context.llm_generate = generate
-        return (
-            plugin(
-                FakeConfig(
-                    model_settings={"assistant_provider_id": "semantic"},
-                    observatory_enabled=False,
-                ),
-                context,
-            ),
-            context,
-        )
-
-    instance, context = instance_for(canonical_completion)
-    canonical_result = asyncio.run(
-        instance._semantic_estimate_v3(FakeEvent(), request_mapping())
-    )
-
-    assert len(context.generate_calls) == 1
-    provider_call = context.generate_calls[0]
-    canonical_schema = json.dumps(
-        main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    assert provider_call["prompt"] == current_turn_text
-    assert set(provider_call) == {
-        "chat_provider_id",
-        "prompt",
-        "system_prompt",
-        "tools",
-    }
-    assert provider_call["tools"] is None
-    assert current_turn_text not in provider_call["system_prompt"]
-    assert canonical_schema in provider_call["system_prompt"]
-    assert all(
-        dimension_name in provider_call["system_prompt"]
-        for dimension_name in _V3_TEST_DIMENSIONS
-    )
-    assert canonical_result.as_json() == _v3_test_estimate()
-
-    recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", recorder)
-    malformed_instance, malformed_context = instance_for(malformed_completion)
-    with pytest.raises(SemanticEstimateError) as exc_info:
-        asyncio.run(
-            malformed_instance._semantic_estimate_v3(FakeEvent(), request_mapping())
-        )
-
-    assert exc_info.value.code == "ESTIMATOR_MALFORMED"
-    assert exc_info.value.subcode == "DIMENSION_KEYS"
-    assert len(malformed_context.generate_calls) == 1
-    assert len(recorder.warning_messages) == 1
-    warning_payload = json.loads(recorder.warning_messages[0])
-    assert warning_payload == {
-        "return_type": "canonical_completion_text",
-        "extraction_path": "canonical_text",
-        "character_length": len(malformed_completion),
-        "sha256": hashlib.sha256(malformed_completion.encode("utf-8")).hexdigest(),
-        "subcode": "DIMENSION_KEYS",
-        "transport_subcode": "NONE",
-        "attempted": True,
-        "attempt_count": 1,
-    }
-    assert current_turn_text not in recorder.warning_messages[0]
-    assert malformed_completion not in recorder.warning_messages[0]
-
-
-def test_v3_rejection_text_commits_nonzero_semantics_and_injects_same_turn_expression(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class NativeAbi:
-        def __init__(self) -> None:
-            self.cursor_calls = 0
-            self.proposals: list[dict] = []
-
-        def contract_info(self) -> str:
-            return _v3_test_node_observability_contract_info()
-
-        def semantic_revision_v1(self, _scope_json: str) -> str:
-            self.cursor_calls += 1
-            return json.dumps(
-                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
-            )
-
-        def apply_perception_proposal_v1(
-            self, _scope_json: str, proposal_json: str
-        ) -> str:
-            self.proposals.append(json.loads(proposal_json))
-            return json.dumps(_v3_test_native_closure_v2())
-
     async def run():
-        context = FakeContext(configured_provider="semantic")
-
-        async def generate(**kwargs):
-            context.generate_calls.append(kwargs)
-            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
-
-        context.llm_generate = generate
-        instance = plugin(
-            FakeConfig(
-                model_settings={"assistant_provider_id": "semantic"},
-                observatory_enabled=False,
-            ),
-            context,
-        )
-        native = NativeAbi()
-        bridge = bridge_module.NativeBridge()
-        bridge._native = native
-        instance._bridge = bridge
-        instance._coordinator = GenesisCoordinator(bridge)
-        scope = _v3_test_scope()
-
-        async def run_genesis(*_args, **_kwargs):
-            return _v3_test_genesis_result(scope)
-
-        instance._run_genesis = run_genesis
-        request = FakeRequest()
-        request.prompt = "请不要再联系我，我明确拒绝。"
-        event = FakeEvent()
-        observed_outcomes: list[dict[str, object]] = []
-        original_preflight = instance._coordinator.preflight_semantic_v3
-
-        async def capture_preflight(**kwargs):
-            result = await original_preflight(**kwargs)
-            observed_outcomes.append(result)
-            return result
-
-        instance._coordinator.preflight_semantic_v3 = capture_preflight
-        await instance.on_llm_request(event, request)
-        return instance, context, native, event, request, observed_outcomes
-
-    recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", recorder)
-    _instance, context, native, event, request, observed_outcomes = asyncio.run(run())
-
-    assert event.stopped is False
-    assert native.cursor_calls == 1
-    assert len(native.proposals) == 1
-    assert native.proposals[0]["dimensions"]["rejection"] == 900_000
-    assert native.proposals[0]["dimensions"] != {
-        name: 0 for name in _V3_TEST_DIMENSIONS
-    }
-    assert native.proposals[0]["estimator_confidence"] == 900_000
-    assert observed_outcomes[0]["migration_subcode"] is None
-    assert len(context.generate_calls) == 1
-    provider_call = context.generate_calls[0]
-    assert provider_call["chat_provider_id"] == "semantic"
-    assert provider_call["prompt"] == "请不要再联系我，我明确拒绝。"
-    assert provider_call["tools"] is None
-    assert provider_call["prompt"] not in provider_call["system_prompt"]
-    assert request.prompt == "请不要再联系我，我明确拒绝。"
-    assert request.contexts == [{"role": "user", "content": "历史"}]
-    assert request.system_prompt.count("AE Affect Expression Context") == 1
-    semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v3", {}
-    )
-    assert {
-        key: semantic_record.get(key)
-        for key in (
-            "schema",
-            "status",
-            "code",
-            "reason",
-            "cause_code",
-            "expression_state",
-            "migration_subcode",
-        )
-    } == {
-        "schema": "astr-embodiment.semantic-observatory.v3",
-        "status": "SUCCESS",
-        "code": "SEMANTIC_COMMITTED",
-        "reason": None,
-        "cause_code": None,
-        "expression_state": "APPLIED",
-        "migration_subcode": None,
-    }
-    assert all("calibration" not in key for key in semantic_record)
-    assert semantic_record["semantic_vector_counts"] == {
-        "dimension_slot_count": 15,
-        "evaluated_dimension_count": 15,
-        "injected_dimension_count": 15,
-        "nonzero_evidence_dimension_count": 1,
-        "neutral_baseline_dimension_count": 14,
-        "unavailable_dimension_count": 0,
-    }
-    assert recorder.warning_messages == []
-    assert len(recorder.info_messages) == 1
-    assert (
-        json.loads(
-            recorder.info_messages[0].removeprefix(main_module._OBSERVATORY_PREFIX)
-        )
-        == semantic_record
-    )
-
-
-def test_v3_unknown_success_migration_subcode_fails_closed_before_expression(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_migration_subcode = "untrusted-migration-subcode private-provider-id"
-
-    class NativeAbi:
-        def contract_info(self) -> str:
-            return _v3_test_node_observability_contract_info()
-
-        def semantic_revision_v1(self, _scope_json: str) -> str:
-            return json.dumps(
-                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
+        return [
+            await run_case(case)
+            for case in (
+                "capacity_without_budget",
+                "capacity_with_budget",
+                "begin_retry",
+                "settle_retry",
             )
-
-        def apply_perception_proposal_v1(
-            self, _scope_json: str, _proposal_json: str
-        ) -> str:
-            closure = _v3_test_native_closure_v2()
-            closure["migration_subcode"] = raw_migration_subcode
-            return json.dumps(closure)
-
-    async def run() -> tuple[dict[str, object], FakeRequest]:
-        context = FakeContext(configured_provider="semantic")
-
-        async def generate(**kwargs):
-            context.generate_calls.append(kwargs)
-            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
-
-        context.llm_generate = generate
-        instance = plugin(
-            FakeConfig(
-                model_settings={"assistant_provider_id": "semantic"},
-                observatory_enabled=False,
-            ),
-            context,
-        )
-        bridge = bridge_module.NativeBridge()
-        bridge._native = NativeAbi()
-        instance._bridge = bridge
-        instance._coordinator = GenesisCoordinator(bridge)
-        scope = _v3_test_scope()
-
-        async def run_genesis(*_args, **_kwargs):
-            return _v3_test_genesis_result(scope)
-
-        instance._run_genesis = run_genesis
-        observed_outcome: dict[str, object] = {}
-        original_preflight = instance._coordinator.preflight_semantic_v3
-
-        async def capture_preflight(**kwargs):
-            result = await original_preflight(**kwargs)
-            observed_outcome.update(result)
-            return result
-
-        instance._coordinator.preflight_semantic_v3 = capture_preflight
-        request = FakeRequest()
-        request.prompt = "请停止并保持边界。"
-        await instance.on_llm_request(FakeEvent(), request)
-        return observed_outcome, request
-
-    recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", recorder)
-    observed_outcome, request = asyncio.run(run())
-
-    assert observed_outcome == {
-        "status": "DEGRADED",
-        "code": "NATIVE_ERROR",
-        "cause_code": "NATIVE_ERROR",
-        "native_stage": "NATIVE_APPLY",
-        "migration_subcode": "FIELD_MIGRATION_UNKNOWN",
-        "transport_subcode": "NONE",
-        "attempted": True,
-        "attempt_count": 1,
-    }
-    semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v3", {}
-    )
-    assert semantic_record["expression_state"] == "NOT_ATTEMPTED"
-    assert semantic_record["cause_code"] == "NATIVE_ERROR"
-    assert semantic_record["migration_subcode"] == "FIELD_MIGRATION_UNKNOWN"
-    assert raw_migration_subcode not in "\n".join(recorder.warning_messages)
-
-
-def test_expression_not_attempted_is_warn_with_explicit_code_and_reason(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class NativeAbi:
-        def semantic_revision_v1(self, _scope_json: str) -> str:
-            return json.dumps(
-                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
-            )
-
-    async def run():
-        context = FakeContext(configured_provider="semantic")
-
-        async def unavailable_generate(**_kwargs):
-            raise RuntimeError("provider unavailable")
-
-        context.llm_generate = unavailable_generate
-        instance = plugin(
-            FakeConfig(
-                model_settings={"assistant_provider_id": "semantic"},
-                observatory_enabled=False,
-            ),
-            context,
-        )
-        bridge = bridge_module.NativeBridge()
-        bridge._native = NativeAbi()
-        instance._bridge = bridge
-        instance._coordinator = GenesisCoordinator(bridge)
-        scope = _v3_test_scope()
-
-        async def run_genesis(*_args, **_kwargs):
-            return _v3_test_genesis_result(scope)
-
-        instance._run_genesis = run_genesis
-        request = FakeRequest()
-        request.prompt = "请停止。"
-        await instance.on_llm_request(FakeEvent(), request)
-        return request
-
-    recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", recorder)
-    request = asyncio.run(run())
-
-    semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v3", {}
-    )
-    assert {
-        key: semantic_record.get(key)
-        for key in ("expression_state", "code", "reason", "cause_code")
-    } == {
-        "expression_state": "NOT_ATTEMPTED",
-        "code": "EXPRESSION_NOT_ATTEMPTED",
-        "reason": "EXPRESSION_NOT_ATTEMPTED",
-        "cause_code": "ESTIMATOR_UNAVAILABLE",
-    }
-    assert recorder.warning_messages[0] == (
-        "AstrEmbodiment semantic transport failure: "
-        "code=ESTIMATOR_UNAVAILABLE transport_subcode=PROVIDER_CALL_FAILED "
-        "attempted=true attempt_count=1"
-    )
-    assert len(recorder.warning_messages) == 2
-    assert recorder.info_messages == []
-
-
-@pytest.mark.parametrize(
-    ("message", "expected_state_subcode"),
-    (
-        (
-            "INVALID_NEURAL_STATE::GRAPH_STATE_INVALID",
-            "GRAPH_STATE_INVALID",
-        ),
-        (
-            "INVALID_NEURAL_STATE::UNMAPPED_FUTURE_REJECTION",
-            "UNKNOWN_INVALID_NEURAL_STATE",
-        ),
-        (
-            "INVALID_NEURAL_STATE::GRAPH_STATE_INVALID::private-native-detail",
-            "UNKNOWN_INVALID_NEURAL_STATE",
-        ),
-    ),
-)
-def test_invalid_neural_state_classification_requires_exact_closed_subcode(
-    message: str, expected_state_subcode: str
-) -> None:
-    classified = bridge_module._classify(RuntimeError(message))
-
-    assert isinstance(classified, bridge_module.InvalidNeuralState)
-    assert classified.code == "INVALID_NEURAL_STATE"
-    assert classified.state_subcode == expected_state_subcode
-    assert classified.detail == expected_state_subcode
-    assert "private-native-detail" not in str(classified)
-
-
-@pytest.mark.parametrize(
-    (
-        "native_code",
-        "native_state_subcode",
-        "native_migration_subcode",
-        "expected_state_subcode",
-        "expected_migration_subcode",
-        "expected_stage",
-    ),
-    (
-        (
-            "LEGACY_UNATTESTED",
-            None,
-            "FIELD_MIGRATION_REFUSED_STRUCTURE",
-            None,
-            "FIELD_MIGRATION_REFUSED_STRUCTURE",
-            "NATIVE_APPLY",
-        ),
-        (
-            "INVALID_NEURAL_STATE",
-            "GRAPH_STATE_INVALID",
-            "FIELD_MIGRATION_REFUSED_RANGE",
-            "GRAPH_STATE_INVALID",
-            "FIELD_MIGRATION_REFUSED_RANGE",
-            "NATIVE_APPLY",
-        ),
-        (
-            "INVALID_NEURAL_STATE",
-            "GRAPH_STATE_INVALID::raw-native-detail provider-id=private-provider-id",
-            "FIELD_MIGRATION_REFUSED_RANGE::raw-native-detail provider-id=private-provider-id",
-            "UNKNOWN_INVALID_NEURAL_STATE",
-            "FIELD_MIGRATION_UNKNOWN",
-            "NATIVE_APPLY",
-        ),
-        (
-            "STORAGE",
-            None,
-            None,
-            None,
-            "FIELD_MIGRATION_UNKNOWN",
-            "NATIVE_APPLY",
-        ),
-    ),
-)
-def test_semantic_native_failures_preserve_exact_safe_code_and_stage(
-    monkeypatch: pytest.MonkeyPatch,
-    native_code: str,
-    native_state_subcode: str | None,
-    native_migration_subcode: str | None,
-    expected_state_subcode: str | None,
-    expected_migration_subcode: str,
-    expected_stage: str,
-):
-    """PyO3 codes survive the Python preview path without exposing detail."""
-
-    native_detail = "private native detail provider-id=private-provider-id"
-
-    class NativeAbi:
-        def contract_info(self) -> str:
-            return _v3_test_node_observability_contract_info()
-
-        def semantic_revision_v1(self, _scope_json: str) -> str:
-            return json.dumps(
-                {"schema": "astrembodiment.semantic-revision.v1", "revision": 2}
-            )
-
-        def apply_perception_proposal_v1(
-            self, _scope_json: str, _proposal_json: str
-        ) -> str:
-            native_suffix = native_state_subcode or native_detail
-            error = RuntimeError(f"{native_code}::{native_suffix}")
-            if native_migration_subcode is not None:
-                error.migration_subcode = native_migration_subcode
-            raise error
-
-    async def run() -> tuple[dict[str, object], FakeRequest]:
-        context = FakeContext(configured_provider="semantic")
-
-        async def generate(**kwargs):
-            context.generate_calls.append(kwargs)
-            return SimpleNamespace(completion_text=json.dumps(_v3_test_estimate()))
-
-        context.llm_generate = generate
-        instance = plugin(
-            FakeConfig(
-                model_settings={"assistant_provider_id": "semantic"},
-                observatory_enabled=False,
-            ),
-            context,
-        )
-        bridge = bridge_module.NativeBridge()
-        bridge._native = NativeAbi()
-        instance._bridge = bridge
-        instance._coordinator = GenesisCoordinator(bridge)
-        scope = _v3_test_scope()
-
-        async def run_genesis(*_args, **_kwargs):
-            return _v3_test_genesis_result(scope)
-
-        instance._run_genesis = run_genesis
-        observed_outcome: dict[str, object] = {}
-        original_preflight = instance._coordinator.preflight_semantic_v3
-
-        async def capture_preflight(**kwargs):
-            result = await original_preflight(**kwargs)
-            observed_outcome.update(result)
-            return result
-
-        instance._coordinator.preflight_semantic_v3 = capture_preflight
-        request = FakeRequest()
-        request.prompt = "请停止并保持边界。"
-        await instance.on_llm_request(FakeEvent(), request)
-        return observed_outcome, request
-
-    recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", recorder)
-    observed_outcome, request = asyncio.run(run())
-
-    expected_outcome: dict[str, object] = {
-        "status": "DEGRADED",
-        "code": native_code,
-        "cause_code": native_code,
-        "native_stage": expected_stage,
-        "transport_subcode": "NONE",
-        "attempted": True,
-        "attempt_count": 1,
-    }
-    if expected_state_subcode is not None:
-        expected_outcome["state_subcode"] = expected_state_subcode
-    expected_outcome["migration_subcode"] = expected_migration_subcode
-    assert observed_outcome == expected_outcome
-    semantic_record = getattr(
-        request, "_astrembodiment_semantic_observatory_record_v3", {}
-    )
-    assert {
-        key: semantic_record.get(key)
-        for key in (
-            "expression_state",
-            "code",
-            "reason",
-            "cause_code",
-            "state_subcode",
-            "migration_subcode",
-            "dimensions_fxp6",
-            "revision",
-        )
-    } == {
-        "expression_state": "NOT_ATTEMPTED",
-        "code": "EXPRESSION_NOT_ATTEMPTED",
-        "reason": "EXPRESSION_NOT_ATTEMPTED",
-        "cause_code": native_code,
-        "state_subcode": expected_state_subcode,
-        "migration_subcode": expected_migration_subcode,
-        "dimensions_fxp6": None,
-        "revision": None,
-    }
-    expected_warning = (
-        "AstrEmbodiment semantic native failure: "
-        f"code={native_code} stage={expected_stage}"
-    )
-    if expected_state_subcode is not None:
-        expected_warning += f" state_subcode={expected_state_subcode}"
-    expected_warning += f" migration_subcode={expected_migration_subcode}"
-    assert recorder.warning_messages[0] == expected_warning
-    assert len(recorder.warning_messages) == 2
-    assert (
-        json.loads(
-            recorder.warning_messages[1].removeprefix(main_module._OBSERVATORY_PREFIX)
-        )
-        == semantic_record
-    )
-    assert native_detail not in "\n".join(recorder.warning_messages)
-    assert "raw-native-detail" not in "\n".join(recorder.warning_messages)
-    assert "private-provider-id" not in "\n".join(recorder.warning_messages)
-
-
-def test_v3_dimension_value_provider_warn_includes_first_safe_diagnostic(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    class NativeAbi:
-        def __init__(self) -> None:
-            self.cursor_calls = 0
-            self.proposal_calls = 0
-
-        def semantic_revision_v1(self, _scope_json: str) -> str:
-            self.cursor_calls += 1
-            return json.dumps(
-                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
-            )
-
-        def apply_perception_proposal_v1(
-            self, _scope_json: str, _proposal_json: str
-        ) -> str:
-            self.proposal_calls += 1
-            raise AssertionError("malformed estimate must not reach native")
-
-    malformed_estimate = _v3_test_estimate()
-    malformed_estimate["dimensions"]["rejection"]["confidence_fxp6"] = 0.75
-    malformed_completion = json.dumps(malformed_estimate)
-    expected_diagnostic = {
-        "dimension_name": "rejection",
-        "value_classification": "CONFIDENCE_NON_INTEGRAL_NUMBER",
-        "json_type": "number",
-        "numeric_scalar": 0.75,
-    }
-
-    async def run():
-        context = FakeContext(configured_provider="semantic")
-
-        async def generate(**kwargs):
-            context.generate_calls.append(kwargs)
-            return SimpleNamespace(completion_text=malformed_completion)
-
-        context.llm_generate = generate
-        instance = plugin(
-            FakeConfig(
-                model_settings={"assistant_provider_id": "semantic"},
-                observatory_enabled=False,
-            ),
-            context,
-        )
-        native = NativeAbi()
-        bridge = bridge_module.NativeBridge()
-        bridge._native = native
-        instance._bridge = bridge
-        instance._coordinator = GenesisCoordinator(bridge)
-        scope = _v3_test_scope()
-
-        async def run_genesis(*_args, **_kwargs):
-            return _v3_test_genesis_result(scope)
-
-        instance._run_genesis = run_genesis
-        request = FakeRequest()
-        request.prompt = "只验证安全诊断传播。"
-        await instance.on_llm_request(FakeEvent(), request)
-        return context, native, request
-
-    recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", recorder)
-    context, native, _request = asyncio.run(run())
-
-    assert len(context.generate_calls) == 1
-    assert native.cursor_calls == 1
-    assert native.proposal_calls == 0
-    assert len(recorder.warning_messages) == 2
-    provider_warning = json.loads(recorder.warning_messages[0])
-    assert provider_warning.get("subcode") == "DIMENSION_VALUE"
-    assert provider_warning.get("dimension_diagnostic") == expected_diagnostic
-    assert malformed_completion not in "\n".join(recorder.warning_messages)
-
-
-def test_v3_positive_null_schema_contract_and_e2e_cause_preservation(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Keep schema, prompt, parser, proposal admission, and observatory aligned."""
-
-    class NativeAbi:
-        def __init__(self, *, closure: dict | None) -> None:
-            self.closure = closure
-            self.cursor_calls = 0
-            self.proposal_calls = 0
-
-        def contract_info(self) -> str:
-            return _v3_test_node_observability_contract_info()
-
-        def semantic_revision_v1(self, _scope_json: str) -> str:
-            self.cursor_calls += 1
-            return json.dumps(
-                {"schema": "astrembodiment.semantic-revision.v1", "revision": 0}
-            )
-
-        def apply_perception_proposal_v1(
-            self, _scope_json: str, _proposal_json: str
-        ) -> str:
-            self.proposal_calls += 1
-            if self.closure is None:
-                raise AssertionError(
-                    "this estimate must not reach native proposal apply"
-                )
-            return json.dumps(self.closure)
-
-    async def run(completion_text: str, native: NativeAbi):
-        context = FakeContext(configured_provider="semantic")
-
-        async def generate(**kwargs):
-            context.generate_calls.append(kwargs)
-            return SimpleNamespace(completion_text=completion_text)
-
-        context.llm_generate = generate
-        instance = plugin(
-            FakeConfig(
-                model_settings={"assistant_provider_id": "semantic"},
-                observatory_enabled=False,
-            ),
-            context,
-        )
-        bridge = bridge_module.NativeBridge()
-        bridge._native = native
-        instance._bridge = bridge
-        instance._coordinator = GenesisCoordinator(bridge)
-        scope = _v3_test_scope()
-
-        async def run_genesis(*_args, **_kwargs):
-            return _v3_test_genesis_result(scope)
-
-        instance._run_genesis = run_genesis
-        request = FakeRequest()
-        request.prompt = "请停止并保持边界。"
-        await instance.on_llm_request(FakeEvent(), request)
-        return context, request
-
-    expected_dimension_schema = {
-        "oneOf": [
-            {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["state", "intensity_fxp6", "confidence_fxp6"],
-                "properties": {
-                    "state": {"const": "PRESENT"},
-                    "intensity_fxp6": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 1_000_000,
-                    },
-                    "confidence_fxp6": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 1_000_000,
-                    },
-                },
-            },
-            {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["state", "intensity_fxp6", "confidence_fxp6"],
-                "properties": {
-                    "state": {"const": "ABSENT"},
-                    "intensity_fxp6": {"const": 0},
-                    "confidence_fxp6": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 1_000_000,
-                    },
-                },
-            },
-            {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["state", "intensity_fxp6", "confidence_fxp6"],
-                "properties": {
-                    "state": {"const": "UNAVAILABLE"},
-                    "intensity_fxp6": {"type": "null"},
-                    "confidence_fxp6": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 1_000_000,
-                    },
-                },
-            },
         ]
-    }
-    expected_prompt_fragments = (
-        "State × intensity algebra (mutually exclusive):",
-        "PRESENT: intensity_fxp6 must be an integer from 1 through 1000000.",
-        "ABSENT: intensity_fxp6 must be the integer 0.",
-        "UNAVAILABLE: intensity_fxp6 must be JSON null.",
-        "JSON null is allowed only with UNAVAILABLE.",
-        "If reliable current-turn presence cannot be determined, select UNAVAILABLE with JSON null.",
-        "If current-turn evaluation finds no evidence, select ABSENT with integer 0.",
-    )
-    contract_failures: list[str] = []
-    structured_schema = main_module.SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA
-    dimensions_schema = structured_schema["properties"]["dimensions"]
-    if dimensions_schema.get("$ref", False):
-        contract_failures.append("dimensions schema must be inline and closed")
-    if dimensions_schema["required"] != list(_V3_TEST_DIMENSIONS):
-        contract_failures.append("schema must retain the canonical ordered 15D set")
-    if structured_schema["$defs"]["dimension"] != expected_dimension_schema:
-        contract_failures.append(
-            "schema must expose the three mutually exclusive state branches"
-        )
 
-    malformed_estimate = _v3_test_estimate()
-    malformed_estimate["dimensions"]["positive"] = {
-        "state": "PRESENT",
-        "intensity_fxp6": None,
-        "confidence_fxp6": 900_000,
-    }
-    malformed_completion = json.dumps(malformed_estimate)
-    with pytest.raises(SemanticEstimateError) as exc_info:
-        parse_estimator_output_v3(malformed_completion)
-    assert exc_info.value.code == "ESTIMATOR_MALFORMED"
-    assert exc_info.value.subcode == "DIMENSION_VALUE"
-    assert exc_info.value.diagnostic_json() == {
-        "dimension_name": "positive",
-        "value_classification": "INTENSITY_NULL_DISALLOWED",
-        "json_type": "null",
-    }
-
-    valid_recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", valid_recorder)
-    valid_native = NativeAbi(closure=_v3_test_native_closure())
-    valid_context, _valid_request = asyncio.run(
-        run(json.dumps(_v3_test_estimate()), valid_native)
-    )
-    assert len(valid_context.generate_calls) == 1
-    assert valid_native.cursor_calls == 1
-    assert valid_native.proposal_calls == 1
-
-    unavailable_estimate = _v3_test_estimate()
-    unavailable_estimate["dimensions"]["positive"] = {
-        "state": "UNAVAILABLE",
-        "intensity_fxp6": None,
-        "confidence_fxp6": 900_000,
-    }
-    unavailable_recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", unavailable_recorder)
-    unavailable_native = NativeAbi(closure=None)
-    unavailable_context, unavailable_request = asyncio.run(
-        run(json.dumps(unavailable_estimate), unavailable_native)
-    )
-    assert len(unavailable_context.generate_calls) == 1
-    assert unavailable_native.cursor_calls == 1
-    assert unavailable_native.proposal_calls == 0
-    unavailable_record = getattr(
-        unavailable_request, "_astrembodiment_semantic_observatory_record_v3", {}
-    )
-    assert unavailable_record.get("cause_code") == "SEMANTIC_VECTOR_UNAVAILABLE"
-
-    malformed_recorder = _SemanticRecordingLogger()
-    monkeypatch.setattr(main_module, "logger", malformed_recorder)
-    malformed_native = NativeAbi(closure=None)
-    malformed_context, malformed_request = asyncio.run(
-        run(malformed_completion, malformed_native)
-    )
-    assert len(malformed_context.generate_calls) == 1
-    assert malformed_native.cursor_calls == 1
-    assert malformed_native.proposal_calls == 0
-    provider_call = malformed_context.generate_calls[0]
-    canonical_schema = json.dumps(
-        structured_schema,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    if canonical_schema not in provider_call["system_prompt"]:
-        contract_failures.append(
-            "provider prompt must carry the canonical structured schema"
-        )
-    for fragment in expected_prompt_fragments:
-        if fragment not in provider_call["system_prompt"]:
-            contract_failures.append(
-                f"provider prompt missing canonical rule: {fragment}"
+    for result in asyncio.run(run()):
+        case = result["case"]
+        context = result["context"]
+        instance = result["instance"]
+        event = result["event"]
+        request = result["request"]
+        scope = result["scope"]
+        expected_revision = result["expected_revision"]
+        assert result["genesis_calls"] == 1
+        assert len(result["begin_requests"]) == 1
+        assert event.stopped is False
+        assert "seed_code=AE-S1-SEMANTIC-BOUNDARY" in request.system_prompt
+        assert instance._revisions[scope.persona_token] == expected_revision
+        assert next(iter(instance._pending.values()))["base_revision"] == expected_revision
+        if case.startswith("capacity"):
+            assert context.generate_calls == []
+            assert result["settlements"] == []
+            assert "capacity_deferred" in instance._semantic_attempts.values()
+            assert any(
+                item["code"] == "SEMANTIC_CAPACITY_DEFERRED"
+                and item["canonical_revision"] == 1
+                for item in instance._semantic_diagnostics
             )
-    malformed_record = getattr(
-        malformed_request, "_astrembodiment_semantic_observatory_record_v3", {}
+        elif case == "begin_retry":
+            assert context.generate_calls == []
+            assert result["settlements"] == []
+            assert "retry_expired_or_unknown" in instance._semantic_attempts.values()
+        else:
+            assert len(context.generate_calls) == 1
+            assert len(result["settlements"]) == 1
+            assert not any(
+                item["code"] == "SEMANTIC_SETTLE_RETRY"
+                for item in instance._semantic_diagnostics
+            )
+        if case.endswith("retry"):
+            assert any(
+                item["code"] == error_code
+                for item in instance._semantic_diagnostics
+            )
+
+
+def test_semantic_cancellation_is_shield_settled_at_full_reservation_then_propagated():
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+        provider_entered = asyncio.Event()
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            provider_entered.set()
+            await asyncio.Event().wait()
+
+        context.llm_generate = generate
+        instance = plugin(FakeConfig(semantic_estimator_provider_id="semantic"), context)
+        scope = ScopeTokens("bot", "persona", "cancel-session")
+        instance._run_genesis = _semantic_genesis(scope)
+        instance._native_revision = lambda _scope: 0
+        instance._bridge.begin_semantic_appraisal_v1 = _claimed_begin
+        settlements = []
+        pending = True
+
+        def settle(payload):
+            nonlocal pending
+            settlements.append(payload)
+            if len(settlements) == 1:
+                raise OSError("transient ffi boundary")
+            pending = False
+            return {
+                "status": "zero_mutation",
+                "charged_tokens": 1_024,
+                "canonical_revision": 1,
+                "contract": None,
+                "reply_affect": None,
+            }
+
+        instance._bridge.settle_semantic_appraisal_v1 = settle
+        event = FakeEvent()
+        event.message_str = "取消中的消息"
+        task = asyncio.create_task(instance._run_inbound(event, FakeRequest()))
+        await asyncio.wait_for(provider_entered.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return context, settlements, pending, instance
+
+    context, settlements, pending, instance = asyncio.run(run())
+    assert len(context.generate_calls) == 1
+    assert len(settlements) == 2
+    assert settlements[0] == settlements[1]
+    assert settlements[0]["outcome"] == "provider_error"
+    assert settlements[0]["provider_usage"] == {"known": False, "used_tokens": None}
+    assert pending is False
+    assert any(
+        item["code"] == "SEMANTIC_CANCELLED_COMPENSATED"
+        for item in instance._semantic_diagnostics
     )
-    expected_record = {
-        "status": "DEGRADED",
-        "code": "EXPRESSION_NOT_ATTEMPTED",
-        "reason": "EXPRESSION_NOT_ATTEMPTED",
-        "cause_code": "DIMENSION_VALUE",
-        "expression_state": "NOT_ATTEMPTED",
-        "dimensions_fxp6": None,
+
+
+@pytest.mark.parametrize("fault", ["receipt", "status", "challenge"])
+def test_invalid_claimed_begin_is_compensated_without_provider_call(fault):
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+        instance = plugin(FakeConfig(semantic_estimator_provider_id="semantic"), context)
+        scope = ScopeTokens("bot", "persona", "bad-challenge-session")
+        instance._run_genesis = _semantic_genesis(scope)
+        instance._native_revision = lambda _scope: 0
+
+        def bad_begin(request):
+            result = _claimed_begin(request)
+            if fault == "receipt":
+                result["interaction"]["receipt"]["canonical_revision"] = 0
+            elif fault == "status":
+                result["status"] = "invalid"
+            else:
+                result["challenge"] = {"origin": None}
+            return result
+
+        settlements = []
+        pending = True
+        instance._bridge.begin_semantic_appraisal_v1 = bad_begin
+
+        def settle(payload):
+            nonlocal pending
+            settlements.append(copy.deepcopy(payload))
+            if len(settlements) == 1:
+                raise OSError("transient ffi boundary")
+            pending = False
+            return {
+                "status": "zero_mutation",
+                "charged_tokens": 1_024,
+                "canonical_revision": 1,
+                "contract": None,
+                "reply_affect": None,
+            }
+
+        instance._bridge.settle_semantic_appraisal_v1 = settle
+        event = FakeEvent()
+        event.message_str = f"坏 begin {fault}"
+        with pytest.raises(main_module.SemanticAppraisalRuntimeError) as raised:
+            await instance._run_inbound(event, FakeRequest())
+        return context, settlements, pending, instance, raised.value
+
+    context, settlements, pending, instance, error = asyncio.run(run())
+    assert context.generate_calls == []
+    assert len(settlements) == 2
+    assert settlements[0] == settlements[1]
+    assert settlements[0]["outcome"] == "malformed"
+    assert settlements[0]["provider_usage"]["known"] is False
+    assert pending is False
+    assert str(error) in {
+        "SEMANTIC_BEGIN_RECEIPT_INVALID",
+        "SEMANTIC_BEGIN_STATUS_INVALID",
+        "SEMANTIC_CHALLENGE_INVALID",
     }
-    observed_record = {key: malformed_record.get(key) for key in expected_record}
-    if observed_record != expected_record:
-        contract_failures.append(
-            f"observatory must preserve DIMENSION_VALUE, got {observed_record!r}"
-        )
-    assert len(malformed_recorder.warning_messages) == 2
-    provider_warning = json.loads(malformed_recorder.warning_messages[0])
-    assert provider_warning.get("subcode") == "DIMENSION_VALUE"
-    assert provider_warning.get("dimension_diagnostic") == {
-        "dimension_name": "positive",
-        "value_classification": "INTENSITY_NULL_DISALLOWED",
-        "json_type": "null",
-    }
-    assert malformed_completion not in "\n".join(malformed_recorder.warning_messages)
-    assert not contract_failures, "\n".join(contract_failures)
+    assert any(
+        item["code"] == str(error)
+        for item in instance._semantic_diagnostics
+    )
+
+
+def test_malformed_estimate_full_charges_and_transient_settle_failure_retries_exact_payload():
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+
+        async def generate(**kwargs):
+            context.generate_calls.append(kwargs)
+            return SimpleNamespace(completion_text='{"not":"closed"}', usage=SimpleNamespace(total=9))
+
+        context.llm_generate = generate
+        instance = plugin(FakeConfig(semantic_estimator_provider_id="semantic"), context)
+        scope = ScopeTokens("bot", "persona", "malformed-session")
+        instance._run_genesis = _semantic_genesis(scope)
+        instance._native_revision = lambda _scope: 0
+        instance._bridge.begin_semantic_appraisal_v1 = _claimed_begin
+        settlements = []
+
+        def settle(payload):
+            settlements.append(copy.deepcopy(payload))
+            if len(settlements) == 1:
+                raise OSError("transient ffi boundary")
+            return {
+                "status": "zero_mutation",
+                "charged_tokens": 1_024,
+                "canonical_revision": 1,
+                "contract": None,
+                "reply_affect": None,
+            }
+
+        instance._bridge.settle_semantic_appraisal_v1 = settle
+        event = FakeEvent()
+        event.message_str = "malformed estimator"
+        result = await instance._run_inbound(event, FakeRequest())
+        return context, settlements, result, instance
+
+    context, settlements, result, instance = asyncio.run(run())
+    assert len(context.generate_calls) == 1
+    assert len(settlements) == 2
+    assert settlements[0] == settlements[1]
+    assert settlements[0]["outcome"] == "malformed"
+    assert settlements[0]["provider_usage"] == {"known": False, "used_tokens": None}
+    assert result[0]["contract"] is None
+    assert any(item["code"] == "SEMANTIC_SETTLE_RETRY" for item in instance._semantic_diagnostics)
+
+
+def test_slow_semantic_providers_overlap_for_same_persona_across_sessions():
+    async def run():
+        context = FakeContext(configured_provider="semantic")
+        both_entered = asyncio.Event()
+        release = asyncio.Event()
+        entered = 0
+
+        async def generate(**kwargs):
+            nonlocal entered
+            context.generate_calls.append(kwargs)
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await release.wait()
+            return SimpleNamespace(
+                completion_text=_closed_semantic_estimate_json(),
+                usage=SimpleNamespace(total=23),
+            )
+
+        context.llm_generate = generate
+        instance = plugin(FakeConfig(semantic_estimator_provider_id="semantic"), context)
+
+        async def genesis(event, _request=None):
+            scope = ScopeTokens("bot", "shared-persona", event.session_name)
+            return await _semantic_genesis(scope)(event, _request)
+
+        instance._run_genesis = genesis
+        instance._native_revision = lambda _scope: 0
+        begin_count = 0
+
+        def begin(request):
+            nonlocal begin_count
+            begin_count += 1
+            return _claimed_begin(request, nonce=f"{begin_count:064x}")
+
+        instance._bridge.begin_semantic_appraisal_v1 = begin
+        instance._bridge.settle_semantic_appraisal_v1 = lambda payload: {
+            "status": "committed",
+            "charged_tokens": payload["provider_usage"]["used_tokens"],
+            "canonical_revision": 2,
+            "contract": {"continuous": {"directness": 450_000}},
+            "reply_affect": None,
+        }
+        left = FakeEvent()
+        left.session_name = "session-left"
+        left.message_str = "左侧"
+        right = FakeEvent()
+        right.session_name = "session-right"
+        right.message_str = "右侧"
+        left_task = asyncio.create_task(instance._run_inbound(left, FakeRequest()))
+        right_task = asyncio.create_task(instance._run_inbound(right, FakeRequest()))
+        await asyncio.wait_for(both_entered.wait(), timeout=1.0)
+        release.set()
+        return await asyncio.gather(left_task, right_task), context, instance
+
+    results, context, instance = asyncio.run(run())
+    assert len(results) == 2
+    assert len(context.generate_calls) == 2
+    assert set(instance._persona_locks) == {("bot", "shared-persona")}

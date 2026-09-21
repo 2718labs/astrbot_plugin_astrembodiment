@@ -1,0 +1,34 @@
+{
+  "schema": "ae.neurofield.task3-source-fixture-provenance.v1",
+  "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+  "source_blobs": [
+    {
+      "path": "crates/ae-neurofield/src/graph_replay.rs",
+      "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+    },
+    {
+      "path": "crates/ae-neurofield/src/structural_delta.rs",
+      "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/graph_persistence_replay.rs",
+      "blob": "f4b6a29e901bffb1ba5a7aaea80113ea52039d60"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/structural_delta_cas.rs",
+      "blob": "968036c805043e7296ddb90de4710a6ff0a31df5"
+    }
+  ],
+  "fixtures": [
+    {
+      "path": "crates/ae-neurofield/tests/vectors/graph-replay-source-v1-nonempty.json",
+      "sha256": "8dbce3645097d566c7b5db5b87b6f774c226e4c077293342ea423862d0deace0",
+      "derivation": "serde_json::to_vec of the immutable source GraphReplayV1 sealed nonempty add-update history"
+    },
+    {
+      "path": "crates/ae-neurofield/tests/vectors/structural-delta-source-v1-composite.bin",
+      "sha256": "2d1cd77abf21cf0224ab409b2ec7121eee17ef034a0d0941874c88163769183c",
+      "derivation": "SparseGraph::canonical_bytes after immutable source apply_delta accepts one canonical add-update-remove transition"
+    }
+  ]
+}

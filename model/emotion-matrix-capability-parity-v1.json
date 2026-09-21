@@ -1,0 +1,3039 @@
+{
+  "schema": "ae.emotion-matrix-capability-parity.v1",
+  "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+  "target_baseline": "e8cf2794ee45a9fad6e54125ea282446c8463ccf",
+  "merge_base": "8c4a606e63888351b3d8854e9006b89aa6623f07",
+  "release_gate": {
+    "status": "NO_GO",
+    "reasons": [
+      "REAL_PLATFORM_ARTIFACTS_PENDING"
+    ],
+    "validated_capability_count": 43,
+    "unmapped_capability_count": 3,
+    "source_mapped_capability_count": 40,
+    "pending_artifact_capability_ids": [
+      "windows-native-export",
+      "linux-native-export",
+      "universal-package-members"
+    ],
+    "scope": "Source capability reconciliation and selected regression gates only; not a full-suite or release pass."
+  },
+  "capabilities": [
+    {
+      "id": "evidence-canonical-codec",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::encode_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::decode_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::event_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::encode_event",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::decode_event",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::event_digest",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+          "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+          "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_event_lane --jobs 1 authenticated_user_stimulus_changes_and_reopens_persona_emotion_state -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+        "execution_run": "runtime",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json"
+      }
+    },
+    {
+      "id": "evidence-slot-order",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "perception_dimension_values",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_vector_from_values",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "perception_dimension_values",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_vector_from_values",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task2-v1/contracts-exact.receipt.json",
+          "sha256": "56a2ef0fb83aa0da9d76151642fd61a116a36266948f5314b4fc8b88b5f43472",
+          "target_commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "evidence-range-validation",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1::validate_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "perception_dimension_values",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1::validate_v1",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "perception_dimension_values",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task2-v1/contracts-exact.receipt.json",
+          "sha256": "56a2ef0fb83aa0da9d76151642fd61a116a36266948f5314b4fc8b88b5f43472",
+          "target_commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "frozen-15-routes",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "Phase0SemanticRouteRuleV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_RULES_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "assemble_full_vector_load",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoad",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoadError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_values",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "full_vector_route_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "Phase0SemanticRouteRuleV1",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_RULES_V1",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "assemble_full_vector_load",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoad",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoadError",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_values",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "full_vector_route_digest",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-attention --test emotion_matrix_route all_fifteen_dimensions_route_through_one_frozen_contract -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task2-v1/attention-exact.receipt.json",
+          "sha256": "c670f071eac04176303e23fc4a99db2e2a57a9b9565585d9e5f8b7eaf69fc2cb",
+          "target_commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-attention --test emotion_matrix_route all_fifteen_dimensions_route_through_one_frozen_contract -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "route-digest",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_semantic_route_digest_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_semantic_route_digest_v1",
+          "commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task2-v1/contracts-exact.receipt.json",
+          "sha256": "56a2ef0fb83aa0da9d76151642fd61a116a36266948f5314b4fc8b88b5f43472",
+          "target_commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "nine-region-layout",
+      "source_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "REGION_LAYOUT",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "interoception_allostasis",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "affective_valuation",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "salience",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "epistemic_fallibility",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "social_boundary",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "temper_inhibitory",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "world_model_imagination",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "global_workspace",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "action_expression",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "REGION_LAYOUT",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development -j 1 v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+      "evidence": [],
+      "historical_test_node": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development -j 1 v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "numerical"
+      }
+    },
+    {
+      "id": "field-16384x8",
+      "source_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NEURON_SLOTS",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NODE_DOF",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics -j 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+      "evidence": [],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics phase0_dynamics_change_all_bounded_state_from_immutable_before -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics -j 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "numerical"
+      }
+    },
+    {
+      "id": "canonical-262144-edge-graph",
+      "source_refs": [
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula::V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "develop_graph",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph::canonical_bytes",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphDevelopmentError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula::V1",
+          "commit": "7f1624518b07626bd68525d930b79417eb27f025"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "develop_graph",
+          "commit": "7f1624518b07626bd68525d930b79417eb27f025"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph::canonical_bytes",
+          "commit": "7f1624518b07626bd68525d930b79417eb27f025"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula",
+          "commit": "7f1624518b07626bd68525d930b79417eb27f025"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphDevelopmentError",
+          "commit": "7f1624518b07626bd68525d930b79417eb27f025"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task3-v1/graph-development-exact.receipt.json",
+          "sha256": "163be9916f8a82d4a22381796f6aa39071dbd12fb1bab01953bba04563f8009a",
+          "target_commit": "7f1624518b07626bd68525d930b79417eb27f025"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "graph-replay",
+      "source_refs": [
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "graph_replay_rule_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::seal",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::reopen",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GRAPH_REPLAY_FORMULA_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphSnapshotV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "bind_delta_to_graph_replay_rule",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "graph_replay_rule_digest",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::seal",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::reopen",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GRAPH_REPLAY_FORMULA_V1",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphSnapshotV1",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayError",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "bind_delta_to_graph_replay_rule",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-neurofield --test graph_admission_equivalence historical_nonempty_replay_migrates_to_closed_admission_profile_equivalently -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task3-v1/graph-replay-exact.receipt.json",
+          "sha256": "1614e13e472ec59b2a098b60a5c91ae9db0d4ddc03718b6bfbe4844136b39958",
+          "target_commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-neurofield --test graph_admission_equivalence historical_nonempty_replay_migrates_to_closed_admission_profile_equivalently -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "structural-delta-cas",
+      "source_refs": [
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "StructuralDeltaV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "EdgeOperationV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "apply_delta",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "DeltaError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "StructuralDeltaV1",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "EdgeOperationV1",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "apply_delta",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "DeltaError",
+          "commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-neurofield --test graph_admission_equivalence composite_add_update_remove_matches_immutable_source_bytes_and_digest -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task3-v1/structural-delta-exact.receipt.json",
+          "sha256": "8a65bd3e580323c2ff5950ea7b802d26927c70d56776a43bbe590d3ec785c781",
+          "target_commit": "eb3f4d75667b72003ea391286d5104949eabed73"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-neurofield --test graph_admission_equivalence composite_add_update_remove_matches_immutable_source_bytes_and_digest -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "fxp6-arithmetic",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "FXP6_SCALE",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "mul6_raw",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "smul6_raw",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "ratio6_raw",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "FXP6_SCALE",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "mul6_raw",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "smul6_raw",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "ratio6_raw",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics --jobs 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task4-v1/dynamics-exact.receipt.json",
+          "sha256": "e1533335710752bae262fdce61346db383e699596714671a8751b27f3c416e54",
+          "target_commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics --jobs 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "jacobi-before-state",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsInputV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "propagate_semantic_dynamics_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsInputV2",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "propagate_semantic_dynamics_v2",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsError",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics --jobs 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task4-v1/dynamics-exact.receipt.json",
+          "sha256": "e1533335710752bae262fdce61346db383e699596714671a8751b27f3c416e54",
+          "target_commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics --jobs 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "eight-dof-state",
+      "source_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::potential",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::excitation",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::inhibition",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::adaptation",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::precision",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::prediction_error",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::eligibility",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::metabolic_reserve",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::potential",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::excitation",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::inhibition",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::adaptation",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::precision",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::prediction_error",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::eligibility",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::metabolic_reserve",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics --jobs 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task4-v1/dynamics-exact.receipt.json",
+          "sha256": "e1533335710752bae262fdce61346db383e699596714671a8751b27f3c416e54",
+          "target_commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_dynamics --jobs 1 full_16k_two_edge_jacobi_step_matches_exact_dynamics_goldens -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "energy-telemetry",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyLedgerV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyTelemetryV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_native_telemetry_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "regional_vector_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "local_vector_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "effective_vector_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyLedgerV1",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyTelemetryV1",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_native_telemetry_v1",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "regional_vector_digest",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "local_vector_digest",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "effective_vector_digest",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic_telemetry_v1::tests::exact_native_telemetry_sealing_is_crate_private -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task4-v1/telemetry-exact.receipt.json",
+          "sha256": "a1a856f4a91c648bcd52e72baffe0eb9e73bfff5236ebddb04e5ba6b29631571",
+          "target_commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic_telemetry_v1::tests::exact_native_telemetry_sealing_is_crate_private -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "capacity-telemetry",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "CapacityTelemetryV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::upper_saturated_nodes",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_native_telemetry_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "CapacityTelemetryV1",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::upper_saturated_nodes",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_native_telemetry_v1",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic_telemetry_v1::tests::exact_native_telemetry_sealing_is_crate_private -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task4-v1/telemetry-exact.receipt.json",
+          "sha256": "a1a856f4a91c648bcd52e72baffe0eb9e73bfff5236ebddb04e5ba6b29631571",
+          "target_commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic_telemetry_v1::tests::exact_native_telemetry_sealing_is_crate_private -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "renormalization-residual-telemetry",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::renormalization_residual",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NativeTelemetryReceiptV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::renormalization_residual",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "NativeTelemetryReceiptV1",
+          "commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic_telemetry_v1::tests::exact_native_telemetry_sealing_is_crate_private -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task4-v1/telemetry-exact.receipt.json",
+          "sha256": "a1a856f4a91c648bcd52e72baffe0eb9e73bfff5236ebddb04e5ba6b29631571",
+          "target_commit": "626fe3026c3830b6728255328037c7312e87e101"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic_telemetry_v1::tests::exact_native_telemetry_sealing_is_crate_private -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "semantic-vector-receipt-v2",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticVectorReceiptV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_vector_receipt_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_semantic_transition_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticVectorReceiptV2",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_vector_receipt_v2",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_semantic_transition_v2",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticTransitionV2",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_is_authenticated_read_only_and_aesem3_is_current_write -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v1/runtime-semantic-exact.receipt.json",
+          "sha256": "4c4882af4c90daf943eac64e5e933996ccc3ab2d7a0c33ac58c99215ea3fef43",
+          "target_commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_is_authenticated_read_only_and_aesem3_is_current_write -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "node-observability-v2",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NodeObservabilityProjectionWireV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "node_observability_projection_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "NodeObservabilityProjectionWireV2",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "node_observability_projection_v2",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_is_authenticated_read_only_and_aesem3_is_current_write -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v1/runtime-semantic-exact.receipt.json",
+          "sha256": "4c4882af4c90daf943eac64e5e933996ccc3ab2d7a0c33ac58c99215ea3fef43",
+          "target_commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        },
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task9-v1/runtime-affect-projection.receipt.json",
+          "sha256": "c232bbc05702841caa4d8404fa623115205c972b4dd9577b560f05aa17df8756",
+          "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_is_authenticated_read_only_and_aesem3_is_current_write -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 committed_persona_reply_affect_replays_and_corruption_is_read_only_rejected -- --exact",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "runtime"
+      }
+    },
+    {
+      "id": "expression-projection-v1",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "ExpressionProjectionV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "expression_projection_from_field_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "ExpressionProjectionV1",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "expression_projection_from_field_v1",
+          "commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_is_authenticated_read_only_and_aesem3_is_current_write -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v1/runtime-semantic-exact.receipt.json",
+          "sha256": "4c4882af4c90daf943eac64e5e933996ccc3ab2d7a0c33ac58c99215ea3fef43",
+          "target_commit": "5541db9d7c5b86b21f013bed2fa4f6c69029bdd1"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_is_authenticated_read_only_and_aesem3_is_current_write -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 committed_persona_reply_affect_replays_and_corruption_is_read_only_rejected -- --exact",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "runtime"
+      }
+    },
+    {
+      "id": "independent-semantic-cursor",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::semantic_revision_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "read_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_cursor",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::semantic_revision_v1",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task7-v1/runtime-evolution-reopen.receipt.json",
+          "sha256": "e1f4fbf15fe584c8ec0be33edb96bf917ead6d1e401f5147415526e5d8d80baa",
+          "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_event_lane --jobs 1 authenticated_user_stimulus_changes_and_reopens_persona_emotion_state -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+        "execution_run": "runtime",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json"
+      }
+    },
+    {
+      "id": "paired-atomic-commit",
+      "source_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StatefulNativeSemanticCommitV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "commit_stateful_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_LANE_NAMESPACE_DOMAIN_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "PairedSemanticCommitV1",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::commit_event_with_semantic_v1",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_ORIGIN_DOMAIN_V1",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_semantic_history_closure",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::canonical_event_and_semantic_sidecar_commit_together_or_not_at_all -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task6-v1/store-atomicity.receipt.json",
+          "sha256": "fae924ccbb23ed96e9bfc64bd8bc09482d9166ba9bb2b2b5db37e492f580f990",
+          "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::canonical_event_and_semantic_sidecar_commit_together_or_not_at_all -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "event-deduplication",
+      "source_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::lookup_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "commit_stateful_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "stored_commit",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::commit_event_with_semantic_v1",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::duplicate_stale_and_identity_conflict_never_split_cursors -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task6-v1/store-dedupe-stale-conflict.receipt.json",
+          "sha256": "7f69b5652b56ce0836ba4f26e973dfee57553cde94f9feb052ede03ce9aa2a9d",
+          "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::duplicate_stale_and_identity_conflict_never_split_cursors -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "stale-base-rejection",
+      "source_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StoreError::StaleRevision",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "commit_stateful_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StoreError::StaleRevision",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::commit_event_with_semantic_v1",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::duplicate_stale_and_identity_conflict_never_split_cursors -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task6-v1/store-dedupe-stale-conflict.receipt.json",
+          "sha256": "7f69b5652b56ce0836ba4f26e973dfee57553cde94f9feb052ede03ce9aa2a9d",
+          "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::duplicate_stale_and_identity_conflict_never_split_cursors -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "identity-conflict-rejection",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "RuntimeError::SemanticIdentityConflict",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "commit_stateful_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StoreError::SemanticIdentityConflict",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::commit_event_with_semantic_v1",
+          "commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::duplicate_stale_and_identity_conflict_never_split_cursors -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task6-v1/store-dedupe-stale-conflict.receipt.json",
+          "sha256": "7f69b5652b56ce0836ba4f26e973dfee57553cde94f9feb052ede03ce9aa2a9d",
+          "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --lib --jobs 1 semantic_atomic_tests::duplicate_stale_and_identity_conflict_never_split_cursors -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "aesem2-read-compatibility",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "snapshot_is_aesem2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "DecodedSemanticSnapshotV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacyReplayTransitionV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "snapshot_is_aesem2",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "DecodedSemanticSnapshotV2",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacyReplayTransitionV1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_history_codec_is_bounded_and_authority_authenticated -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v2/runtime-aesem2-bounded.receipt.json",
+          "sha256": "0d6848a8d764ca222205672ed60844b76f9fc518934a1e7d9400ae5aa69bc0ca",
+          "target_commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --lib --jobs 1 semantic::tests::aesem2_history_codec_is_bounded_and_authority_authenticated -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "aesem3-current-write",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "encode_semantic_snapshot_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_semantic_snapshot_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "encode_semantic_snapshot_v3",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v3",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_semantic_snapshot_v3",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --jobs 1 finite_aesem2_migration_is_copy_verify_commit_and_idempotent -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v2/store-finite-copy-verify-commit.receipt.json",
+          "sha256": "3fd2bfeb39dccbc05504fb824b7812275d312781b35c6369fd55dda49709c029",
+          "target_commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --jobs 1 finite_aesem2_migration_is_copy_verify_commit_and_idempotent -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "finite-domain-migration",
+      "source_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFieldDomainUpgradeV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFieldDomainUpgradeV1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticMigrationOutcomeV1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::migrate_legacy_semantic_snapshot_v2",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --jobs 1 authority_constructs_finite_migration_and_closes_all_history_sets -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v2/store-authority-closure.receipt.json",
+          "sha256": "084e61d082331f5497933480850e57e67ed9d7b0bb7f616108b181e70e33b58c",
+          "target_commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --jobs 1 authority_constructs_finite_migration_and_closes_all_history_sets -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "migration-preimage-backup",
+      "source_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "FieldMigrationPreimageBackupV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "field_migration_backup_manifest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "ensure_field_migration_preimage_backup_tx",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "FieldMigrationPreimageBackupV1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "backup_manifest",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_backup",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --features migration-test-hooks --jobs 1 backup_recovers_every_failpoint_without_source_mutation -- --exact --nocapture",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v2/store-backup-18-seam.receipt.json",
+          "sha256": "eac42f9726fa7c7b75c36a66d1df1cf20a33ff1fa2389484892e7da73a818bbb",
+          "target_commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --features migration-test-hooks --jobs 1 backup_recovers_every_failpoint_without_source_mutation -- --exact --nocapture",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "formula-upgrade-proof",
+      "source_refs": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFormulaUpgradeReceiptV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_formula_transition_delta_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFormulaUpgradeReceiptV1",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFormulaUpgradeReceiptV1::from_transition_receipt",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFormulaUpgradeReceiptV1::canonical_bytes",
+          "commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --jobs 1 authority_binds_formula_upgrade_and_rejects_public_raw_envelopes -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task5-v2/store-formula-authority.receipt.json",
+          "sha256": "d676d71debd621272ee468d36378a3389c6af65d358a250abcd65f36de9722ec",
+          "target_commit": "a96e3db8b8e36df6bbe18243f21d45117727ea4f"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --jobs 1 authority_binds_formula_upgrade_and_rejects_public_raw_envelopes -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario."
+      }
+    },
+    {
+      "id": "async-semantic-outbox",
+      "source_refs": [
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.enqueue",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.wait_foreground",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.wait_completion",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutboxConfig",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticJobTicket",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.start",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.close",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/core_boundary_v9.rs",
+          "kind": "rust_item",
+          "qualified_name": "RetiredOperationTagV1",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "HISTORY_PRESERVED_RUNTIME_RETIRED",
+      "future_test_node": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+      "evidence": [],
+      "historical_test_node": "python -m pytest -q tests/test_semantic_async_outbox.py::test_compatibility_outbox_is_dormant_and_tamper_closed",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "surface",
+        "note": "Execution CANCELLED by the Task11/12 addendum; historical DB/settings/ciphertext/key bytes remain preserved. Source surface absence was rerun; prior v9 byte-preservation acceptance is reused, not newly executed here."
+      }
+    },
+    {
+      "id": "outbox-authenticated-crypto",
+      "source_refs": [
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1::seal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1::open_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxCryptoStatusV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxCryptoError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/core_boundary_v9.rs",
+          "kind": "rust_item",
+          "qualified_name": "RetiredOperationTagV1",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "HISTORY_PRESERVED_RUNTIME_RETIRED",
+      "future_test_node": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+      "evidence": [],
+      "historical_test_node": "python -m pytest -q tests/test_semantic_async_outbox.py::test_compatibility_outbox_is_dormant_and_tamper_closed",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "surface",
+        "note": "Execution CANCELLED by the Task11/12 addendum; historical DB/settings/ciphertext/key bytes remain preserved. Source surface absence was rerun; prior v9 byte-preservation acceptance is reused, not newly executed here."
+      }
+    },
+    {
+      "id": "relation-private-evidence",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._valid_semantic_request",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1::estimator_digest_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator.apply_stimulus",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator.preflight_semantic_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._run_semantic_owner_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._run_semantic_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_evidence_authority",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::apply_perception_proposal_v1",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::mint_perception_challenge_from_committed_inbound_v1",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.receipt.json",
+          "sha256": "43a59bf6637805bcdef27cfac6588997436d7bc5660b8e67736dff9644718258",
+          "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_event_lane --jobs 1 relation_evidence_is_private_while_persona_mood_is_continuous -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+        "execution_run": "runtime",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "note": "ADAPTED: historical relation bytes remain isolated behind the v9 overlay/fence; new inbound appraisal and ReplyAffect are persona-only. This row does not authorize new relation writes or a contact consumer. Historical preservation evidence remains historical; the new runtime gate covers persona continuity."
+      }
+    },
+    {
+      "id": "persona-global-mood",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticTransitionV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::semantic_revision_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-semantic-core/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticTransitionV2",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_cursor",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "HotBrain::semantic_revision",
+          "commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.receipt.json",
+          "sha256": "43a59bf6637805bcdef27cfac6588997436d7bc5660b8e67736dff9644718258",
+          "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_event_lane --jobs 1 relation_evidence_is_private_while_persona_mood_is_continuous -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 committed_persona_reply_affect_replays_and_corruption_is_read_only_rejected -- --exact",
+        "execution_run": "runtime",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json"
+      }
+    },
+    {
+      "id": "matrix-time-decay",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "NEUTRAL_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "ADAPTATION_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "RESERVE_RECOVERY_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/matrix_time.rs",
+          "kind": "rust_item",
+          "qualified_name": "MATRIX_TIME_FORMULA_V1",
+          "commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        },
+        {
+          "path": "crates/ae-runtime/src/matrix_time.rs",
+          "kind": "rust_item",
+          "qualified_name": "MatrixTimeAdvanceV1",
+          "commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        },
+        {
+          "path": "crates/ae-runtime/src/matrix_time.rs",
+          "kind": "rust_item",
+          "qualified_name": "advance_matrix_time_v1",
+          "commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 persona_sleep_clock_projects_matrix_without_evidence_and_reopens -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task8-v1/runtime-frozen-chunking.receipt.json",
+          "sha256": "6debb190467015c9c9934da0c398f75cbc6f4866064f321f0a307664cf9b84a3",
+          "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_time frozen_chunking_is_deterministic_and_backward_time_fails_closed -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 persona_sleep_clock_projects_matrix_without_evidence_and_reopens -- --exact",
+        "numerical_gate": "cargo test --locked --offline -p ae-semantic-core --test matrix_time -j 1",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "runtime"
+      }
+    },
+    {
+      "id": "sleep-aware-time-advance",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "TimeAdvance",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "NEUTRAL_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "RESERVE_RECOVERY_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-runtime/src/matrix_time.rs",
+          "kind": "rust_item",
+          "qualified_name": "MatrixSleepPhaseV1",
+          "commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        },
+        {
+          "path": "crates/ae-runtime/src/matrix_time.rs",
+          "kind": "rust_item",
+          "qualified_name": "MatrixTimeAdvanceV1",
+          "commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        },
+        {
+          "path": "crates/ae-runtime/src/matrix_time.rs",
+          "kind": "rust_item",
+          "qualified_name": "advance_matrix_time_v1",
+          "commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 persona_sleep_clock_projects_matrix_without_evidence_and_reopens -- --exact",
+      "evidence": [
+        {
+          "kind": "local_reproducible_execution_receipt",
+          "locator": "model/evidence/emotion-matrix-task8-v1/runtime-sleep-time.receipt.json",
+          "sha256": "51bf3a1078424a2558a63e2ad9b5e0dc6d5e051c37037b7ce069c65112d166fb",
+          "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405"
+        }
+      ],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_time sleep_time_advance_relaxes_without_inventing_evidence -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 persona_sleep_clock_projects_matrix_without_evidence_and_reopens -- --exact",
+        "numerical_gate": "cargo test --locked --offline -p ae-semantic-core --test matrix_time -j 1",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "runtime"
+      }
+    },
+    {
+      "id": "closed-host-abi",
+      "source_refs": [
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_revision_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "apply_perception_proposal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_revision_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.apply_perception_proposal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_crypto_status_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_seal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_open_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "inspect",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_replay",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.inspect",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.verify_replay",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_crypto_status_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_seal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_open_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "validate_semantic_result",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/core_surface.rs",
+          "kind": "rust_item",
+          "qualified_name": "CORE_PUBLIC_METHOD_MANIFEST_V1",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+      "evidence": [],
+      "historical_test_node": "python -m pytest -q tests/test_emotion_matrix_host.py::test_host_semantic_bridge_is_closed_and_projection_only",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "surface"
+      }
+    },
+    {
+      "id": "windows-native-export",
+      "source_refs": [
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "_native",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "contract_info",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "_native",
+          "commit": null
+        },
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "contract_info",
+          "commit": null
+        },
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "PyInit__native",
+          "commit": null
+        }
+      ],
+      "disposition": "UNMAPPED",
+      "future_test_node": "python -m pytest -q tests/test_semantic_package_parity.py::test_dual_platform_semantic_domains_and_exports_match",
+      "evidence": [],
+      "historical_test_node": "python -m pytest -q tests/test_semantic_package_parity.py::test_dual_platform_semantic_domains_and_exports_match",
+      "current_core_mapping": {
+        "status": "PENDING_REAL_ARTIFACT",
+        "execution_evidence": [],
+        "note": "Source registration and local test imports cannot close this artifact row; requires final clean-SHA release sidecar."
+      }
+    },
+    {
+      "id": "linux-native-export",
+      "source_refs": [
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "_native",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "contract_info",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "_native",
+          "commit": null
+        },
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "contract_info",
+          "commit": null
+        },
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "PyInit__native",
+          "commit": null
+        }
+      ],
+      "disposition": "UNMAPPED",
+      "future_test_node": "python -m pytest -q tests/test_semantic_package_parity.py::test_dual_platform_semantic_domains_and_exports_match",
+      "evidence": [],
+      "historical_test_node": "python -m pytest -q tests/test_semantic_package_parity.py::test_dual_platform_semantic_domains_and_exports_match",
+      "current_core_mapping": {
+        "status": "PENDING_REAL_ARTIFACT",
+        "execution_evidence": [],
+        "note": "Source registration and local test imports cannot close this artifact row; requires final clean-SHA release sidecar."
+      }
+    },
+    {
+      "id": "universal-package-members",
+      "source_refs": [
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "_bundled_native_package_dir",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "_load_bundled_native",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "contract_info",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "verify_semantic_package_parity",
+          "commit": null
+        },
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "_bundled/manifest.json",
+          "commit": null
+        },
+        {
+          "path": "artifacts/emotion-matrix-alpha4",
+          "kind": "artifact",
+          "qualified_name": "PyInit__native",
+          "commit": null
+        }
+      ],
+      "disposition": "UNMAPPED",
+      "future_test_node": "python -m pytest -q tests/test_semantic_package_parity.py::test_dual_platform_semantic_domains_and_exports_match",
+      "evidence": [],
+      "historical_test_node": "python -m pytest -q tests/test_semantic_package_parity.py::test_dual_platform_semantic_domains_and_exports_match",
+      "current_core_mapping": {
+        "status": "PENDING_REAL_ARTIFACT",
+        "execution_evidence": [],
+        "note": "Source registration and local test imports cannot close this artifact row; requires final clean-SHA release sidecar."
+      }
+    },
+    {
+      "id": "formula-contract",
+      "source_refs": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_NATIVE_DYNAMICS_FORMULA_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_canonical_formula_digest_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StateSubcodeV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_RULES_V1",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract -j 1 all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "evidence": [],
+      "historical_test_node": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract -j 1 all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "numerical"
+      }
+    },
+    {
+      "id": "module-export-surface",
+      "source_refs": [
+        {
+          "path": "crates/ae-attention/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "r7",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "3e5f7c9442ee4f7fbef602b23dfa816f7f3239f9"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::apply_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::inspect",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::verify_replay",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::apply_perception_proposal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-contracts/src/core_surface.rs",
+          "kind": "rust_item",
+          "qualified_name": "CORE_PUBLIC_METHOD_MANIFEST_V1",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+      "evidence": [],
+      "historical_test_node": "cargo check --locked --offline -p ae-attention -p ae-runtime",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "surface"
+      }
+    },
+    {
+      "id": "graph-capacity-and-digests",
+      "source_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "EDGE_CAPACITY",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "state_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "graph_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "initial_state_from_manifest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "EXACT_PORT",
+      "future_test_node": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development -j 1 v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+      "evidence": [],
+      "historical_test_node": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-neurofield --test deterministic_graph_development -j 1 v1_golden_vector_is_cross_process_and_cross_platform_stable -- --exact",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "numerical"
+      }
+    },
+    {
+      "id": "n2-no-action-boundary",
+      "source_refs": [
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "N2VerifiedSourceSetV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        },
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedN1NativeSemanticCommitV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        },
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "N2AssemblyError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        },
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_n2_no_action_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        }
+      ],
+      "target_refs": [
+        {
+          "path": "crates/ae-semantic-core/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "derive_user_stimulus_transition_v1",
+          "commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92"
+        }
+      ],
+      "disposition": "ADAPTED_WITH_EQUIVALENCE",
+      "future_test_node": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+      "evidence": [],
+      "historical_test_node": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_event_lane authenticated_user_stimulus_changes_and_reopens_persona_emotion_state -- --exact",
+      "current_core_mapping": {
+        "status": "SOURCE_MAPPED",
+        "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+        "regression_scope": "Historical receipt preserved; unchanged low-level source plus selected aggregate core regression, not a fresh rerun of every historical scenario.",
+        "current_gate": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 nonzero_stimulus_delivery_and_reopen_preserve_matrix_lane -- --exact",
+        "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+        "execution_run": "runtime",
+        "note": "ADAPTED: pure semantic-core produces matrix transitions; the 19-method core boundary and typed ordinary delivery replace old action/contact selection. No outbound consumer is reinstated."
+      }
+    }
+  ],
+  "core_boundary_reconciliation": {
+    "authority_path": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock.md",
+    "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+    "historical_receipt_count": 20,
+    "historical_mapped_count": 31,
+    "execution_receipt": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/execution.receipt.json",
+    "artifact_closure": "External release sidecar binds the final clean source SHA, actual Windows/Linux wheel hashes, imported 19-method API/schema/tzdb identities, and final ZIP member hashes. Do not write that sidecar back into its own source commit.",
+    "legacy_test_policy": "Legacy feature-gated matrix targets are preserved historical fixtures, not default-run evidence; core_matrix_regression supersedes their active core scenarios. Historical provenance assertions that freeze older counts/plan snapshots are not current release gates."
+  }
+}

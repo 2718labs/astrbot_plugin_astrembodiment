@@ -1,0 +1,3 @@
+   Compiling ae-attention v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-attention)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.48s
+     Running tests\emotion_matrix_route.rs (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-target\debug\deps\emotion_matrix_route-249dadbf35698da0.exe)

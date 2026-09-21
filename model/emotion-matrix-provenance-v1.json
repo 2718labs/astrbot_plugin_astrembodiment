@@ -1,0 +1,2408 @@
+{
+  "schema": "ae.emotion-matrix-provenance.v1",
+  "hash_profile": "sha256/git-blob-bytes/eol-none",
+  "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+  "target_baseline": "e8cf2794ee45a9fad6e54125ea282446c8463ccf",
+  "merge_base": "8c4a606e63888351b3d8854e9006b89aa6623f07",
+  "audited_source_commits": [
+    "a036391",
+    "dac330e",
+    "15a2da5",
+    "d6cfbe5",
+    "d8bfc7c",
+    "867eec6",
+    "8209a2b",
+    "1774023",
+    "3984ffb",
+    "cc725f2",
+    "9d373c4",
+    "ca8d719",
+    "710829a"
+  ],
+  "files": [
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-contracts/src/lib.rs",
+      "source_blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82",
+      "sha256": "4b42175c17cdf4a4e5e982bea60f4f6c63c30323c0af7969e99fc82d90f32b70",
+      "source_symbols": [
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StateSubcodeV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_NATIVE_DYNAMICS_FORMULA_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "Phase0SemanticRouteRuleV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_RULES_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_semantic_route_digest_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_canonical_formula_digest_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "perception_dimension_values",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_vector_from_values",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticVectorReceiptV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NativeTelemetryReceiptV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NodeObservabilityProjectionWireV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "CapacityTelemetryV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyTelemetryV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1::estimator_digest_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1::validate_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "TimeAdvance",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::decode_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::encode_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        },
+        {
+          "path": "crates/ae-contracts/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::event_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "8d8926b50f52311f9670eae61758cf0c88ee6c82"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "StateSubcodeV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_NATIVE_DYNAMICS_FORMULA_V1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "Phase0SemanticRouteRuleV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_RULES_V1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_semantic_route_digest_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_canonical_formula_digest_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "perception_dimension_values",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_vector_from_values",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticVectorReceiptV2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "NativeTelemetryReceiptV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "NodeObservabilityProjectionWireV2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "CapacityTelemetryV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyTelemetryV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1::estimator_digest_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PerceptionProposalV1::validate_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "TimeAdvance",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::decode_event",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::encode_event",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-contracts/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "wire::event_digest",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-attention/src/lib.rs",
+      "source_blob": "3e5f7c9442ee4f7fbef602b23dfa816f7f3239f9",
+      "sha256": "1b7c5141f01f4f910ee60ba1933ea6645fcc410bafdef7615ab4d00591c67c52",
+      "source_symbols": [
+        {
+          "path": "crates/ae-attention/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "r7",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "3e5f7c9442ee4f7fbef602b23dfa816f7f3239f9"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-attention/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "r7",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-attention/src/r7.rs",
+      "source_blob": "941019173092c9948325788839897cc15504d519",
+      "sha256": "efaa208c170d5c950340ed6b997028b7e2f7dacfb402a95030da051c90f6bce4",
+      "source_symbols": [
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoad",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoadError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_values",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "full_vector_route_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        },
+        {
+          "path": "crates/ae-attention/src/r7.rs",
+          "kind": "rust_item",
+          "qualified_name": "assemble_full_vector_load",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "941019173092c9948325788839897cc15504d519"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoad",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "FullVectorLoadError",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "evidence_values",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "full_vector_route_digest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-attention/src/emotion_matrix.rs",
+          "kind": "rust_item",
+          "qualified_name": "assemble_full_vector_load",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-neurofield/src/lib.rs",
+      "source_blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c",
+      "sha256": "c0ab2ed01917564d95865065b5b51f6f86a3e9a1eaed4a4fa5cd793f41587a16",
+      "source_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NEURON_SLOTS",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "EDGE_CAPACITY",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NODE_DOF",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "REGION_LAYOUT",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "initial_state_from_manifest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "state_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "graph_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::adaptation",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::eligibility",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::excitation",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::inhibition",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::metabolic_reserve",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::potential",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::precision",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::prediction_error",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bb2d6df9fe50bd4fda39094ddae571a75a00478c"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NEURON_SLOTS",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "EDGE_CAPACITY",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NODE_DOF",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "REGION_LAYOUT",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "initial_state_from_manifest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "state_digest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "graph_digest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::adaptation",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::eligibility",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::excitation",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::inhibition",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::metabolic_reserve",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::potential",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::precision",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "NeuralField::prediction_error",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-neurofield/src/graph_development.rs",
+      "source_blob": "cee6ac6116b4f3f90bb481129f125191f572f54a",
+      "sha256": "d014151e501e55938200b2773e94a5a2f290ad09cda5c615fff5a6f9969ed00e",
+      "source_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphDevelopmentError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "develop_graph",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph::canonical_bytes",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula::V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "cee6ac6116b4f3f90bb481129f125191f572f54a"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphDevelopmentError",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "develop_graph",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "SparseGraph::canonical_bytes",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_development.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphFormula::V1",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-neurofield/src/graph_replay.rs",
+      "source_blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e",
+      "sha256": "a3b7355d6f35ba04ea42c0959f1b96793026104ae504244cd20a9dc96f040ddf",
+      "source_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GRAPH_REPLAY_FORMULA_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphSnapshotV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "graph_replay_rule_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "bind_delta_to_graph_replay_rule",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::seal",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::reopen",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "6bc2461a4fa5e8cdfdff238bcc5e146d3b2a131e"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GRAPH_REPLAY_FORMULA_V1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphSnapshotV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayError",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "graph_replay_rule_digest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "bind_delta_to_graph_replay_rule",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::seal",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/graph_replay.rs",
+          "kind": "rust_item",
+          "qualified_name": "GraphReplayV1::reopen",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-neurofield/src/structural_delta.rs",
+      "source_blob": "e407c1059b55b10603db2c08f169675f858cbd27",
+      "sha256": "4121208c9d6ecf9fd207616a6e95c0c65a4f73d9d24867131195ae92b40a5891",
+      "source_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "StructuralDeltaV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "EdgeOperationV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "DeltaError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "apply_delta",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "e407c1059b55b10603db2c08f169675f858cbd27"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "StructuralDeltaV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "EdgeOperationV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "DeltaError",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-neurofield/src/structural_delta.rs",
+          "kind": "rust_item",
+          "qualified_name": "apply_delta",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-runtime/src/semantic.rs",
+      "source_blob": "49b3825ed5e54405952706a40d3270b36eead5e3",
+      "sha256": "63ea4b3ac75fdd5703fd2a8cd753a6d677b7eb6d8250b26f3b81e03372864649",
+      "source_symbols": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticTransitionV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_semantic_transition_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_vector_receipt_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "node_observability_projection_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "expression_projection_from_field_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "encode_semantic_snapshot_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "ExpressionProjectionV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "snapshot_is_aesem2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "49b3825ed5e54405952706a40d3270b36eead5e3"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticTransitionV2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_semantic_transition_v2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_vector_receipt_v2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "node_observability_projection_v2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "expression_projection_from_field_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "encode_semantic_snapshot_v3",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v3",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "ExpressionProjectionV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "snapshot_is_aesem2",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+      "source_blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1",
+      "sha256": "9162735da896c82bc07fbebdcc446354bbc12138efebd05e2d8cc89566f9f91d",
+      "source_symbols": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "FXP6_SCALE",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsInputV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyLedgerV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "mul6_raw",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "smul6_raw",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "ratio6_raw",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "propagate_semantic_dynamics_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "ADAPTATION_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "NEUTRAL_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::renormalization_residual",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::upper_saturated_nodes",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "RESERVE_RECOVERY_RATE_FXP6",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "91331f3b556aca9e457c877079d3f7fad2af5ce1"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "FXP6_SCALE",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsError",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "DynamicsInputV2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "EnergyLedgerV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "mul6_raw",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "smul6_raw",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "ratio6_raw",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "propagate_semantic_dynamics_v2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "ADAPTATION_RATE_FXP6",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "NEUTRAL_RATE_FXP6",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::renormalization_residual",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedSemanticDynamicsV2::upper_saturated_nodes",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_dynamics_v2.rs",
+          "kind": "rust_item",
+          "qualified_name": "RESERVE_RECOVERY_RATE_FXP6",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+      "source_blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c",
+      "sha256": "737a1ee8d8341586f46a552ea5de0e36ca41d50381e332e9092b2562c3616a7f",
+      "source_symbols": [
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "regional_vector_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "local_vector_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "effective_vector_digest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_native_telemetry_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "81589a52f45cc3d7af203e3e2d8ddb77f1006c6c"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "regional_vector_digest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "local_vector_digest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "effective_vector_digest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/semantic_telemetry_v1.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_native_telemetry_v1",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-runtime/src/n2_native_assembly.rs",
+      "source_blob": "10fe282414a42a22b4d582fddc2859140f36d839",
+      "sha256": "47031415ea7fd2966b149ecc7b9b4359b4476f74a78c051c9c315ce6ec25086f",
+      "source_symbols": [
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "N2VerifiedSourceSetV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        },
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedN1NativeSemanticCommitV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        },
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "N2AssemblyError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        },
+        {
+          "path": "crates/ae-runtime/src/n2_native_assembly.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_n2_no_action_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "10fe282414a42a22b4d582fddc2859140f36d839"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "N2VerifiedSourceSetV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "PreparedN1NativeSemanticCommitV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "N2AssemblyError",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "prepare_n2_no_action_v1",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-runtime/src/lib.rs",
+      "source_blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07",
+      "sha256": "930bfe25565ae221cd05a8b0d81d4a8a5318e3dbe7ec855e3dc38b290e64a0ad",
+      "source_symbols": [
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::apply_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::semantic_revision_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::apply_perception_proposal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::inspect",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::verify_replay",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "RuntimeError::SemanticIdentityConflict",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "bf7cd91badbddfd825eb4f09f43f7efcfccc9d07"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::apply_event",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::semantic_revision_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::apply_perception_proposal_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::inspect",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "AstrRuntime::verify_replay",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-runtime/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "RuntimeError::SemanticIdentityConflict",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-store/src/lib.rs",
+      "source_blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153",
+      "sha256": "a629ff3db836d855e9392eaa940808ba26153124c7a8610a654d7b6b1265b2b7",
+      "source_symbols": [
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_LANE_NAMESPACE_DOMAIN_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StatefulNativeSemanticCommitV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "commit_stateful_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "read_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_n1_native_semantic_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFormulaUpgradeReceiptV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFieldDomainUpgradeV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "FieldMigrationPreimageBackupV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::lookup_event",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "StoreError::StaleRevision",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "ensure_field_migration_preimage_backup_tx",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "field_migration_backup_manifest",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        },
+        {
+          "path": "crates/ae-store/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_formula_transition_delta_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "657c8f43f74b45a6ef6e623b5398b4ac5eed6153"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_LANE_NAMESPACE_DOMAIN_V1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "StatefulNativeSemanticCommitV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "commit_stateful_n1_native_semantic_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "read_n1_native_semantic_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_n1_native_semantic_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFormulaUpgradeReceiptV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacySemanticFieldDomainUpgradeV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "FieldMigrationPreimageBackupV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "Store::lookup_event",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "StoreError::StaleRevision",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "ensure_field_migration_preimage_backup_tx",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "field_migration_backup_manifest",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic.rs",
+          "kind": "rust_item",
+          "qualified_name": "phase0_formula_transition_delta_v1",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-store/src/semantic_field_attestation.rs",
+      "source_blob": "9b7c272c10051f4406cabc448388111ae9993dad",
+      "sha256": "05acadb0c7d5195f1497ae3673169ef79926399a86c5c5b96a46ade534564fcd",
+      "source_symbols": [
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "DecodedSemanticSnapshotV2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_semantic_snapshot_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacyReplayTransitionV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "9b7c272c10051f4406cabc448388111ae9993dad"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "DecodedSemanticSnapshotV2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "decode_semantic_snapshot_v2",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_semantic_snapshot_v3",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "LegacyReplayTransitionV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "replay_legacy_aesem2_transition_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_field_attestation.rs",
+          "kind": "rust_item",
+          "qualified_name": "normalize_legacy_aesem2_field_domain_v1",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+      "source_blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa",
+      "sha256": "40a0d21efaf6ce9a52e59e71eeb02a806571ffa0c67158b1891c648d461c38f8",
+      "source_symbols": [
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxCryptoStatusV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxCryptoError",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1::seal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1::open_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "c82e82fb1c44f137484d37e0e38881ffe7c23cfa"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_OUTBOX_MAX_AAD_BYTES_V1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SEMANTIC_OUTBOX_MAX_PLAINTEXT_BYTES_V1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxCryptoStatusV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxCryptoError",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1::seal_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-store/src/semantic_outbox_crypto.rs",
+          "kind": "rust_item",
+          "qualified_name": "SemanticOutboxKeyAuthorityV1::open_v1",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "crates/ae-pyo3/src/lib.rs",
+      "source_blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8",
+      "sha256": "792fe403e85d7cf599a2df48ec9888fb1c47e045e251ce13274c819a079553c6",
+      "source_symbols": [
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "contract_info",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_crypto_status_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_seal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_open_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_revision_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "apply_perception_proposal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "inspect",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_replay",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "_native",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7d1fad619e0f6587d192a055d8a5aec37c0922e8"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "contract_info",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_crypto_status_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_seal_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_outbox_open_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "semantic_revision_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "apply_perception_proposal_v1",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "inspect",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "verify_replay",
+          "commit": null
+        },
+        {
+          "path": "crates/ae-pyo3/src/lib.rs",
+          "kind": "rust_item",
+          "qualified_name": "_native",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "astr_embodiment/bridge.py",
+      "source_blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2",
+      "sha256": "23afe048cc9865544bf9cda67a501c0dea769ff480017865f952d5ded7ab69e2",
+      "source_symbols": [
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_revision_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.apply_perception_proposal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.inspect",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.verify_replay",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_crypto_status_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_seal_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_open_v1",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "validate_semantic_result",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "_bundled_native_package_dir",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "_load_bundled_native",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "5a03b27c512e448bff0cea7ac621ae24e3d97fe2"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_revision_v1",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.apply_perception_proposal_v1",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.inspect",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.verify_replay",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_crypto_status_v1",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_seal_v1",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "NativeBridge.semantic_outbox_open_v1",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "validate_semantic_result",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "_bundled_native_package_dir",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/bridge.py",
+          "kind": "python_item",
+          "qualified_name": "_load_bundled_native",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "astr_embodiment/coordinator.py",
+      "source_blob": "7310454dce1b8a14cf0b48171e844e7e195354fe",
+      "sha256": "9a236b49bd13753f7a349f541179dedbe8e235154a2b210b16319c40e5d68577",
+      "source_symbols": [
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator.apply_stimulus",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator.preflight_semantic_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._run_semantic_owner_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._run_semantic_v3",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._valid_semantic_request",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7310454dce1b8a14cf0b48171e844e7e195354fe"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator.apply_stimulus",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator.preflight_semantic_v3",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._run_semantic_owner_v3",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._run_semantic_v3",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/coordinator.py",
+          "kind": "python_item",
+          "qualified_name": "GenesisCoordinator._valid_semantic_request",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "astr_embodiment/semantic_outbox.py",
+      "source_blob": "058b5c84afac72bd84de111bc871b803dd3bf1db",
+      "sha256": "92cdb95127f0bb9074e10aea1b3192964695f71a5ded83fd85ac45c4a27d7014",
+      "source_symbols": [
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutboxConfig",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticJobTicket",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.start",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.enqueue",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.wait_foreground",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.wait_completion",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.close",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "058b5c84afac72bd84de111bc871b803dd3bf1db"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutboxConfig",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticJobTicket",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.start",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.enqueue",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.wait_foreground",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.wait_completion",
+          "commit": null
+        },
+        {
+          "path": "astr_embodiment/semantic_outbox.py",
+          "kind": "python_item",
+          "qualified_name": "SemanticOutbox.close",
+          "commit": null
+        }
+      ]
+    },
+    {
+      "source_commit": "710829ae5d3bef82ce818754354272517cb28056",
+      "source_path": "model/regions-v1.toml",
+      "source_blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66",
+      "sha256": "6a2af87fe65e01b17a512b9796bee011e6ea319b1362467d426fb685e887383a",
+      "source_symbols": [
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "interoception_allostasis",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "affective_valuation",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "salience",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "epistemic_fallibility",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "social_boundary",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "temper_inhibitory",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "world_model_imagination",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "global_workspace",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "action_expression",
+          "commit": "710829ae5d3bef82ce818754354272517cb28056",
+          "blob": "7444730877d0fdbf0021658d8d733ac8fa65ab66"
+        }
+      ],
+      "target_symbols": [
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "interoception_allostasis",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "affective_valuation",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "salience",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "epistemic_fallibility",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "social_boundary",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "temper_inhibitory",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "world_model_imagination",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "global_workspace",
+          "commit": null
+        },
+        {
+          "path": "model/regions-v1.toml",
+          "kind": "toml_entry",
+          "qualified_name": "action_expression",
+          "commit": null
+        }
+      ]
+    }
+  ]
+}

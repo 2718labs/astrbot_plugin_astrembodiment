@@ -1,6 +1,6 @@
 use ae_neurofield::{
-    apply_delta, graph_digest, DeltaError, EdgeOperationV1, SparseGraph, StructuralDeltaV1,
-    Synapse, EDGE_CAPACITY, NEURON_SLOTS,
+    apply_delta, bind_delta_to_graph_replay_rule, graph_digest, DeltaError, EdgeOperationV1,
+    SparseGraph, StructuralDeltaV1, Synapse, EDGE_CAPACITY, GRAPH_REPLAY_FORMULA_V1, NEURON_SLOTS,
 };
 
 fn digest(byte: u8) -> [u8; 32] {
@@ -46,14 +46,16 @@ fn delta(
     operations: Vec<EdgeOperationV1>,
     after_graph: &SparseGraph,
 ) -> StructuralDeltaV1 {
-    StructuralDeltaV1 {
+    let mut delta = StructuralDeltaV1 {
         base_revision,
         base_graph_digest: graph_digest(base_graph),
         delta_sequence: 1,
-        rule_digest: digest(7),
+        rule_digest: [0; 32],
         operations,
         after_graph_digest: graph_digest(after_graph),
-    }
+    };
+    bind_delta_to_graph_replay_rule(GRAPH_REPLAY_FORMULA_V1, &mut delta).unwrap();
+    delta
 }
 
 fn assert_rejected_preserves_graph(

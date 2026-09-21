@@ -1,0 +1,5 @@
+
+running 1 test
+test sleep_time_advance_relaxes_without_inventing_evidence ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 26.93s

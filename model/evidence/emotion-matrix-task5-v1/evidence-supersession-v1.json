@@ -1,0 +1,33 @@
+{
+  "schema": "ae.evidence-supersession.v1",
+  "status": "SUPERSEDED_UNEARNED",
+  "superseded_evidence_commit": "c341c2800d8a2f1ca7c6da4c50893ccdd8e49aca",
+  "affected_capability_ids": [
+    "aesem2-read-compatibility",
+    "aesem3-current-write",
+    "finite-domain-migration",
+    "migration-preimage-backup",
+    "formula-upgrade-proof"
+  ],
+  "reason_codes": [
+    "BACKUP_PREIMAGE_NOT_BOUND_TO_WHOLE_DATABASE",
+    "FORMULA_UPGRADE_ROW_BYPASSES_JOURNAL_AUTHENTICATION",
+    "UNIX_PARENT_DIRECTORY_DURABILITY_NOT_REPAIRED_ON_RETRY",
+    "UNIX_NO_REPLACE_PUBLICATION_HAS_TOCTOU_RACE"
+  ],
+  "audit_only_receipts": [
+    "runtime-aesem2-bounded.receipt.json",
+    "runtime-aesem3-four-block.receipt.json",
+    "store-api-default-list.receipt.json",
+    "store-api-hooks-list.receipt.json",
+    "store-backup-18-seam.receipt.json",
+    "store-finite-authority-closure.receipt.json",
+    "store-formula-authority.receipt.json"
+  ],
+  "parity_after_rollback": {
+    "mapped_capability_count": 16,
+    "unmapped_capability_count": 27,
+    "release_gate": "NO_GO"
+  },
+  "custody_note": "Receipt and log bytes are retained only as historical audit material. They do not earn capability parity after independent quality rejection."
+}

@@ -9,199 +9,25 @@
 
 use ae_fixed::Fixed;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+
+pub mod autonomy;
+pub use autonomy::*;
+pub mod alpha3;
+pub use alpha3::*;
+pub mod emotion_matrix;
+pub use emotion_matrix::*;
+pub mod core_boundary;
+pub use core_boundary::*;
+pub mod core_surface;
+pub use core_surface::*;
+pub mod embodiment_time;
+pub use embodiment_time::*;
 
 pub type Digest = [u8; 32];
 pub type Id128 = [u8; 16];
 
-/// R7 authority types stay in an isolated compatibility namespace.
+/// Pure historical R7 contract types; no runtime submission capability.
 pub mod r7;
-
-/// Closed, content-free classification for an `INVALID_NEURAL_STATE` rejection.
-///
-/// This type is deliberately not serialized into any receipt, snapshot, or
-/// persistence record. It only crosses the native error boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum StateSubcodeV1 {
-    BaselineStateInvalid,
-    FieldStateInvalid,
-    GraphStateInvalid,
-    DynamicsInvalid,
-    SemanticClosureInvalid,
-    SnapshotWireInvalid,
-    SnapshotAttestationMismatch,
-    Aesem3RetiredCompensationNonzero,
-    RelationScopeMissing,
-    UnknownInvalidNeuralState,
-}
-
-impl StateSubcodeV1 {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::BaselineStateInvalid => "BASELINE_STATE_INVALID",
-            Self::FieldStateInvalid => "FIELD_STATE_INVALID",
-            Self::GraphStateInvalid => "GRAPH_STATE_INVALID",
-            Self::DynamicsInvalid => "DYNAMICS_INVALID",
-            Self::SemanticClosureInvalid => "SEMANTIC_CLOSURE_INVALID",
-            Self::SnapshotWireInvalid => "SNAPSHOT_WIRE_INVALID",
-            Self::SnapshotAttestationMismatch => "SNAPSHOT_ATTESTATION_MISMATCH",
-            Self::Aesem3RetiredCompensationNonzero => "AESEM3_RETIRED_COMPENSATION_NONZERO",
-            Self::RelationScopeMissing => "RELATION_SCOPE_MISSING",
-            Self::UnknownInvalidNeuralState => "UNKNOWN_INVALID_NEURAL_STATE",
-        }
-    }
-}
-
-impl fmt::Display for StateSubcodeV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Frozen Phase-0 native dynamics identity.  The runtime and durable Store
-/// both derive formula digests here so a persisted transition cannot label an
-/// arbitrary digest as this formula.
-pub const PHASE0_NATIVE_FORMULA_DIGEST_DOMAIN_V1: &[u8] =
-    b"astr-embodiment/phase0-native-propagation-fxp6-v1";
-pub const PHASE0_NATIVE_GRAPH_FORMULA_V1: &[u8] = b"graph-formula-v1";
-pub const PHASE0_NATIVE_DYNAMICS_FORMULA_V1: &str = "phase0-native-propagation-fxp6-v1";
-pub const PHASE0_NATIVE_PROPAGATION_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
-pub const PHASE0_NATIVE_NEUTRAL_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
-pub const PHASE0_NATIVE_ADAPTATION_RATE_FXP6: Fixed = Fixed::from_raw(125_000);
-pub const PHASE0_NATIVE_RESERVE_RECOVERY_RATE_FXP6: Fixed = Fixed::from_raw(25_000);
-pub const PHASE0_NATIVE_ENERGY_COST_RATE_FXP6: Fixed = Fixed::from_raw(100_000);
-
-pub const PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1: &[u8] =
-    b"astr-embodiment/semantic-evidence-route-neutral-v1";
-pub const PHASE0_SEMANTIC_ROUTE_PRIMARY_COEFFICIENT_FXP6: Fixed = Fixed::ONE;
-pub const PHASE0_SEMANTIC_ROUTE_SECONDARY_COEFFICIENT_FXP6: Fixed = Fixed::from_raw(500_000);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Phase0SemanticRouteRuleV1 {
-    pub primary: u8,
-    pub secondary: Option<u8>,
-}
-
-/// Frozen fifteen-slot semantic route used by both native dynamics and the
-/// durable formula-authenticity fence.
-pub const PHASE0_SEMANTIC_ROUTE_RULES_V1: [Phase0SemanticRouteRuleV1; 15] = [
-    Phase0SemanticRouteRuleV1 {
-        primary: 1,
-        secondary: Some(8),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 1,
-        secondary: Some(8),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 0,
-        secondary: Some(5),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 4,
-        secondary: Some(5),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 3,
-        secondary: Some(8),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 2,
-        secondary: Some(7),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 6,
-        secondary: Some(2),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 2,
-        secondary: Some(3),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 3,
-        secondary: Some(7),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 3,
-        secondary: Some(7),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 4,
-        secondary: Some(7),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 5,
-        secondary: Some(4),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 4,
-        secondary: Some(7),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 8,
-        secondary: Some(7),
-    },
-    Phase0SemanticRouteRuleV1 {
-        primary: 0,
-        secondary: Some(4),
-    },
-];
-
-/// Derive the frozen fifteen-slot route commitment without accepting caller
-/// inputs. Formula validation must use this, not a receipt-provided route.
-pub fn phase0_semantic_route_digest_v1() -> Digest {
-    let mut route_bytes = Vec::with_capacity(PHASE0_SEMANTIC_ROUTE_RULES_V1.len() * 18);
-    for route in PHASE0_SEMANTIC_ROUTE_RULES_V1 {
-        route_bytes.push(route.primary);
-        route_bytes.push(route.secondary.unwrap_or(u8::MAX));
-        route_bytes.extend_from_slice(
-            &PHASE0_SEMANTIC_ROUTE_PRIMARY_COEFFICIENT_FXP6
-                .raw()
-                .to_be_bytes(),
-        );
-        route_bytes.extend_from_slice(
-            &PHASE0_SEMANTIC_ROUTE_SECONDARY_COEFFICIENT_FXP6
-                .raw()
-                .to_be_bytes(),
-        );
-    }
-    wire::domain_hash(PHASE0_SEMANTIC_ROUTE_DIGEST_DOMAIN_V1, &[&route_bytes])
-}
-
-/// Derive the sole Phase-0 formula digest from Genesis authority and the
-/// frozen fifteen-slot route commitment.
-fn phase0_native_formula_digest_v1(
-    genesis_formula_digest: &Digest,
-    route_digest: &Digest,
-) -> Digest {
-    let mut constants = Vec::with_capacity(8 * 5 + PHASE0_NATIVE_GRAPH_FORMULA_V1.len());
-    constants.extend_from_slice(PHASE0_NATIVE_GRAPH_FORMULA_V1);
-    for value in [
-        PHASE0_NATIVE_PROPAGATION_RATE_FXP6,
-        PHASE0_NATIVE_NEUTRAL_RATE_FXP6,
-        PHASE0_NATIVE_ADAPTATION_RATE_FXP6,
-        PHASE0_NATIVE_RESERVE_RECOVERY_RATE_FXP6,
-        PHASE0_NATIVE_ENERGY_COST_RATE_FXP6,
-    ] {
-        constants.extend_from_slice(&value.raw().to_le_bytes());
-    }
-    wire::domain_hash(
-        PHASE0_NATIVE_FORMULA_DIGEST_DOMAIN_V1,
-        &[
-            genesis_formula_digest,
-            route_digest,
-            PHASE0_NATIVE_DYNAMICS_FORMULA_V1.as_bytes(),
-            &constants,
-        ],
-    )
-}
-
-/// Derive the one canonical Phase-0 formula digest. No caller-provided route
-/// participates in this identity.
-pub fn phase0_canonical_formula_digest_v1(genesis_formula_digest: &Digest) -> Digest {
-    let route_digest = phase0_semantic_route_digest_v1();
-    phase0_native_formula_digest_v1(genesis_formula_digest, &route_digest)
-}
 
 pub mod hex {
     //! Serde helpers: digests and opaque tokens cross the FFI as lowercase hex
@@ -631,152 +457,6 @@ pub struct EvidenceVector {
     pub rejection: Fixed,
 }
 
-/// Closed request-local evidence proposal for the semantic perception preview.
-/// It deliberately contains neither provider text nor authority/action policy.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PerceptionProposalV1 {
-    pub schema_version: u16,
-    #[serde(with = "crate::hex::d16")]
-    pub event_id: Id128,
-    #[serde(with = "crate::hex::d16")]
-    pub turn_id: Id128,
-    pub observed_at_ms: u64,
-    pub base_revision: u64,
-    pub dimensions: EvidenceVector,
-    pub estimator_confidence: Fixed,
-    pub protocol_version: u16,
-    #[serde(with = "crate::hex::d32")]
-    pub request_nonce_digest: Digest,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PerceptionProposalErrorV1 {
-    InvalidSchemaVersion,
-    InvalidProtocolVersion,
-    InvalidIdentity,
-    InvalidObservedAt,
-    InvalidDimensions,
-    InvalidConfidence,
-    ZeroRequestNonce,
-}
-
-impl fmt::Display for PerceptionProposalErrorV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::InvalidSchemaVersion => "invalid perception proposal schema",
-            Self::InvalidProtocolVersion => "invalid perception proposal protocol",
-            Self::InvalidIdentity => "invalid perception proposal identity",
-            Self::InvalidObservedAt => "invalid perception proposal observed time",
-            Self::InvalidDimensions => "invalid perception proposal dimensions",
-            Self::InvalidConfidence => "invalid perception proposal confidence",
-            Self::ZeroRequestNonce => "invalid perception proposal nonce",
-        })
-    }
-}
-
-impl std::error::Error for PerceptionProposalErrorV1 {}
-
-impl PerceptionProposalV1 {
-    pub const SCHEMA_VERSION: u16 = 1;
-    pub const PROTOCOL_VERSION: u16 = 1;
-    pub const DIGEST_DOMAIN_V1: &'static [u8] = b"astr-embodiment/semantic-perception-proposal-v1";
-
-    pub fn validate_v1(&self) -> Result<(), PerceptionProposalErrorV1> {
-        if self.schema_version != Self::SCHEMA_VERSION {
-            return Err(PerceptionProposalErrorV1::InvalidSchemaVersion);
-        }
-        if self.protocol_version != Self::PROTOCOL_VERSION {
-            return Err(PerceptionProposalErrorV1::InvalidProtocolVersion);
-        }
-        if self.event_id.iter().all(|byte| *byte == 0) || self.turn_id.iter().all(|byte| *byte == 0)
-        {
-            return Err(PerceptionProposalErrorV1::InvalidIdentity);
-        }
-        if self.observed_at_ms == 0 {
-            return Err(PerceptionProposalErrorV1::InvalidObservedAt);
-        }
-        if perception_dimension_values(&self.dimensions)
-            .into_iter()
-            .any(|value| !(Fixed::ZERO..=Fixed::ONE).contains(&value))
-        {
-            return Err(PerceptionProposalErrorV1::InvalidDimensions);
-        }
-        if !(Fixed::ZERO < self.estimator_confidence && self.estimator_confidence <= Fixed::ONE) {
-            return Err(PerceptionProposalErrorV1::InvalidConfidence);
-        }
-        if self.request_nonce_digest.iter().all(|byte| *byte == 0) {
-            return Err(PerceptionProposalErrorV1::ZeroRequestNonce);
-        }
-        Ok(())
-    }
-
-    /// Canonically commits the closed proposal together with the caller's
-    /// public request scope. The durable semantic namespace is deliberately
-    /// not an input to this commitment.
-    pub fn estimator_digest_v1(&self, scope: &ScopeRef) -> Digest {
-        let schema_version = self.schema_version.to_le_bytes();
-        let values = perception_dimension_values(&self.dimensions).map(Fixed::encode);
-        let confidence = self.estimator_confidence.encode();
-        let protocol_version = self.protocol_version.to_le_bytes();
-        let scope_digest = wire::scope_digest(scope);
-        let base_revision = self.base_revision.to_le_bytes();
-        let mut fields: Vec<&[u8]> = Vec::with_capacity(22);
-        fields.push(&schema_version);
-        fields.extend(values.iter().map(|value| value.as_slice()));
-        fields.push(&confidence);
-        fields.push(&protocol_version);
-        fields.push(&self.request_nonce_digest);
-        fields.push(&self.event_id);
-        fields.push(&scope_digest);
-        fields.push(&self.turn_id);
-        fields.push(&base_revision);
-        wire::domain_hash(Self::DIGEST_DOMAIN_V1, &fields)
-    }
-}
-
-pub fn perception_dimension_values(evidence: &EvidenceVector) -> [Fixed; 15] {
-    [
-        evidence.positive,
-        evidence.affiliation,
-        evidence.harm,
-        evidence.boundary,
-        evidence.repair,
-        evidence.repetition,
-        evidence.new_information,
-        evidence.constraint_instability,
-        evidence.epistemic_conflict,
-        evidence.self_responsibility,
-        evidence.other_responsibility,
-        evidence.hostility,
-        evidence.publicness,
-        evidence.engagement,
-        evidence.rejection,
-    ]
-}
-
-/// Reconstruct the fixed, named fifteen-dimensional JSON layout without
-/// allowing a caller to choose a positional interpretation.
-pub fn evidence_vector_from_values(values: [Fixed; 15]) -> EvidenceVector {
-    EvidenceVector {
-        positive: values[0],
-        affiliation: values[1],
-        harm: values[2],
-        boundary: values[3],
-        repair: values[4],
-        repetition: values[5],
-        new_information: values[6],
-        constraint_instability: values[7],
-        epistemic_conflict: values[8],
-        self_responsibility: values[9],
-        other_responsibility: values[10],
-        hostility: values[11],
-        publicness: values[12],
-        engagement: values[13],
-        rejection: values[14],
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticEstimate {
@@ -890,15 +570,6 @@ pub struct DeliveryOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TimeAdvance {
-    #[serde(with = "crate::hex::d16")]
-    pub event_id: Id128,
-    pub scope: ScopeRef,
-    pub elapsed_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AdminAction {
     #[serde(with = "crate::hex::d16")]
     pub event_id: Id128,
@@ -923,8 +594,9 @@ pub enum CanonicalEvent {
     SelfActionCandidate(SelfActionCandidate),
     DeliveryOutcome(DeliveryOutcome),
     SettlementEvidence(SettlementEvidence),
-    TimeAdvance(TimeAdvance),
+    TimeAdvance(TimeAdvanceV1),
     AdminAction(AdminAction),
+    InteractionFactBatch(InteractionFactBatchV1),
 }
 
 impl CanonicalEvent {
@@ -938,6 +610,7 @@ impl CanonicalEvent {
             Self::SettlementEvidence(e) => e.source,
             Self::TimeAdvance(_) => SourceAuthority::TimeAdvance,
             Self::AdminAction(_) => SourceAuthority::AdminAction,
+            Self::InteractionFactBatch(_) => SourceAuthority::UserObserved,
         }
     }
 }
@@ -1102,651 +775,6 @@ pub struct TransitionReceipt {
     pub status: CommitStatus,
 }
 
-pub const SEMANTIC_VECTOR_RECEIPT_SCHEMA_V2: &str = "astr-embodiment.semantic-vector-receipt.v2";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SemanticVectorFormulaV2 {
-    #[serde(rename = "full-vector-route-neutral-relaxation-v1")]
-    FullVectorRouteNeutralRelaxationV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticVectorReceiptV2 {
-    pub schema_version: u16,
-    pub formula: SemanticVectorFormulaV2,
-    pub dimension_slot_count: u8,
-    pub evaluated_dimension_count: u8,
-    pub injected_dimension_count: u8,
-    pub nonzero_evidence_dimension_count: u8,
-    pub neutral_baseline_dimension_count: u8,
-    pub unavailable_dimension_count: u8,
-    pub state_changed: bool,
-}
-
-impl SemanticVectorReceiptV2 {
-    pub const SCHEMA_VERSION: u16 = 2;
-
-    pub fn validate(&self) -> bool {
-        self.schema_version == Self::SCHEMA_VERSION
-            && self.dimension_slot_count == 15
-            && self.evaluated_dimension_count == 15
-            && self.injected_dimension_count == 15
-            && self.unavailable_dimension_count == 0
-            && self
-                .nonzero_evidence_dimension_count
-                .checked_add(self.neutral_baseline_dimension_count)
-                == Some(self.evaluated_dimension_count)
-    }
-}
-
-/// A separate semantic attestation. Its fixed v1-shaped prefix deliberately
-/// leaves the persisted D1 `TransitionReceipt` byte codec unchanged.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TransitionReceiptV2 {
-    pub schema_version: u16,
-    #[serde(with = "crate::hex::d32")]
-    pub formula_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub scope_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub event_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub authority_digest: Digest,
-    pub base_revision: u64,
-    pub next_revision: u64,
-    #[serde(with = "crate::hex::d32")]
-    pub state_before: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub state_after: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub graph_after: Digest,
-    #[serde(with = "crate::hex::d32_opt")]
-    pub action_contract: Option<Digest>,
-    pub active_nodes: u32,
-    pub active_edges: u32,
-    pub residuals: InvariantResiduals,
-    pub status: CommitStatus,
-    pub semantic_vector: SemanticVectorReceiptV2,
-}
-
-impl TransitionReceiptV2 {
-    pub const SCHEMA_VERSION: u16 = 2;
-
-    pub fn from_legacy(
-        legacy: &TransitionReceipt,
-        semantic_vector: SemanticVectorReceiptV2,
-    ) -> Option<Self> {
-        if legacy.schema_version != 1 {
-            return None;
-        }
-        let receipt = Self {
-            schema_version: Self::SCHEMA_VERSION,
-            formula_digest: legacy.formula_digest,
-            scope_digest: legacy.scope_digest,
-            event_digest: legacy.event_digest,
-            authority_digest: legacy.authority_digest,
-            base_revision: legacy.base_revision,
-            next_revision: legacy.next_revision,
-            state_before: legacy.state_before,
-            state_after: legacy.state_after,
-            graph_after: legacy.graph_after,
-            action_contract: legacy.action_contract,
-            active_nodes: legacy.active_nodes,
-            active_edges: legacy.active_edges,
-            residuals: legacy.residuals.clone(),
-            status: legacy.status,
-            semantic_vector,
-        };
-        receipt.validate().then_some(receipt)
-    }
-
-    pub fn validate(&self) -> bool {
-        self.schema_version == Self::SCHEMA_VERSION
-            && self.status == CommitStatus::Committed
-            && self.action_contract.is_none()
-            && self.base_revision.checked_add(1) == Some(self.next_revision)
-            && self.semantic_vector.validate()
-            && self.semantic_vector.state_changed == (self.state_before != self.state_after)
-    }
-}
-
-/// Phase 0 intentionally keeps the historical v1 journal receipt and AESEM2
-/// attestation readable.  New causal telemetry is a separate sealed object so
-/// adding it can never reinterpret legacy zero residuals as healthy data.
-pub const NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1: &str = "native-telemetry-receipt.v1";
-pub const NATIVE_TELEMETRY_RECEIPT_DOMAIN_V1: &[u8] =
-    b"astr-embodiment/native-telemetry-receipt-v1";
-/// Historical AESEM3 checkpoint-body domain.  The name is retained in its
-/// bytes for wire compatibility, but it is no longer a learning API.
-pub const LEGACY_CHECKPOINT_DOMAIN_V1: &[u8] = b"astr-embodiment/phase0-learning-checkpoint-v1";
-/// Historical commitment domain for the fourth AESEM3 block.  Native-only
-/// snapshots seal the canonical all-zero regional vector under this existing
-/// domain so telemetry v1 bytes remain readable without reactivating it.
-pub const LEGACY_RESERVED_VECTOR_DIGEST_DOMAIN_V1: &[u8] =
-    b"astr-embodiment/phase0-compensation-vector-v1";
-
-pub fn legacy_reserved_zero_digest_v1() -> Digest {
-    let mut bytes = Vec::with_capacity(9 * 8);
-    for _ in 0..9 {
-        bytes.extend_from_slice(&Fixed::ZERO.encode());
-    }
-    wire::domain_hash(LEGACY_RESERVED_VECTOR_DIGEST_DOMAIN_V1, &[&bytes])
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NativeTelemetryFormulaV1 {
-    #[serde(rename = "phase0-native-propagation-fxp6-v1")]
-    Phase0NativePropagationFxp6V1,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NativeTelemetryPhaseV1 {
-    #[serde(rename = "PREPARE")]
-    Prepare,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnergyTelemetryV1 {
-    pub reserve_before: Fixed,
-    pub reserve_after: Fixed,
-    pub recovered: Fixed,
-    pub spent: Fixed,
-    pub headroom: Fixed,
-    pub residual: Fixed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CapacityTelemetryV1 {
-    pub upper_saturated_nodes: u32,
-    pub node_limit: u32,
-    pub node_headroom: Fixed,
-    pub edge_used: u32,
-    pub edge_limit: u32,
-    pub edge_headroom: Fixed,
-    pub headroom: Fixed,
-    pub residual: Fixed,
-}
-
-/// Canonically sealed PREPARE telemetry. `telemetry_digest` is derived over
-/// every field except itself; `checkpoint_digest` is derived over the same
-/// complete canonical body under its historical compatibility domain.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NativeTelemetryReceiptV1 {
-    pub schema: String,
-    pub formula: NativeTelemetryFormulaV1,
-    #[serde(with = "crate::hex::d32")]
-    pub formula_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub scope_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub event_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub source_digest: Digest,
-    pub base_revision: u64,
-    pub next_revision: u64,
-    pub phase: NativeTelemetryPhaseV1,
-    #[serde(with = "crate::hex::d32")]
-    pub state_before: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub state_after: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub graph_before: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub graph_after: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub local_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub compensation_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub effective_digest: Digest,
-    pub energy: EnergyTelemetryV1,
-    pub capacity: CapacityTelemetryV1,
-    pub residuals: InvariantResiduals,
-    pub residual_health: Fixed,
-    pub native_gate: Fixed,
-    #[serde(with = "crate::hex::d32")]
-    pub checkpoint_digest: Digest,
-    #[serde(with = "crate::hex::d32")]
-    pub telemetry_digest: Digest,
-}
-
-impl NativeTelemetryReceiptV1 {
-    pub fn canonical_bytes_without_digests(&self) -> Vec<u8> {
-        fn push_fixed(out: &mut Vec<u8>, value: Fixed) {
-            out.extend_from_slice(&value.encode());
-        }
-        fn push_digest(out: &mut Vec<u8>, value: &Digest) {
-            out.extend_from_slice(value);
-        }
-        let mut out = Vec::with_capacity(32 * 12 + 8 * 20 + 32);
-        out.push(match self.formula {
-            NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1 => 1,
-        });
-        out.push(match self.phase {
-            NativeTelemetryPhaseV1::Prepare => 1,
-        });
-        for digest in [
-            &self.formula_digest,
-            &self.scope_digest,
-            &self.event_digest,
-            &self.source_digest,
-        ] {
-            push_digest(&mut out, digest);
-        }
-        out.extend_from_slice(&self.base_revision.to_le_bytes());
-        out.extend_from_slice(&self.next_revision.to_le_bytes());
-        for digest in [
-            &self.state_before,
-            &self.state_after,
-            &self.graph_before,
-            &self.graph_after,
-            &self.local_digest,
-            &self.compensation_digest,
-            &self.effective_digest,
-        ] {
-            push_digest(&mut out, digest);
-        }
-        for value in [
-            self.energy.reserve_before,
-            self.energy.reserve_after,
-            self.energy.recovered,
-            self.energy.spent,
-            self.energy.headroom,
-            self.energy.residual,
-        ] {
-            push_fixed(&mut out, value);
-        }
-        out.extend_from_slice(&self.capacity.upper_saturated_nodes.to_le_bytes());
-        out.extend_from_slice(&self.capacity.node_limit.to_le_bytes());
-        push_fixed(&mut out, self.capacity.node_headroom);
-        out.extend_from_slice(&self.capacity.edge_used.to_le_bytes());
-        out.extend_from_slice(&self.capacity.edge_limit.to_le_bytes());
-        for value in [
-            self.capacity.edge_headroom,
-            self.capacity.headroom,
-            self.capacity.residual,
-            self.residuals.authority,
-            self.residuals.continuity,
-            self.residuals.energy,
-            self.residuals.renormalization,
-            self.residuals.capacity,
-            self.residual_health,
-            self.native_gate,
-        ] {
-            push_fixed(&mut out, value);
-        }
-        out
-    }
-
-    pub fn telemetry_digest_for_body(&self) -> Digest {
-        wire::domain_hash(
-            NATIVE_TELEMETRY_RECEIPT_DOMAIN_V1,
-            &[&self.canonical_bytes_without_digests()],
-        )
-    }
-
-    pub fn checkpoint_digest_for_body(&self) -> Digest {
-        wire::domain_hash(
-            LEGACY_CHECKPOINT_DOMAIN_V1,
-            &[&self.canonical_bytes_without_digests()],
-        )
-    }
-
-    pub fn seal(mut self) -> Self {
-        self.checkpoint_digest = self.checkpoint_digest_for_body();
-        self.telemetry_digest = self.telemetry_digest_for_body();
-        self
-    }
-
-    pub fn validate(&self) -> bool {
-        let unit = |value: Fixed| (Fixed::ZERO..=Fixed::ONE).contains(&value);
-        let nonzero = |digest: &Digest| digest.iter().any(|byte| *byte != 0);
-        let headroom = |used: u32, limit: u32| {
-            if limit == 0 || used > limit {
-                return None;
-            }
-            let denominator = i128::from(limit);
-            let ratio = i128::from(used)
-                .checked_mul(i128::from(Fixed::ONE.raw()))?
-                .checked_add(denominator / 2)?
-                / denominator;
-            let raw = i128::from(Fixed::ONE.raw()).checked_sub(ratio)?;
-            i64::try_from(raw).ok().map(Fixed::from_raw)
-        };
-        if self.schema != NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1
-            || self.formula != NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1
-            || self.phase != NativeTelemetryPhaseV1::Prepare
-            || self.base_revision.checked_add(1) != Some(self.next_revision)
-            || self.capacity.node_limit == 0
-            || self.capacity.edge_limit == 0
-            || self.capacity.upper_saturated_nodes > self.capacity.node_limit
-            || self.capacity.edge_used > self.capacity.edge_limit
-            || self.compensation_digest != legacy_reserved_zero_digest_v1()
-            || ![
-                &self.formula_digest,
-                &self.scope_digest,
-                &self.event_digest,
-                &self.source_digest,
-                &self.state_before,
-                &self.state_after,
-                &self.graph_before,
-                &self.graph_after,
-                &self.local_digest,
-                &self.compensation_digest,
-                &self.effective_digest,
-            ]
-            .into_iter()
-            .all(nonzero)
-        {
-            return false;
-        }
-        let values = [
-            self.energy.reserve_before,
-            self.energy.reserve_after,
-            self.energy.recovered,
-            self.energy.spent,
-            self.energy.headroom,
-            self.energy.residual,
-            self.capacity.node_headroom,
-            self.capacity.edge_headroom,
-            self.capacity.headroom,
-            self.capacity.residual,
-            self.residuals.authority,
-            self.residuals.continuity,
-            self.residuals.energy,
-            self.residuals.renormalization,
-            self.residuals.capacity,
-            self.residual_health,
-            self.native_gate,
-        ];
-        if !values.into_iter().all(unit)
-            || self.energy.headroom != self.energy.reserve_after
-            || self.energy.residual != self.residuals.energy
-            || self.capacity.residual != self.residuals.capacity
-            || self.capacity.residual != Fixed::ZERO
-            || headroom(
-                self.capacity.upper_saturated_nodes,
-                self.capacity.node_limit,
-            ) != Some(self.capacity.node_headroom)
-            || headroom(self.capacity.edge_used, self.capacity.edge_limit)
-                != Some(self.capacity.edge_headroom)
-            || self.capacity.headroom
-                != self.capacity.node_headroom.min(self.capacity.edge_headroom)
-        {
-            return false;
-        }
-        let worst_residual = [
-            self.residuals.authority,
-            self.residuals.continuity,
-            self.residuals.energy,
-            self.residuals.renormalization,
-            self.residuals.capacity,
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(Fixed::ONE);
-        self.residual_health == Fixed::ONE.saturating_sub(worst_residual)
-            && self.native_gate
-                == self
-                    .energy
-                    .headroom
-                    .min(self.capacity.headroom)
-                    .min(self.residual_health)
-            && self.checkpoint_digest == self.checkpoint_digest_for_body()
-            && self.telemetry_digest == self.telemetry_digest_for_body()
-    }
-}
-
-/// Versioned native authority for the aggregate-only node-observability wire.
-///
-/// The opaque id is intentionally declared only by native code. Any
-/// incompatible change advances the whole contract version rather than asking
-/// a host to recompute a schema hash.
-pub const NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA_V1: &str =
-    "astr-embodiment.node-observability-contract-info.v1";
-pub const NODE_OBSERVABILITY_SCHEMA_V2: &str = "astr-embodiment.node-observability.v2";
-pub const NODE_OBSERVABILITY_FORMULA_V1: &str = "spc1-node-observability-v1";
-pub const NODE_OBSERVABILITY_REGION_LAYOUT_V1: &str = "regions-v1";
-pub const NODE_OBSERVABILITY_CONTRACT_ID_V2: &str =
-    "astr-embodiment.node-observability-contract.v2";
-
-/// Native-exported declaration for the currently compiled node-observability
-/// wire. The opaque contract id is native-owned and never copied from a host
-/// literal.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeObservabilityContractInfoV1 {
-    pub schema: String,
-    pub contract_id: String,
-    pub node_observability_schema: String,
-}
-
-impl NodeObservabilityContractInfoV1 {
-    pub fn native_v1() -> Self {
-        Self {
-            schema: NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA_V1.to_owned(),
-            contract_id: NODE_OBSERVABILITY_CONTRACT_ID_V2.to_owned(),
-            node_observability_schema: NODE_OBSERVABILITY_SCHEMA_V2.to_owned(),
-        }
-    }
-
-    pub fn validate(&self) -> bool {
-        self.schema == NODE_OBSERVABILITY_CONTRACT_INFO_SCHEMA_V1
-            && self.contract_id == NODE_OBSERVABILITY_CONTRACT_ID_V2
-            && self.node_observability_schema == NODE_OBSERVABILITY_SCHEMA_V2
-    }
-}
-
-pub fn node_observability_contract_info_v1() -> NodeObservabilityContractInfoV1 {
-    NodeObservabilityContractInfoV1::native_v1()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum NodeObservabilityResidualStateV1 {
-    NotComputed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeObservabilityResidualsV1 {
-    pub state: NodeObservabilityResidualStateV1,
-    pub formula: Option<String>,
-    pub values_fxp6: Option<[u32; 5]>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeObservabilityCountsV1 {
-    pub selected_node_count: u32,
-    pub activated_node_count: u32,
-    pub changed_node_count: u32,
-    pub potential_nonzero_after_count: u32,
-    pub excitation_nonzero_after_count: u32,
-    pub signal_nonzero_after_count: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeObservabilityComponentV1 {
-    pub before_mean_fxp6: i64,
-    pub after_mean_fxp6: i64,
-    pub delta_mean_fxp6: i64,
-    pub changed_node_count: u32,
-    pub nonzero_after_count: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeObservabilityRegionV1 {
-    pub region_id: u8,
-    pub region_name: String,
-    pub node_capacity: u32,
-    pub selected_node_count: u32,
-    pub activated_node_count: u32,
-    pub changed_node_count: u32,
-    pub potential: NodeObservabilityComponentV1,
-    pub excitation: NodeObservabilityComponentV1,
-}
-
-/// Native-validated aggregate projection. This is a v2 wire because the
-/// closed v1 projection had no binding to its producer contract.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeObservabilityProjectionWireV2 {
-    pub schema: String,
-    pub contract_id: String,
-    pub formula: String,
-    pub revision: u64,
-    pub field_node_capacity: u32,
-    pub region_layout: String,
-    pub counts: NodeObservabilityCountsV1,
-    pub residuals: NodeObservabilityResidualsV1,
-    pub regions: Vec<NodeObservabilityRegionV1>,
-}
-
-impl NodeObservabilityProjectionWireV2 {
-    pub fn new(
-        revision: u64,
-        field_node_capacity: u32,
-        counts: NodeObservabilityCountsV1,
-        residuals: NodeObservabilityResidualsV1,
-        regions: Vec<NodeObservabilityRegionV1>,
-    ) -> Self {
-        Self {
-            schema: NODE_OBSERVABILITY_SCHEMA_V2.to_owned(),
-            contract_id: NODE_OBSERVABILITY_CONTRACT_ID_V2.to_owned(),
-            formula: NODE_OBSERVABILITY_FORMULA_V1.to_owned(),
-            revision,
-            field_node_capacity,
-            region_layout: NODE_OBSERVABILITY_REGION_LAYOUT_V1.to_owned(),
-            counts,
-            residuals,
-            regions,
-        }
-    }
-
-    pub fn validate(&self) -> bool {
-        if self.schema != NODE_OBSERVABILITY_SCHEMA_V2
-            || self.formula != NODE_OBSERVABILITY_FORMULA_V1
-            || self.contract_id != NODE_OBSERVABILITY_CONTRACT_ID_V2
-            || self.region_layout != NODE_OBSERVABILITY_REGION_LAYOUT_V1
-            || self.field_node_capacity == 0
-            || self.regions.is_empty()
-            || self.residuals.state != NodeObservabilityResidualStateV1::NotComputed
-            || self.residuals.formula.is_some()
-            || self.residuals.values_fxp6.is_some()
-        {
-            return false;
-        }
-
-        let capacity = self.field_node_capacity;
-        let counts = &self.counts;
-        if [
-            counts.selected_node_count,
-            counts.activated_node_count,
-            counts.changed_node_count,
-            counts.potential_nonzero_after_count,
-            counts.excitation_nonzero_after_count,
-            counts.signal_nonzero_after_count,
-        ]
-        .into_iter()
-        .any(|value| value > capacity)
-            || counts.selected_node_count != counts.changed_node_count
-            || counts.activated_node_count > counts.changed_node_count
-            || counts.signal_nonzero_after_count
-                < counts
-                    .potential_nonzero_after_count
-                    .max(counts.excitation_nonzero_after_count)
-        {
-            return false;
-        }
-
-        let mut selected_total = 0_u64;
-        let mut activated_total = 0_u64;
-        let mut changed_total = 0_u64;
-        let mut potential_nonzero_after_total = 0_u64;
-        let mut excitation_nonzero_after_total = 0_u64;
-        let mut region_capacity_total = 0_u64;
-
-        for (index, region) in self.regions.iter().enumerate() {
-            if u8::try_from(index).ok() != Some(region.region_id)
-                || region.region_name.is_empty()
-                || self.regions[..index]
-                    .iter()
-                    .any(|previous| previous.region_name == region.region_name)
-                || region.node_capacity == 0
-                || [
-                    region.selected_node_count,
-                    region.activated_node_count,
-                    region.changed_node_count,
-                    region.potential.changed_node_count,
-                    region.potential.nonzero_after_count,
-                    region.excitation.changed_node_count,
-                    region.excitation.nonzero_after_count,
-                ]
-                .into_iter()
-                .any(|value| value > region.node_capacity)
-                || region.selected_node_count != region.changed_node_count
-                || region.activated_node_count > region.changed_node_count
-                || region.potential.changed_node_count > region.activated_node_count
-                || region.excitation.changed_node_count > region.activated_node_count
-            {
-                return false;
-            }
-
-            let Some(next_selected_total) =
-                selected_total.checked_add(u64::from(region.selected_node_count))
-            else {
-                return false;
-            };
-            let Some(next_activated_total) =
-                activated_total.checked_add(u64::from(region.activated_node_count))
-            else {
-                return false;
-            };
-            let Some(next_changed_total) =
-                changed_total.checked_add(u64::from(region.changed_node_count))
-            else {
-                return false;
-            };
-            let Some(next_potential_nonzero_after_total) = potential_nonzero_after_total
-                .checked_add(u64::from(region.potential.nonzero_after_count))
-            else {
-                return false;
-            };
-            let Some(next_excitation_nonzero_after_total) = excitation_nonzero_after_total
-                .checked_add(u64::from(region.excitation.nonzero_after_count))
-            else {
-                return false;
-            };
-            let Some(next_region_capacity_total) =
-                region_capacity_total.checked_add(u64::from(region.node_capacity))
-            else {
-                return false;
-            };
-            selected_total = next_selected_total;
-            activated_total = next_activated_total;
-            changed_total = next_changed_total;
-            potential_nonzero_after_total = next_potential_nonzero_after_total;
-            excitation_nonzero_after_total = next_excitation_nonzero_after_total;
-            region_capacity_total = next_region_capacity_total;
-        }
-
-        region_capacity_total == u64::from(capacity)
-            && selected_total == u64::from(counts.selected_node_count)
-            && activated_total == u64::from(counts.activated_node_count)
-            && changed_total == u64::from(counts.changed_node_count)
-            && potential_nonzero_after_total == u64::from(counts.potential_nonzero_after_count)
-            && excitation_nonzero_after_total == u64::from(counts.excitation_nonzero_after_count)
-    }
-}
-
 pub mod wire {
     //! Canonical binary wire codec (fixed layout, little-endian, closed
     //! boundaries). Every struct here has exactly one encoding; a digest is
@@ -1756,13 +784,13 @@ pub mod wire {
     use super::*;
     use thiserror::Error;
 
-    pub const WIRE_SCHEMA_VERSION: u16 = 1;
+    pub const WIRE_SCHEMA_VERSION: u16 = 5;
+    pub const LEGACY_EVENT_WIRE_SCHEMA_VERSION: u16 = 4;
 
     pub const MANIFEST_BODY_DOMAIN: &[u8] = b"ae.genesis.manifest-body.v1";
     pub const EVENT_DOMAIN: &[u8] = b"ae.event.v1";
     pub const ACTION_CONTRACT_DOMAIN: &[u8] = b"ae.action-contract.v1";
     pub const TRANSITION_RECEIPT_DOMAIN: &[u8] = b"ae.transition-receipt.v1";
-    pub const TRANSITION_RECEIPT_V2_DOMAIN: &[u8] = b"ae.transition-receipt.v2";
     pub const SCOPE_DOMAIN: &[u8] = b"ae.journal.scope.v1";
     pub const AUTHORITY_DOMAIN: &[u8] = b"ae.authority.v1";
     pub const CAPSULE_DOMAIN: &[u8] = b"ae.genesis-capsule.v1";
@@ -1785,6 +813,7 @@ pub mod wire {
     pub const KIND_SETTLEMENT_EVIDENCE: u8 = 7;
     pub const KIND_TIME_ADVANCE: u8 = 8;
     pub const KIND_ADMIN_ACTION: u8 = 9;
+    pub const KIND_INTERACTION_FACT_BATCH: u8 = 10;
 
     #[derive(Debug, Error, PartialEq, Eq)]
     pub enum WireError {
@@ -1794,6 +823,8 @@ pub mod wire {
         TrailingBytes(usize),
         #[error("wire schema version {0} is not supported")]
         SchemaVersion(u16),
+        #[error("legacy wire schema {0} is not valid for this event")]
+        UnsupportedSchema(u16),
         #[error("wire unknown event kind {0}")]
         UnknownKind(u8),
         #[error("wire invalid enum code {0}")]
@@ -1804,6 +835,14 @@ pub mod wire {
         StringTooLong,
         #[error("wire claim count exceeds limit")]
         TooManyClaims,
+        #[error("wire interaction fact batch must not be empty")]
+        EmptyInteractionFacts,
+        #[error("wire interaction fact batch exceeds limit")]
+        TooManyInteractionFacts,
+        #[error("wire alpha3 source vector exceeds limit")]
+        TooManyAlpha3SourceRefs,
+        #[error("wire alpha3 contract is invalid: {0}")]
+        InvalidAlpha3Contract(&'static str),
     }
 
     /// Domain-separated hash: BLAKE3(domain || 0x00 || len(field) || field ...)
@@ -1874,6 +913,11 @@ pub mod wire {
             Ok(u32::from_le_bytes(bytes))
         }
 
+        pub fn i32(&mut self) -> Result<i32, WireError> {
+            let bytes: [u8; 4] = self.take(4)?.try_into().unwrap();
+            Ok(i32::from_le_bytes(bytes))
+        }
+
         pub fn u64(&mut self) -> Result<u64, WireError> {
             let bytes: [u8; 8] = self.take(8)?.try_into().unwrap();
             Ok(u64::from_le_bytes(bytes))
@@ -1910,6 +954,14 @@ pub mod wire {
             }
         }
 
+        pub fn opt_u64(&mut self) -> Result<Option<u64>, WireError> {
+            if self.bool()? {
+                Ok(Some(self.u64()?))
+            } else {
+                Ok(None)
+            }
+        }
+
         pub fn string(&mut self) -> Result<String, WireError> {
             let length = self.u32()? as usize;
             if length > MAX_WIRE_STRING {
@@ -1932,6 +984,10 @@ pub mod wire {
     }
 
     fn push_u32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_i32(out: &mut Vec<u8>, value: i32) {
         out.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -1962,6 +1018,13 @@ pub mod wire {
         push_bool(out, value.is_some());
         if let Some(digest) = value {
             push_digest(out, digest);
+        }
+    }
+
+    fn push_opt_u64(out: &mut Vec<u8>, value: Option<u64>) {
+        push_bool(out, value.is_some());
+        if let Some(value) = value {
+            push_u64(out, value);
         }
     }
 
@@ -2231,6 +1294,7 @@ pub mod wire {
             CanonicalEvent::SettlementEvidence(_) => KIND_SETTLEMENT_EVIDENCE,
             CanonicalEvent::TimeAdvance(_) => KIND_TIME_ADVANCE,
             CanonicalEvent::AdminAction(_) => KIND_ADMIN_ACTION,
+            CanonicalEvent::InteractionFactBatch(_) => KIND_INTERACTION_FACT_BATCH,
         }
     }
 
@@ -2245,6 +1309,7 @@ pub mod wire {
             CanonicalEvent::SettlementEvidence(_) => "settlement_evidence",
             CanonicalEvent::TimeAdvance(_) => "time_advance",
             CanonicalEvent::AdminAction(_) => "admin_action",
+            CanonicalEvent::InteractionFactBatch(_) => "interaction_fact_batch",
         }
     }
 
@@ -2375,9 +1440,312 @@ pub mod wire {
         Ok((decode_scope(reader)?, decode_causal(reader)?))
     }
 
-    pub fn encode_event(event: &CanonicalEvent) -> Vec<u8> {
+    pub fn interaction_fact_kind_code(kind: InteractionFactKindV1) -> u8 {
+        match kind {
+            InteractionFactKindV1::InboundObserved => 1,
+            InteractionFactKindV1::FollowUpRequested => 2,
+            InteractionFactKindV1::FollowUpResolved => 3,
+            InteractionFactKindV1::BoundarySet => 4,
+            InteractionFactKindV1::ContactGranted => 5,
+            InteractionFactKindV1::ContactPaused => 6,
+            InteractionFactKindV1::ContactResumed => 7,
+            InteractionFactKindV1::RelationEnded => 8,
+            InteractionFactKindV1::ExplicitOutcomeReported => 9,
+        }
+    }
+
+    pub fn interaction_fact_kind_from_code(code: u8) -> Option<InteractionFactKindV1> {
+        Some(match code {
+            1 => InteractionFactKindV1::InboundObserved,
+            2 => InteractionFactKindV1::FollowUpRequested,
+            3 => InteractionFactKindV1::FollowUpResolved,
+            4 => InteractionFactKindV1::BoundarySet,
+            5 => InteractionFactKindV1::ContactGranted,
+            6 => InteractionFactKindV1::ContactPaused,
+            7 => InteractionFactKindV1::ContactResumed,
+            8 => InteractionFactKindV1::RelationEnded,
+            9 => InteractionFactKindV1::ExplicitOutcomeReported,
+            _ => return None,
+        })
+    }
+
+    pub fn interaction_source_authority_code(authority: InteractionSourceAuthorityV1) -> u8 {
+        match authority {
+            InteractionSourceAuthorityV1::ExplicitControl => 1,
+            InteractionSourceAuthorityV1::AstrbotMetadata => 2,
+            InteractionSourceAuthorityV1::DeterministicRule => 3,
+            InteractionSourceAuthorityV1::ModelCandidate => 4,
+        }
+    }
+
+    pub fn interaction_source_authority_from_code(
+        code: u8,
+    ) -> Option<InteractionSourceAuthorityV1> {
+        Some(match code {
+            1 => InteractionSourceAuthorityV1::ExplicitControl,
+            2 => InteractionSourceAuthorityV1::AstrbotMetadata,
+            3 => InteractionSourceAuthorityV1::DeterministicRule,
+            4 => InteractionSourceAuthorityV1::ModelCandidate,
+            _ => return None,
+        })
+    }
+
+    pub fn interaction_value_code(value: InteractionValueCodeV1) -> u8 {
+        match value {
+            InteractionValueCodeV1::FollowUp => 1,
+            InteractionValueCodeV1::FollowUpResolved => 2,
+            InteractionValueCodeV1::NoContactBoundary => 3,
+            InteractionValueCodeV1::Grant => 4,
+            InteractionValueCodeV1::Pause => 5,
+            InteractionValueCodeV1::Resume => 6,
+            InteractionValueCodeV1::End => 7,
+            InteractionValueCodeV1::OutcomePositive => 8,
+            InteractionValueCodeV1::OutcomeNeutral => 9,
+            InteractionValueCodeV1::OutcomeNegative => 10,
+        }
+    }
+
+    pub fn interaction_value_from_code(code: u8) -> Option<InteractionValueCodeV1> {
+        Some(match code {
+            1 => InteractionValueCodeV1::FollowUp,
+            2 => InteractionValueCodeV1::FollowUpResolved,
+            3 => InteractionValueCodeV1::NoContactBoundary,
+            4 => InteractionValueCodeV1::Grant,
+            5 => InteractionValueCodeV1::Pause,
+            6 => InteractionValueCodeV1::Resume,
+            7 => InteractionValueCodeV1::End,
+            8 => InteractionValueCodeV1::OutcomePositive,
+            9 => InteractionValueCodeV1::OutcomeNeutral,
+            10 => InteractionValueCodeV1::OutcomeNegative,
+            _ => return None,
+        })
+    }
+
+    pub fn contact_purpose_code(purpose: ContactPurposeV1) -> u8 {
+        match purpose {
+            ContactPurposeV1::ScheduledCheckIn => 1,
+            ContactPurposeV1::ExplicitFollowUp => 2,
+            ContactPurposeV1::RepairInvitation => 3,
+        }
+    }
+
+    pub fn contact_purpose_from_code(code: u8) -> Option<ContactPurposeV1> {
+        Some(match code {
+            1 => ContactPurposeV1::ScheduledCheckIn,
+            2 => ContactPurposeV1::ExplicitFollowUp,
+            3 => ContactPurposeV1::RepairInvitation,
+            _ => return None,
+        })
+    }
+
+    pub fn contact_channel_code(channel: ContactChannelV1) -> u8 {
+        match channel {
+            ContactChannelV1::AstrbotSession => 1,
+        }
+    }
+
+    pub fn contact_channel_from_code(code: u8) -> Option<ContactChannelV1> {
+        Some(match code {
+            1 => ContactChannelV1::AstrbotSession,
+            _ => return None,
+        })
+    }
+
+    fn alpha3_contract_wire_error(error: Alpha3ContractError) -> WireError {
+        match error {
+            Alpha3ContractError::EmptyInteractionFacts => WireError::EmptyInteractionFacts,
+            Alpha3ContractError::TooManyInteractionFacts => WireError::TooManyInteractionFacts,
+            Alpha3ContractError::TooManySourceRefs => WireError::TooManyAlpha3SourceRefs,
+            Alpha3ContractError::SchemaUnsupported => {
+                WireError::InvalidAlpha3Contract("schema version")
+            }
+            Alpha3ContractError::VectorBound => WireError::InvalidAlpha3Contract("vector bound"),
+            Alpha3ContractError::DuplicateValue => {
+                WireError::InvalidAlpha3Contract("duplicate value")
+            }
+            Alpha3ContractError::FixedOutOfRange => {
+                WireError::InvalidAlpha3Contract("fixed-point range")
+            }
+            Alpha3ContractError::InvalidInteractionFact => {
+                WireError::InvalidAlpha3Contract("interaction fact fields")
+            }
+            Alpha3ContractError::PayloadKindMismatch => {
+                WireError::InvalidAlpha3Contract("payload kind")
+            }
+            Alpha3ContractError::InvalidTimeRange => WireError::InvalidAlpha3Contract("time range"),
+            Alpha3ContractError::InvalidWorldAnchor => {
+                WireError::InvalidAlpha3Contract("world anchor")
+            }
+            Alpha3ContractError::CodeTooLong => WireError::StringTooLong,
+            Alpha3ContractError::InvalidProviderUsage => {
+                WireError::InvalidAlpha3Contract("provider usage")
+            }
+            Alpha3ContractError::DreamMustBeNonFact => {
+                WireError::InvalidAlpha3Contract("dream non-fact")
+            }
+            Alpha3ContractError::ScopedLocatorChecksumFailed => {
+                WireError::InvalidAlpha3Contract("public reference authentication")
+            }
+            Alpha3ContractError::InvalidEffectiveFrequency => {
+                WireError::InvalidAlpha3Contract("effective proactive frequency")
+            }
+            Alpha3ContractError::InvalidAffectProjection => {
+                WireError::InvalidAlpha3Contract("affect projection")
+            }
+        }
+    }
+
+    pub fn ensure_interaction_batch_bounds(
+        batch: &InteractionFactBatchV1,
+    ) -> Result<(), WireError> {
+        validate_interaction_fact_batch(batch).map_err(alpha3_contract_wire_error)
+    }
+
+    fn encode_consent_terms(out: &mut Vec<u8>, terms: &ConsentTermsV1) {
+        out.push(terms.purposes.len() as u8);
+        for purpose in &terms.purposes {
+            out.push(contact_purpose_code(*purpose));
+        }
+        out.push(terms.channels.len() as u8);
+        for channel in &terms.channels {
+            out.push(contact_channel_code(*channel));
+        }
+        push_opt_u64(out, terms.valid_until_utc_ms);
+        push_opt_u64(out, terms.pause_until_utc_ms);
+    }
+
+    fn decode_consent_terms(reader: &mut Reader<'_>) -> Result<ConsentTermsV1, WireError> {
+        let purpose_count = reader.u8()? as usize;
+        if purpose_count > 3 {
+            return Err(WireError::InvalidAlpha3Contract("consent purpose count"));
+        }
+        let mut purposes = Vec::with_capacity(purpose_count);
+        for _ in 0..purpose_count {
+            purposes.push(
+                contact_purpose_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("contact purpose"))?,
+            );
+        }
+        let channel_count = reader.u8()? as usize;
+        if channel_count > 1 {
+            return Err(WireError::InvalidAlpha3Contract("consent channel count"));
+        }
+        let mut channels = Vec::with_capacity(channel_count);
+        for _ in 0..channel_count {
+            channels.push(
+                contact_channel_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("contact channel"))?,
+            );
+        }
+        Ok(ConsentTermsV1 {
+            purposes,
+            channels,
+            valid_until_utc_ms: reader.opt_u64()?,
+            pause_until_utc_ms: reader.opt_u64()?,
+        })
+    }
+
+    fn encode_interaction_fact(out: &mut Vec<u8>, fact: &InteractionFactV1) {
+        push_id(out, &fact.fact_id);
+        out.push(interaction_fact_kind_code(fact.kind));
+        push_u64(out, fact.observed_at_utc_ms);
+        out.push(interaction_source_authority_code(fact.source_authority));
+        push_digest(out, &fact.source_digest);
+        push_digest(out, &fact.extractor_digest);
+        out.extend_from_slice(&encode_fixed(fact.confidence));
+        push_bool(out, fact.value_code.is_some());
+        if let Some(value) = fact.value_code {
+            out.push(interaction_value_code(value));
+        }
+        push_opt_digest(out, &fact.subject_public_ref);
+        push_bool(out, fact.consent_terms.is_some());
+        if let Some(terms) = &fact.consent_terms {
+            encode_consent_terms(out, terms);
+        }
+        push_opt_u64(out, fact.scheduled_at_utc_ms);
+        push_opt_u64(out, fact.expires_at_utc_ms);
+    }
+
+    fn decode_interaction_fact(reader: &mut Reader<'_>) -> Result<InteractionFactV1, WireError> {
+        let fact_id = reader.id()?;
+        let kind = interaction_fact_kind_from_code(reader.u8()?)
+            .ok_or(WireError::InvalidEnum("interaction fact kind"))?;
+        let observed_at_utc_ms = reader.u64()?;
+        let source_authority = interaction_source_authority_from_code(reader.u8()?)
+            .ok_or(WireError::InvalidEnum("interaction source authority"))?;
+        let source_digest = reader.digest()?;
+        let extractor_digest = reader.digest()?;
+        let confidence = reader.fixed()?;
+        let value_code = if reader.bool()? {
+            Some(
+                interaction_value_from_code(reader.u8()?)
+                    .ok_or(WireError::InvalidEnum("interaction value"))?,
+            )
+        } else {
+            None
+        };
+        let subject_public_ref = reader.opt_digest()?;
+        let consent_terms = if reader.bool()? {
+            Some(decode_consent_terms(reader)?)
+        } else {
+            None
+        };
+        Ok(InteractionFactV1 {
+            fact_id,
+            kind,
+            observed_at_utc_ms,
+            source_authority,
+            source_digest,
+            extractor_digest,
+            confidence,
+            value_code,
+            subject_public_ref,
+            consent_terms,
+            scheduled_at_utc_ms: reader.opt_u64()?,
+            expires_at_utc_ms: reader.opt_u64()?,
+        })
+    }
+
+    fn encode_interaction_batch(out: &mut Vec<u8>, batch: &InteractionFactBatchV1) {
+        push_id(out, &batch.event_id);
+        out.extend_from_slice(&encode_scope(&batch.scope));
+        encode_causal(&batch.causal, out);
+        out.push(batch.facts.len() as u8);
+        for fact in &batch.facts {
+            encode_interaction_fact(out, fact);
+        }
+    }
+
+    fn validate_existing_event_bounds(event: &CanonicalEvent) -> Result<(), WireError> {
+        match event {
+            CanonicalEvent::SelfActionCandidate(event) if event.claims.len() > MAX_CLAIMS => {
+                Err(WireError::TooManyClaims)
+            }
+            CanonicalEvent::TimeAdvance(event)
+                if event.frozen.persona_tzid.len() > MAX_WIRE_STRING
+                    || event.frozen.relation_tzid.len() > MAX_WIRE_STRING =>
+            {
+                Err(WireError::StringTooLong)
+            }
+            CanonicalEvent::AdminAction(event) if event.operation.len() > MAX_WIRE_STRING => {
+                Err(WireError::StringTooLong)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn encode_event_checked(event: &CanonicalEvent) -> Result<Vec<u8>, WireError> {
+        validate_existing_event_bounds(event)?;
+        if let CanonicalEvent::InteractionFactBatch(batch) = event {
+            ensure_interaction_batch_bounds(batch)?;
+        }
         let mut out = Vec::with_capacity(128);
-        push_u16(&mut out, WIRE_SCHEMA_VERSION);
+        let schema_version = if matches!(event, CanonicalEvent::InteractionFactBatch(_)) {
+            WIRE_SCHEMA_VERSION
+        } else {
+            LEGACY_EVENT_WIRE_SCHEMA_VERSION
+        };
+        push_u16(&mut out, schema_version);
         out.push(event_kind_code(event));
         match event {
             CanonicalEvent::UserStimulus(e) => {
@@ -2450,7 +1818,30 @@ pub mod wire {
             CanonicalEvent::TimeAdvance(e) => {
                 push_id(&mut out, &e.event_id);
                 out.extend_from_slice(&encode_scope(&e.scope));
-                push_u64(&mut out, e.elapsed_ms);
+                push_u64(&mut out, e.expected_generation);
+                push_u16(&mut out, e.frozen.schema_version);
+                push_u64(&mut out, e.frozen.observed_now_utc_ms);
+                push_u64(&mut out, e.frozen.effective_now_utc_ms);
+                push_string(&mut out, &e.frozen.persona_tzid);
+                push_i32(&mut out, e.frozen.persona_utc_offset_seconds);
+                push_u16(&mut out, e.frozen.persona_local_minute);
+                push_i32(&mut out, e.frozen.persona_day_ordinal);
+                push_string(&mut out, &e.frozen.relation_tzid);
+                push_i32(&mut out, e.frozen.relation_utc_offset_seconds);
+                push_u16(&mut out, e.frozen.relation_local_minute);
+                push_i32(&mut out, e.frozen.relation_day_ordinal);
+                push_u64(&mut out, e.frozen.budget_day_start_utc_ms);
+                push_u64(&mut out, e.frozen.budget_next_day_start_utc_ms);
+                push_bool(&mut out, e.frozen.next_timezone_transition_utc_ms.is_some());
+                if let Some(value) = e.frozen.next_timezone_transition_utc_ms {
+                    push_u64(&mut out, value);
+                }
+                push_digest(&mut out, &e.frozen.tzdb_fingerprint);
+                push_digest(&mut out, &e.frozen_input_digest);
+                out.extend_from_slice(&encode_fixed(e.stimulus.arousal));
+                out.extend_from_slice(&encode_fixed(e.stimulus.urgency));
+                push_bool(&mut out, e.stimulus.emergency_authorized);
+                push_digest(&mut out, &e.stimulus.source_digest);
             }
             CanonicalEvent::AdminAction(e) => {
                 push_id(&mut out, &e.event_id);
@@ -2458,17 +1849,28 @@ pub mod wire {
                 push_string(&mut out, &e.operation);
                 push_digest(&mut out, &e.nonce_digest);
             }
+            CanonicalEvent::InteractionFactBatch(batch) => {
+                encode_interaction_batch(&mut out, batch);
+            }
         }
-        out
+        Ok(out)
+    }
+
+    pub fn encode_event(event: &CanonicalEvent) -> Vec<u8> {
+        encode_event_checked(event)
+            .expect("canonical event violated its pre-persistence wire contract")
     }
 
     pub fn decode_event(bytes: &[u8]) -> Result<CanonicalEvent, WireError> {
         let mut reader = Reader::new(bytes);
         let schema_version = reader.u16()?;
-        if schema_version != WIRE_SCHEMA_VERSION {
+        if !(1..=WIRE_SCHEMA_VERSION).contains(&schema_version) {
             return Err(WireError::SchemaVersion(schema_version));
         }
         let kind = reader.u8()?;
+        if schema_version == 1 && kind == KIND_TIME_ADVANCE {
+            return Err(WireError::UnsupportedSchema(0));
+        }
         let event = match kind {
             KIND_USER_STIMULUS => {
                 let event_id = reader.id()?;
@@ -2586,10 +1988,44 @@ pub mod wire {
             KIND_TIME_ADVANCE => {
                 let event_id = reader.id()?;
                 let scope = decode_scope(&mut reader)?;
-                CanonicalEvent::TimeAdvance(TimeAdvance {
+                let expected_generation = reader.u64()?;
+                let frozen = FrozenTimeInputV1 {
+                    schema_version: reader.u16()?,
+                    observed_now_utc_ms: reader.u64()?,
+                    effective_now_utc_ms: reader.u64()?,
+                    persona_tzid: reader.string()?,
+                    persona_utc_offset_seconds: reader.i32()?,
+                    persona_local_minute: reader.u16()?,
+                    persona_day_ordinal: reader.i32()?,
+                    relation_tzid: reader.string()?,
+                    relation_utc_offset_seconds: reader.i32()?,
+                    relation_local_minute: reader.u16()?,
+                    relation_day_ordinal: reader.i32()?,
+                    budget_day_start_utc_ms: reader.u64()?,
+                    budget_next_day_start_utc_ms: reader.u64()?,
+                    next_timezone_transition_utc_ms: if reader.bool()? {
+                        Some(reader.u64()?)
+                    } else {
+                        None
+                    },
+                    tzdb_fingerprint: reader.digest()?,
+                };
+                CanonicalEvent::TimeAdvance(TimeAdvanceV1 {
                     event_id,
                     scope,
-                    elapsed_ms: reader.u64()?,
+                    expected_generation,
+                    frozen,
+                    frozen_input_digest: reader.digest()?,
+                    stimulus: if schema_version >= 4 {
+                        AutonomousStimulusV1 {
+                            arousal: reader.fixed()?,
+                            urgency: reader.fixed()?,
+                            emergency_authorized: reader.bool()?,
+                            source_digest: reader.digest()?,
+                        }
+                    } else {
+                        AutonomousStimulusV1::default()
+                    },
                 })
             }
             KIND_ADMIN_ACTION => {
@@ -2601,6 +2037,33 @@ pub mod wire {
                     operation: reader.string()?,
                     nonce_digest: reader.digest()?,
                 })
+            }
+            KIND_INTERACTION_FACT_BATCH => {
+                if schema_version != WIRE_SCHEMA_VERSION {
+                    return Err(WireError::UnsupportedSchema(schema_version));
+                }
+                let event_id = reader.id()?;
+                let (scope, causal) = decode_scope_and_causal_payload(&mut reader)?;
+                let fact_count = reader.u8()? as usize;
+                if fact_count == 0 {
+                    return Err(WireError::EmptyInteractionFacts);
+                }
+                if fact_count > MAX_INTERACTION_FACTS {
+                    return Err(WireError::TooManyInteractionFacts);
+                }
+                let mut facts = Vec::with_capacity(fact_count);
+                for _ in 0..fact_count {
+                    facts.push(decode_interaction_fact(&mut reader)?);
+                }
+                let batch = InteractionFactBatchV1 {
+                    schema_version: ALPHA3_SCHEMA_VERSION,
+                    event_id,
+                    scope,
+                    causal,
+                    facts,
+                };
+                ensure_interaction_batch_bounds(&batch)?;
+                CanonicalEvent::InteractionFactBatch(batch)
             }
             other => return Err(WireError::UnknownKind(other)),
         };
@@ -2754,266 +2217,6 @@ pub mod wire {
         )
     }
 
-    // ------------------------------------------------------ transition receipt v2
-
-    fn semantic_vector_formula_v2_code(formula: SemanticVectorFormulaV2) -> u8 {
-        match formula {
-            SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1 => 1,
-        }
-    }
-
-    fn semantic_vector_formula_v2_from_code(code: u8) -> Option<SemanticVectorFormulaV2> {
-        Some(match code {
-            1 => SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1,
-            _ => return None,
-        })
-    }
-
-    pub fn encode_transition_receipt_v2(receipt: &TransitionReceiptV2) -> Vec<u8> {
-        let mut out = Vec::with_capacity(272);
-        push_u16(&mut out, receipt.schema_version);
-        push_digest(&mut out, &receipt.formula_digest);
-        push_digest(&mut out, &receipt.scope_digest);
-        push_digest(&mut out, &receipt.event_digest);
-        push_digest(&mut out, &receipt.authority_digest);
-        push_u64(&mut out, receipt.base_revision);
-        push_u64(&mut out, receipt.next_revision);
-        push_digest(&mut out, &receipt.state_before);
-        push_digest(&mut out, &receipt.state_after);
-        push_digest(&mut out, &receipt.graph_after);
-        push_opt_digest(&mut out, &receipt.action_contract);
-        push_u32(&mut out, receipt.active_nodes);
-        push_u32(&mut out, receipt.active_edges);
-        for value in [
-            receipt.residuals.authority,
-            receipt.residuals.continuity,
-            receipt.residuals.energy,
-            receipt.residuals.renormalization,
-            receipt.residuals.capacity,
-        ] {
-            out.extend_from_slice(&encode_fixed(value));
-        }
-        out.push(commit_status_code(receipt.status));
-        let vector = &receipt.semantic_vector;
-        push_u16(&mut out, vector.schema_version);
-        out.push(semantic_vector_formula_v2_code(vector.formula));
-        out.push(vector.dimension_slot_count);
-        out.push(vector.evaluated_dimension_count);
-        out.push(vector.injected_dimension_count);
-        out.push(vector.nonzero_evidence_dimension_count);
-        out.push(vector.neutral_baseline_dimension_count);
-        out.push(vector.unavailable_dimension_count);
-        push_bool(&mut out, vector.state_changed);
-        out
-    }
-
-    pub fn decode_transition_receipt_v2(bytes: &[u8]) -> Result<TransitionReceiptV2, WireError> {
-        let mut reader = Reader::new(bytes);
-        let schema_version = reader.u16()?;
-        if schema_version != TransitionReceiptV2::SCHEMA_VERSION {
-            return Err(WireError::SchemaVersion(schema_version));
-        }
-        let receipt = TransitionReceiptV2 {
-            schema_version,
-            formula_digest: reader.digest()?,
-            scope_digest: reader.digest()?,
-            event_digest: reader.digest()?,
-            authority_digest: reader.digest()?,
-            base_revision: reader.u64()?,
-            next_revision: reader.u64()?,
-            state_before: reader.digest()?,
-            state_after: reader.digest()?,
-            graph_after: reader.digest()?,
-            action_contract: reader.opt_digest()?,
-            active_nodes: reader.u32()?,
-            active_edges: reader.u32()?,
-            residuals: InvariantResiduals {
-                authority: reader.fixed()?,
-                continuity: reader.fixed()?,
-                energy: reader.fixed()?,
-                renormalization: reader.fixed()?,
-                capacity: reader.fixed()?,
-            },
-            status: commit_status_from_code(reader.u8()?)
-                .ok_or(WireError::InvalidEnum("commit status"))?,
-            semantic_vector: SemanticVectorReceiptV2 {
-                schema_version: reader.u16()?,
-                formula: semantic_vector_formula_v2_from_code(reader.u8()?)
-                    .ok_or(WireError::InvalidEnum("semantic vector formula v2"))?,
-                dimension_slot_count: reader.u8()?,
-                evaluated_dimension_count: reader.u8()?,
-                injected_dimension_count: reader.u8()?,
-                nonzero_evidence_dimension_count: reader.u8()?,
-                neutral_baseline_dimension_count: reader.u8()?,
-                unavailable_dimension_count: reader.u8()?,
-                state_changed: reader.bool()?,
-            },
-        };
-        reader.finish()?;
-        if !receipt.validate() {
-            return Err(WireError::InvalidEnum("transition receipt v2"));
-        }
-        Ok(receipt)
-    }
-
-    pub fn transition_receipt_v2_digest(receipt: &TransitionReceiptV2) -> Digest {
-        domain_hash(
-            TRANSITION_RECEIPT_V2_DOMAIN,
-            &[&encode_transition_receipt_v2(receipt)],
-        )
-    }
-
-    // ------------------------------------------------ native telemetry receipt v1
-
-    fn native_telemetry_formula_code(formula: NativeTelemetryFormulaV1) -> u8 {
-        match formula {
-            NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1 => 1,
-        }
-    }
-
-    fn native_telemetry_formula_from_code(code: u8) -> Option<NativeTelemetryFormulaV1> {
-        Some(match code {
-            1 => NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1,
-            _ => return None,
-        })
-    }
-
-    fn native_telemetry_phase_code(phase: NativeTelemetryPhaseV1) -> u8 {
-        match phase {
-            NativeTelemetryPhaseV1::Prepare => 1,
-        }
-    }
-
-    fn native_telemetry_phase_from_code(code: u8) -> Option<NativeTelemetryPhaseV1> {
-        Some(match code {
-            1 => NativeTelemetryPhaseV1::Prepare,
-            _ => return None,
-        })
-    }
-
-    pub fn encode_native_telemetry_receipt_v1(receipt: &NativeTelemetryReceiptV1) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 * 13 + 8 * 20 + 32);
-        push_u16(&mut out, 1);
-        out.push(native_telemetry_formula_code(receipt.formula));
-        out.push(native_telemetry_phase_code(receipt.phase));
-        for digest in [
-            &receipt.formula_digest,
-            &receipt.scope_digest,
-            &receipt.event_digest,
-            &receipt.source_digest,
-        ] {
-            push_digest(&mut out, digest);
-        }
-        push_u64(&mut out, receipt.base_revision);
-        push_u64(&mut out, receipt.next_revision);
-        for digest in [
-            &receipt.state_before,
-            &receipt.state_after,
-            &receipt.graph_before,
-            &receipt.graph_after,
-            &receipt.local_digest,
-            &receipt.compensation_digest,
-            &receipt.effective_digest,
-        ] {
-            push_digest(&mut out, digest);
-        }
-        for value in [
-            receipt.energy.reserve_before,
-            receipt.energy.reserve_after,
-            receipt.energy.recovered,
-            receipt.energy.spent,
-            receipt.energy.headroom,
-            receipt.energy.residual,
-        ] {
-            out.extend_from_slice(&encode_fixed(value));
-        }
-        push_u32(&mut out, receipt.capacity.upper_saturated_nodes);
-        push_u32(&mut out, receipt.capacity.node_limit);
-        out.extend_from_slice(&encode_fixed(receipt.capacity.node_headroom));
-        push_u32(&mut out, receipt.capacity.edge_used);
-        push_u32(&mut out, receipt.capacity.edge_limit);
-        for value in [
-            receipt.capacity.edge_headroom,
-            receipt.capacity.headroom,
-            receipt.capacity.residual,
-            receipt.residuals.authority,
-            receipt.residuals.continuity,
-            receipt.residuals.energy,
-            receipt.residuals.renormalization,
-            receipt.residuals.capacity,
-            receipt.residual_health,
-            receipt.native_gate,
-        ] {
-            out.extend_from_slice(&encode_fixed(value));
-        }
-        push_digest(&mut out, &receipt.checkpoint_digest);
-        push_digest(&mut out, &receipt.telemetry_digest);
-        out
-    }
-
-    pub fn decode_native_telemetry_receipt_v1(
-        bytes: &[u8],
-    ) -> Result<NativeTelemetryReceiptV1, WireError> {
-        let mut reader = Reader::new(bytes);
-        if reader.u16()? != 1 {
-            return Err(WireError::SchemaVersion(0));
-        }
-        let receipt = NativeTelemetryReceiptV1 {
-            schema: NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1.to_owned(),
-            formula: native_telemetry_formula_from_code(reader.u8()?)
-                .ok_or(WireError::InvalidEnum("native telemetry formula"))?,
-            phase: native_telemetry_phase_from_code(reader.u8()?)
-                .ok_or(WireError::InvalidEnum("native telemetry phase"))?,
-            formula_digest: reader.digest()?,
-            scope_digest: reader.digest()?,
-            event_digest: reader.digest()?,
-            source_digest: reader.digest()?,
-            base_revision: reader.u64()?,
-            next_revision: reader.u64()?,
-            state_before: reader.digest()?,
-            state_after: reader.digest()?,
-            graph_before: reader.digest()?,
-            graph_after: reader.digest()?,
-            local_digest: reader.digest()?,
-            compensation_digest: reader.digest()?,
-            effective_digest: reader.digest()?,
-            energy: EnergyTelemetryV1 {
-                reserve_before: reader.fixed()?,
-                reserve_after: reader.fixed()?,
-                recovered: reader.fixed()?,
-                spent: reader.fixed()?,
-                headroom: reader.fixed()?,
-                residual: reader.fixed()?,
-            },
-            capacity: CapacityTelemetryV1 {
-                upper_saturated_nodes: reader.u32()?,
-                node_limit: reader.u32()?,
-                node_headroom: reader.fixed()?,
-                edge_used: reader.u32()?,
-                edge_limit: reader.u32()?,
-                edge_headroom: reader.fixed()?,
-                headroom: reader.fixed()?,
-                residual: reader.fixed()?,
-            },
-            residuals: InvariantResiduals {
-                authority: reader.fixed()?,
-                continuity: reader.fixed()?,
-                energy: reader.fixed()?,
-                renormalization: reader.fixed()?,
-                capacity: reader.fixed()?,
-            },
-            residual_health: reader.fixed()?,
-            native_gate: reader.fixed()?,
-            checkpoint_digest: reader.digest()?,
-            telemetry_digest: reader.digest()?,
-        };
-        reader.finish()?;
-        if !receipt.validate() || encode_native_telemetry_receipt_v1(&receipt) != bytes {
-            return Err(WireError::InvalidEnum("native telemetry receipt v1"));
-        }
-        Ok(receipt)
-    }
-
     // ---------------------------------------------------------------- genesis receipt
 
     pub fn encode_genesis_receipt(receipt: &GenesisReceipt) -> Vec<u8> {
@@ -3137,6 +2340,35 @@ mod tests {
         }
     }
 
+    fn time_advance(id: u8, now_ms: u64) -> TimeAdvanceV1 {
+        let frozen = FrozenTimeInputV1 {
+            schema_version: AUTONOMY_SCHEMA_VERSION,
+            observed_now_utc_ms: now_ms,
+            effective_now_utc_ms: now_ms,
+            persona_tzid: "UTC".to_string(),
+            persona_utc_offset_seconds: 0,
+            persona_local_minute: 0,
+            persona_day_ordinal: 0,
+            relation_tzid: "UTC".to_string(),
+            relation_utc_offset_seconds: 0,
+            relation_local_minute: 0,
+            relation_day_ordinal: 0,
+            budget_day_start_utc_ms: 0,
+            budget_next_day_start_utc_ms: 86_400_000,
+            next_timezone_transition_utc_ms: None,
+            tzdb_fingerprint: [7; 32],
+        };
+        let digest = wire::domain_hash(b"ae.frozen-time-input.v1", &[&now_ms.to_le_bytes()]);
+        TimeAdvanceV1 {
+            event_id: [id; 16],
+            scope: scope(),
+            expected_generation: 0,
+            frozen,
+            frozen_input_digest: digest,
+            stimulus: AutonomousStimulusV1::default(),
+        }
+    }
+
     fn sample_manifest() -> GenesisManifest {
         let mut manifest = GenesisManifest {
             schema_version: 1,
@@ -3211,12 +2443,8 @@ mod tests {
 
     #[test]
     fn canonical_event_rejects_unknown_json_field() {
-        let mut json = serde_json::to_value(CanonicalEvent::TimeAdvance(TimeAdvance {
-            event_id: [1; 16],
-            scope: scope(),
-            elapsed_ms: 5,
-        }))
-        .unwrap();
+        let mut json =
+            serde_json::to_value(CanonicalEvent::TimeAdvance(time_advance(1, 5))).unwrap();
         json["payload"]["secret"] = serde_json::json!(1);
         let err = serde_json::from_value::<CanonicalEvent>(json).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "{err}");
@@ -3307,11 +2535,7 @@ mod tests {
                 evidence_digest: [18; 32],
                 observed_at_ms: 19,
             }),
-            CanonicalEvent::TimeAdvance(TimeAdvance {
-                event_id: [20; 16],
-                scope: scope(),
-                elapsed_ms: 21,
-            }),
+            CanonicalEvent::TimeAdvance(time_advance(20, 21)),
             CanonicalEvent::AdminAction(AdminAction {
                 event_id: [22; 16],
                 scope: scope(),
@@ -3329,11 +2553,7 @@ mod tests {
 
     #[test]
     fn event_decode_rejects_trailing_bytes_and_unknown_kind() {
-        let event = CanonicalEvent::TimeAdvance(TimeAdvance {
-            event_id: [1; 16],
-            scope: scope(),
-            elapsed_ms: 1,
-        });
+        let event = CanonicalEvent::TimeAdvance(time_advance(1, 1));
         let mut bytes = encode_event(&event);
         bytes.push(0xFF);
         assert_eq!(
@@ -3345,6 +2565,26 @@ mod tests {
             decode_event(&bytes).unwrap_err(),
             WireError::UnknownKind(99)
         );
+    }
+
+    #[test]
+    fn time_advance_v3_fixture_migrates_without_stimulus() {
+        let event = CanonicalEvent::TimeAdvance(time_advance(31, 32));
+        let mut legacy = encode_event(&event);
+        legacy[0..2].copy_from_slice(&3_u16.to_le_bytes());
+        legacy.truncate(legacy.len() - (8 + 8 + 1 + 32));
+        let decoded = decode_event(&legacy).unwrap();
+        let CanonicalEvent::TimeAdvance(decoded) = decoded else {
+            panic!("expected time advance");
+        };
+        assert_eq!(decoded.stimulus, AutonomousStimulusV1::default());
+    }
+
+    #[test]
+    fn time_advance_json_requires_explicit_stimulus() {
+        let mut value = serde_json::to_value(time_advance(33, 34)).unwrap();
+        value.as_object_mut().unwrap().remove("stimulus");
+        assert!(serde_json::from_value::<TimeAdvanceV1>(value).is_err());
     }
 
     #[test]
@@ -3465,84 +2705,5 @@ mod tests {
         };
         let bytes = encode_genesis_receipt(&receipt);
         assert_eq!(decode_genesis_receipt(&bytes).unwrap(), receipt);
-    }
-
-    fn reserved_zero_compensation_digest() -> Digest {
-        let mut bytes = Vec::with_capacity(9 * 8);
-        for _ in 0..9 {
-            bytes.extend_from_slice(&Fixed::ZERO.encode());
-        }
-        wire::domain_hash(b"astr-embodiment/phase0-compensation-vector-v1", &[&bytes])
-    }
-
-    fn sample_native_telemetry() -> NativeTelemetryReceiptV1 {
-        NativeTelemetryReceiptV1 {
-            schema: NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1.to_owned(),
-            formula: NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1,
-            formula_digest: [1; 32],
-            scope_digest: [2; 32],
-            event_digest: [3; 32],
-            source_digest: [4; 32],
-            base_revision: 0,
-            next_revision: 1,
-            phase: NativeTelemetryPhaseV1::Prepare,
-            state_before: [5; 32],
-            state_after: [6; 32],
-            graph_before: [7; 32],
-            graph_after: [8; 32],
-            local_digest: [9; 32],
-            compensation_digest: reserved_zero_compensation_digest(),
-            effective_digest: [10; 32],
-            energy: EnergyTelemetryV1 {
-                reserve_before: Fixed::ONE,
-                reserve_after: Fixed::from_raw(500_000),
-                recovered: Fixed::from_raw(100_000),
-                spent: Fixed::from_raw(600_000),
-                headroom: Fixed::from_raw(500_000),
-                residual: Fixed::from_raw(200_000),
-            },
-            capacity: CapacityTelemetryV1 {
-                upper_saturated_nodes: 2,
-                node_limit: 4,
-                node_headroom: Fixed::from_raw(500_000),
-                edge_used: 1,
-                edge_limit: 2,
-                edge_headroom: Fixed::from_raw(500_000),
-                headroom: Fixed::from_raw(500_000),
-                residual: Fixed::ZERO,
-            },
-            residuals: InvariantResiduals {
-                authority: Fixed::ZERO,
-                continuity: Fixed::ZERO,
-                energy: Fixed::from_raw(200_000),
-                renormalization: Fixed::from_raw(100_000),
-                capacity: Fixed::ZERO,
-            },
-            residual_health: Fixed::from_raw(800_000),
-            native_gate: Fixed::from_raw(500_000),
-            checkpoint_digest: [0; 32],
-            telemetry_digest: [0; 32],
-        }
-        .seal()
-    }
-
-    #[test]
-    fn native_telemetry_rejects_mismatched_capacity_headroom() {
-        let mut receipt = sample_native_telemetry();
-        assert!(receipt.validate());
-        receipt.capacity.node_headroom = Fixed::ONE;
-        receipt = receipt.seal();
-        assert!(!receipt.validate());
-    }
-
-    #[test]
-    fn native_telemetry_accepts_computed_zero_gate() {
-        let mut receipt = sample_native_telemetry();
-        receipt.capacity.upper_saturated_nodes = receipt.capacity.node_limit;
-        receipt.capacity.node_headroom = Fixed::ZERO;
-        receipt.capacity.headroom = Fixed::ZERO;
-        receipt.native_gate = Fixed::ZERO;
-        receipt = receipt.seal();
-        assert!(receipt.validate());
     }
 }

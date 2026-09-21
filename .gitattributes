@@ -1,0 +1,3 @@
+# Release identities and ZIP source parity use exact Git blob bytes on both OSes.
+# Some frozen assets intentionally contain CRLF; do not normalize their hashes.
+* -text

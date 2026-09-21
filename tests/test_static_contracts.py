@@ -28,6 +28,14 @@ def test_self_action_has_zero_residual_authority() -> None:
     )
     assert matrix["self_action"]["allow"] == []
     assert matrix["self_action"]["eligibility_only"] is True
+    assert matrix["time_advance"]["allow"] == []
+    assert matrix["time_advance"]["derived_allow"] == [
+        "temporal_state",
+        "sleep_state",
+        "workspace_projection",
+        "operational_intention",
+        "wake_schedule",
+    ]
     assert matrix["self_critique"]["allow"] == []
     assert matrix["platform_observed"]["allow"] == []
 
@@ -46,3 +54,14 @@ def test_region_layout_covers_exact_brain() -> None:
 def test_config_schema_parses() -> None:
     schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
     assert schema["runtime_envelope"]["default"] == "auto"
+
+    assert {"runtime_envelope", "native_data_dir", "model_settings", "seed_code"} <= schema.keys()
+    retired = {
+        "proactive_enabled", "proactive_frequency", "user_quiet_hours",
+        "proactive_settings_revision", "proactive_daily_max",
+        "min_proactive_cooldown_minutes", "quiet_hours_start", "quiet_hours_end",
+        "quiet_hours_emergency_bypass", "intention_ttl_minutes",
+        "unanswered_backoff_base_minutes", "unanswered_hard_stop",
+        "emergency_threshold", "inner_activity_token_daily_max",
+    }
+    assert not retired & schema.keys()

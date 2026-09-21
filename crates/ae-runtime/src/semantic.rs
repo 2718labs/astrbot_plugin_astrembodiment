@@ -1,11 +1,10 @@
 #![forbid(unsafe_code)]
 
 use crate::RuntimeError;
-use ae_attention::r7::{assemble_full_vector_load, FullVectorLoad};
+use ae_attention::emotion_matrix::assemble_full_vector_load;
 use ae_contracts::{
-    phase0_canonical_formula_digest_v1, wire, CommitStatus, EvidenceVector,
-    NativeTelemetryReceiptV1, PerceptionProposalV1, SemanticVectorFormulaV2,
-    SemanticVectorReceiptV2, StateSubcodeV1, TransitionReceipt, TransitionReceiptV2,
+    CommitStatus, Digest, EvidenceVector, NativeTelemetryReceiptV1, PerceptionProposalV1,
+    StateSubcodeV1, TransitionReceipt,
 };
 pub use ae_contracts::{
     NodeObservabilityComponentV1, NodeObservabilityCountsV1, NodeObservabilityProjectionWireV2,
@@ -13,19 +12,32 @@ pub use ae_contracts::{
 };
 use ae_fixed::Fixed;
 use ae_neurofield::{
-    develop_graph, graph_digest, state_digest, GraphFormula, NeuralField, SparseGraph, Synapse,
-    EDGE_CAPACITY, NEURON_SLOTS, REGION_LAYOUT,
+    graph_digest, state_digest, NeuralField, SparseGraph, Synapse, EDGE_CAPACITY, NEURON_SLOTS,
+    REGION_LAYOUT,
 };
-
-use crate::semantic_dynamics_v2::{
-    propagate_semantic_dynamics_v2, DynamicsError, DynamicsInputV2, PreparedSemanticDynamicsV2,
-};
+use ae_semantic_core::potential_region_projection_v1;
+pub(crate) use ae_semantic_core::{PreparedSemanticTransitionV2, TransitionReceiptV2};
+#[cfg(test)]
+use ae_store::{decode_canonical_aesem3_blocks, CanonicalAesem3Error};
 
 const SNAPSHOT_MAGIC_V2: &[u8] = b"AESEM2\0";
 const SNAPSHOT_SCHEMA_V2: u16 = 2;
 const SNAPSHOT_MAGIC_V3: &[u8] = b"AESEM3\0";
 const SNAPSHOT_SCHEMA_V3: u16 = 3;
 const EXPRESSION_FXP6_MAX: u32 = 1_000_000;
+const FIELD_WIRE_LEN: usize = 8 * (4 + NEURON_SLOTS * 8);
+const GRAPH_WIRE_MIN_LEN: usize = 4 + (NEURON_SLOTS + 1) * 4 + 4;
+const GRAPH_EDGE_WIRE_LEN: usize = 16;
+const GRAPH_WIRE_MAX_EDGE_BYTES: usize = match EDGE_CAPACITY.checked_mul(GRAPH_EDGE_WIRE_LEN) {
+    Some(value) => value,
+    None => panic!("semantic graph edge wire bound overflow"),
+};
+const GRAPH_WIRE_MAX_LEN: usize = match GRAPH_WIRE_MIN_LEN.checked_add(GRAPH_WIRE_MAX_EDGE_BYTES) {
+    Some(value) => value,
+    None => panic!("semantic graph wire bound overflow"),
+};
+const TRANSITION_RECEIPT_V2_WIRE_LEN: usize = 302;
+const NATIVE_TELEMETRY_RECEIPT_V1_WIRE_LEN: usize = 588;
 /// Frozen predecessor relaxation rate used only to authenticate AESEM2
 /// history.  New writes always use the Phase-0 sparse dynamics below.
 const LEGACY_NEUTRAL_RELAXATION_MAX_RATE: Fixed = Fixed::from_raw(125_000);
@@ -46,22 +58,37 @@ fn invalid_neural_state(subcode: StateSubcodeV1) -> RuntimeError {
     RuntimeError::invalid_neural_state(subcode)
 }
 
-fn state_subcode_for_dynamics_error(error: DynamicsError) -> StateSubcodeV1 {
+fn runtime_error_from_semantic_core(error: ae_semantic_core::SemanticCoreError) -> RuntimeError {
     match error {
-        DynamicsError::FieldStateInvalid => StateSubcodeV1::FieldStateInvalid,
-        DynamicsError::GraphStateInvalid => StateSubcodeV1::GraphStateInvalid,
-        DynamicsError::InvalidInput | DynamicsError::Arithmetic => StateSubcodeV1::DynamicsInvalid,
+        ae_semantic_core::SemanticCoreError::InvalidPerceptionProposal => {
+            RuntimeError::InvalidPerceptionProposal
+        }
+        ae_semantic_core::SemanticCoreError::FieldStateInvalid => {
+            invalid_neural_state(StateSubcodeV1::FieldStateInvalid)
+        }
+        ae_semantic_core::SemanticCoreError::GraphStateInvalid => {
+            invalid_neural_state(StateSubcodeV1::GraphStateInvalid)
+        }
+        ae_semantic_core::SemanticCoreError::DynamicsInvalid => {
+            invalid_neural_state(StateSubcodeV1::DynamicsInvalid)
+        }
+        ae_semantic_core::SemanticCoreError::SemanticRevisionOverflow => {
+            RuntimeError::SemanticRevisionOverflow
+        }
+        ae_semantic_core::SemanticCoreError::SemanticClosureInvalid => {
+            invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid)
+        }
+        ae_semantic_core::SemanticCoreError::SnapshotWireInvalid => {
+            invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid)
+        }
+        ae_semantic_core::SemanticCoreError::Aesem3MagicOrSchema => RuntimeError::LegacyUnattested,
+        ae_semantic_core::SemanticCoreError::Aesem3RetiredCompensationNonzero => {
+            invalid_neural_state(StateSubcodeV1::Aesem3RetiredCompensationNonzero)
+        }
+        ae_semantic_core::SemanticCoreError::SnapshotAttestationMismatch => {
+            invalid_neural_state(StateSubcodeV1::SnapshotAttestationMismatch)
+        }
     }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PreparedSemanticTransitionV2 {
-    pub next_field: NeuralField,
-    pub next_graph: SparseGraph,
-    pub active_nodes: u32,
-    pub full_vector_load: FullVectorLoad,
-    pub local_by_region: [Fixed; REGION_LAYOUT.len()],
-    pub dynamics: PreparedSemanticDynamicsV2,
 }
 
 /// The exact AESEM2 writer is retained solely for deterministic historical
@@ -337,61 +364,15 @@ pub(crate) fn prepare_semantic_transition_v2(
     development_seed_digest: &[u8; 32],
     proposal: &PerceptionProposalV1,
 ) -> Result<PreparedSemanticTransitionV2, RuntimeError> {
-    proposal
-        .validate_v1()
-        .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
-    let full_vector_load = assemble_full_vector_load(&proposal.dimensions)
-        .map_err(|_| RuntimeError::InvalidPerceptionProposal)?;
-    if full_vector_load.evaluated_dimension_count != 15
-        || full_vector_load.injected_dimension_count != 15
-    {
-        return Err(RuntimeError::InvalidPerceptionProposal);
-    }
-    let next_graph = if graph.edges.is_empty() {
-        develop_graph(manifest_digest, development_seed_digest, GraphFormula::V1)
-            .map_err(|_| invalid_neural_state(StateSubcodeV1::GraphStateInvalid))?
-    } else {
-        graph.clone()
-    };
-    if !next_graph.validate() {
-        return Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid));
-    }
-    let local_by_region = full_vector_load.evidence_means;
-    // The Provider proposal and its supplied confidence are the complete
-    // native input. No local estimator or secondary vector is merged here.
-    let local_confidence_by_region = [proposal.estimator_confidence; REGION_LAYOUT.len()];
-    let dynamics = propagate_semantic_dynamics_v2(DynamicsInputV2 {
+    ae_semantic_core::prepare_semantic_transition_v2(
         field,
         baseline,
-        graph: &next_graph,
-        local_by_region,
-        local_confidence_by_region,
-    })
-    .map_err(|error| invalid_neural_state(state_subcode_for_dynamics_error(error)))?;
-    let active_nodes = u32::try_from(
-        (0..NEURON_SLOTS)
-            .filter(|node| {
-                field.potential[*node] != dynamics.next_field.potential[*node]
-                    || field.excitation[*node] != dynamics.next_field.excitation[*node]
-                    || field.inhibition[*node] != dynamics.next_field.inhibition[*node]
-                    || field.adaptation[*node] != dynamics.next_field.adaptation[*node]
-                    || field.precision[*node] != dynamics.next_field.precision[*node]
-                    || field.prediction_error[*node] != dynamics.next_field.prediction_error[*node]
-                    || field.eligibility[*node] != dynamics.next_field.eligibility[*node]
-                    || field.metabolic_reserve[*node]
-                        != dynamics.next_field.metabolic_reserve[*node]
-            })
-            .count(),
+        graph,
+        manifest_digest,
+        development_seed_digest,
+        proposal,
     )
-    .map_err(|_| invalid_neural_state(StateSubcodeV1::DynamicsInvalid))?;
-    Ok(PreparedSemanticTransitionV2 {
-        next_field: dynamics.next_field.clone(),
-        next_graph,
-        active_nodes,
-        full_vector_load,
-        local_by_region,
-        dynamics,
-    })
+    .map_err(runtime_error_from_semantic_core)
 }
 
 /// Formula identity is fixed by the shared route/dynamics contract rather than
@@ -399,7 +380,8 @@ pub(crate) fn prepare_semantic_transition_v2(
 pub(crate) fn phase0_semantic_formula_digest_v1(
     genesis_formula_digest: &[u8; 32],
 ) -> Result<[u8; 32], RuntimeError> {
-    Ok(phase0_canonical_formula_digest_v1(genesis_formula_digest))
+    ae_semantic_core::phase0_semantic_formula_digest_v1(genesis_formula_digest)
+        .map_err(runtime_error_from_semantic_core)
 }
 
 pub(crate) fn semantic_vector_receipt_v2(
@@ -408,48 +390,20 @@ pub(crate) fn semantic_vector_receipt_v2(
     injected_dimension_count: u8,
     nonzero_evidence_dimension_count: u8,
 ) -> Result<TransitionReceiptV2, RuntimeError> {
-    let neutral_baseline_dimension_count = evaluated_dimension_count
-        .checked_sub(nonzero_evidence_dimension_count)
-        .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
-    TransitionReceiptV2::from_legacy(
+    ae_semantic_core::semantic_vector_receipt_v2(
         legacy,
-        SemanticVectorReceiptV2 {
-            schema_version: SemanticVectorReceiptV2::SCHEMA_VERSION,
-            formula: SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1,
-            dimension_slot_count: 15,
-            evaluated_dimension_count,
-            injected_dimension_count,
-            nonzero_evidence_dimension_count,
-            neutral_baseline_dimension_count,
-            unavailable_dimension_count: 0,
-            state_changed: legacy.state_before != legacy.state_after,
-        },
+        evaluated_dimension_count,
+        injected_dimension_count,
+        nonzero_evidence_dimension_count,
     )
-    .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))
+    .map_err(runtime_error_from_semantic_core)
 }
 
 pub(crate) fn semantic_v2_matches_legacy_receipt(
     semantic_receipt: &TransitionReceiptV2,
     legacy_receipt: &TransitionReceipt,
 ) -> bool {
-    legacy_receipt.schema_version == 1
-        && legacy_receipt.status == CommitStatus::Committed
-        && legacy_receipt.action_contract.is_none()
-        && semantic_receipt.validate()
-        && semantic_receipt.formula_digest == legacy_receipt.formula_digest
-        && semantic_receipt.scope_digest == legacy_receipt.scope_digest
-        && semantic_receipt.event_digest == legacy_receipt.event_digest
-        && semantic_receipt.authority_digest == legacy_receipt.authority_digest
-        && semantic_receipt.base_revision == legacy_receipt.base_revision
-        && semantic_receipt.next_revision == legacy_receipt.next_revision
-        && semantic_receipt.state_before == legacy_receipt.state_before
-        && semantic_receipt.state_after == legacy_receipt.state_after
-        && semantic_receipt.graph_after == legacy_receipt.graph_after
-        && semantic_receipt.action_contract == legacy_receipt.action_contract
-        && semantic_receipt.active_nodes == legacy_receipt.active_nodes
-        && semantic_receipt.active_edges == legacy_receipt.active_edges
-        && semantic_receipt.residuals == legacy_receipt.residuals
-        && semantic_receipt.status == legacy_receipt.status
+    ae_semantic_core::semantic_v2_matches_legacy_receipt(semantic_receipt, legacy_receipt)
 }
 
 fn mean_fxp6(sum: i128, count: usize) -> Result<i64, RuntimeError> {
@@ -471,6 +425,8 @@ pub(crate) fn node_observability_projection_v2(
     if !before.validate() || !after.validate() {
         return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
     }
+    let potential_projection =
+        potential_region_projection_v1(before, after).map_err(runtime_error_from_semantic_core)?;
     let mut regions = Vec::with_capacity(REGION_LAYOUT.len());
     let mut selected_total = 0_u32;
     let mut activated_total = 0_u32;
@@ -489,9 +445,6 @@ pub(crate) fn node_observability_projection_v2(
         let mut selected = 0_u32;
         let mut activated = 0_u32;
         let mut changed = 0_u32;
-        let mut potential_before_sum = 0_i128;
-        let mut potential_after_sum = 0_i128;
-        let mut potential_delta_sum = 0_i128;
         let mut potential_changed = 0_u32;
         let mut potential_nonzero_after = 0_u32;
         let mut excitation_before_sum = 0_i128;
@@ -567,10 +520,6 @@ pub(crate) fn node_observability_projection_v2(
                     .checked_add(1)
                     .ok_or(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid))?;
             }
-            potential_before_sum += i128::from(before.potential[node].raw());
-            potential_after_sum += i128::from(after.potential[node].raw());
-            potential_delta_sum +=
-                i128::from(after.potential[node].raw()) - i128::from(before.potential[node].raw());
             excitation_before_sum += i128::from(before.excitation[node].raw());
             excitation_after_sum += i128::from(after.excitation[node].raw());
             excitation_delta_sum += i128::from(after.excitation[node].raw())
@@ -586,9 +535,9 @@ pub(crate) fn node_observability_projection_v2(
             activated_node_count: activated,
             changed_node_count: changed,
             potential: NodeObservabilityComponentV1 {
-                before_mean_fxp6: mean_fxp6(potential_before_sum, count)?,
-                after_mean_fxp6: mean_fxp6(potential_after_sum, count)?,
-                delta_mean_fxp6: mean_fxp6(potential_delta_sum, count)?,
+                before_mean_fxp6: potential_projection.previous_mean_fxp6[region],
+                after_mean_fxp6: potential_projection.current_mean_fxp6[region],
+                delta_mean_fxp6: potential_projection.delta_mean_fxp6[region],
                 changed_node_count: potential_changed,
                 nonzero_after_count: potential_nonzero_after,
             },
@@ -711,10 +660,42 @@ impl<'a> Cursor<'a> {
         Ok(u16::from_le_bytes(value))
     }
 
+    fn u8(&mut self) -> Result<u8, RuntimeError> {
+        Ok(self.take(1)?[0])
+    }
+
     fn u32(&mut self) -> Result<u32, RuntimeError> {
         let mut value = [0; 4];
         value.copy_from_slice(self.take(4)?);
         Ok(u32::from_le_bytes(value))
+    }
+
+    fn u64(&mut self) -> Result<u64, RuntimeError> {
+        let mut value = [0; 8];
+        value.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(value))
+    }
+
+    fn digest(&mut self) -> Result<Digest, RuntimeError> {
+        let mut value = [0; 32];
+        value.copy_from_slice(self.take(32)?);
+        Ok(value)
+    }
+
+    fn bool(&mut self) -> Result<bool, RuntimeError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid)),
+        }
+    }
+
+    fn opt_digest(&mut self) -> Result<Option<Digest>, RuntimeError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.digest()?)),
+            _ => Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid)),
+        }
     }
 
     fn fixed(&mut self) -> Result<Fixed, RuntimeError> {
@@ -728,11 +709,33 @@ impl<'a> Cursor<'a> {
     }
 }
 
+fn encode_transition_receipt_v2(receipt: &TransitionReceiptV2) -> Result<Vec<u8>, RuntimeError> {
+    ae_semantic_core::encode_transition_receipt_v2(receipt)
+        .map_err(runtime_error_from_semantic_core)
+}
+
+fn decode_transition_receipt_v2(bytes: &[u8]) -> Result<TransitionReceiptV2, RuntimeError> {
+    ae_semantic_core::decode_transition_receipt_v2(bytes).map_err(runtime_error_from_semantic_core)
+}
+
+fn encode_native_telemetry_receipt_v1(
+    receipt: &NativeTelemetryReceiptV1,
+) -> Result<Vec<u8>, RuntimeError> {
+    ae_semantic_core::encode_native_telemetry_receipt_v1(receipt)
+        .map_err(runtime_error_from_semantic_core)
+}
+
+fn decode_native_telemetry_receipt_v1(
+    bytes: &[u8],
+) -> Result<NativeTelemetryReceiptV1, RuntimeError> {
+    ae_semantic_core::decode_native_telemetry_receipt_v1(bytes)
+        .map_err(runtime_error_from_semantic_core)
+}
 fn encode_field(field: &NeuralField) -> Result<Vec<u8>, RuntimeError> {
     if !field.validate() {
         return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
     }
-    let mut out = Vec::with_capacity(8 * (4 + NEURON_SLOTS * 8));
+    let mut out = Vec::with_capacity(FIELD_WIRE_LEN);
     for values in [
         &field.potential,
         &field.excitation,
@@ -752,10 +755,14 @@ fn encode_field(field: &NeuralField) -> Result<Vec<u8>, RuntimeError> {
             out.extend_from_slice(&value.encode());
         }
     }
+    debug_assert_eq!(out.len(), FIELD_WIRE_LEN);
     Ok(out)
 }
 
 fn decode_field(bytes: &[u8]) -> Result<NeuralField, RuntimeError> {
+    if bytes.len() != FIELD_WIRE_LEN {
+        return Err(invalid_neural_state(StateSubcodeV1::FieldStateInvalid));
+    }
     let mut cursor = Cursor::new(bytes);
     let mut vectors = Vec::with_capacity(8);
     for _ in 0..8 {
@@ -840,6 +847,9 @@ fn encode_graph(graph: &SparseGraph) -> Result<Vec<u8>, RuntimeError> {
 }
 
 fn decode_graph(bytes: &[u8]) -> Result<SparseGraph, RuntimeError> {
+    if !(GRAPH_WIRE_MIN_LEN..=GRAPH_WIRE_MAX_LEN).contains(&bytes.len()) {
+        return Err(invalid_neural_state(StateSubcodeV1::GraphStateInvalid));
+    }
     let mut cursor = Cursor::new(bytes);
     let offsets_len = usize::try_from(cursor.u32()?)
         .map_err(|_| invalid_neural_state(StateSubcodeV1::GraphStateInvalid))?;
@@ -917,9 +927,8 @@ pub(crate) fn decode_semantic_snapshot_v2(
     if !cursor.eof() {
         return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
     }
-    let receipt = wire::decode_transition_receipt_v2(receipt_bytes)
-        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
-    if wire::encode_transition_receipt_v2(&receipt) != receipt_bytes {
+    let receipt = decode_transition_receipt_v2(receipt_bytes)?;
+    if encode_transition_receipt_v2(&receipt)? != receipt_bytes {
         return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
     }
     if !receipt.validate() {
@@ -961,7 +970,7 @@ pub(crate) fn encode_semantic_snapshot_v2_for_test(
     }
     let field_bytes = encode_field(field)?;
     let graph_bytes = encode_graph(graph)?;
-    let receipt_bytes = wire::encode_transition_receipt_v2(receipt);
+    let receipt_bytes = encode_transition_receipt_v2(receipt)?;
     let mut out = Vec::with_capacity(
         SNAPSHOT_MAGIC_V2.len()
             + 2
@@ -1014,53 +1023,8 @@ pub(crate) fn encode_semantic_snapshot_v3(
     graph: &SparseGraph,
     telemetry: &NativeTelemetryReceiptV1,
 ) -> Result<Vec<u8>, RuntimeError> {
-    if !telemetry.validate() {
-        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
-    }
-    if telemetry.formula_digest != *formula_digest
-        || telemetry.state_after != state_digest(field, formula_digest)
-        || telemetry.graph_after != graph_digest(graph)
-        || telemetry.compensation_digest != ae_contracts::legacy_reserved_zero_digest_v1()
-    {
-        return Err(invalid_neural_state(
-            StateSubcodeV1::SnapshotAttestationMismatch,
-        ));
-    }
-    let field_bytes = encode_field(field)?;
-    let graph_bytes = encode_graph(graph)?;
-    let telemetry_bytes = wire::encode_native_telemetry_receipt_v1(telemetry);
-    let mut reserved_zero_bytes = Vec::with_capacity(REGION_LAYOUT.len() * 8);
-    for _ in 0..REGION_LAYOUT.len() {
-        reserved_zero_bytes.extend_from_slice(&Fixed::ZERO.encode());
-    }
-    let mut out = Vec::with_capacity(
-        SNAPSHOT_MAGIC_V3.len()
-            + 2
-            + 4
-            + field_bytes.len()
-            + 4
-            + graph_bytes.len()
-            + 4
-            + telemetry_bytes.len()
-            + 4
-            + reserved_zero_bytes.len(),
-    );
-    out.extend_from_slice(SNAPSHOT_MAGIC_V3);
-    out.extend_from_slice(&SNAPSHOT_SCHEMA_V3.to_le_bytes());
-    for bytes in [
-        &field_bytes,
-        &graph_bytes,
-        &telemetry_bytes,
-        &reserved_zero_bytes,
-    ] {
-        out.extend_from_slice(
-            &(u32::try_from(bytes.len())
-                .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?)
-            .to_le_bytes(),
-        );
-        out.extend_from_slice(bytes);
-    }
-    Ok(out)
+    ae_semantic_core::encode_semantic_snapshot_v3(formula_digest, field, graph, telemetry)
+        .map_err(runtime_error_from_semantic_core)
 }
 
 pub(crate) fn decode_semantic_snapshot_v3(
@@ -1070,66 +1034,18 @@ pub(crate) fn decode_semantic_snapshot_v3(
     expected_graph_digest: &[u8; 32],
     legacy_receipt: &TransitionReceipt,
 ) -> Result<(NeuralField, SparseGraph, NativeTelemetryReceiptV1), RuntimeError> {
-    let mut cursor = Cursor::new(bytes);
-    if cursor.take(SNAPSHOT_MAGIC_V3.len())? != SNAPSHOT_MAGIC_V3
-        || cursor.u16()? != SNAPSHOT_SCHEMA_V3
-    {
-        return Err(RuntimeError::LegacyUnattested);
-    }
-    let field_len = usize::try_from(cursor.u32()?)
-        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
-    let field = decode_field(cursor.take(field_len)?)?;
-    let graph_len = usize::try_from(cursor.u32()?)
-        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
-    let graph = decode_graph(cursor.take(graph_len)?)?;
-    let telemetry_len = usize::try_from(cursor.u32()?)
-        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
-    let telemetry_bytes = cursor.take(telemetry_len)?;
-    // The early three-block precursor has the same all-zero reserved value.
-    // Current writes always carry the fourth AESEM3 block; a non-zero legacy
-    // value cannot be replayed safely because it may already have affected the
-    // sealed field, so it fails closed rather than being ignored.
-    if !cursor.eof() {
-        let reserved_len = usize::try_from(cursor.u32()?)
-            .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
-        if reserved_len != REGION_LAYOUT.len() * 8 {
-            return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
-        }
-        let reserved_bytes = cursor.take(reserved_len)?;
-        if !cursor.eof() {
-            return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
-        }
-        for chunk in reserved_bytes.as_chunks::<8>().0 {
-            let mut raw = [0u8; 8];
-            raw.copy_from_slice(chunk);
-            if Fixed::decode(raw) != Fixed::ZERO {
-                return Err(invalid_neural_state(
-                    StateSubcodeV1::Aesem3RetiredCompensationNonzero,
-                ));
-            }
-        }
-    }
-    let telemetry = wire::decode_native_telemetry_receipt_v1(telemetry_bytes)
-        .map_err(|_| invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid))?;
-    if wire::encode_native_telemetry_receipt_v1(&telemetry) != telemetry_bytes {
-        return Err(invalid_neural_state(StateSubcodeV1::SnapshotWireInvalid));
-    }
-    if !telemetry.validate() {
-        return Err(invalid_neural_state(StateSubcodeV1::SemanticClosureInvalid));
-    }
-    if telemetry.formula_digest != *expected_formula_digest
-        || telemetry.state_after != *expected_state_digest
-        || telemetry.graph_after != *expected_graph_digest
-        || telemetry.compensation_digest != ae_contracts::legacy_reserved_zero_digest_v1()
-        || !semantic_v3_matches_legacy_receipt(&telemetry, legacy_receipt)
-        || state_digest(&field, expected_formula_digest) != *expected_state_digest
-        || graph_digest(&graph) != *expected_graph_digest
+    let decoded = ae_semantic_core::decode_canonical_semantic_snapshot_v3(bytes)
+        .map_err(runtime_error_from_semantic_core)?;
+    if decoded.telemetry.formula_digest != *expected_formula_digest
+        || decoded.telemetry.state_after != *expected_state_digest
+        || decoded.telemetry.graph_after != *expected_graph_digest
+        || !semantic_v3_matches_legacy_receipt(&decoded.telemetry, legacy_receipt)
     {
         return Err(invalid_neural_state(
             StateSubcodeV1::SnapshotAttestationMismatch,
         ));
     }
-    Ok((field, graph, telemetry))
+    Ok((decoded.field, decoded.graph, decoded.telemetry))
 }
 
 #[cfg(test)]
@@ -1137,17 +1053,311 @@ mod tests {
     use super::*;
     use ae_contracts::{
         CapacityTelemetryV1, EnergyTelemetryV1, EvidenceVector, InvariantResiduals,
-        NativeTelemetryFormulaV1, NativeTelemetryPhaseV1, PerceptionProposalV1, StateSubcodeV1,
+        NativeTelemetryFormulaV1, NativeTelemetryPhaseV1, PerceptionProposalV1,
+        SemanticVectorFormulaV2, SemanticVectorReceiptV2, StateSubcodeV1,
         NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1,
     };
+    use sha2::{Digest as Sha2Digest, Sha256};
+
+    /// This fixture is independently encoded from the immutable source wire at
+    /// 710829ae (semantic.rs blob 49b3825e..., contracts blob 8d8926b5...).
+    /// It deliberately does not call either current snapshot encoder.
+    struct FrozenAesem2Fixture {
+        bytes: Vec<u8>,
+        formula_digest: Digest,
+        state_digest: Digest,
+        graph_digest: Digest,
+        legacy_receipt: TransitionReceipt,
+        current_telemetry: NativeTelemetryReceiptV1,
+    }
+
+    fn source_fixture_field_bytes(field: &NeuralField) -> Vec<u8> {
+        let mut out = Vec::with_capacity(FIELD_WIRE_LEN);
+        for values in [
+            &field.potential,
+            &field.excitation,
+            &field.inhibition,
+            &field.adaptation,
+            &field.precision,
+            &field.prediction_error,
+            &field.eligibility,
+            &field.metabolic_reserve,
+        ] {
+            out.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                out.extend_from_slice(&value.encode());
+            }
+        }
+        assert_eq!(out.len(), FIELD_WIRE_LEN);
+        out
+    }
+
+    fn source_fixture_graph_bytes(graph: &SparseGraph) -> Vec<u8> {
+        let mut out = Vec::with_capacity(GRAPH_WIRE_MIN_LEN + graph.edges.len() * 16);
+        out.extend_from_slice(&(graph.row_offsets.len() as u32).to_le_bytes());
+        for offset in &graph.row_offsets {
+            out.extend_from_slice(&offset.to_le_bytes());
+        }
+        out.extend_from_slice(&(graph.edges.len() as u32).to_le_bytes());
+        for edge in &graph.edges {
+            out.extend_from_slice(&edge.target.to_le_bytes());
+            out.extend_from_slice(&edge.weight.to_le_bytes());
+            out.extend_from_slice(&edge.eligibility.to_le_bytes());
+            out.extend_from_slice(&edge.stability.to_le_bytes());
+            out.extend_from_slice(&edge.last_used_epoch.to_le_bytes());
+            out.push(edge.operator_id);
+            out.push(edge.delay_class);
+            out.extend_from_slice(&edge.flags.to_le_bytes());
+        }
+        out
+    }
+
+    fn source_fixture_receipt_bytes(receipt: &TransitionReceiptV2) -> Vec<u8> {
+        let mut out = Vec::with_capacity(TRANSITION_RECEIPT_V2_WIRE_LEN);
+        out.extend_from_slice(&receipt.schema_version.to_le_bytes());
+        for digest in [
+            &receipt.formula_digest,
+            &receipt.scope_digest,
+            &receipt.event_digest,
+            &receipt.authority_digest,
+        ] {
+            out.extend_from_slice(digest);
+        }
+        out.extend_from_slice(&receipt.base_revision.to_le_bytes());
+        out.extend_from_slice(&receipt.next_revision.to_le_bytes());
+        for digest in [
+            &receipt.state_before,
+            &receipt.state_after,
+            &receipt.graph_after,
+        ] {
+            out.extend_from_slice(digest);
+        }
+        assert!(receipt.action_contract.is_none());
+        out.push(0);
+        out.extend_from_slice(&receipt.active_nodes.to_le_bytes());
+        out.extend_from_slice(&receipt.active_edges.to_le_bytes());
+        for value in [
+            receipt.residuals.authority,
+            receipt.residuals.continuity,
+            receipt.residuals.energy,
+            receipt.residuals.renormalization,
+            receipt.residuals.capacity,
+        ] {
+            out.extend_from_slice(&value.encode());
+        }
+        assert_eq!(receipt.status, CommitStatus::Committed);
+        out.push(1);
+        out.extend_from_slice(&receipt.semantic_vector.schema_version.to_le_bytes());
+        assert_eq!(
+            receipt.semantic_vector.formula,
+            SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1
+        );
+        out.push(1);
+        out.push(receipt.semantic_vector.dimension_slot_count);
+        out.push(receipt.semantic_vector.evaluated_dimension_count);
+        out.push(receipt.semantic_vector.injected_dimension_count);
+        out.push(receipt.semantic_vector.nonzero_evidence_dimension_count);
+        out.push(receipt.semantic_vector.neutral_baseline_dimension_count);
+        out.push(receipt.semantic_vector.unavailable_dimension_count);
+        out.push(u8::from(receipt.semantic_vector.state_changed));
+        assert_eq!(out.len(), TRANSITION_RECEIPT_V2_WIRE_LEN);
+        out
+    }
+
+    fn frozen_aesem2_fixture() -> FrozenAesem2Fixture {
+        let zeros = || vec![Fixed::ZERO; NEURON_SLOTS];
+        let field = NeuralField {
+            potential: zeros(),
+            excitation: zeros(),
+            inhibition: zeros(),
+            adaptation: zeros(),
+            precision: zeros(),
+            prediction_error: zeros(),
+            eligibility: zeros(),
+            metabolic_reserve: vec![Fixed::ONE; NEURON_SLOTS],
+        };
+        let graph = SparseGraph {
+            row_offsets: vec![0; NEURON_SLOTS + 1],
+            edges: Vec::new(),
+        };
+        let formula_digest = [0x31; 32];
+        let state_digest = state_digest(&field, &formula_digest);
+        let graph_digest = graph_digest(&graph);
+        let residuals = InvariantResiduals {
+            authority: Fixed::ZERO,
+            continuity: Fixed::ZERO,
+            energy: Fixed::from_raw(200_000),
+            renormalization: Fixed::from_raw(100_000),
+            capacity: Fixed::ZERO,
+        };
+        let current_telemetry = NativeTelemetryReceiptV1 {
+            schema: NATIVE_TELEMETRY_RECEIPT_SCHEMA_V1.to_owned(),
+            formula: NativeTelemetryFormulaV1::Phase0NativePropagationFxp6V1,
+            formula_digest,
+            scope_digest: [0x32; 32],
+            event_digest: [0x33; 32],
+            source_digest: [0x34; 32],
+            base_revision: 0,
+            next_revision: 1,
+            phase: NativeTelemetryPhaseV1::Prepare,
+            state_before: [0x35; 32],
+            state_after: state_digest,
+            graph_before: graph_digest,
+            graph_after: graph_digest,
+            local_digest: [0x36; 32],
+            compensation_digest: ae_contracts::legacy_reserved_zero_digest_v1(),
+            effective_digest: [0x37; 32],
+            energy: EnergyTelemetryV1 {
+                reserve_before: Fixed::ONE,
+                reserve_after: Fixed::from_raw(500_000),
+                recovered: Fixed::from_raw(100_000),
+                spent: Fixed::from_raw(600_000),
+                headroom: Fixed::from_raw(500_000),
+                residual: Fixed::from_raw(200_000),
+            },
+            capacity: CapacityTelemetryV1 {
+                upper_saturated_nodes: 2,
+                node_limit: 4,
+                node_headroom: Fixed::from_raw(500_000),
+                edge_used: 1,
+                edge_limit: 2,
+                edge_headroom: Fixed::from_raw(500_000),
+                headroom: Fixed::from_raw(500_000),
+                residual: Fixed::ZERO,
+            },
+            residuals: residuals.clone(),
+            residual_health: Fixed::from_raw(800_000),
+            native_gate: Fixed::from_raw(500_000),
+            checkpoint_digest: [0; 32],
+            telemetry_digest: [0; 32],
+        }
+        .seal();
+        let legacy_receipt = TransitionReceipt {
+            schema_version: 1,
+            formula_digest,
+            scope_digest: current_telemetry.scope_digest,
+            event_digest: current_telemetry.event_digest,
+            authority_digest: [0x38; 32],
+            base_revision: current_telemetry.base_revision,
+            next_revision: current_telemetry.next_revision,
+            state_before: current_telemetry.state_before,
+            state_after: state_digest,
+            graph_after: graph_digest,
+            action_contract: None,
+            active_nodes: 0,
+            active_edges: 0,
+            residuals,
+            status: CommitStatus::Committed,
+        };
+        let semantic_receipt = TransitionReceiptV2::from_legacy(
+            &legacy_receipt,
+            SemanticVectorReceiptV2 {
+                schema_version: SemanticVectorReceiptV2::SCHEMA_VERSION,
+                formula: SemanticVectorFormulaV2::FullVectorRouteNeutralRelaxationV1,
+                dimension_slot_count: 15,
+                evaluated_dimension_count: 15,
+                injected_dimension_count: 15,
+                nonzero_evidence_dimension_count: 0,
+                neutral_baseline_dimension_count: 15,
+                unavailable_dimension_count: 0,
+                state_changed: legacy_receipt.state_before != legacy_receipt.state_after,
+            },
+        )
+        .expect("frozen semantic receipt closes");
+        let field_bytes = source_fixture_field_bytes(&field);
+        let graph_bytes = source_fixture_graph_bytes(&graph);
+        let receipt_bytes = source_fixture_receipt_bytes(&semantic_receipt);
+        let mut bytes = Vec::with_capacity(
+            SNAPSHOT_MAGIC_V2.len()
+                + 2
+                + 12
+                + field_bytes.len()
+                + graph_bytes.len()
+                + receipt_bytes.len(),
+        );
+        bytes.extend_from_slice(SNAPSHOT_MAGIC_V2);
+        bytes.extend_from_slice(&SNAPSHOT_SCHEMA_V2.to_le_bytes());
+        for block in [&field_bytes, &graph_bytes, &receipt_bytes] {
+            bytes.extend_from_slice(&(block.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(block);
+        }
+        FrozenAesem2Fixture {
+            bytes,
+            formula_digest,
+            state_digest,
+            graph_digest,
+            legacy_receipt,
+            current_telemetry,
+        }
+    }
+
+    #[test]
+    fn aesem2_history_codec_is_bounded_and_authority_authenticated() {
+        let fixture = frozen_aesem2_fixture();
+        let fixture_sha256: [u8; 32] = Sha256::digest(&fixture.bytes).into();
+        assert_eq!(
+            fixture_sha256,
+            [
+                73, 116, 115, 0, 133, 21, 89, 231, 159, 250, 69, 211, 132, 189, 48, 25, 125, 214,
+                183, 12, 240, 155, 114, 101, 11, 45, 192, 11, 163, 73, 211, 206,
+            ]
+        );
+        let legacy = fixture.bytes.clone();
+        let (field, graph, semantic_receipt) = decode_semantic_snapshot_v2(
+            &legacy,
+            &fixture.formula_digest,
+            &fixture.state_digest,
+            &fixture.graph_digest,
+            &fixture.legacy_receipt,
+        )
+        .expect("immutable AESEM2 fixture must authenticate");
+        assert!(semantic_receipt.validate());
+
+        let current = encode_semantic_snapshot_v3(
+            &fixture.formula_digest,
+            &field,
+            &graph,
+            &fixture.current_telemetry,
+        )
+        .expect("current semantic state must encode as AESEM3");
+        assert!(current.starts_with(b"AESEM3\0"));
+        assert!(snapshot_is_aesem2(&legacy));
+        assert!(!snapshot_is_aesem2(&current));
+        assert_eq!(legacy, fixture.bytes);
+
+        let semantic = semantic_vector_receipt_v2(&fixture.legacy_receipt, 15, 15, 0)
+            .expect("the complete semantic vector must close over the legacy receipt");
+        assert!(semantic.validate());
+        let prepared = prepare_semantic_transition_v2(
+            &field,
+            &field,
+            &graph,
+            &[0x41; 32],
+            &[0x42; 32],
+            &valid_proposal(),
+        )
+        .expect("current preparation must accept the complete vector proposal");
+        assert_eq!(prepared.full_vector_load.evaluated_dimension_count, 15);
+        assert_eq!(prepared.full_vector_load.injected_dimension_count, 15);
+        let observability = node_observability_projection_v2(&field, &prepared.next_field, 1)
+            .expect("prepared native state must project into bounded observability");
+        assert!(observability.validate());
+        let expression = expression_projection_from_field_v1(&prepared.next_field, 1)
+            .expect("prepared native state must project into expression");
+        assert_eq!(expression.revision, 1);
+    }
+
+    // Retain the original Task 5 node while the stricter final acceptance node
+    // above proves the same immutable AESEM2 authority contract.
+    #[test]
+    fn aesem2_is_authenticated_read_only_and_aesem3_is_current_write() {
+        aesem2_history_codec_is_bounded_and_authority_authenticated();
+    }
 
     fn valid_proposal() -> PerceptionProposalV1 {
         PerceptionProposalV1 {
             schema_version: PerceptionProposalV1::SCHEMA_VERSION,
-            event_id: [1; 16],
-            turn_id: [2; 16],
-            observed_at_ms: 1,
-            base_revision: 0,
+            origin_digest: [1; 32],
             dimensions: EvidenceVector::default(),
             estimator_confidence: Fixed::ONE,
             protocol_version: PerceptionProposalV1::PROTOCOL_VERSION,
@@ -1246,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn aesem3_reserved_zero_replays_and_nonzero_history_fails_closed() {
+    fn aesem3_decoder_requires_exactly_four_bounded_blocks() {
         let formula_digest = [0x31; 32];
         let field = NeuralField::zeroed();
         let graph = SparseGraph::empty();
@@ -1329,6 +1539,72 @@ mod tests {
             &legacy_receipt,
         )
         .is_ok());
+        assert!(decode_canonical_aesem3_blocks(&snapshot).is_ok());
+
+        let exact_three_block_truncation =
+            &snapshot[..snapshot.len() - (4 + REGION_LAYOUT.len() * 8)];
+        assert_eq!(
+            decode_canonical_aesem3_blocks(exact_three_block_truncation),
+            Err(CanonicalAesem3Error::WireInvalid)
+        );
+        assert!(matches!(
+            decode_semantic_snapshot_v3(
+                exact_three_block_truncation,
+                &formula_digest,
+                &state_after,
+                &graph_after,
+                &legacy_receipt,
+            ),
+            Err(RuntimeError::InvalidNeuralState(
+                StateSubcodeV1::SnapshotWireInvalid
+            ))
+        ));
+
+        let truncated_fourth_block = &snapshot[..snapshot.len() - 1];
+        assert_eq!(
+            decode_canonical_aesem3_blocks(truncated_fourth_block),
+            Err(CanonicalAesem3Error::WireInvalid)
+        );
+        assert!(decode_semantic_snapshot_v3(
+            truncated_fourth_block,
+            &formula_digest,
+            &state_after,
+            &graph_after,
+            &legacy_receipt,
+        )
+        .is_err());
+
+        let mut trailing_wire = snapshot.clone();
+        trailing_wire.push(0);
+        assert_eq!(
+            decode_canonical_aesem3_blocks(&trailing_wire),
+            Err(CanonicalAesem3Error::WireInvalid)
+        );
+        assert!(decode_semantic_snapshot_v3(
+            &trailing_wire,
+            &formula_digest,
+            &state_after,
+            &graph_after,
+            &legacy_receipt,
+        )
+        .is_err());
+
+        let mut oversized_field = snapshot.clone();
+        let field_len_offset = SNAPSHOT_MAGIC_V3.len() + 2;
+        oversized_field[field_len_offset..field_len_offset + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            decode_canonical_aesem3_blocks(&oversized_field),
+            Err(CanonicalAesem3Error::WireInvalid)
+        );
+        assert!(decode_semantic_snapshot_v3(
+            &oversized_field,
+            &formula_digest,
+            &state_after,
+            &graph_after,
+            &legacy_receipt,
+        )
+        .is_err());
 
         let truncated_wire = &snapshot[..SNAPSHOT_MAGIC_V3.len() + 2];
         assert!(matches!(
@@ -1348,6 +1624,10 @@ mod tests {
         *nonzero_history
             .last_mut()
             .expect("AESEM3 has a reserved fourth block") = 1;
+        assert_eq!(
+            decode_canonical_aesem3_blocks(&nonzero_history),
+            Err(CanonicalAesem3Error::ReservedNonzero)
+        );
         assert!(matches!(
             decode_semantic_snapshot_v3(
                 &nonzero_history,
@@ -1360,5 +1640,10 @@ mod tests {
                 StateSubcodeV1::Aesem3RetiredCompensationNonzero
             ))
         ));
+    }
+
+    #[test]
+    fn aesem3_reserved_zero_replays_and_nonzero_history_fails_closed() {
+        aesem3_decoder_requires_exactly_four_bounded_blocks();
     }
 }

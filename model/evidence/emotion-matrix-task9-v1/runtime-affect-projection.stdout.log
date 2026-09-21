@@ -1,0 +1,8 @@
+
+running 4 tests
+test projection_layers_remain_relation_private ... ok
+test committed_affect_projection_is_persona_global_and_non_identifying ... ok
+test compact_time_head_projects_attested_previous_to_current_delta ... ok
+test uncommitted_corrupt_or_renorm_failed_projection_is_unavailable_and_read_only ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.58s

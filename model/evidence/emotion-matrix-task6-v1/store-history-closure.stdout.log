@@ -1,0 +1,6 @@
+
+running 1 test
+test semantic_atomic_tests::cursor_rewind_and_historical_sidecar_deletion_fail_closed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 57 filtered out; finished in 11.76s
+

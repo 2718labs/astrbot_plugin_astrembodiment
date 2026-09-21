@@ -1,0 +1,86 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE_DIAGNOSTIC",
+  "authority_claim": "DIAGNOSTIC_FAILURE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task8-v1-store-autonomy-migration-known-debt",
+  "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405",
+  "command": "cargo test --locked --offline -p ae-store --test autonomy_migration --jobs 1 -- --nocapture",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-store",
+    "--test",
+    "autonomy_migration",
+    "--jobs",
+    "1",
+    "--",
+    "--nocapture"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 101,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t8-evidence-49b3866",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "passed": 12,
+    "failed": 2,
+    "filtered_out": 0,
+    "failures": [
+      {
+        "test": "legacy_ready_and_deferred_keep_claimable_revisions_in_pending_work",
+        "error_class": "LEGACY_V2_FIXTURE_SCHEMA_COLLISION",
+        "error_contains": "table world_anchor already exists"
+      },
+      {
+        "test": "legacy_v2_uncertain_outbound_bootstraps_anchored_unknown_snapshot",
+        "error_class": "LEGACY_V2_FIXTURE_SCHEMA_COLLISION",
+        "error_contains": "table world_anchor already exists"
+      }
+    ],
+    "classification": "KNOWN_PREEXISTING_FIXTURE_DEBT_RECONFIRMED_AT_REVIEWED_HEAD",
+    "baseline_anchor": "3a042ad5a8cef2adeb6772c780112ca43661f3ab",
+    "baseline_provenance": "independent reviewer report; not rerun by this custody receipt"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task8-v1/store-autonomy-migration-known-debt.stdout.log",
+        "sha256": "dedaedc4d648afdb4a25bd1389fe04c1af3d343dfd16904c247f41ca2b09e132"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task8-v1/store-autonomy-migration-known-debt.stderr.log",
+      "sha256": "19af9d868afbdef94a04a5a2b76042419a363cec6e22afd640c766b9c6949c36"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "f6c840552aa97f04f535bb92f1cdd52bb36e70dfa61fda0562d56217d1954531"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5708e225a0e63e77786c2f60c41b0ef9d00cdacb86dcff8ea47b6285d34e920a"
+    },
+    {
+      "path": "crates/ae-store/src/autonomy.rs",
+      "sha256": "99f9bf30728230cdf9e3937b1064355e5f58df8b429bec747d6e00553ef76c44"
+    },
+    {
+      "path": "crates/ae-store/tests/autonomy_migration.rs",
+      "sha256": "b4b14f1299eccb038d60eb2be2fbe48ea8898cba40d8d472d6053d712bc2e732"
+    }
+  ]
+}

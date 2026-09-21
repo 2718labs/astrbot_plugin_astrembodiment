@@ -1,0 +1,4 @@
+   Compiling ae-store v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-store)
+   Compiling ae-runtime v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.03s
+     Running unittests src\lib.rs (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-task05-quality-target\debug\deps\ae_runtime-65806cc69ba7c657.exe)

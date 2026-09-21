@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 
 BOT_TOKEN_DOMAIN = b"ae.bot-token.v1"
+PLATFORM_TOKEN_DOMAIN = b"ae.platform-token.v1"
 PERSONA_TOKEN_DOMAIN = b"ae.persona-token.v1"
 SESSION_TOKEN_DOMAIN = b"ae.session-token.v1"
 RELATION_TOKEN_DOMAIN = b"ae.relation-token.v1"
@@ -26,6 +27,10 @@ def derive_token(domain: bytes, seed: str) -> str:
 
 def bot_token(bot_id: str) -> str:
     return derive_token(BOT_TOKEN_DOMAIN, bot_id)
+
+
+def platform_token(platform_id: str) -> str:
+    return derive_token(PLATFORM_TOKEN_DOMAIN, platform_id)
 
 
 def persona_token(persona_id: str) -> str:

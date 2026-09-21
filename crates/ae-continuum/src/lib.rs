@@ -54,6 +54,20 @@ pub fn chain_link(previous: &Digest, event_bytes: &[u8], receipt_bytes: &[u8]) -
     hash_chain(previous, &payload)
 }
 
+pub fn chain_link_with_delta(
+    previous: &Digest,
+    event_bytes: &[u8],
+    receipt_bytes: &[u8],
+    delta_bytes: &[u8],
+) -> Digest {
+    let mut payload =
+        Vec::with_capacity(event_bytes.len() + receipt_bytes.len() + delta_bytes.len());
+    payload.extend_from_slice(event_bytes);
+    payload.extend_from_slice(receipt_bytes);
+    payload.extend_from_slice(delta_bytes);
+    hash_chain(previous, &payload)
+}
+
 /// A persisted journal row. Receipt bytes are the canonical binary encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalRow {
@@ -64,6 +78,7 @@ pub struct JournalRow {
     pub event_bytes: Vec<u8>,
     pub event_digest: Digest,
     pub receipt_bytes: Vec<u8>,
+    pub delta_bytes: Vec<u8>,
     pub chain_digest: Digest,
 }
 
@@ -118,11 +133,17 @@ pub fn verify_replay(chain_seed: Digest, rows: &[JournalRow]) -> ReplayReport {
         }
         expected_revision = Some(row.revision + 1);
 
-        let event_ok = match wire::decode_event(&row.event_bytes) {
-            Ok(event) => wire::event_digest(&event) == row.event_digest,
-            Err(error) => {
-                first_error = Some(format!("event decode failed at {}: {error}", row.revision));
-                break;
+        let operational_checkpoint = row.event_kind == "operational_checkpoint_v1";
+        let event_ok = if operational_checkpoint {
+            wire::domain_hash(b"ae.operational-checkpoint-event.v1", &[&row.event_bytes])
+                == row.event_digest
+        } else {
+            match wire::decode_event(&row.event_bytes) {
+                Ok(event) => wire::event_digest(&event) == row.event_digest,
+                Err(error) => {
+                    first_error = Some(format!("event decode failed at {}: {error}", row.revision));
+                    break;
+                }
             }
         };
         if !event_ok {
@@ -130,18 +151,22 @@ pub fn verify_replay(chain_seed: Digest, rows: &[JournalRow]) -> ReplayReport {
             break;
         }
 
-        let receipt_ok = match row.decode_receipt() {
-            Ok(receipt) => {
-                receipt.base_revision == row.base_revision
-                    && receipt.event_digest == row.event_digest
-                    && receipt.scope_digest == row.scope_digest
-            }
-            Err(error) => {
-                first_error = Some(format!(
-                    "receipt decode failed at {}: {error}",
-                    row.revision
-                ));
-                break;
+        let receipt_ok = if operational_checkpoint {
+            row.receipt_bytes.len() == 32
+        } else {
+            match row.decode_receipt() {
+                Ok(receipt) => {
+                    receipt.base_revision == row.base_revision
+                        && receipt.event_digest == row.event_digest
+                        && receipt.scope_digest == row.scope_digest
+                }
+                Err(error) => {
+                    first_error = Some(format!(
+                        "receipt decode failed at {}: {error}",
+                        row.revision
+                    ));
+                    break;
+                }
             }
         };
         if !receipt_ok {
@@ -149,7 +174,16 @@ pub fn verify_replay(chain_seed: Digest, rows: &[JournalRow]) -> ReplayReport {
             break;
         }
 
-        let recomputed = chain_link(&previous_chain, &row.event_bytes, &row.receipt_bytes);
+        let recomputed = if row.delta_bytes.is_empty() {
+            chain_link(&previous_chain, &row.event_bytes, &row.receipt_bytes)
+        } else {
+            chain_link_with_delta(
+                &previous_chain,
+                &row.event_bytes,
+                &row.receipt_bytes,
+                &row.delta_bytes,
+            )
+        };
         if recomputed != row.chain_digest {
             first_error = Some(format!("hash chain broken at {}", row.revision));
             break;
@@ -172,7 +206,7 @@ pub fn verify_replay(chain_seed: Digest, rows: &[JournalRow]) -> ReplayReport {
 mod tests {
     use super::*;
     use ae_contracts::{
-        wire, CanonicalEvent, CommitStatus, InvariantResiduals, ScopeRef, TimeAdvance,
+        wire, AdminAction, CanonicalEvent, CommitStatus, InvariantResiduals, ScopeRef,
         TransitionReceipt,
     };
 
@@ -211,10 +245,11 @@ mod tests {
     }
 
     fn row(revision: u64, scope_digest: Digest, chain_seed: Digest) -> JournalRow {
-        let event = CanonicalEvent::TimeAdvance(TimeAdvance {
+        let event = CanonicalEvent::AdminAction(AdminAction {
             event_id: [revision as u8; 16],
             scope: scope(),
-            elapsed_ms: 1,
+            operation: "journal_test".into(),
+            nonce_digest: [revision as u8; 32],
         });
         let event_bytes = wire::encode_event(&event);
         let event_digest = wire::event_digest(&event);
@@ -230,10 +265,11 @@ mod tests {
             revision,
             scope_digest,
             base_revision: revision.saturating_sub(1),
-            event_kind: "time_advance".to_string(),
+            event_kind: "admin_action".to_string(),
             event_bytes,
             event_digest,
             receipt_bytes,
+            delta_bytes: Vec::new(),
             chain_digest,
         }
     }

@@ -1,0 +1,20 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task5-store-formula-authority",
+  "target_commit": "91cb4acbeb089eee001b51625b2ced3b66a5af86",
+  "command": "cargo test --locked --offline -p ae-store --test emotion_matrix_migration_v2 --jobs 1 authority_binds_formula_upgrade_and_rejects_public_raw_envelopes -- --exact",
+  "argv": ["test", "--locked", "--offline", "-p", "ae-store", "--test", "emotion_matrix_migration_v2", "--jobs", "1", "authority_binds_formula_upgrade_and_rejects_public_raw_envelopes", "--", "--exact"],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {"exit_code": 0, "locked": true, "offline": true, "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-task05-final-target", "cargo_term_color": "never"},
+  "toolchain": {"cargo": "cargo 1.97.0 (c980f4866 2026-06-30)", "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)", "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3", "host": "x86_64-pc-windows-msvc", "llvm": "22.1.6"},
+  "logs": {"normalization": "utf8-lf", "stdout": {"path": "model/evidence/emotion-matrix-task5-v1/store-formula-authority.stdout.log", "sha256": "51bccb16380133db3379128beb33ddac1f8145af9ff13ef928d7fdb8917387e0"}, "stderr": {"path": "model/evidence/emotion-matrix-task5-v1/store-formula-authority.stderr.log", "sha256": "f1f4e65f37af9d3296d1c148952e170bc9949ad9754367ba6101d404d7dfa0a6"}},
+  "artifacts": [
+    {"path": "Cargo.lock", "sha256": "876e85b277b52092656ba564ec133b372693be10ab91f338d8d65381a631ec6d"},
+    {"path": "crates/ae-store/Cargo.toml", "sha256": "f6c3414f30d2015a3b143003a6ebec5fec9a55e46e7c44eaad152659f9d9744d"},
+    {"path": "crates/ae-store/src/lib.rs", "sha256": "1740b09465f3af36602f9b62779e71e7faf7c5c16933ecfb3e126ac9bd4d8319"},
+    {"path": "crates/ae-store/src/semantic_field_attestation.rs", "sha256": "7acd25f32f6276e5a591b6729d08ab03369bce9af722722dcd2474daaf250650"},
+    {"path": "crates/ae-store/tests/emotion_matrix_migration_v2.rs", "sha256": "df7e40fc3b74a123f261df51354bc4712be28412b897fb677165bcdae9379181"}
+  ]
+}

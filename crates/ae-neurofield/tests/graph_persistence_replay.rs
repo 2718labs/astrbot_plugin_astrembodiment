@@ -1,8 +1,9 @@
 use ae_neurofield::{
-    bind_delta_to_graph_replay_rule, graph_digest, graph_replay_rule_descriptor,
+    bind_delta_to_graph_replay_rule, graph_admission_profile_descriptor,
+    graph_admission_profile_digest, graph_digest, graph_replay_rule_descriptor,
     graph_replay_rule_digest, graph_replay_rule_digest_for_descriptor, EdgeOperationV1,
-    GraphReplayError, GraphReplayV1, GraphSnapshotV1, SparseGraph, StructuralDeltaV1, Synapse,
-    GRAPH_REPLAY_FORMULA_V1, NEURON_SLOTS,
+    GraphAdmissionProfileV1, GraphReplayError, GraphReplayV1, GraphSnapshotV1, SparseGraph,
+    StructuralDeltaV1, Synapse, GRAPH_REPLAY_FORMULA_V1, NEURON_SLOTS,
 };
 
 fn edge(target: u32, weight: i16) -> Synapse {
@@ -90,25 +91,31 @@ fn sealed_history() -> (GraphReplayV1, SparseGraph, SparseGraph) {
 fn production_rule_digest_is_derived_from_the_canonical_formula_descriptor() {
     let (history, _, _) = sealed_history();
     let descriptor = graph_replay_rule_descriptor(GRAPH_REPLAY_FORMULA_V1).unwrap();
-    let rule_digest = graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1).unwrap();
+    let formula_rule_digest = graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1).unwrap();
+    let admission_descriptor =
+        graph_admission_profile_descriptor(GraphAdmissionProfileV1::ClosedV1).unwrap();
+    let admission_digest =
+        graph_admission_profile_digest(GraphAdmissionProfileV1::ClosedV1).unwrap();
 
     assert!(descriptor.contains(&format!("formula_version={GRAPH_REPLAY_FORMULA_V1}")));
     assert!(descriptor.contains("delta_schema=StructuralDeltaV1"));
     assert!(descriptor.contains("apply_delta=v1-cas-canonical-operations"));
     assert_eq!(
-        rule_digest,
+        formula_rule_digest,
         graph_replay_rule_digest_for_descriptor(GRAPH_REPLAY_FORMULA_V1, &descriptor).unwrap()
     );
+    assert!(admission_descriptor.contains("max_snapshot_canonical_bytes=8454156"));
+    assert_ne!(formula_rule_digest, admission_digest);
     assert_ne!(
-        rule_digest, [rule_digest[0]; 32],
-        "a valid graph replay rule digest must derive from its rule contract"
+        admission_digest, [admission_digest[0]; 32],
+        "a valid graph admission digest must derive from its closed profile"
     );
-    assert_ne!(rule_digest, [0_u8; 32]);
-    assert_ne!(rule_digest, [u8::MAX; 32]);
+    assert_ne!(admission_digest, [0_u8; 32]);
+    assert_ne!(admission_digest, [u8::MAX; 32]);
     assert!(history
         .deltas
         .iter()
-        .all(|delta| delta.rule_digest == rule_digest));
+        .all(|delta| delta.rule_digest == admission_digest));
 }
 
 #[test]
@@ -132,7 +139,8 @@ fn rule_contract_rejects_formula_or_descriptor_mismatch() {
 #[test]
 fn production_bound_deltas_replay_under_the_same_rule_contract() {
     let (history, _, expected) = sealed_history();
-    let production_digest = graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1).unwrap();
+    let production_digest =
+        graph_admission_profile_digest(GraphAdmissionProfileV1::ClosedV1).unwrap();
 
     assert!(history
         .deltas

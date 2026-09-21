@@ -1,0 +1,24 @@
+
+running 1 test
+test backup_recovers_every_failpoint_without_source_mutation ... semantic-migration-failpoint=before-snapshot
+semantic-migration-failpoint=after-snapshot
+semantic-migration-failpoint=before-database-sync
+semantic-migration-failpoint=after-database-sync
+semantic-migration-failpoint=before-manifest-sync
+semantic-migration-failpoint=after-manifest-sync
+semantic-migration-failpoint=before-directory-sync
+semantic-migration-failpoint=after-directory-sync
+semantic-migration-failpoint=before-atomic-publish
+semantic-migration-failpoint=after-atomic-publish
+semantic-migration-failpoint=before-parent-sync
+semantic-migration-failpoint=after-parent-sync
+semantic-migration-failpoint=before-transaction-begin
+semantic-migration-failpoint=after-transaction-begin
+semantic-migration-failpoint=before-row-insertion
+semantic-migration-failpoint=after-row-insertion
+semantic-migration-failpoint=before-commit
+semantic-migration-failpoint=after-commit
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 92.40s
+

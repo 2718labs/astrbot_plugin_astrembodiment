@@ -1,0 +1,158 @@
+{
+  "schema": "ae.emotion-matrix-task6-evidence-custody.v1",
+  "status": "EARNED_AFTER_REVIEW",
+  "production_code_anchor": "f05734077b6af7c7a397bb3875968254c485f9d8",
+  "fixture_compatibility_anchor": "48150de07d52ce50674518189ca52ac10462504e",
+  "review_preconditions": {
+    "quality": "APPROVED",
+    "quality_reviewed_commit": "f05734077b6af7c7a397bb3875968254c485f9d8",
+    "code_spec": "APPROVED",
+    "code_spec_reviewed_commit": "48150de07d52ce50674518189ca52ac10462504e",
+    "fixture_delta_changes_production": false
+  },
+  "affected_capability_ids": [
+    "paired-atomic-commit",
+    "event-deduplication",
+    "stale-base-rejection",
+    "identity-conflict-rejection"
+  ],
+  "held_for_later_task_ids": [
+    "independent-semantic-cursor"
+  ],
+  "primary_receipts": {
+    "paired-atomic-commit": {
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-atomicity.receipt.json",
+      "sha256": "fae924ccbb23ed96e9bfc64bd8bc09482d9166ba9bb2b2b5db37e492f580f990",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    "event-deduplication": {
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-dedupe-stale-conflict.receipt.json",
+      "sha256": "7f69b5652b56ce0836ba4f26e973dfee57553cde94f9feb052ede03ce9aa2a9d",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    "stale-base-rejection": {
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-dedupe-stale-conflict.receipt.json",
+      "sha256": "7f69b5652b56ce0836ba4f26e973dfee57553cde94f9feb052ede03ce9aa2a9d",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    "identity-conflict-rejection": {
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-dedupe-stale-conflict.receipt.json",
+      "sha256": "7f69b5652b56ce0836ba4f26e973dfee57553cde94f9feb052ede03ce9aa2a9d",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    }
+  },
+  "supporting_exact_receipts": [
+    {
+      "claim": "default-build-production-entry-rejects-caller-authority",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-authority-boundary-default.receipt.json",
+      "sha256": "1d0bb85aff4013d3adea26139699bbf14b87bb88e258fb5384d913556540486c",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "all-features-production-entry-rejects-caller-authority",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-authority-boundary-all-features.receipt.json",
+      "sha256": "4d8286a5541d25d8b60c805db077324045d3c3529930aa46ad99090d10790211",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "missing-cursor-and-orphan-origin-fail-closed",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-missing-cursor-origin.receipt.json",
+      "sha256": "80cb8f61bbd5060a53ffe51c6115f63f7c3c9377151140afcef8927daa8e7c8d",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "journal-only-lane-rejects-user-stimulus",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-journal-only-rejection.receipt.json",
+      "sha256": "1a63493524e6dd040d64788091adfa5f21076ae3795637206d2ec69e93585bc5",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "store-rebinds-all-caller-claimed-identity",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-authority-rebinding.receipt.json",
+      "sha256": "c5c20d2962da605ae8ec66132c6f9ac4e90ca8e02a4dc08ade4ce614333fd002",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "relation-evidence-identity-set-is-closed",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-relation-identity-closure.receipt.json",
+      "sha256": "aa1c1147e013f5bd41aa592fc504319a460a3eaa53472160abc71720ff03b47a",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "cursor-and-revision-sidecar-history-is-closed",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-history-closure.receipt.json",
+      "sha256": "4d11a49efd30f2ad9e3466542e18b361be10413bfb9395272ecc446c015e2bf5",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "every-historical-payload-is-reattested",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-historical-payload-closure.receipt.json",
+      "sha256": "1309f3d1a82ff253d67d51a75cb50d4b5c4193d7e7e09174d187f548d54a60d1",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "weak-task6-schema-is-transactionally-rebuilt",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-weak-schema-migration.receipt.json",
+      "sha256": "3d51e3d614bdb3d617b9773ea9a5b8c34431ee48f54197a61d01419e0262df7d",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "claim": "task5-finite-migration-fixture-remains-compatible",
+      "locator": "model/evidence/emotion-matrix-task6-v1/task5-finite-migration-compat.receipt.json",
+      "sha256": "8284cc14c885ffde1bfb79eba4aa7690da35d2a2025baea1e050b51fe7a2dd1c",
+      "target_commit": "48150de07d52ce50674518189ca52ac10462504e"
+    },
+    {
+      "claim": "task5-authority-closure-fixture-remains-compatible",
+      "locator": "model/evidence/emotion-matrix-task6-v1/task5-authority-closure-compat.receipt.json",
+      "sha256": "14d2d93c69c9566ba4d132cc76ffb7cd9ed3c0e49f291b9929a399a3f69dc684",
+      "target_commit": "48150de07d52ce50674518189ca52ac10462504e"
+    },
+    {
+      "claim": "task5-backup-failpoint-fixture-remains-compatible",
+      "locator": "model/evidence/emotion-matrix-task6-v1/task5-backup-seams-compat.receipt.json",
+      "sha256": "ed9a02dee5fc904970e8a5d7abbf4776a828f2f766b719ae5057b75078207ee4",
+      "target_commit": "48150de07d52ce50674518189ca52ac10462504e"
+    },
+    {
+      "claim": "task5-formula-authority-fixture-remains-compatible",
+      "locator": "model/evidence/emotion-matrix-task6-v1/task5-formula-authority-compat.receipt.json",
+      "sha256": "cb433081ce94388d1658a6fbe477835b01c94e9cea9bc9f05a159bd39797d444",
+      "target_commit": "48150de07d52ce50674518189ca52ac10462504e"
+    },
+    {
+      "claim": "task5-reopen-reattest-fixture-remains-compatible",
+      "locator": "model/evidence/emotion-matrix-task6-v1/task5-reopen-reattest-compat.receipt.json",
+      "sha256": "62f346e07d5fd7172c6a3699853633fd1a2122561ddb6ea65c8cd29b89596ce4",
+      "target_commit": "48150de07d52ce50674518189ca52ac10462504e"
+    }
+  ],
+  "compile_receipts": [
+    {
+      "configuration": "default",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-check-default.receipt.json",
+      "sha256": "df5b8720533cb5f84c8b8aed9ff1313ecbcdb66d6f36038747673f2dd018a8cc",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    },
+    {
+      "configuration": "all-features",
+      "locator": "model/evidence/emotion-matrix-task6-v1/store-check-all-features.receipt.json",
+      "sha256": "6737a4e72cf3cccdb38222f7fa563f09b5989c007a576a5745556fb166b03007",
+      "target_commit": "f05734077b6af7c7a397bb3875968254c485f9d8"
+    }
+  ],
+  "non_vacuity": {
+    "private_semantic_test_identity_count": 10,
+    "exact_receipt_count": 16,
+    "passed_exact_test_count": 16,
+    "task5_fixture_compatibility_exact_count": 5,
+    "compile_receipt_count": 2,
+    "backup_failpoint_seam_count": 18
+  },
+  "parity_after_task6": {
+    "mapped_capability_count": 25,
+    "unmapped_capability_count": 18,
+    "release_gate": "NO_GO"
+  },
+  "custody_note": "Only the four Store-owned Task 6 capabilities are restored. The production implementation and private unit-test boundary are pinned to f057340; the later 48150de commit is pinned only where its legacy Task 5 fixture participates. Runtime-owned independent semantic cursor behavior remains UNMAPPED for Task 7."
+}

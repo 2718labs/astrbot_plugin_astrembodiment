@@ -1,0 +1,24 @@
+
+running 14 tests
+test failed_migration_rolls_back_and_reopens ... ok
+test migration_review_rejects_wrong_current_v6_digest ... ok
+test migration_review_v5_backfill_rejects_tampered_projection_columns_and_rolls_back ... ok
+test current_v6_open_rejects_missing_inner_event_projection_row ... ok
+test legacy_database_migration_preserves_journal_bytes ... ok
+test legacy_ready_and_deferred_keep_claimable_revisions_in_pending_work ... FAILED
+test legacy_v2_uncertain_outbound_bootstraps_anchored_unknown_snapshot ... FAILED
+test orphaned_adapter_call_recovers_unknown_without_second_outbound ... ok
+test autonomy_claim_body_is_bounded_in_schema_and_before_legacy_migration_reads ... ok
+test autonomy_v7_to_v8_is_transactional_and_preserves_legacy_data ... ok
+test migration_review_v5_backfill_is_bidirectionally_complete_and_repeatable ... ok
+test autonomy_v8_rejects_weakened_or_unreceipted_same_name_objects ... ok
+test current_v6_open_rejects_manifest_and_materialization_bound_tamper ... ok
+test alpha3_v6_to_v7 ... ok
+
+failures:
+
+failures:
+    legacy_ready_and_deferred_keep_claimable_revisions_in_pending_work
+    legacy_v2_uncertain_outbound_bootstraps_anchored_unknown_snapshot
+
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.17s

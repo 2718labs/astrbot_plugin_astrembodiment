@@ -1,5 +1,15 @@
 #![forbid(unsafe_code)]
 
+pub mod autonomy;
+pub mod contact;
+pub use autonomy::{form_endogenous_candidate, EndogenousSignalsV1};
+pub use contact::{
+    advance_contact_due_v1, contact_cause_digest_v1, evaluate_effective_frequency_v1,
+    form_contact_candidate_v1, interaction_fact_public_ref_v1, reduce_interaction_v1,
+    ContactCandidateInputV1, ContactReducerErrorV1, FrequencyEvaluationErrorV1,
+    FrequencyEvidenceV1, CONTACT_DUE_THRESHOLD_V1,
+};
+
 use ae_contracts::wire;
 use ae_contracts::{ActionContract, ActionVector, Digest, Id128};
 use ae_fixed::Fixed;

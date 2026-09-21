@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use ae_contracts::{wire, CanonicalEvent, Digest, SettlementKind, SourceAuthority};
+use ae_contracts::{
+    wire, CanonicalEvent, DerivedMutationClass, Digest, SettlementKind, SourceAuthority,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,6 +51,21 @@ impl ResidualCoordinate {
 pub struct AuthorityProjection;
 
 impl AuthorityProjection {
+    /// Time passage may update only reconstructable operational state.  This
+    /// lattice is deliberately separate from residual/persona authority.
+    pub fn allows_derived(source: SourceAuthority, class: DerivedMutationClass) -> bool {
+        (source == SourceAuthority::TimeAdvance
+            && matches!(
+                class,
+                DerivedMutationClass::TemporalState
+                    | DerivedMutationClass::SleepState
+                    | DerivedMutationClass::WorkspaceProjection
+                    | DerivedMutationClass::WakeSchedule
+            ))
+            || (source == SourceAuthority::SelfAction
+                && class == DerivedMutationClass::OperationalIntention)
+    }
+
     pub fn allows(
         source: SourceAuthority,
         settlement: SettlementKind,
@@ -130,7 +147,8 @@ pub fn authority_projection_digest(event: &CanonicalEvent) -> Digest {
 mod tests {
     use super::*;
     use ae_contracts::{
-        CausalRef, DeliveryOutcome, ScopeRef, SelfActionCandidate, SettlementEvidence, TimeAdvance,
+        CausalRef, DeliveryOutcome, FrozenTimeInputV1, ScopeRef, SelfActionCandidate,
+        SettlementEvidence, TimeAdvanceV1, AUTONOMY_SCHEMA_VERSION,
     };
     use ae_fixed::Fixed;
 
@@ -150,6 +168,33 @@ mod tests {
             delivery_id: None,
             claim_id: None,
             base_revision: 0,
+        }
+    }
+
+    fn time_advance() -> TimeAdvanceV1 {
+        TimeAdvanceV1 {
+            event_id: [11; 16],
+            scope: scope(),
+            expected_generation: 0,
+            frozen: FrozenTimeInputV1 {
+                schema_version: AUTONOMY_SCHEMA_VERSION,
+                observed_now_utc_ms: 5,
+                effective_now_utc_ms: 5,
+                persona_tzid: "UTC".into(),
+                persona_utc_offset_seconds: 0,
+                persona_local_minute: 0,
+                persona_day_ordinal: 0,
+                relation_tzid: "UTC".into(),
+                relation_utc_offset_seconds: 0,
+                relation_local_minute: 0,
+                relation_day_ordinal: 0,
+                budget_day_start_utc_ms: 0,
+                budget_next_day_start_utc_ms: 86_400_000,
+                next_timezone_transition_utc_ms: None,
+                tzdb_fingerprint: [5; 32],
+            },
+            frozen_input_digest: [6; 32],
+            stimulus: Default::default(),
         }
     }
 
@@ -198,6 +243,44 @@ mod tests {
                     assert!(!AuthorityProjection::allows(source, settlement, coordinate));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn allows_only_reversible_time_derived_state() {
+        for class in [
+            DerivedMutationClass::TemporalState,
+            DerivedMutationClass::SleepState,
+            DerivedMutationClass::WorkspaceProjection,
+            DerivedMutationClass::WakeSchedule,
+        ] {
+            assert!(AuthorityProjection::allows_derived(
+                SourceAuthority::TimeAdvance,
+                class
+            ));
+            assert!(!AuthorityProjection::allows_derived(
+                SourceAuthority::SelfAction,
+                class
+            ));
+        }
+        assert!(!AuthorityProjection::allows_derived(
+            SourceAuthority::TimeAdvance,
+            DerivedMutationClass::OperationalIntention,
+        ));
+        assert!(AuthorityProjection::allows_derived(
+            SourceAuthority::SelfAction,
+            DerivedMutationClass::OperationalIntention,
+        ));
+        for class in [
+            DerivedMutationClass::PermanentMemory,
+            DerivedMutationClass::RelationCommitment,
+            DerivedMutationClass::PersonaGenesis,
+            DerivedMutationClass::DeliveryFact,
+        ] {
+            assert!(!AuthorityProjection::allows_derived(
+                SourceAuthority::TimeAdvance,
+                class
+            ));
         }
     }
 
@@ -276,11 +359,7 @@ mod tests {
         let second = authority_projection_digest(&candidate);
         assert_eq!(first, second);
 
-        let advance = CanonicalEvent::TimeAdvance(TimeAdvance {
-            event_id: [11; 16],
-            scope: scope(),
-            elapsed_ms: 5,
-        });
+        let advance = CanonicalEvent::TimeAdvance(time_advance());
         let advance_digest = authority_projection_digest(&advance);
         assert_ne!(advance_digest, first);
         assert_eq!(advance_digest, authority_projection_digest(&advance));

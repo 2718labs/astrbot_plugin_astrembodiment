@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
-import json
-import tempfile
+import hashlib
+import secrets
 import time
+import threading
+import sys
+import contextvars
+from concurrent.futures import Future
+from collections import deque
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
+from types import MappingProxyType
 
 try:
     from astrbot.api import AstrBotConfig, logger
@@ -60,29 +64,27 @@ except ImportError:  # Static checks outside AstrBot.
     filter = _Filter()  # type: ignore[assignment]
 
 try:
-    from .astr_embodiment import NativeBridge, NativeCoreUnavailable
-    from .astr_embodiment.auxiliary_transport import (
-        AuxiliaryProviderTransport,
-        AuxiliaryTransportError,
-        AuxiliaryTransportMetaV1,
-        DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
-        RequestTransportContext,
-        normalized_transport_meta,
-        not_applicable_transport_meta,
+    from .astr_embodiment import (
+        NativeBridge,
+        NativeCoreUnavailable,
+        SemanticAppraisalRetryExpiredOrUnknown,
     )
-    from .astr_embodiment.bridge import (
-        SEMANTIC_NATIVE_ERROR_CODES,
-        SEMANTIC_NATIVE_FAILURE_STAGES,
-        normalize_field_migration_subcode,
-        normalize_invalid_neural_state_subcode,
-    )
-    from .astr_embodiment.contracts import (
-        FrozenTurn,
-        ScopeTokens,
-        build_delivery_outcome_json,
-    )
+    from .astr_embodiment.contracts import ScopeTokens
+    from .astr_embodiment.auxiliary_transport import AuxiliaryProviderTransport
     from .astr_embodiment.coordinator import GenesisCoordinator
-    from .astr_embodiment.semantic_outbox import SemanticOutbox, SemanticOutboxConfig
+    from .astr_embodiment.embodiment_clock import EmbodimentClock
+    from .astr_embodiment.interaction import build_core_inbound_request, persona_scope
+    from .astr_embodiment.relation import (
+        RelationBindingError,
+        canonical_relation_key,
+        relation_token_from_key,
+    )
+    from .astr_embodiment.semantic_estimator import (
+        SemanticEstimateError,
+        build_estimator_request_v3,
+        build_perception_proposal_v3,
+        parse_estimator_output_v3,
+    )
     from .astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
         PersonaGenesisError,
@@ -91,42 +93,31 @@ try:
     )
     from .astr_embodiment.tokens import (
         bot_token,
-        event_id,
         persona_token,
         session_token,
-        turn_id,
-    )
-    from .astr_embodiment.semantic_estimator import (
-        ESTIMATOR_MALFORMED_SUBCODES,
-        SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
-        SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
-        SemanticEstimateError,
-        parse_estimator_output_v3,
     )
 except ImportError:  # Direct ``python main.py`` and the local test harness.
-    from astr_embodiment import NativeBridge, NativeCoreUnavailable
-    from astr_embodiment.auxiliary_transport import (
-        AuxiliaryProviderTransport,
-        AuxiliaryTransportError,
-        AuxiliaryTransportMetaV1,
-        DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
-        RequestTransportContext,
-        normalized_transport_meta,
-        not_applicable_transport_meta,
+    from astr_embodiment import (
+        NativeBridge,
+        NativeCoreUnavailable,
+        SemanticAppraisalRetryExpiredOrUnknown,
     )
-    from astr_embodiment.bridge import (
-        SEMANTIC_NATIVE_ERROR_CODES,
-        SEMANTIC_NATIVE_FAILURE_STAGES,
-        normalize_field_migration_subcode,
-        normalize_invalid_neural_state_subcode,
-    )
-    from astr_embodiment.contracts import (
-        FrozenTurn,
-        ScopeTokens,
-        build_delivery_outcome_json,
-    )
+    from astr_embodiment.contracts import ScopeTokens
+    from astr_embodiment.auxiliary_transport import AuxiliaryProviderTransport
     from astr_embodiment.coordinator import GenesisCoordinator
-    from astr_embodiment.semantic_outbox import SemanticOutbox, SemanticOutboxConfig
+    from astr_embodiment.embodiment_clock import EmbodimentClock
+    from astr_embodiment.interaction import build_core_inbound_request, persona_scope
+    from astr_embodiment.relation import (
+        RelationBindingError,
+        canonical_relation_key,
+        relation_token_from_key,
+    )
+    from astr_embodiment.semantic_estimator import (
+        SemanticEstimateError,
+        build_estimator_request_v3,
+        build_perception_proposal_v3,
+        parse_estimator_output_v3,
+    )
     from astr_embodiment.persona_genesis import (
         PersonaCompilerMalformed,
         PersonaGenesisError,
@@ -135,178 +126,59 @@ except ImportError:  # Direct ``python main.py`` and the local test harness.
     )
     from astr_embodiment.tokens import (
         bot_token,
-        event_id,
         persona_token,
         session_token,
-        turn_id,
-    )
-    from astr_embodiment.semantic_estimator import (
-        ESTIMATOR_MALFORMED_SUBCODES,
-        SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA,
-        SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT,
-        SemanticEstimateError,
-        parse_estimator_output_v3,
     )
 
 _G0_FORMULA_DIGEST = "00" * 32
 _G0_PROTOCOL_DIGEST = "00" * 32
-_SEED_CONFIG_OBSERVATION_SCHEMA_V1 = "astrembodiment.seed-config-observation.v1"
-_SEED_CONFIG_WRITEBACK_ACK_SCHEMA_V1 = "astrembodiment.seed-config-writeback-ack.v1"
-_SEED_CONFIG_SCHEMA_VERSION_V1 = 1
-_SEED_CONFIG_PACKAGE_EPOCH_PREFIX_V1 = "ae-pkg-"
-_INSPECT_INCARNATION_PREFIX = "AE-I1-"
-_INSPECT_INCARNATION_GROUP_COUNT = 13
-_INSPECT_CROCKFORD_ALPHABET = frozenset("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
-
-
-def _is_inspect_display_incarnation_id(value: object) -> bool:
-    """Validate the AE-I1 Crockford display ID returned by inspect.v1."""
-    if not isinstance(value, str) or not value.startswith(_INSPECT_INCARNATION_PREFIX):
-        return False
-    groups = value.removeprefix(_INSPECT_INCARNATION_PREFIX).split("-")
-    return len(groups) == _INSPECT_INCARNATION_GROUP_COUNT and all(
-        len(group) == 4
-        and all(character in _INSPECT_CROCKFORD_ALPHABET for character in group)
-        for group in groups
-    )
-
-
-_OBSERVATORY_SCHEMA = "astr-embodiment.observatory.semantic-injection.v3"
-_OBSERVATORY_PREFIX = "AstrEmbodiment SPC1 observatory: "
-_OBSERVATORY_DIMENSIONS = (
-    "positive",
-    "affiliation",
-    "harm",
-    "boundary",
-    "repair",
-    "repetition",
-    "new_information",
-    "constraint_instability",
-    "epistemic_conflict",
-    "self_responsibility",
-    "other_responsibility",
-    "hostility",
-    "publicness",
-    "engagement",
-    "rejection",
-)
-_OBSERVATORY_RESIDUALS = (
-    "authority",
-    "continuity",
-    "energy",
-    "renormalization",
-    "capacity",
-)
-_OBSERVATORY_EXPRESSION_PROFILE = (
-    "warmth",
-    "sensitivity",
-    "guardedness",
-    "repair_orientation",
-    "engagement",
-    "epistemic_caution",
+_DELIVERY_DIAGNOSTIC_LIMIT = 64
+# Process registry survives plugin reload/reimport and namespace changes.
+_SYNC_PROVIDER_SLOTS = sys.__dict__.setdefault(
+    "_astrembodiment_sync_provider_slots_v1", threading.BoundedSemaphore(4)
 )
 
 
-def _observatory_migration_subcode(value: object) -> str | None:
-    if value is None:
-        return None
-    return normalize_field_migration_subcode(value)
+def _discard_provider_result(result: Any) -> None:
+    """A late coroutine must never start a new provider call."""
+    if inspect.iscoroutine(result):
+        result.close()
+    elif isinstance(result, asyncio.Future):
+        loop = result.get_loop()
+        if not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(result.cancel)
+            except RuntimeError:
+                pass  # Loop shutdown raced this best-effort disposal.
 
 
-_OBSERVATORY_FIELDS = (
-    "schema",
-    "status",
-    "code",
-    "stage",
-    "commit_state",
-    "values_state",
-    "fxp_scale",
-    "dimensions_fxp6",
-    "estimator_confidence_fxp6",
-    "dimension_confidence_fxp6",
-    "base_revision",
-    "revision",
-    "deduplicated",
-    "receipt_status",
-    "calculation_state",
-    "native_calculation",
-    "expression_state",
-    "expression_profile_fxp6",
-)
-_OBSERVATORY_CODES = {
-    "SEMANTIC_COMMITTED",
-    "EMPTY_REQUEST",
-    "NATIVE_ERROR",
-    "NATIVE_MALFORMED",
-    "GENESIS_UNAVAILABLE",
-    "CONFIG_BLOCKED",
-    "EXPRESSION_INJECTION_FAILED",
-    "INTERNAL",
-    "OBSERVATORY_FORMATTER_FAILED",
-}
-_OBSERVATORY_STAGES = {
-    "INPUT",
-    "ESTIMATOR",
-    "CURSOR",
-    "PROPOSAL",
-    "NATIVE_APPLY",
-    "RECEIPT",
-    "EXPRESSION_INJECTION",
-    "INTERNAL",
-}
-_OBSERVATORY_COMMIT_STATES = {
-    "NOT_ATTEMPTED",
-    "UNKNOWN",
-    "CONFIRMED_NEW",
-    "CONFIRMED_EXISTING",
-}
-_OBSERVATORY_VALUES_STATES = {
-    "UNAVAILABLE",
-    "ESTIMATED_NOT_COMMITTED",
-    "ESTIMATED_NOT_CONFIRMED",
-    "COMMITTED",
-}
-_OBSERVATORY_CALCULATION_STATES = {
-    "NOT_ATTEMPTED",
-    "UNCONFIRMED",
-    "CONFIRMED",
-}
-_OBSERVATORY_EXPRESSION_STATES = {
-    "APPLIED",
-    "NOT_ATTEMPTED",
-    "UNAVAILABLE",
-    "REJECTED",
-    "INJECTION_FAILED",
-}
-_SEMANTIC_OBSERVATORY_SCHEMA = "astr-embodiment.semantic-observatory.v3"
-_SEMANTIC_CLOSURE_SCHEMAS = frozenset(
-    {
-        "astrembodiment.semantic-perception-closure.v1",
-        "astrembodiment.semantic-perception-closure.v2",
-    }
-)
-_SEMANTIC_NOT_ATTEMPTED_CAUSES = (
-    frozenset(
-        {
-            "EMPTY_REQUEST",
-            "ESTIMATOR_UNAVAILABLE",
-            "ESTIMATOR_MALFORMED",
-            "SEMANTIC_VECTOR_UNAVAILABLE",
-            "ESTIMATOR_UNCERTAIN",
-            "NATIVE_SYMBOL_UNAVAILABLE",
-            "NATIVE_MALFORMED",
-            "NATIVE_ERROR",
-            "EXPRESSION_PROJECTION_UNAVAILABLE",
-            "ASYNC_KEY_UNAVAILABLE",
-            "ASYNC_KEY_VERSION_UNSUPPORTED",
-            "ASYNC_PAYLOAD_AUTH_FAILED",
-            "ASYNC_QUEUE_UNAVAILABLE",
-            "DEFERRED_ASYNC",
-        }
-    )
-    | ESTIMATOR_MALFORMED_SUBCODES
-    | SEMANTIC_NATIVE_ERROR_CODES
-)
+class _SyncProviderCall:
+    def __init__(self) -> None:
+        self.future: Future = Future()
+        self.lock = threading.Lock()
+        self.abandoned = False
+
+    def abandon(self) -> None:
+        with self.lock:
+            if self.abandoned:
+                return
+            self.abandoned = True
+            if self.future.done() and not self.future.cancelled():
+                if self.future.exception() is None:
+                    _discard_provider_result(self.future.result())
+            else:
+                self.future.cancel()
+
+    def complete(self, result: Any) -> None:
+        with self.lock:
+            if self.abandoned:
+                _discard_provider_result(result)
+            else:
+                self.future.set_result(result)
+
+
+class SemanticAppraisalRuntimeError(RuntimeError):
+    """Closed Host/Native appraisal fault that must not block normal reply."""
 
 
 class AstrEmbodimentPlugin(Star):
@@ -317,52 +189,42 @@ class AstrEmbodimentPlugin(Star):
         # Keep AstrBotConfig intact: its save methods are required for the
         # generated SeedCode to appear in the WebUI after reload.
         self.config = config if config is not None else AstrBotConfig()
-        self._config_values = dict(config or {})
+        self._config_values = dict(self.config)
+        self._caller_incarnation = secrets.token_hex(32)
         self._bridge = NativeBridge()
-        self._coordinator = GenesisCoordinator(
-            self._bridge,
-            transport_warning=self._emit_transport_failure_warning,
-        )
-        self._auxiliary_transport = AuxiliaryProviderTransport(
-            context=self.context,
-            configured_provider=self._configured_auxiliary_provider,
-            timeout_ms=self._semantic_estimator_timeout_ms,
-        )
-        self._semantic_outbox: SemanticOutbox | None = None
+        self._sync_provider_calls: set[_SyncProviderCall] = set()
+        self._sync_provider_lock = threading.Lock()
+        self._provider_closed = False
+        self._coordinator = GenesisCoordinator(self._bridge)
         self._health = None
+        self._clock = None
         self._revisions: dict[str, int] = {}
         self._turn_seq: dict[str, int] = {}
+        self._persona_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._coordinator._persona_locks = self._persona_locks
+        self._semantic_attempts: dict[str, str] = {}
+        self._semantic_attempt_order: deque[str] = deque(maxlen=256)
         self._pending: dict[str, dict[str, Any]] = {}
-        self._seed_receipts: dict[str, dict[str, Any]] = {}
-        # The fallback is only allowed to describe the host configuration as
-        # it existed when this plugin instance was created.  Later in-process
-        # mutations have no trustworthy user-save origin, so they must never
-        # be re-labelled as STARTUP_READ on an ordinary message turn.
-        self._seed_config_startup_observation_v1 = (
-            self._read_seed_config_observation_v1()
+        self._delivery_diagnostics: deque[dict[str, Any]] = deque(
+            maxlen=_DELIVERY_DIAGNOSTIC_LIMIT
         )
-        self._seed_config_startup_scopes_v1: set[tuple[str, str, str | None]] = set()
-        self._seed_config_package_epoch_v1_cached = (
-            self._compute_seed_config_package_epoch_v1()
+        self._seed_receipts: dict[str, dict[str, Any]] = {}
+        self._semantic_diagnostics: deque[dict[str, Any]] = deque(
+            maxlen=_DELIVERY_DIAGNOSTIC_LIMIT
         )
         self._injection_marker = "AstrEmbodiment Runtime Context"
         self._request_injected_attr = "_astrembodiment_runtime_injected_v1"
-        self._expression_injection_marker = "AE Affect Expression Context"
-        self._request_expression_attr = "_astrembodiment_expression_injected_v1"
-        self._request_semantic_record_attr = (
-            "_astrembodiment_semantic_observatory_record_v3"
-        )
 
     async def initialize(self) -> None:
+        data_dir = str(self._config_values.get("native_data_dir") or "")
+        if not data_dir:
+            try:
+                data_dir = str(StarTools.get_data_dir())
+            except Exception:  # noqa: BLE001 - static/fallback host
+                data_dir = "astrembodiment-data"
         try:
-            data_dir = self._runtime_data_dir()
             self._health = self._bridge.open(data_dir)
-        except PersonaGenesisError:
-            self._emit_observatory(self._failed_observatory("CONFIG_BLOCKED", "INPUT"))
-            logger.error("AstrEmbodiment runtime configuration blocked")
-            raise
         except NativeCoreUnavailable as exc:
-            self._emit_observatory(self._failed_observatory("NATIVE_ERROR", "INPUT"))
             logger.error("AstrEmbodiment native core unavailable: %s", exc)
             raise
         logger.info(
@@ -372,24 +234,26 @@ class AstrEmbodimentPlugin(Star):
             self._health.neuron_slots,
             self._health.status,
         )
-        self._semantic_outbox = SemanticOutbox(
-            runtime_data_dir=data_dir,
+        self._clock = EmbodimentClock(
             bridge=self._bridge,
-            transport=self._auxiliary_transport,
-            config=self._semantic_outbox_config(),
+            persona_locks=self._persona_locks,
+            config=self._config_value,
         )
-        started = await self._semantic_outbox.start()
-        self._coordinator.configure_semantic_outbox(self._semantic_outbox)
-        if not started:
-            logger.warning(
-                "AstrEmbodiment semantic async lane unavailable: code=%s",
-                self._semantic_outbox.disabled_code or "ASYNC_QUEUE_UNAVAILABLE",
-            )
+        if bool(self._config_value("embodiment_clock_enabled", True)):
+            await self._clock.start()
 
     async def terminate(self) -> None:
-        if self._semantic_outbox is not None:
-            await self._semantic_outbox.close()
-            self._semantic_outbox = None
+        # External synchronous methods cannot be forcibly killed. Abandon their
+        # results, retain their global slots until actual completion, and never
+        # wait indefinitely or consume AstrBot's shared default executor.
+        with self._sync_provider_lock:
+            self._provider_closed = True
+            calls = tuple(self._sync_provider_calls)
+        for call in calls:
+            call.abandon()
+        if self._clock is not None:
+            await self._clock.stop()
+            self._clock = None
         self._bridge.close()
         self._pending.clear()
         self._seed_receipts.clear()
@@ -412,7 +276,7 @@ class AstrEmbodimentPlugin(Star):
         ``ae_seed`` 指令查看；因此服务器没有 WebUI 时也能完成首次配置。
         """
         existing = str(self._config_value("seed_code", "") or "").strip()
-        if existing and not bool(getattr(self._bridge, "loaded", False)):
+        if existing:
             yield event.plain_result(f"SeedCode: {existing}")
             return
 
@@ -424,7 +288,7 @@ class AstrEmbodimentPlugin(Star):
                 _seq,
                 _turn_token,
                 _base_revision,
-            ) = await self._run_genesis(event, apply_stimulus=False)
+            ) = await self._run_genesis(event)
             genesis = decision.get("genesis")
             if not isinstance(genesis, Mapping):
                 raise PersonaGenesisError("原生创世回执不完整")
@@ -444,6 +308,7 @@ class AstrEmbodimentPlugin(Star):
             ):
                 raise PersonaGenesisError("原生创世回执身份不一致")
             self._seed_receipts[scope.persona_token] = dict(genesis)
+            await self._persist_seed(seed_code)
         except (PersonaCompilerMalformed, PersonaGenesisError) as exc:
             logger.error("AstrEmbodiment SeedCode generation failed: %s", exc)
             yield event.plain_result(f"SeedCode 生成失败：{exc}")
@@ -481,138 +346,17 @@ class AstrEmbodimentPlugin(Star):
             value = getattr(self.config, key, default)
         return default if value is None else value
 
-    def _observatory_enabled(self) -> bool:
-        """Only a native bool enables successful compact observatory output."""
-        return type(self._config_value("observatory_enabled", True)) is bool and bool(
-            self._config_value("observatory_enabled", True)
-        )
-
-    def _detailed_observatory_enabled(self) -> bool:
-        """Detailed logging is opt-in; truthy strings never broaden logging."""
-        value = self._config_value("node_observability_detailed_logging", False)
-        return type(value) is bool and value
-
     @staticmethod
-    def _path_is_within(candidate: Path, parent: Path) -> bool:
+    def _local_minute(value: object, default: int) -> int:
         try:
-            candidate.relative_to(parent)
-        except ValueError:
-            return False
-        return True
-
-    @classmethod
-    def _durable_directory(cls, raw: Any, *, label: str) -> Path:
-        value = str(raw or "").strip()
-        if not value:
-            raise PersonaGenesisError("CONFIG_BLOCKED")
-        try:
-            path = Path(value).expanduser()
-            if not path.is_absolute():
-                raise PersonaGenesisError("CONFIG_BLOCKED")
-            resolved = path.resolve(strict=False)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise PersonaGenesisError("CONFIG_BLOCKED") from exc
-        plugin_root = Path(__file__).resolve().parent
-        temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
-        if cls._path_is_within(resolved, plugin_root) or cls._path_is_within(
-            resolved, temp_root
-        ):
-            raise PersonaGenesisError("CONFIG_BLOCKED")
-        if (
-            label == "continuity_vault"
-            and resolved.name.casefold() != "continuity-vault"
-        ):
-            raise PersonaGenesisError("CONFIG_BLOCKED")
-        if label == "native_data" and resolved.name.casefold() == "continuity-vault":
-            raise PersonaGenesisError("CONFIG_BLOCKED")
-        return resolved
-
-    def _runtime_data_dir(self) -> str:
-        """Choose one durable Store/Vault root without version-derived paths."""
-        vault_raw = self._config_value("continuity_vault_dir", "")
-        if str(vault_raw or "").strip():
-            # NativeBridge derives ``continuity-vault`` below its data root, so
-            # a configured direct Vault is passed to it through its parent.
-            return str(
-                self._durable_directory(vault_raw, label="continuity_vault").parent
-            )
-
-        data_raw = self._config_value("native_data_dir", "")
-        if str(data_raw or "").strip():
-            return str(self._durable_directory(data_raw, label="native_data"))
-        try:
-            host_data_dir = StarTools.get_data_dir()
-        except Exception as exc:  # noqa: BLE001 - host adapter boundary
-            raise PersonaGenesisError("CONFIG_BLOCKED") from exc
-        return str(self._durable_directory(host_data_dir, label="native_data"))
+            hour, minute = str(value).split(":", 1)
+            result = int(hour) * 60 + int(minute)
+        except (TypeError, ValueError):
+            return default
+        return result if 0 <= result < 1_440 else default
 
     def _assistant_provider_id(self) -> str:
         return str(self._config_value("assistant_provider_id", "") or "").strip()
-
-    def _semantic_estimator_provider_id(self) -> str:
-        """Read the hidden legacy V3 provider key for migration compatibility."""
-
-        return str(
-            self._config_value("semantic_estimator_provider_id", "") or ""
-        ).strip()
-
-    def _configured_auxiliary_provider(self) -> tuple[str, str]:
-        """Select only the configured unified Provider source for this request."""
-
-        provider_id = self._assistant_provider_id()
-        if provider_id:
-            return provider_id, "CONFIGURED"
-        provider_id = self._semantic_estimator_provider_id()
-        if provider_id:
-            return provider_id, "LEGACY_COMPAT"
-        return "", "CURRENT_SESSION"
-
-    def _semantic_estimator_timeout_ms(self) -> int:
-        """Read the one shared, schema-bounded semantic operation budget."""
-
-        value = self._config_value(
-            "semantic_estimator_timeout_ms",
-            DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS,
-        )
-        return (
-            value
-            if type(value) is int and 1_000 <= value <= 15_000
-            else DEFAULT_SEMANTIC_ESTIMATOR_TIMEOUT_MS
-        )
-
-    def _semantic_outbox_config(self) -> SemanticOutboxConfig:
-        """Read the bounded async queue settings without reviving sync waits."""
-
-        def bounded(name: str, default: int, minimum: int, maximum: int) -> int:
-            value = self._config_value(name, default)
-            return (
-                value if type(value) is int and minimum <= value <= maximum else default
-            )
-
-        legacy_attempt_cap = 90_000
-        legacy_settings = self._config_values.get("model_settings")
-        legacy_raw = (
-            legacy_settings.get("semantic_estimator_timeout_ms")
-            if isinstance(legacy_settings, Mapping)
-            else self._config_values.get("semantic_estimator_timeout_ms")
-        )
-        if type(legacy_raw) is int and 5_000 <= legacy_raw <= 120_000:
-            legacy_attempt_cap = legacy_raw
-        return SemanticOutboxConfig(
-            sync_wait_ms=bounded("semantic_sync_wait_ms", 2_000, 250, 5_000),
-            job_ttl_ms=bounded("semantic_async_job_ttl_ms", 600_000, 60_000, 3_600_000),
-            total_budget_ms=bounded(
-                "semantic_async_total_budget_ms", 150_000, 10_000, 300_000
-            ),
-            provider_attempt_cap_ms=bounded(
-                "semantic_provider_attempt_cap_ms",
-                min(max(legacy_attempt_cap, 5_000), 120_000),
-                5_000,
-                120_000,
-            ),
-            worker_concurrency=bounded("semantic_worker_concurrency", 2, 1, 4),
-            lease_ms=bounded("semantic_job_lease_ms", 30_000, 10_000, 60_000),
-        )
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:
@@ -621,281 +365,347 @@ class AstrEmbodimentPlugin(Star):
             return await value
         return value
 
-    async def _llm_generate(
+    async def _genesis_generate(
         self,
         event: Any,
         *,
         prompt: str,
         system_prompt: str,
-        transport_context: RequestTransportContext | None = None,
-    ) -> str:
-        """Use one fixed, validated auxiliary Provider with no history leakage."""
-
-        own_context = transport_context is None
-        if transport_context is None:
-            transport_context = self._auxiliary_transport.open_request(
-                umo=getattr(event, "unified_msg_origin", None)
-            )
-            transport_context.bind_semantic_key(f"auxiliary:{id(event)}")
-        try:
-            result = await transport_context.generate(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                semantic_operation=False,
-            )
-            return result.text
-        finally:
-            if own_context:
-                transport_context.close()
-
-    async def _semantic_estimate_v3(
-        self,
-        event: Any,
-        request_mapping: Mapping[str, Any],
-        *,
-        transport_context: RequestTransportContext | None = None,
     ) -> Any:
-        """Adapt the V3-only provider mapping without history or tool leakage."""
+        """Call the configured compiler provider with an explicit fallback rule."""
+        provider_id = await self._semantic_provider_id(event)
+        return await self._auxiliary_generate(
+            chat_provider_id=provider_id,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            contexts=None,
+            tools=None,
+            temperature=0,
+        )
 
-        if type(request_mapping) is not dict or set(request_mapping) != {
-            "current_turn_text",
-            "system_prompt",
-            "structured_schema",
-            "input",
-        }:
-            raise ValueError("invalid semantic estimate request")
-        current_turn_text = request_mapping["current_turn_text"]
-        system_prompt = request_mapping["system_prompt"]
-        structured_schema = request_mapping["structured_schema"]
-        provider_input = request_mapping["input"]
-        if (
-            type(current_turn_text) is not str
-            or type(system_prompt) is not str
-            or system_prompt != SEMANTIC_ESTIMATE_V3_SYSTEM_PROMPT
-            or type(structured_schema) is not dict
-            or structured_schema != SEMANTIC_ESTIMATE_V3_STRUCTURED_SCHEMA
-            or type(provider_input) is not dict
-            or set(provider_input) != {"context_summary"}
-            or type(provider_input["context_summary"]) is not dict
-        ):
-            raise ValueError("invalid semantic estimate request")
+    async def _semantic_provider_id(self, event: Any) -> str:
+        def configured() -> tuple[str, str]:
+            for key, source in (
+                ("assistant_provider_id", "CONFIGURED"),
+                ("semantic_estimator_provider_id", "LEGACY_COMPAT"),
+            ):
+                value = self._config_value(key, "")
+                if value:
+                    if type(value) is not str:
+                        raise TypeError("invalid provider id")
+                    if value.strip():
+                        return value.strip(), source
+            return "", "CURRENT_SESSION"
 
+        transport = AuxiliaryProviderTransport(
+            context=self.context,
+            configured_provider=configured,
+            timeout_ms=lambda: 15_000,
+        )
+        request = transport.open_request(umo=getattr(event, "unified_msg_origin", None))
+        request.bind_semantic_key(f"typed-host:{id(event)}")
         try:
-            canonical_schema = json.dumps(
-                structured_schema,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
+            return (await request.resolve_binding()).provider_id
+        finally:
+            request.close()
+
+    @staticmethod
+    def _semantic_provider_digest(provider_id: str) -> str:
+        return hashlib.sha256(
+            b"astr-embodiment/semantic-provider-v1\0" + provider_id.encode("utf-8")
+        ).hexdigest()
+
+    def _semantic_daily_limit(self) -> int:
+        try:
+            value = int(
+                self._config_value("semantic_appraisal_token_daily_max", 16_384)
             )
         except (TypeError, ValueError):
-            raise ValueError("invalid semantic estimate request") from None
-        provider_system_prompt = (
-            f"{system_prompt}\n\n"
-            "Closed output schema (canonical JSON):\n"
-            f"{canonical_schema}\n"
-            "Return exactly one JSON object matching this closed schema."
-        )
-        own_context = transport_context is None
-        if transport_context is None:
-            transport_context = self._auxiliary_transport.open_request(
-                umo=getattr(event, "unified_msg_origin", None)
-            )
-            transport_context.bind_semantic_key(f"semantic:{id(event)}")
+            return 16_384
+        return value if 0 <= value <= 1_000_000 else 16_384
+
+    @staticmethod
+    def _semantic_lock_key(scope: ScopeTokens) -> tuple[str, str]:
+        return scope.bot_token, scope.persona_token
+
+    async def _semantic_native_call(self, scope: ScopeTokens, operation: Any) -> Any:
+        """Serialize only the short Native transaction, never Provider I/O."""
+
+        key = self._semantic_lock_key(scope)
+        lock = self._persona_locks.setdefault(key, asyncio.Lock())
         try:
-            transport_result = await transport_context.generate(
-                prompt=current_turn_text,
-                system_prompt=provider_system_prompt,
-                semantic_operation=True,
-            )
-        except AuxiliaryTransportError as exc:
-            raise SemanticEstimateError(
-                "ESTIMATOR_UNAVAILABLE",
-                transport_meta=exc.meta,
-            ) from None
+            await asyncio.wait_for(lock.acquire(), timeout=1.0)
+        except asyncio.TimeoutError as exc:
+            raise SemanticAppraisalRuntimeError(
+                "SEMANTIC_PERSONA_LOCK_TIMEOUT"
+            ) from exc
+        try:
+            return operation()
         finally:
-            if own_context:
-                transport_context.close()
+            lock.release()
 
-        completion_text = transport_result.text
-        try:
-            estimate = parse_estimator_output_v3(completion_text)
-        except SemanticEstimateError as exc:
-            malformed = SemanticEstimateError(
-                exc.code,
-                exc.subcode,
-                exc.diagnostic,
-                transport_meta=transport_result.meta,
-            )
-        else:
-            return type(estimate)(
-                dimensions=dict(estimate.dimensions),
-                schema=estimate.schema,
-                transport_meta=transport_result.meta,
-            )
-
-        if type(completion_text) is str:
-            try:
-                warning_payload: dict[str, Any] = {
-                    "return_type": "canonical_completion_text",
-                    "extraction_path": "canonical_text",
-                    "character_length": len(completion_text),
-                    "sha256": hashlib.sha256(
-                        completion_text.encode("utf-8")
-                    ).hexdigest(),
-                    "subcode": malformed.subcode or "JSON_DECODE",
-                    **transport_result.meta.as_json(),
-                }
-            except (TypeError, ValueError):
-                warning_payload = {
-                    "return_type": "canonical_completion_text",
-                    "extraction_path": "canonical_text",
-                    "character_length": None,
-                    "sha256": None,
-                    "subcode": "JSON_DECODE",
-                    **transport_result.meta.as_json(),
-                }
-
-        dimension_diagnostic = malformed.diagnostic_json()
-        if dimension_diagnostic is not None:
-            warning_payload["dimension_diagnostic"] = dimension_diagnostic
-        logger.warning(
-            json.dumps(
-                warning_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-        )
-        raise malformed
-
-    @staticmethod
-    def _seed_config_capability_v1(value: object) -> bool:
-        return (
-            type(value) is str
-            and len(value) == 64
-            and all(character in "0123456789abcdef" for character in value)
-        )
-
-    @staticmethod
-    def _compute_seed_config_package_epoch_v1() -> str | None:
-        """Hash the installed package identity, including the native bundle.
-
-        A release can be rebuilt or hot-fixed without changing its marketing
-        version.  The native mirror epoch therefore binds the actual package
-        inputs used at runtime rather than a long-lived ``1.0.0`` label.
-        Failure to read any mandatory identity input is fail-closed: Python
-        will defer reconciliation instead of inventing a stable epoch.
-        """
-        try:
-            root = Path(__file__).resolve().parent
-            required = (
-                root / "main.py",
-                root / "metadata.yaml",
-                root / "_conf_schema.json",
-                root / "astr_embodiment" / "bridge.py",
-            )
-            native_manifest = (
-                root / "astrembodiment_core" / "_bundled" / "manifest.json"
-            )
-            native_init_candidates = (
-                root / "astrembodiment_core" / "__init__.py",
-                root / "python" / "astrembodiment_core" / "__init__.py",
-            )
-            native_identity = (
-                native_manifest
-                if native_manifest.is_file()
-                else next(
-                    (path for path in native_init_candidates if path.is_file()), None
-                )
-            )
-            if native_identity is None:
-                return None
-            digest = hashlib.sha256()
-            for path in (*required, native_identity):
-                relative = path.relative_to(root).as_posix().encode("utf-8")
-                payload = path.read_bytes()
-                digest.update(len(relative).to_bytes(2, "big"))
-                digest.update(relative)
-                digest.update(len(payload).to_bytes(8, "big"))
-                digest.update(payload)
-            return _SEED_CONFIG_PACKAGE_EPOCH_PREFIX_V1 + digest.hexdigest()
-        except (OSError, RuntimeError, ValueError):
-            return None
-
-    def _seed_config_package_epoch_v1(self) -> str | None:
-        """Return the process-start build identity, or no authority epoch."""
-        return self._seed_config_package_epoch_v1_cached
-
-    def _seed_config_scope_payload_v1(
-        self, scope: ScopeTokens
-    ) -> dict[str, str | None]:
-        return {
-            "bot_token": scope.bot_token,
-            "persona_token": scope.persona_token,
-            "relation_token": scope.relation_token,
+    def _semantic_diagnostic(
+        self,
+        code: str,
+        *,
+        stage: str,
+        canonical_revision: int | None = None,
+        charged_tokens: int | None = None,
+        usage_known: bool | None = None,
+    ) -> None:
+        item: dict[str, Any] = {
+            "code": code[:64],
+            "stage": stage[:32],
+            "recorded_at_ms": int(time.time() * 1_000),
         }
+        if canonical_revision is not None:
+            item["canonical_revision"] = canonical_revision
+        if charged_tokens is not None:
+            item["charged_tokens"] = charged_tokens
+        if usage_known is not None:
+            item["usage_known"] = usage_known
+        self._semantic_diagnostics.append(item)
+
+    def _remember_semantic_attempt(self, event_key: str, state: str) -> bool:
+        """Return False when this process already started Provider for the event."""
+
+        if event_key in self._semantic_attempts:
+            return False
+        if len(self._semantic_attempt_order) == self._semantic_attempt_order.maxlen:
+            oldest = self._semantic_attempt_order.popleft()
+            self._semantic_attempts.pop(oldest, None)
+        self._semantic_attempt_order.append(event_key)
+        self._semantic_attempts[event_key] = state
+        return True
+
+    async def _settle_semantic_locked(
+        self, scope: ScopeTokens, payload: dict[str, Any]
+    ) -> Mapping[str, Any]:
+        result = await self._semantic_native_call(
+            scope, lambda: self._bridge.settle_semantic_appraisal_v1(payload)
+        )
+        if not isinstance(result, Mapping):
+            raise SemanticAppraisalRuntimeError("SEMANTIC_SETTLEMENT_INVALID")
+        return result
 
     @staticmethod
-    def _seed_config_scope_key_v1(scope: ScopeTokens) -> tuple[str, str, str | None]:
-        return (scope.bot_token, scope.persona_token, scope.relation_token)
-
-    def _read_seed_config_observation_v1(self) -> tuple[str, str | None, str | None]:
-        """Preserve explicit empty/missing/read-failed host states.
-
-        This routine intentionally reads the live AstrBot config rather than
-        the bootstrap cache. A stale process-local default must never turn a
-        user's clear action into a guessed native authority decision.
-        """
-        missing = object()
+    def _semantic_nonce(value: Any) -> str | None:
+        if not isinstance(value, str) or len(value) != 64:
+            return None
         try:
-            config = self.config
-            if isinstance(config, Mapping):
-                raw_seed = config.get("seed_code", missing)
-                raw_guard = config.get("seed_mirror_guard_v1", missing)
-            else:
-                getter = getattr(config, "get", None)
-                if not callable(getter):
-                    return "READ_FAILED", None, None
-                raw_seed = getter("seed_code", missing)
-                raw_guard = getter("seed_mirror_guard_v1", missing)
-        except Exception:
-            return "READ_FAILED", None, None
+            decoded = bytes.fromhex(value)
+        except ValueError:
+            return None
+        return value if len(decoded) == 32 and any(decoded) else None
 
-        # The hidden schema field starts as an explicit empty-string default.
-        # It means “no native mirror has been written yet”, not a malformed
-        # guard and certainly not evidence for a clear action. Any non-empty
-        # malformed value remains a read failure and cannot create intent.
-        if raw_guard is missing or raw_guard == "":
-            mirror_guard = None
-        elif not self._seed_config_capability_v1(raw_guard):
-            return "READ_FAILED", None, None
-        else:
-            mirror_guard = raw_guard
-        if raw_seed is missing:
-            return "MISSING", None, mirror_guard
-        if type(raw_seed) is not str:
-            return "READ_FAILED", None, None
-        seed_code = raw_seed.strip()
-        if seed_code:
-            return "PRESENT_NONEMPTY", seed_code, mirror_guard
-        return "PRESENT_EMPTY", None, mirror_guard
+    async def _settle_semantic_exact(
+        self, scope: ScopeTokens, payload: dict[str, Any]
+    ) -> Mapping[str, Any]:
+        """Submit one immutable settlement payload at most twice."""
 
-    async def _persist_seed_mirror_v1(
+        first_error: BaseException | None = None
+        for attempt in range(2):
+            try:
+                return await self._settle_semantic_locked(scope, payload)
+            except asyncio.CancelledError:
+                raise
+            except SemanticAppraisalRetryExpiredOrUnknown:
+                raise
+            except Exception as exc:
+                if attempt == 0:
+                    first_error = exc
+                    self._semantic_diagnostic("SEMANTIC_SETTLE_RETRY", stage="settle")
+                    continue
+                self._semantic_diagnostic("SEMANTIC_SETTLE_FAILED", stage="settle")
+                logger.warning(
+                    "AstrEmbodiment semantic settlement failed (%s/%s)",
+                    type(first_error).__name__,
+                    type(exc).__name__,
+                )
+                raise SemanticAppraisalRuntimeError(
+                    "SEMANTIC_SETTLEMENT_FAILED"
+                ) from exc
+        raise SemanticAppraisalRuntimeError("SEMANTIC_SETTLEMENT_FAILED")
+
+    async def _shield_semantic_settlement(
+        self, scope: ScopeTokens, payload: dict[str, Any]
+    ) -> Mapping[str, Any]:
+        task = asyncio.create_task(self._settle_semantic_exact(scope, payload))
+        return await asyncio.shield(task)
+
+    async def _compensate_semantic_claim(
         self,
         *,
-        seed_code: str,
-        mirror_guard: str,
+        scope: ScopeTokens,
+        nonce: str,
+        outcome: str = "provider_error",
+    ) -> Mapping[str, Any]:
+        payload = {
+            "schema_version": 1,
+            "scope": ScopeTokens(
+                scope.bot_token, scope.persona_token, scope.session_token
+            ).scope_json(),
+            "request_nonce_digest": nonce,
+            "outcome": outcome,
+            "provider_usage": {"known": False, "used_tokens": None},
+            "proposal": None,
+        }
+        return await self._shield_semantic_settlement(scope, payload)
+
+    async def _reject_semantic_begin(
+        self,
+        *,
+        scope: ScopeTokens,
+        status: Any,
+        settlement_nonce: str | None,
+        code: str,
+        stage: str,
     ) -> None:
-        """Persist native repair values together in one AstrBot save call."""
-        if not seed_code or not self._seed_config_capability_v1(mirror_guard):
-            raise PersonaGenesisError("SEED_CONFIG_SCHEMA_INVALID")
+        """Full-charge a possibly created claim before rejecting its receipt."""
+
+        self._semantic_diagnostic(code, stage=stage)
+        if settlement_nonce is not None:
+            try:
+                await self._compensate_semantic_claim(
+                    scope=scope,
+                    nonce=settlement_nonce,
+                    outcome="malformed",
+                )
+            except BaseException as exc:
+                self._semantic_diagnostic(
+                    "SEMANTIC_BEGIN_COMPENSATION_FAILED", stage=stage
+                )
+                logger.warning(
+                    "AstrEmbodiment begin compensation failed: %s",
+                    type(exc).__name__,
+                )
+        elif status == "claimed":
+            # A current Native build cannot produce this state: the independent
+            # settlement handle is constructed in the same typed begin result.
+            self._semantic_diagnostic("SEMANTIC_BEGIN_HANDLE_MISSING", stage=stage)
+        raise SemanticAppraisalRuntimeError(code)
+
+    async def _semantic_generate(
+        self,
+        *,
+        provider_id: str,
+        prompt: str,
+        system_prompt: str,
+    ) -> Any:
+        return await self._auxiliary_generate(
+            chat_provider_id=provider_id,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            contexts=None,
+            tools=None,
+            temperature=0,
+            max_tokens=512,
+        )
+
+    async def _auxiliary_generate(self, **kwargs: Any) -> Any:
+        """Bound synchronous or async host calls without discarding usage."""
+        if self._provider_closed:
+            raise RuntimeError("PROVIDER_TRANSPORT_CLOSED")
+        generate = getattr(self.context, "llm_generate", None)
+        if not callable(generate):
+            raise RuntimeError("HOST_API_UNAVAILABLE")
+
+        async def invoke() -> Any:
+            if inspect.iscoroutinefunction(generate):
+                result = generate(**kwargs)
+            else:
+                result = await self._sync_provider_generate(generate, kwargs)
+            return await self._maybe_await(result)
+
+        try:
+            return await asyncio.wait_for(invoke(), timeout=15.0)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            raise TimeoutError("PROVIDER_CALL_TIMEOUT") from None
+        except Exception:
+            raise RuntimeError("PROVIDER_CALL_FAILED") from None
+
+    async def _sync_provider_generate(
+        self, generate: Any, kwargs: dict[str, Any]
+    ) -> Any:
+        call = _SyncProviderCall()
+        context = contextvars.copy_context()
+        acquired_slots = _SYNC_PROVIDER_SLOTS
+        with self._sync_provider_lock:
+            if self._provider_closed or not acquired_slots.acquire(blocking=False):
+                raise RuntimeError("PROVIDER_CALL_IN_PROGRESS")
+            self._sync_provider_calls.add(call)
+
+        def worker() -> None:
+            try:
+                result = context.run(generate, **kwargs)
+                call.complete(result)
+            except BaseException as exc:
+                with call.lock:
+                    if not call.abandoned:
+                        call.future.set_exception(
+                            exc
+                            if isinstance(
+                                exc,
+                                (asyncio.CancelledError, KeyboardInterrupt, SystemExit),
+                            )
+                            else RuntimeError("PROVIDER_CALL_FAILED")
+                        )
+            finally:
+                with self._sync_provider_lock:
+                    self._sync_provider_calls.discard(call)
+                acquired_slots.release()
+
+        try:
+            threading.Thread(target=worker, name="ae-provider", daemon=True).start()
+        except BaseException:
+            with self._sync_provider_lock:
+                self._sync_provider_calls.discard(call)
+            acquired_slots.release()
+            raise
+        try:
+            return await asyncio.shield(asyncio.wrap_future(call.future))
+        except BaseException:
+            call.abandon()
+            raise
+
+    @staticmethod
+    def _semantic_response_parts(
+        response: Any,
+    ) -> tuple[str | None, dict[str, Any]]:
+        completion = (
+            response.get("completion_text")
+            if isinstance(response, Mapping)
+            else getattr(response, "completion_text", None)
+        )
+        usage = (
+            response.get("usage")
+            if isinstance(response, Mapping)
+            else getattr(response, "usage", None)
+        )
+        total = (
+            usage.get("total")
+            if isinstance(usage, Mapping)
+            else getattr(usage, "total", None)
+        )
+        if (
+            isinstance(total, bool)
+            or not isinstance(total, int)
+            or not 0 <= total <= 0xFFFF_FFFF
+        ):
+            return completion, {"known": False, "used_tokens": None}
+        return completion, {"known": True, "used_tokens": total}
+
+    async def _persist_seed(self, seed_code: str) -> None:
+        """Persist the latest native SeedCode through AstrBotConfig."""
+        seed_code = str(seed_code or "").strip()
+        if not seed_code:
+            return
         missing = object()
-        previous_seed = self.config.get("seed_code", missing)
-        previous_guard = self.config.get("seed_mirror_guard_v1", missing)
-        previous_cached_seed = self._config_values.get("seed_code", missing)
-        previous_cached_guard = self._config_values.get("seed_mirror_guard_v1", missing)
+        previous_config = self.config.get("seed_code", missing)
+        previous_cached = self._config_values.get("seed_code", missing)
         self.config["seed_code"] = seed_code
-        self.config["seed_mirror_guard_v1"] = mirror_guard
         try:
             save_async = getattr(self.config, "save_config_async", None)
             if callable(save_async):
@@ -906,208 +716,16 @@ class AstrEmbodimentPlugin(Star):
                     raise TypeError("AstrBot 配置不支持保存 SeedCode")
                 await self._maybe_await(save())
         except BaseException:
-            for key, previous in (
-                ("seed_code", previous_seed),
-                ("seed_mirror_guard_v1", previous_guard),
-            ):
-                if previous is missing:
-                    self.config.pop(key, None)
-                else:
-                    self.config[key] = previous
-            for key, previous in (
-                ("seed_code", previous_cached_seed),
-                ("seed_mirror_guard_v1", previous_cached_guard),
-            ):
-                if previous is missing:
-                    self._config_values.pop(key, None)
-                else:
-                    self._config_values[key] = previous
+            if previous_config is missing:
+                self.config.pop("seed_code", None)
+            else:
+                self.config["seed_code"] = previous_config
+            if previous_cached is missing:
+                self._config_values.pop("seed_code", None)
+            else:
+                self._config_values["seed_code"] = previous_cached
             raise
         self._config_values["seed_code"] = seed_code
-        self._config_values["seed_mirror_guard_v1"] = mirror_guard
-
-    def _forget_seed_clear_scope_v1(self, scope: ScopeTokens) -> None:
-        """Drop only process-local mirrors after native authority switches."""
-        self._coordinator.forget_scope(scope)
-        self._revisions.pop(scope.persona_token, None)
-        self._seed_receipts.pop(scope.persona_token, None)
-        self._turn_seq.pop(scope.session_token, None)
-        for turn_token, pending in tuple(self._pending.items()):
-            if isinstance(pending, Mapping) and pending.get("scope") == scope:
-                self._pending.pop(turn_token, None)
-
-    async def _scrub_async_outbox_after_rebirth_v1(
-        self,
-        scope: ScopeTokens,
-        old_incarnation_id: str | None,
-    ) -> None:
-        """Scrub durable old-generation jobs before clearing local mirrors."""
-
-        outbox = self._semantic_outbox
-        if outbox is None:
-            return
-        try:
-            await outbox.cancel_rebirth(
-                scope=scope,
-                old_incarnation_id=old_incarnation_id,
-            )
-        except Exception:  # noqa: BLE001 - rebirth itself is already native-final
-            disable = getattr(outbox, "disable", None)
-            if callable(disable):
-                disable("ASYNC_QUEUE_UNAVAILABLE")
-            logger.warning(
-                "AstrEmbodiment semantic async lane disabled after rebirth scrub"
-            )
-
-    def _scrub_async_outbox_after_rebirth_now_v1(
-        self,
-        scope: ScopeTokens,
-        old_incarnation_id: str | None,
-    ) -> None:
-        """Use the synchronous transaction form for the explicit command path."""
-
-        outbox = self._semantic_outbox
-        if outbox is None:
-            return
-        cancel_now = getattr(outbox, "cancel_rebirth_now", None)
-        if not callable(cancel_now):
-            return
-        try:
-            cancel_now(scope=scope, old_incarnation_id=old_incarnation_id)
-        except Exception:  # noqa: BLE001 - native rebirth must not be rolled back
-            disable = getattr(outbox, "disable", None)
-            if callable(disable):
-                disable("ASYNC_QUEUE_UNAVAILABLE")
-            logger.warning(
-                "AstrEmbodiment semantic async lane disabled after rebirth scrub"
-            )
-
-    async def _consume_seed_config_startup_v1(
-        self,
-        scope: ScopeTokens,
-    ) -> dict[str, Any] | None:
-        """Use the persisted startup snapshot at most once per native scope."""
-        key = self._seed_config_scope_key_v1(scope)
-        if key in self._seed_config_startup_scopes_v1:
-            return None
-        # Consume before awaiting native work. A failure is deliberately not
-        # retried as a fresh STARTUP_READ on later ordinary messages.
-        self._seed_config_startup_scopes_v1.add(key)
-        return await self._reconcile_seed_config_v1(
-            scope,
-            origin="STARTUP_READ",
-            observation_override=self._seed_config_startup_observation_v1,
-        )
-
-    async def _reconcile_seed_config_v1(
-        self,
-        scope: ScopeTokens,
-        *,
-        origin: str,
-        previous_observation: str | None = None,
-        host_config_revision: int = 0,
-        observation_override: tuple[str, str | None, str | None] | None = None,
-    ) -> dict[str, Any]:
-        """Bridge a live config observation without manufacturing authority.
-
-        All intent, authority fences, consumption and child creation remain in
-        Rust. On host-save failure the native mirror intentionally stays
-        pending; this method never rolls the native generation back.
-        """
-        previous_receipt = self._seed_receipts.get(scope.persona_token)
-        previous_incarnation = (
-            previous_receipt.get("incarnation_id")
-            if isinstance(previous_receipt, Mapping)
-            else None
-        )
-        if type(previous_incarnation) is not str or not previous_incarnation:
-            previous_incarnation = None
-        observation, seed_code, mirror_guard = (
-            observation_override
-            if observation_override is not None
-            else self._read_seed_config_observation_v1()
-        )
-        package_epoch = self._seed_config_package_epoch_v1()
-        if package_epoch is None:
-            logger.warning(
-                "AstrEmbodiment seed config deferred: package epoch unavailable"
-            )
-            return {
-                "schema": "astrembodiment.seed-config-result.v1",
-                "state": "DEFERRED",
-                "writeback": None,
-                "before_revision": None,
-                "after_revision": None,
-                "reason": "SEED_CONFIG_OBSERVATION_DEFERRED",
-            }
-        request: dict[str, Any] = {
-            "schema": _SEED_CONFIG_OBSERVATION_SCHEMA_V1,
-            "scope": self._seed_config_scope_payload_v1(scope),
-            "observation": observation,
-            "origin": origin,
-            "previous_observation": previous_observation,
-            "package_epoch": package_epoch,
-            "config_schema_version": _SEED_CONFIG_SCHEMA_VERSION_V1,
-            "host_config_revision": host_config_revision,
-        }
-        if seed_code is not None:
-            request["seed_code"] = seed_code
-        if mirror_guard is not None:
-            request["mirror_guard"] = mirror_guard
-        result = self._bridge.reconcile_seed_config_v1(request)
-        if not isinstance(result, Mapping):
-            raise PersonaGenesisError("SEED_CLEAR_UNKNOWN")
-
-        writeback = result.get("writeback")
-        if isinstance(writeback, Mapping):
-            next_seed = writeback.get("seed_code")
-            next_guard = writeback.get("mirror_guard")
-            writeback_token = writeback.get("writeback_token")
-            if (
-                type(next_seed) is not str
-                or not next_seed
-                or not self._seed_config_capability_v1(next_guard)
-                or not self._seed_config_capability_v1(writeback_token)
-            ):
-                raise PersonaGenesisError("SEED_CLEAR_UNKNOWN")
-            try:
-                await self._persist_seed_mirror_v1(
-                    seed_code=next_seed,
-                    mirror_guard=next_guard,
-                )
-            except Exception:
-                # The native authority is intentionally not rolled back. Do
-                # not interpolate the exception: it could contain host config
-                # data or one of the immediate raw writeback values.
-                logger.warning(
-                    "AstrEmbodiment seed config writeback pending: state=%s",
-                    result.get("state", "UNKNOWN"),
-                )
-                return dict(result)
-            ack = self._bridge.ack_seed_config_writeback_v1(
-                {
-                    "schema": _SEED_CONFIG_WRITEBACK_ACK_SCHEMA_V1,
-                    "scope": self._seed_config_scope_payload_v1(scope),
-                    "writeback_token": writeback_token,
-                    "write_succeeded": True,
-                    "host_config_revision": host_config_revision,
-                }
-            )
-            if not isinstance(ack, Mapping) or ack.get("state") not in {
-                "MIRROR_ACTIVE",
-                "REPLAYED",
-            }:
-                logger.warning(
-                    "AstrEmbodiment seed config mirror acknowledgement stale"
-                )
-
-        if result.get("state") in {"REBIRTH_COMMITTED", "REBIRTH_REPLAYED"}:
-            await self._scrub_async_outbox_after_rebirth_v1(
-                scope,
-                previous_incarnation,
-            )
-            self._forget_seed_clear_scope_v1(scope)
-        return dict(result)
 
     async def _stop_genesis_turn(self, event: Any, detail: str) -> None:
         """Stop the host LLM lane and report why no unseeded reply was allowed."""
@@ -1136,412 +754,12 @@ class AstrEmbodimentPlugin(Star):
             return 0.0
         return number / 1_000_000
 
-    # ------------------------------------------------------------ observatory
-
-    @staticmethod
-    def _closed_int(
-        value: Any,
-        *,
-        minimum: int,
-        maximum: int,
-    ) -> int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError("integer required")
-        if value < minimum or value > maximum:
-            raise ValueError("integer outside closed range")
-        return value
-
-    @classmethod
-    def _closed_fxp6_map(
-        cls,
-        value: Any,
-        *,
-        names: tuple[str, ...],
-        minimum: int,
-        maximum: int,
-        optional: bool = False,
-    ) -> dict[str, int] | None:
-        if value is None and optional:
-            return None
-        if not isinstance(value, Mapping) or set(value) != set(names):
-            raise ValueError("closed scalar map required")
-        return {
-            name: cls._closed_int(value[name], minimum=minimum, maximum=maximum)
-            for name in names
-        }
-
-    @staticmethod
-    def _closed_choice(value: Any, allowed: set[str]) -> str:
-        if type(value) is not str or value not in allowed:
-            raise ValueError("closed enum required")
-        return value
-
-    @classmethod
-    def _closed_observatory_record(cls, outcome: Mapping[str, Any]) -> dict[str, Any]:
-        expected = {
-            "status",
-            "code",
-            "stage",
-            "commit_state",
-            "values_state",
-            "dimensions_fxp6",
-            "estimator_confidence_fxp6",
-            "dimension_confidence_fxp6",
-            "base_revision",
-            "revision",
-            "deduplicated",
-            "receipt_status",
-            "calculation_state",
-            "native_calculation",
-            "expression_state",
-            "expression_profile_fxp6",
-        }
-        if set(outcome) != expected:
-            raise ValueError("unexpected observatory field")
-
-        status = cls._closed_choice(outcome.get("status"), {"SUCCESS", "FAILED"})
-        code = cls._closed_choice(outcome.get("code"), _OBSERVATORY_CODES)
-        stage = cls._closed_choice(outcome.get("stage"), _OBSERVATORY_STAGES)
-        commit_state = cls._closed_choice(
-            outcome.get("commit_state"), _OBSERVATORY_COMMIT_STATES
-        )
-        values_state = cls._closed_choice(
-            outcome.get("values_state"), _OBSERVATORY_VALUES_STATES
-        )
-        dimensions = cls._closed_fxp6_map(
-            outcome.get("dimensions_fxp6"),
-            names=_OBSERVATORY_DIMENSIONS,
-            minimum=0,
-            maximum=1_000_000,
-            optional=values_state == "UNAVAILABLE",
-        )
-        if dimensions is None and values_state != "UNAVAILABLE":
-            raise ValueError("semantic values required")
-        estimator_confidence = outcome.get("estimator_confidence_fxp6")
-        if estimator_confidence is not None:
-            estimator_confidence = cls._closed_int(
-                estimator_confidence, minimum=0, maximum=1_000_000
-            )
-        elif values_state != "UNAVAILABLE":
-            raise ValueError("estimator confidence required")
-        dimension_confidence = cls._closed_fxp6_map(
-            outcome.get("dimension_confidence_fxp6"),
-            names=_OBSERVATORY_DIMENSIONS,
-            minimum=0,
-            maximum=1_000_000,
-            optional=True,
-        )
-
-        def optional_revision(name: str) -> int | None:
-            value = outcome.get(name)
-            if value is None:
-                return None
-            return cls._closed_int(value, minimum=0, maximum=(2**64) - 1)
-
-        base_revision = optional_revision("base_revision")
-        revision = optional_revision("revision")
-        deduplicated = outcome.get("deduplicated")
-        if type(deduplicated) is not bool:
-            raise ValueError("deduplicated must be bool")
-        receipt_status = cls._closed_choice(
-            outcome.get("receipt_status"),
-            {"committed", "unavailable", "not_attempted", "rejected"},
-        )
-        calculation_state = cls._closed_choice(
-            outcome.get("calculation_state"), _OBSERVATORY_CALCULATION_STATES
-        )
-        raw_calculation = outcome.get("native_calculation")
-        if calculation_state == "CONFIRMED":
-            if receipt_status != "committed" or not isinstance(
-                raw_calculation, Mapping
-            ):
-                raise ValueError("confirmed calculation requires committed receipt")
-            expected_calculation = {
-                "state_changed",
-                "active_nodes",
-                "active_edges",
-                "residuals_fxp6",
-            }
-            if set(raw_calculation) != expected_calculation:
-                raise ValueError("unexpected native calculation field")
-            state_changed = raw_calculation.get("state_changed")
-            if type(state_changed) is not bool:
-                raise ValueError("state_changed must be bool")
-            native_calculation: dict[str, Any] | None = {
-                "state_changed": state_changed,
-                "active_nodes": cls._closed_int(
-                    raw_calculation.get("active_nodes"),
-                    minimum=0,
-                    maximum=(2**32) - 1,
-                ),
-                "active_edges": cls._closed_int(
-                    raw_calculation.get("active_edges"),
-                    minimum=0,
-                    maximum=(2**32) - 1,
-                ),
-                "residuals_fxp6": cls._closed_fxp6_map(
-                    raw_calculation.get("residuals_fxp6"),
-                    names=_OBSERVATORY_RESIDUALS,
-                    minimum=-(2**63),
-                    maximum=(2**63) - 1,
-                ),
-            }
-        else:
-            if raw_calculation is not None:
-                raise ValueError("unconfirmed calculation must be absent")
-            native_calculation = None
-
-        expression_state = cls._closed_choice(
-            outcome.get("expression_state"), _OBSERVATORY_EXPRESSION_STATES
-        )
-        expression_profile = cls._closed_fxp6_map(
-            outcome.get("expression_profile_fxp6"),
-            names=_OBSERVATORY_EXPRESSION_PROFILE,
-            minimum=0,
-            maximum=1_000_000,
-            optional=True,
-        )
-        if expression_state == "APPLIED" and expression_profile is None:
-            raise ValueError("applied expression requires profile")
-        if expression_state in {"NOT_ATTEMPTED", "UNAVAILABLE", "REJECTED"} and (
-            expression_profile is not None
-        ):
-            raise ValueError("unapplied expression profile is forbidden")
-
-        return {
-            "schema": _OBSERVATORY_SCHEMA,
-            "status": status,
-            "code": code,
-            "stage": stage,
-            "commit_state": commit_state,
-            "values_state": values_state,
-            "fxp_scale": 1_000_000,
-            "dimensions_fxp6": dimensions,
-            "estimator_confidence_fxp6": estimator_confidence,
-            "dimension_confidence_fxp6": dimension_confidence,
-            "base_revision": base_revision,
-            "revision": revision,
-            "deduplicated": deduplicated,
-            "receipt_status": receipt_status,
-            "calculation_state": calculation_state,
-            "native_calculation": native_calculation,
-            "expression_state": expression_state,
-            "expression_profile_fxp6": expression_profile,
-        }
-
-    @staticmethod
-    def _failed_observatory(code: str, stage: str) -> dict[str, Any]:
-        if code not in _OBSERVATORY_CODES:
-            code = "INTERNAL"
-        if stage not in _OBSERVATORY_STAGES:
-            stage = "INTERNAL"
-        return {
-            "status": "FAILED",
-            "code": code,
-            "stage": stage,
-            "commit_state": "NOT_ATTEMPTED",
-            "values_state": "UNAVAILABLE",
-            "dimensions_fxp6": None,
-            "estimator_confidence_fxp6": None,
-            "dimension_confidence_fxp6": None,
-            "base_revision": None,
-            "revision": None,
-            "deduplicated": False,
-            "receipt_status": "unavailable",
-            "calculation_state": "NOT_ATTEMPTED",
-            "native_calculation": None,
-            "expression_state": "UNAVAILABLE",
-            "expression_profile_fxp6": None,
-        }
-
-    @staticmethod
-    def _observatory_scalar(value: int | None) -> str:
-        return "不可用" if value is None else str(value)
-
-    @classmethod
-    def _compact_observatory_message(cls, record: Mapping[str, Any]) -> str:
-        dimensions = record["dimensions_fxp6"]
-        dimension_text = ",".join(
-            f"{name}={cls._observatory_scalar(None if dimensions is None else dimensions[name])}"
-            for name in _OBSERVATORY_DIMENSIONS
-        )
-        if record["status"] == "SUCCESS":
-            return f"运算已完成｜十五维：{dimension_text}"
-
-        native_calculation = record["native_calculation"]
-        if native_calculation is None:
-            active_nodes = None
-            active_edges = None
-            residuals = None
-        else:
-            active_nodes = native_calculation["active_nodes"]
-            active_edges = native_calculation["active_edges"]
-            residuals = native_calculation["residuals_fxp6"]
-        residual_text = ",".join(
-            f"{name}={cls._observatory_scalar(None if residuals is None else residuals[name])}"
-            for name in _OBSERVATORY_RESIDUALS
-        )
-        expression_profile = record["expression_profile_fxp6"]
-        expression_suffix = ""
-        if expression_profile is not None:
-            expression_suffix = (
-                "["
-                + ",".join(
-                    f"{name}={expression_profile[name]}"
-                    for name in _OBSERVATORY_EXPRESSION_PROFILE
-                )
-                + "]"
-            )
-        message = (
-            f"运算失败｜失败码={record['code']}｜阶段={record['stage']}"
-            f"｜十五维：{dimension_text}"
-            f"｜confidence={cls._observatory_scalar(record['estimator_confidence_fxp6'])}"
-            f"｜base_revision={cls._observatory_scalar(record['base_revision'])}"
-            f"｜revision={cls._observatory_scalar(record['revision'])}"
-            f"｜receipt={record['receipt_status']}"
-            f"｜deduplicated={str(record['deduplicated']).lower()}"
-            f"｜active_nodes={cls._observatory_scalar(active_nodes)}"
-            f"｜active_edges={cls._observatory_scalar(active_edges)}"
-            f"｜residuals：{residual_text}"
-            f"｜expression={record['expression_state']}{expression_suffix}"
-            f"｜status={record['status']}｜commit_state={record['commit_state']}"
-            f"｜values_state={record['values_state']}"
-        )
-        if record["code"] == "EMPTY_REQUEST":
-            message += "｜原因=EMPTY_REQUEST"
-        return message
-
-    def _emit_observatory(self, outcome: Mapping[str, Any]) -> dict[str, Any]:
-        """Emit only a closed, aggregate observatory projection.
-
-        The formatter is intentionally a second fail-closed boundary: it never
-        serializes input mappings, receipts, exceptions, identities, or raw
-        diagnostics.  A formatting failure produces a fixed safe failure
-        record instead of suppressing the warning.
-        """
-        try:
-            record = self._closed_observatory_record(outcome)
-        except (KeyError, TypeError, ValueError):
-            record = self._closed_observatory_record(
-                self._failed_observatory("OBSERVATORY_FORMATTER_FAILED", "INTERNAL")
-            )
-
-        failed = record["status"] != "SUCCESS"
-        if self._detailed_observatory_enabled():
-            try:
-                message = _OBSERVATORY_PREFIX + json.dumps(
-                    record,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
-            except (TypeError, ValueError):
-                record = self._closed_observatory_record(
-                    self._failed_observatory("OBSERVATORY_FORMATTER_FAILED", "INTERNAL")
-                )
-                failed = True
-                message = _OBSERVATORY_PREFIX + json.dumps(
-                    record,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
-            if failed:
-                logger.warning(message)
-            else:
-                logger.info(message)
-        elif failed:
-            logger.warning(self._compact_observatory_message(record))
-        elif self._observatory_enabled():
-            logger.info(self._compact_observatory_message(record))
-        return record
-
-    @staticmethod
-    def _aggregate_context_metadata(context_summary: Mapping[str, Any] | None) -> str:
-        """Format only the sealed aggregate context accepted from Rust.
-
-        The exact key set intentionally excludes raw dialogue, entities,
-        provider/platform metadata, paths, and projection state bytes.  A
-        malformed result stops the request before any host prompt mutation.
-        """
-        if context_summary is None:
-            return ""
-        expected_keys = {
-            "schema",
-            "summary_revision",
-            "source_continuum_revision",
-            "dimensions_ema_fxp6",
-            "unresolved_boundary",
-            "unresolved_repair",
-            "repetition_count",
-            "delivery_outcome",
-            "summary_digest",
-        }
-        if set(context_summary) != expected_keys:
-            raise PersonaGenesisError("原生上下文摘要包含未授权字段")
-        if context_summary.get("schema") != "astrembodiment.context-summary.v1":
-            raise PersonaGenesisError("原生上下文摘要模式无效")
-
-        def positive_int(value: Any) -> int:
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise PersonaGenesisError("原生上下文摘要整数无效")
-            return value
-
-        summary_revision = positive_int(context_summary.get("summary_revision"))
-        source_revision = positive_int(context_summary.get("source_continuum_revision"))
-        repetition_count = positive_int(context_summary.get("repetition_count"))
-        dimensions = context_summary.get("dimensions_ema_fxp6")
-        if (
-            not isinstance(dimensions, list)
-            or len(dimensions) != 15
-            or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 0
-                or value > 1_000_000
-                for value in dimensions
-            )
-        ):
-            raise PersonaGenesisError("原生上下文摘要维度无效")
-        unresolved_boundary = context_summary.get("unresolved_boundary")
-        unresolved_repair = context_summary.get("unresolved_repair")
-        if not isinstance(unresolved_boundary, bool) or not isinstance(
-            unresolved_repair, bool
-        ):
-            raise PersonaGenesisError("原生上下文摘要标记无效")
-        delivery_outcome = context_summary.get("delivery_outcome")
-        if delivery_outcome not in {"pending", "delivered", "failed"}:
-            raise PersonaGenesisError("原生上下文摘要投递状态无效")
-        summary_digest = context_summary.get("summary_digest")
-        if not isinstance(summary_digest, str) or len(summary_digest) != 64:
-            raise PersonaGenesisError("原生上下文摘要摘要无效")
-        try:
-            if len(bytes.fromhex(summary_digest)) != 32:
-                raise ValueError("digest length")
-        except ValueError as exc:
-            raise PersonaGenesisError("原生上下文摘要摘要无效") from exc
-
-        values = ",".join(f"{value / 1_000_000:.3f}" for value in dimensions)
-        flags = (
-            f"boundary={str(unresolved_boundary).lower()},"
-            f"repair={str(unresolved_repair).lower()},"
-            f"delivery={delivery_outcome}"
-        )
-        return (
-            f"summary_revision={summary_revision}; "
-            f"source_revision={source_revision}; "
-            f"repetition_count={repetition_count}; "
-            f"dimensions_ema={values}; "
-            f"flags={flags}; "
-            f"summary_digest={summary_digest}"
-        )
-
     def _inject_request(
         self,
         request: ProviderRequest,
         seed_code: str,
         contract: Mapping[str, Any] | None,
-        context_summary: Mapping[str, Any] | None = None,
+        reply_affect: Mapping[str, Any] | None,
     ) -> None:
         """Append one bounded, trusted runtime context to this LLM request."""
         seed_code = str(seed_code or "").strip()
@@ -1550,7 +768,6 @@ class AstrEmbodimentPlugin(Star):
             return
         if bool(getattr(request, self._request_injected_attr, False)):
             return
-
         current = str(getattr(request, "system_prompt", "") or "")
         if contract is None:
             contract = {}
@@ -1580,10 +797,33 @@ class AstrEmbodimentPlugin(Star):
                 "must_not_seek_reassurance",
             )
         )
-        aggregate_context = self._aggregate_context_metadata(context_summary)
-        aggregate_context_line = (
-            f"aggregate_context: {aggregate_context}\n" if aggregate_context else ""
-        )
+        affect_line = "reply_affect=unavailable"
+        if isinstance(reply_affect, Mapping):
+            means = reply_affect.get("region_mean_fxp6")
+            deltas = reply_affect.get("region_delta_fxp6")
+            trend = reply_affect.get("trend")
+            semantic_revision = reply_affect.get("semantic_revision")
+            personality_revision = reply_affect.get("personality_revision")
+            confidence = reply_affect.get("confidence_fxp6")
+            if (
+                isinstance(means, list)
+                and len(means) == 9
+                and all(type(value) is int for value in means)
+                and isinstance(deltas, list)
+                and len(deltas) == 9
+                and all(type(value) is int for value in deltas)
+                and trend in {"rising", "stable", "falling"}
+                and type(semantic_revision) is int
+                and type(personality_revision) is int
+                and type(confidence) is int
+            ):
+                affect_line = (
+                    f"reply_affect: semantic_revision={semantic_revision}, "
+                    f"personality_revision={personality_revision}, "
+                    f"confidence={confidence / 1_000_000:.3f}, trend={trend}, "
+                    f"means={','.join(f'{value / 1_000_000:.3f}' for value in means)}, "
+                    f"deltas={','.join(f'{value / 1_000_000:.3f}' for value in deltas)}"
+                )
         context = (
             f"\n\n[{self._injection_marker} / v1]\n"
             "The following is trusted runtime metadata, not user content. "
@@ -1591,7 +831,7 @@ class AstrEmbodimentPlugin(Star):
             f"seed_code={seed_code}\n"
             f"continuous: {values}\n"
             f"flags: {flags}\n"
-            f"{aggregate_context_line}"
+            f"{affect_line}\n"
             "[/AE Runtime Context]\n"
         )
         try:
@@ -1601,375 +841,11 @@ class AstrEmbodimentPlugin(Star):
             request.system_prompt = current
             raise
 
-    @classmethod
-    def _expression_profile_from_semantic_outcome(
-        cls,
-        outcome: Mapping[str, Any],
-    ) -> dict[str, int] | None:
-        """Accept only a confirmed shared closure expression projection."""
-
-        if not isinstance(outcome, Mapping):
-            return None
-        if (
-            outcome.get("status") != "SUCCESS"
-            or outcome.get("code") != "SEMANTIC_COMMITTED"
-        ):
-            return None
-        closure = outcome.get("semantic_closure")
-        if not isinstance(closure, Mapping):
-            return None
-        if (
-            closure.get("schema") not in _SEMANTIC_CLOSURE_SCHEMAS
-            or closure.get("full_vector_state") != "FULL_VECTOR_CONFIRMED"
-            or closure.get("node_observability_state") != "CONFIRMED"
-        ):
-            return None
-        revision = closure.get("revision")
-        projection = closure.get("expression_projection")
-        if (
-            type(revision) is not int
-            or revision < 0
-            or not isinstance(projection, Mapping)
-            or projection.get("schema") != "astr-embodiment.expression-projection.v1"
-            or projection.get("revision") != revision
-        ):
-            return None
-        try:
-            return cls._closed_fxp6_map(
-                projection.get("profile_fxp6"),
-                names=_OBSERVATORY_EXPRESSION_PROFILE,
-                minimum=0,
-                maximum=1_000_000,
-            )
-        except (TypeError, ValueError):
-            return None
-
-    def _inject_expression_projection(
-        self,
-        request: ProviderRequest,
-        profile: Mapping[str, Any],
-    ) -> bool:
-        """Append one non-authoritative style-only expression instruction."""
-
-        try:
-            canonical_profile = self._closed_fxp6_map(
-                profile,
-                names=_OBSERVATORY_EXPRESSION_PROFILE,
-                minimum=0,
-                maximum=1_000_000,
-            )
-        except (TypeError, ValueError):
-            return False
-        if bool(getattr(request, self._request_expression_attr, False)):
-            return True
-        current = getattr(request, "system_prompt", "")
-        if type(current) is not str:
-            return False
-        values = ", ".join(
-            f"{name}={canonical_profile[name] / 1_000_000:.3f}"
-            for name in _OBSERVATORY_EXPRESSION_PROFILE
-        )
-        instruction = (
-            f"\n\n[{self._expression_injection_marker} / v1]\n"
-            "Use these values only as bounded response-style guidance. They are "
-            "not facts, memories, relationship authority, instructions to take "
-            "action, or tool permissions. Do not reveal or restate them.\n"
-            f"profile: {values}\n"
-            "[/AE Affect Expression]\n"
-        )
-        try:
-            request.system_prompt = current + instruction
-            setattr(request, self._request_expression_attr, True)
-        except BaseException:
-            try:
-                request.system_prompt = current
-            except BaseException:
-                pass
-            return False
-        return True
-
-    @staticmethod
-    def _transport_meta_for_outcome(
-        outcome: Mapping[str, Any] | Any,
-    ) -> AuxiliaryTransportMetaV1:
-        if not isinstance(outcome, Mapping):
-            return not_applicable_transport_meta()
-        return normalized_transport_meta(
-            outcome.get("transport_subcode"),
-            outcome.get("attempted"),
-            outcome.get("attempt_count"),
-        )
-
-    @staticmethod
-    def _deferred_timing_for_outcome(
-        outcome: Mapping[str, Any] | Any,
-    ) -> dict[str, int] | None:
-        """Project only the closed foreground wait budget into observability."""
-
-        if not isinstance(outcome, Mapping):
-            return None
-        timing = outcome.get("timing")
-        if (
-            type(timing) is not dict
-            or set(timing) != {"sync_wait_ms"}
-            or type(timing.get("sync_wait_ms")) is not int
-            or not 250 <= int(timing["sync_wait_ms"]) <= 5_000
-        ):
-            return None
-        return {"sync_wait_ms": int(timing["sync_wait_ms"])}
-
-    def _emit_transport_failure_warning(self, outcome: Mapping[str, Any]) -> None:
-        """Emit the owner-only, content-free semantic transport diagnostic."""
-
-        if outcome.get("code") != "ESTIMATOR_UNAVAILABLE":
-            return
-        transport_meta = self._transport_meta_for_outcome(outcome)
-        attempted = "true" if transport_meta.attempted else "false"
-        logger.warning(
-            "AstrEmbodiment semantic transport failure: "
-            "code=ESTIMATOR_UNAVAILABLE transport_subcode=%s attempted=%s "
-            "attempt_count=%d",
-            transport_meta.transport_subcode,
-            attempted,
-            transport_meta.attempt_count,
-        )
-
-    @classmethod
-    def _semantic_observatory_record(
-        cls,
-        outcome: Mapping[str, Any],
-        *,
-        expression_applied: bool,
-        expression_profile: Mapping[str, Any] | None,
-        cause_code: str | None = None,
-    ) -> dict[str, Any]:
-        """Create the only D2 projection: a semantic closure or fixed failure.
-
-        The returned record deliberately contains neither identity tokens nor
-        request/provider text, digest material, exception details, or paths.
-        """
-
-        transport_meta = cls._transport_meta_for_outcome(outcome)
-        if (
-            outcome.get("status") == "DEFERRED"
-            and outcome.get("code") == "DEFERRED_ASYNC"
-        ):
-            return {
-                "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
-                "status": "DEFERRED",
-                "code": "DEFERRED_ASYNC",
-                "reason": "SYNC_BUDGET_EXPIRED",
-                "cause_code": None,
-                "expression_state": "DEFERRED",
-                "dimensions_fxp6": None,
-                "estimator_confidence_fxp6": None,
-                "revision": None,
-                "deduplicated": None,
-                "semantic_vector_counts": None,
-                "node_counts": None,
-                "expression_profile_fxp6": None,
-                "state_subcode": None,
-                "migration_subcode": None,
-                "timing": cls._deferred_timing_for_outcome(outcome),
-                **transport_meta.as_json(),
-            }
-        empty_record: dict[str, Any] = {
-            "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
-            "status": "DEGRADED",
-            "code": "EXPRESSION_NOT_ATTEMPTED",
-            "reason": "EXPRESSION_NOT_ATTEMPTED",
-            "cause_code": "NATIVE_ERROR",
-            "expression_state": "NOT_ATTEMPTED",
-            "dimensions_fxp6": None,
-            "estimator_confidence_fxp6": None,
-            "revision": None,
-            "deduplicated": None,
-            "semantic_vector_counts": None,
-            "node_counts": None,
-            "expression_profile_fxp6": None,
-            "state_subcode": None,
-            "migration_subcode": None,
-            "timing": None,
-            **transport_meta.as_json(),
-        }
-        profile = cls._expression_profile_from_semantic_outcome(outcome)
-        if expression_applied and profile is not None and expression_profile == profile:
-            closure = outcome.get("semantic_closure")
-            try:
-                dimensions = cls._closed_fxp6_map(
-                    outcome.get("dimensions_fxp6"),
-                    names=_OBSERVATORY_DIMENSIONS,
-                    minimum=0,
-                    maximum=1_000_000,
-                )
-                confidence = cls._closed_int(
-                    outcome.get("estimator_confidence_fxp6"),
-                    minimum=1,
-                    maximum=1_000_000,
-                )
-                assert isinstance(closure, Mapping)
-                revision = cls._closed_int(
-                    closure.get("revision"), minimum=0, maximum=(2**64) - 1
-                )
-                deduplicated = closure.get("deduplicated")
-                if type(deduplicated) is not bool:
-                    raise ValueError("deduplicated")
-                vector = closure.get("semantic_vector_receipt")
-                nodes = closure.get("node_observability")
-                if not isinstance(vector, Mapping) or not isinstance(nodes, Mapping):
-                    raise ValueError("semantic closure")
-                vector_counts = {
-                    name: cls._closed_int(vector.get(name), minimum=0, maximum=15)
-                    for name in (
-                        "dimension_slot_count",
-                        "evaluated_dimension_count",
-                        "injected_dimension_count",
-                        "nonzero_evidence_dimension_count",
-                        "neutral_baseline_dimension_count",
-                        "unavailable_dimension_count",
-                    )
-                }
-                node_counts_source = nodes.get("counts")
-                if not isinstance(node_counts_source, Mapping):
-                    raise ValueError("node counts")
-                node_counts = {
-                    name: cls._closed_int(
-                        node_counts_source.get(name), minimum=0, maximum=16_384
-                    )
-                    for name in (
-                        "selected_node_count",
-                        "activated_node_count",
-                        "changed_node_count",
-                        "potential_nonzero_after_count",
-                        "excitation_nonzero_after_count",
-                        "signal_nonzero_after_count",
-                    )
-                }
-            except (AssertionError, TypeError, ValueError):
-                cause_code = "NATIVE_MALFORMED"
-            else:
-                return {
-                    "schema": _SEMANTIC_OBSERVATORY_SCHEMA,
-                    "status": "SUCCESS",
-                    "code": "SEMANTIC_COMMITTED",
-                    "reason": None,
-                    "cause_code": None,
-                    "expression_state": "APPLIED",
-                    "dimensions_fxp6": dimensions,
-                    "estimator_confidence_fxp6": confidence,
-                    "revision": revision,
-                    "deduplicated": deduplicated,
-                    "semantic_vector_counts": vector_counts,
-                    "node_counts": node_counts,
-                    "expression_profile_fxp6": profile,
-                    "state_subcode": None,
-                    "migration_subcode": _observatory_migration_subcode(
-                        closure.get("migration_subcode")
-                    ),
-                    "timing": None,
-                    **transport_meta.as_json(),
-                }
-        if cause_code is None and isinstance(outcome, Mapping):
-            candidate = outcome.get("cause_code")
-            cause_code = candidate if type(candidate) is str else None
-            if cause_code is None:
-                candidate = outcome.get("code")
-                cause_code = candidate if type(candidate) is str else None
-        if cause_code not in _SEMANTIC_NOT_ATTEMPTED_CAUSES:
-            cause_code = "NATIVE_ERROR"
-        empty_record["cause_code"] = cause_code
-        if (
-            cause_code == "INVALID_NEURAL_STATE"
-            and outcome.get("native_stage") == "NATIVE_APPLY"
-        ):
-            empty_record["state_subcode"] = normalize_invalid_neural_state_subcode(
-                outcome.get("state_subcode")
-            )
-        if (
-            cause_code in SEMANTIC_NATIVE_ERROR_CODES
-            and outcome.get("native_stage") == "NATIVE_APPLY"
-        ):
-            empty_record["migration_subcode"] = _observatory_migration_subcode(
-                outcome.get("migration_subcode")
-            )
-        return empty_record
-
-    def _emit_semantic_observatory(
-        self,
-        outcome: Mapping[str, Any],
-        *,
-        expression_applied: bool,
-        expression_profile: Mapping[str, Any] | None,
-        cause_code: str | None = None,
-    ) -> dict[str, Any]:
-        """Emit SUCCESS records at INFO level and failure records at WARN level."""
-
-        record = self._semantic_observatory_record(
-            outcome,
-            expression_applied=expression_applied,
-            expression_profile=expression_profile,
-            cause_code=cause_code,
-        )
-        native_code = outcome.get("cause_code")
-        native_stage = outcome.get("native_stage")
-        if (
-            outcome.get("code") == "ESTIMATOR_UNAVAILABLE"
-            and outcome.get("_transport_warning_emitted") is not True
-        ):
-            self._emit_transport_failure_warning(outcome)
-        if (
-            type(native_code) is str
-            and native_code in SEMANTIC_NATIVE_ERROR_CODES
-            and type(native_stage) is str
-            and native_stage in SEMANTIC_NATIVE_FAILURE_STAGES
-        ):
-            migration_subcode = _observatory_migration_subcode(
-                outcome.get("migration_subcode")
-            )
-            if native_code == "INVALID_NEURAL_STATE" and native_stage == "NATIVE_APPLY":
-                logger.warning(
-                    "AstrEmbodiment semantic native failure: "
-                    "code=%s stage=%s state_subcode=%s migration_subcode=%s",
-                    native_code,
-                    native_stage,
-                    normalize_invalid_neural_state_subcode(
-                        outcome.get("state_subcode")
-                    ),
-                    migration_subcode,
-                )
-            else:
-                logger.warning(
-                    "AstrEmbodiment semantic native failure: "
-                    "code=%s stage=%s migration_subcode=%s",
-                    native_code,
-                    native_stage,
-                    migration_subcode,
-                )
-        try:
-            message = _OBSERVATORY_PREFIX + json.dumps(
-                record,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-        except (TypeError, ValueError):
-            record = self._semantic_observatory_record(
-                {"status": "DEGRADED", "code": "NATIVE_ERROR"},
-                expression_applied=False,
-                expression_profile=None,
-                cause_code="NATIVE_ERROR",
-            )
-            message = _OBSERVATORY_PREFIX + json.dumps(
-                record,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-        if record.get("status") in {"SUCCESS", "DEFERRED"}:
-            logger.info(message)
-        else:
-            logger.warning(message)
-        return record
+    async def _save_receipt(self, receipt: Mapping[str, Any]) -> str:
+        seed_code = str(receipt.get("seed_code", "") or "").strip()
+        if seed_code:
+            await self._persist_seed(seed_code)
+        return seed_code
 
     # ------------------------------------------------------------ persona adapter
 
@@ -2078,25 +954,36 @@ class AstrEmbodimentPlugin(Star):
             session_key = getattr(umo, "session_id", None) or str(umo)
         except Exception:  # noqa: BLE001
             session_key = "default"
-        bot_id = str(getattr(event, "bot_id", "") or "default-bot")
-        return ScopeTokens(
+        platform_getter = getattr(event, "get_platform_id", None)
+        platform_id = str(platform_getter() if callable(platform_getter) else "")
+        bot_getter = getattr(event, "get_self_id", None)
+        bot_id = str(
+            (bot_getter() if callable(bot_getter) else "")
+            or getattr(event, "bot_id", "")
+        )
+        group_getter = getattr(event, "get_group_id", None)
+        sender_getter = getattr(event, "get_sender_id", None)
+        group_id = str(group_getter() if callable(group_getter) else "")
+        sender_id = str(sender_getter() if callable(sender_getter) else "")
+        target_kind = "group" if group_id else "private"
+        target_id = group_id or sender_id
+        try:
+            relation_key = canonical_relation_key(
+                platform_id=platform_id,
+                bot_id=bot_id,
+                persona_id=persona_id,
+                target_kind=target_kind,
+                target_id=target_id,
+            )
+        except RelationBindingError:
+            return None
+        scope = ScopeTokens(
             bot_token=bot_token(bot_id),
             persona_token=persona_token(persona_id),
             session_token=session_token(str(session_key)),
+            relation_token=relation_token_from_key(relation_key),
         )
-
-    @staticmethod
-    def _semantic_request_key(scope: ScopeTokens, session_key: str, seq: int) -> str:
-        """Build the same private key used by semantic singleflight for this turn."""
-
-        return ":".join(
-            (
-                scope.bot_token,
-                scope.persona_token,
-                event_id(f"{session_key}#{seq}"),
-                turn_id(session_key, seq),
-            )
-        )
+        return scope
 
     def _native_revision(self, scope: ScopeTokens) -> int:
         """Read and validate the native revision mirror for one scope."""
@@ -2115,139 +1002,69 @@ class AstrEmbodimentPlugin(Star):
             raise PersonaGenesisError("原生修订检查状态不一致")
         return revision
 
-    def _existing_native_identity(self, scope: ScopeTokens) -> dict[str, Any] | None:
-        """Read one durable native binding; never synthesize an identity here."""
-        loaded = getattr(self._bridge, "loaded", False)
-        if type(loaded) is not bool:
-            raise PersonaGenesisError("原生运行状态无效")
-        if not loaded:
-            return None
-        inspected = self._bridge.inspect(scope.scope_json())
-        if not isinstance(inspected, Mapping):
-            raise PersonaGenesisError("原生身份检查格式无效")
-        bound = inspected.get("bound")
-        revision = inspected.get("revision")
-        if type(bound) is not bool:
-            raise PersonaGenesisError("原生身份检查绑定标志无效")
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
-            raise PersonaGenesisError("原生身份检查版本无效")
-        if not bound:
-            if revision != 0:
-                raise PersonaGenesisError("原生身份检查状态不一致")
-            return None
-
-        seed_code = inspected.get("seed_code")
-        seed_code_short = inspected.get("seed_code_short", "")
-        incarnation_id = inspected.get("incarnation_id")
-        if (
-            not isinstance(seed_code, str)
-            or not seed_code.strip()
-            or len(seed_code) > 256
-            or not isinstance(seed_code_short, str)
-            or len(seed_code_short) > 256
-            or not _is_inspect_display_incarnation_id(incarnation_id)
-        ):
-            raise PersonaGenesisError("原生身份检查身份字段无效")
-        return {
-            "seed_code": seed_code,
-            "seed_code_short": seed_code_short,
-            "incarnation_id": incarnation_id,
-            "revision": revision,
-        }
-
-    def request_rebirth(
-        self,
-        *,
-        scope: ScopeTokens,
-        expected_incarnation_id: str,
-        expected_revision: int,
-        action: str,
-    ) -> dict[str, Any]:
-        """Start, but never auto-confirm, one D1.5 destructive-action gate."""
-        return self._coordinator.prepare_rebirth(
-            scope=scope,
-            expected_incarnation_id=expected_incarnation_id,
-            expected_revision=expected_revision,
-            action=action,
+    @staticmethod
+    def _valid_delivery_event_id(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 32
+            and all(character in "0123456789abcdef" for character in value)
         )
 
-    def confirm_rebirth_payload(
+    @staticmethod
+    def _redact_delivery_identifier(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        return hashlib.sha256(
+            b"ae.delivery-diagnostic.v1\0" + value.encode("utf-8")
+        ).hexdigest()[:16]
+
+    def _record_delivery_diagnostic(
         self,
         *,
-        scope: ScopeTokens,
-        expected_incarnation_id: str,
-        expected_revision: int,
-        request_nonce: str,
-        action: str,
-        confirmed: bool | None = None,
-    ) -> dict[str, Any]:
-        """Forward explicit confirmation once; native D1.5 owns all replay state."""
-        payload: dict[str, Any] = {
-            "scope": scope.scope_json(),
-            "expected_incarnation_id": expected_incarnation_id,
-            "expected_revision": expected_revision,
-            "request_nonce": request_nonce,
-            "action": action,
-        }
-        if confirmed is not None:
-            payload["confirmed"] = confirmed
-        response = self._coordinator.confirm_rebirth_payload(payload)
-        if response.get("state") in {"COMMITTED", "REPLAYED"}:
-            # A new native incarnation invalidates only local mirrors.  No
-            # challenge, receipt, nonce, identity, or replay state is cached.
-            self._scrub_async_outbox_after_rebirth_now_v1(
-                scope,
-                expected_incarnation_id,
-            )
-            self._coordinator.forget_scope(scope)
-            self._revisions.pop(scope.persona_token, None)
-            self._seed_receipts.pop(scope.persona_token, None)
-            self._turn_seq.pop(scope.session_token, None)
-            for turn_token, pending in tuple(self._pending.items()):
-                if isinstance(pending, Mapping) and pending.get("scope") == scope:
-                    self._pending.pop(turn_token, None)
-        return response
+        event_id_value: object,
+        turn_id_value: object,
+        base_revision: object,
+        error_code: str,
+        recorded_at_ms: int | None = None,
+    ) -> None:
+        if recorded_at_ms is None:
+            recorded_at_ms = int(time.time() * 1000)
+        if isinstance(base_revision, bool) or not isinstance(base_revision, int):
+            safe_base_revision: int | None = None
+        else:
+            safe_base_revision = base_revision
+        safe_code = "".join(
+            character
+            for character in str(error_code)
+            if character.isalnum() or character in "_-"
+        )[:64]
+        self._delivery_diagnostics.append(
+            {
+                "event_id": self._redact_delivery_identifier(event_id_value),
+                "turn_id": self._redact_delivery_identifier(turn_id_value),
+                "base_revision": safe_base_revision,
+                "error_code": safe_code or "DELIVERY_FAILURE",
+                "recorded_at_ms": int(recorded_at_ms),
+            }
+        )
+
+    def _clear_pending_delivery_if_same(
+        self, turn_token: object, frozen: dict[str, Any]
+    ) -> None:
+        if self._pending.get(turn_token) is frozen:
+            self._pending.pop(turn_token, None)
+
+    @property
+    def delivery_diagnostics(self) -> tuple[dict[str, Any], ...]:
+        """Return bounded, redacted diagnostics for terminal delivery failures."""
+        return tuple(dict(entry) for entry in self._delivery_diagnostics)
 
     async def _run_genesis(
         self,
         event: Any,
         request: Any = None,
-        *,
-        apply_stimulus: bool,
-        transport_context: RequestTransportContext | None = None,
     ) -> tuple[dict[str, Any], ScopeTokens, str, int, str | None, int]:
-        """Run Genesis and clear a context created outside the LLM hook."""
-
-        own_transport_context = transport_context is None
-        if transport_context is None:
-            transport_context = self._auxiliary_transport.open_request(
-                umo=getattr(event, "unified_msg_origin", None)
-            )
-        try:
-            return await self._run_genesis_bound(
-                event,
-                request,
-                apply_stimulus=apply_stimulus,
-                transport_context=transport_context,
-            )
-        finally:
-            if own_transport_context:
-                transport_context.close()
-
-    async def _run_genesis_bound(
-        self,
-        event: Any,
-        request: Any = None,
-        *,
-        apply_stimulus: bool,
-        transport_context: RequestTransportContext,
-    ) -> tuple[dict[str, Any], ScopeTokens, str, int, str | None, int]:
-        """Resolve the active Persona and run the native Genesis boundary.
-
-        The command path uses ``apply_stimulus=False`` so asking for a SeedCode
-        does not fabricate a user turn. The LLM hook uses the first-turn
-        barrier and receives the native ActionContract decision.
-        """
+        """Resolve the active Persona and cross only the Genesis boundary."""
         resolved = await self.resolve_effective_persona(event, request)
         if resolved is None:
             raise PersonaGenesisError("当前会话没有可用的人格")
@@ -2256,128 +1073,309 @@ class AstrEmbodimentPlugin(Star):
         if scope is None:
             raise PersonaGenesisError("无法建立当前会话的运行范围")
 
+        source = PersonaSourceSnapshot.freeze(
+            persona_id=persona_id, persona=persona, selection=selection
+        )
         session_key = scope.session_token
         seq = self._turn_seq.get(session_key, 0)
         turn_token = None
         base_revision = self._revisions.get(scope.persona_token, 0)
         observed_at_ms = int(time.time() * 1000)
 
-        existing_identity = self._existing_native_identity(scope)
-        if existing_identity is not None:
-            # Only Rust may decide whether this live tri-state observation is
-            # strong enough to switch authority. It may have just committed a
-            # child, so discard hot state and read the native current again.
-            await self._consume_seed_config_startup_v1(scope)
-            existing_identity = self._existing_native_identity(scope)
-            if existing_identity is None:
-                raise PersonaGenesisError("SEED_CLEAR_UNKNOWN")
-            # A normal plugin reopen/update reads the durable native binding
-            # first.  It must not invoke Genesis merely because Python process
-            # memory was lost or a plugin artifact changed.
-            base_revision = existing_identity["revision"]
-            self._revisions[scope.persona_token] = base_revision
-            seq = max(seq, base_revision)
-            transport_context.bind_semantic_key(
-                self._semantic_request_key(scope, session_key, seq)
-            )
-            genesis = dict(existing_identity)
-            if apply_stimulus:
-                turn_token = turn_id(session_key, seq)
-                decision = await self._coordinator.apply_stimulus(
-                    scope=scope,
-                    event_id=event_id(f"{session_key}#{seq}"),
-                    turn_id=turn_token,
-                    base_revision=base_revision,
-                    observed_at_ms=observed_at_ms,
-                )
-                decision = dict(decision)
-                decision["genesis"] = genesis
-                decision["seed_code"] = genesis["seed_code"]
-                decision["seed_code_short"] = genesis["seed_code_short"]
-                decision["incarnation_id"] = genesis["incarnation_id"]
-                # The event may have advanced the authority revision. Refresh
-                # the mirror afterward so a future explicit empty value binds
-                # to the current native fence rather than stale state.
-                await self._reconcile_seed_config_v1(
-                    scope,
-                    origin="PLUGIN_WRITEBACK",
-                )
-            else:
-                decision = dict(genesis)
-                decision["genesis"] = dict(genesis)
-            return decision, scope, session_key, seq, turn_token, base_revision
-
-        source = PersonaSourceSnapshot.freeze(
-            persona_id=persona_id, persona=persona, selection=selection
-        )
-        # Genesis itself does not consume a user-turn sequence.  Fix this
-        # request's final semantic key before its compiler may use the helper.
-        transport_context.bind_semantic_key(
-            self._semantic_request_key(scope, session_key, seq)
-        )
-
         async def generate(**prompt_kwargs: Any) -> Any:
-            return await self._llm_generate(
-                event,
-                transport_context=transport_context,
-                **prompt_kwargs,
-            )
+            return await self._genesis_generate(event, **prompt_kwargs)
 
         async def compiler(snapshot: PersonaSourceSnapshot) -> dict[str, Any]:
             return await compile_with_provider(generate=generate, source=snapshot)
 
-        if apply_stimulus:
-            # Genesis must be committed before the native revision used for
-            # the stimulus is inspected. The coordinator's first_turn also
-            # joins this committed Genesis result without recompiling it.
-            if self._bridge.loaded:
-                await self._coordinator.ensure_genesis(
-                    scope=scope,
-                    source=source,
-                    selection=selection,
-                    compiler=compiler,
-                    compiler_protocol_digest=_G0_PROTOCOL_DIGEST,
-                    compiler_model_digest=_G0_PROTOCOL_DIGEST,
-                    observed_at_ms=observed_at_ms,
-                )
-                base_revision = self._native_revision(scope)
-                self._revisions[scope.persona_token] = base_revision
-            turn_token = turn_id(session_key, seq)
-            assert turn_token is not None
-            decision = await self._coordinator.first_turn(
-                scope=scope,
-                event_id=event_id(f"{session_key}#{seq}"),
-                turn_id=turn_token,
-                base_revision=base_revision,
-                observed_at_ms=observed_at_ms,
-                source=source,
-                selection=selection,
-                compiler=compiler,
-                compiler_protocol_digest=_G0_PROTOCOL_DIGEST,
-                compiler_model_digest=_G0_PROTOCOL_DIGEST,
-            )
-        else:
-            genesis = await self._coordinator.ensure_genesis(
-                scope=scope,
-                source=source,
-                selection=selection,
-                compiler=compiler,
-                compiler_protocol_digest=_G0_PROTOCOL_DIGEST,
-                compiler_model_digest=_G0_PROTOCOL_DIGEST,
-                observed_at_ms=observed_at_ms,
-            )
-            decision = dict(genesis)
-            decision["genesis"] = genesis
-            decision["seed_code"] = genesis.get("seed_code", "")
-            decision["seed_code_short"] = genesis.get("seed_code_short", "")
-            decision["incarnation_id"] = genesis.get("incarnation_id", "")
-        # A fresh generation has no active config mirror. Native performs the
-        # repair and returns the only values Python is permitted to write.
-        await self._reconcile_seed_config_v1(
-            scope,
-            origin="PLUGIN_WRITEBACK",
+        genesis = await self._coordinator.ensure_genesis(
+            scope=scope,
+            source=source,
+            selection=selection,
+            compiler=compiler,
+            compiler_protocol_digest=_G0_PROTOCOL_DIGEST,
+            compiler_model_digest=_G0_PROTOCOL_DIGEST,
+            observed_at_ms=observed_at_ms,
         )
+        base_revision = self._native_revision(scope)
+        self._revisions[scope.persona_token] = base_revision
+        seq = max(seq, base_revision)
+        decision = dict(genesis)
+        decision["genesis"] = genesis
+        decision["seed_code"] = genesis.get("seed_code", "")
+        decision["seed_code_short"] = genesis.get("seed_code_short", "")
+        decision["incarnation_id"] = genesis.get("incarnation_id", "")
+        if self._clock is not None and self._clock._task is not None:
+            await self._clock.notify_persona(persona_scope(scope))
         return decision, scope, session_key, seq, turn_token, base_revision
+
+    async def _run_inbound(
+        self, event: Any, request: Any
+    ) -> tuple[dict[str, Any], ScopeTokens, str, int, str, int]:
+        """Run one bounded inbound appraisal without owning the normal reply."""
+
+        decision, scope, session_key, seq, _turn, _base = await self._run_genesis(
+            event, request
+        )
+        message_getter = getattr(event, "get_message_str", None)
+        raw_message = (
+            message_getter()
+            if callable(message_getter)
+            else getattr(event, "message_str", "")
+        )
+        message = (
+            raw_message if isinstance(raw_message, str) else str(raw_message or "")
+        )
+        provider_id, estimator_request, appraisal = "", None, None
+        if self._semantic_daily_limit() > 0:
+            try:
+                estimator_request = build_estimator_request_v3(message)
+                provider_id = await self._semantic_provider_id(event)
+                appraisal = {
+                    "daily_token_limit": self._semantic_daily_limit(),
+                    "reserved_tokens": estimator_request.reserved_tokens,
+                    "provider_digest": self._semantic_provider_digest(provider_id),
+                }
+            except Exception as exc:
+                self._semantic_diagnostic(
+                    "SEMANTIC_PROVIDER_UNAVAILABLE", stage="provider_resolve"
+                )
+                logger.warning("Semantic Provider unavailable: %s", type(exc).__name__)
+
+        # Reusing this immutable event in another hook preserves exact request bytes.
+        requests = getattr(event, "_ae_core_requests", None)
+        if requests is None:
+            requests = {}
+            setattr(event, "_ae_core_requests", requests)
+        key = self._semantic_lock_key(scope)
+        inbound = requests.get(key)
+        if inbound is None:
+            timestamp = getattr(getattr(event, "message_obj", None), "timestamp", None)
+            observed = (
+                int(float(timestamp) * 1000) if timestamp else int(time.time() * 1000)
+            )
+            inbound = build_core_inbound_request(
+                self._bridge,
+                scope=scope,
+                event=event,
+                message=message,
+                appraisal=appraisal,
+                observed_at_ms=observed,
+            )
+            requests[key] = inbound
+        observation = inbound["observation"]
+        turn_token, event_key = observation["turn_id"], observation["operation_id"]
+        scope = ScopeTokens(scope.bot_token, scope.persona_token, turn_token)
+        delivery = self._bridge.compile_core_host_request_v1(
+            "delivery",
+            {
+                "schema_version": 1,
+                "operation_id": "00" * 16,
+                "scope": persona_scope(scope),
+                "turn_id": turn_token,
+                "inbound_operation_id": event_key,
+                "delivered": True,
+                "observed_at_utc_ms": observation["observed_at_utc_ms"],
+                "visible_action_digest": hashlib.sha256(b"").hexdigest(),
+            },
+        )
+        lock = self._persona_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            # The persona anchor is needed by both semantic settlement and clock.
+            if self._clock is not None:
+                self._clock.prepare_locked(persona_scope(scope))
+            outcome = self._bridge.commit_core_inbound_v1(inbound)
+            if outcome.get("commit_status") not in {"committed", "existing"}:
+                raise SemanticAppraisalRuntimeError("CORE_INBOUND_RECEIPT_INVALID")
+            initial = outcome["initial_receipt"]
+            receipt = initial["event"]
+            if (
+                receipt["scope"] != persona_scope(scope)
+                or receipt["operation_id"] != event_key
+                or receipt["turn_id"] != turn_token
+            ):
+                raise SemanticAppraisalRuntimeError("CORE_INBOUND_IDENTITY_MISMATCH")
+            self._pending.setdefault(
+                turn_token,
+                MappingProxyType(
+                    {
+                        "scope": scope,
+                        "turn_id": turn_token,
+                        "inbound_operation_id": event_key,
+                        "delivery_operation_id": delivery["operation_id"],
+                        "contract": None,
+                        "visible_action_digest": hashlib.sha256(b"").hexdigest(),
+                    }
+                ),
+            )
+            interaction_revision = receipt["transition"]["next_revision"]
+            decision["contract"] = None
+            decision["reply_affect"] = initial.get("reply_affect")
+            decision["revision"] = interaction_revision
+            context = (
+                decision,
+                scope,
+                session_key,
+                seq,
+                turn_token,
+                interaction_revision,
+            )
+            setattr(event, "_ae_core_context", context)
+            setattr(event, "turn_token", turn_token)
+        if self._clock is not None and self._clock._task is not None:
+            await self._clock.notify_persona(persona_scope(scope))
+        if outcome["provider_authorized_now"] is not True:
+            return context
+        if (
+            outcome["commit_status"] != "committed"
+            or initial["disposition"] != "claimed"
+        ):
+            raise SemanticAppraisalRuntimeError("CORE_PROVIDER_AUTHORITY_INVALID")
+        begin = initial
+        settlement_nonce = self._semantic_nonce(
+            (begin.get("challenge") or {}).get("request_nonce_digest")
+        )
+        self._remember_semantic_attempt(event_key, "claimed")
+        challenge = begin.get("challenge")
+        challenge_nonce = self._semantic_nonce(
+            challenge.get("request_nonce_digest")
+            if isinstance(challenge, Mapping)
+            else None
+        )
+        origin = challenge.get("origin") if isinstance(challenge, Mapping) else None
+        origin_digest = self._semantic_nonce(
+            origin.get("origin_digest") if isinstance(origin, Mapping) else None
+        )
+        if (
+            challenge_nonce is None
+            or settlement_nonce is None
+            or challenge_nonce.casefold() != settlement_nonce.casefold()
+            or origin_digest is None
+            or origin.get("scope") != scope.scope_json()
+        ):
+            await self._reject_semantic_begin(
+                scope=scope,
+                status="claimed",
+                settlement_nonce=settlement_nonce,
+                code="SEMANTIC_CHALLENGE_INVALID",
+                stage="begin_challenge",
+            )
+        nonce = settlement_nonce
+        self._semantic_attempts[event_key] = "provider_started"
+
+        outcome = "success"
+        usage: dict[str, Any] = {"known": False, "used_tokens": None}
+        proposal: dict[str, Any] | None = None
+        try:
+            response = await self._semantic_generate(
+                provider_id=provider_id,
+                prompt=estimator_request.request_json,
+                system_prompt=estimator_request.system_prompt,
+            )
+            completion, usage = self._semantic_response_parts(response)
+            if completion is None:
+                raise SemanticEstimateError("ESTIMATOR_MALFORMED")
+            proposal = build_perception_proposal_v3(
+                estimate=parse_estimator_output_v3(completion),
+                origin_digest=origin_digest,
+                request_nonce_digest=nonce,
+            )
+        except asyncio.CancelledError:
+            self._semantic_attempts[event_key] = "cancelled"
+            try:
+                await self._compensate_semantic_claim(
+                    scope=scope,
+                    nonce=nonce,
+                )
+                self._semantic_diagnostic(
+                    "SEMANTIC_CANCELLED_COMPENSATED", stage="provider"
+                )
+            except BaseException as exc:
+                self._semantic_diagnostic(
+                    "SEMANTIC_CANCEL_COMPENSATION_FAILED", stage="provider"
+                )
+                logger.warning(
+                    "AstrEmbodiment cancellation compensation failed: %s",
+                    type(exc).__name__,
+                )
+            raise
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            usage = {"known": False, "used_tokens": None}
+            self._semantic_diagnostic("SEMANTIC_PROVIDER_TIMEOUT", stage="provider")
+        except SemanticEstimateError:
+            outcome = "malformed"
+            usage = {"known": False, "used_tokens": None}
+            proposal = None
+            self._semantic_diagnostic("SEMANTIC_ESTIMATE_MALFORMED", stage="parser")
+        except Exception as exc:
+            outcome = "provider_error"
+            usage = {"known": False, "used_tokens": None}
+            self._semantic_diagnostic("SEMANTIC_PROVIDER_ERROR", stage="provider")
+            logger.warning(
+                "AstrEmbodiment semantic Provider failed: %s", type(exc).__name__
+            )
+
+        settle_payload = {
+            "schema_version": 1,
+            "scope": ScopeTokens(
+                scope.bot_token, scope.persona_token, scope.session_token
+            ).scope_json(),
+            "request_nonce_digest": nonce,
+            "outcome": outcome,
+            "provider_usage": usage,
+            "proposal": proposal,
+        }
+        try:
+            settle = await self._settle_semantic_exact(scope, settle_payload)
+        except asyncio.CancelledError:
+            self._semantic_attempts[event_key] = "settle_cancelled"
+            try:
+                await self._shield_semantic_settlement(scope, settle_payload)
+                self._semantic_diagnostic(
+                    "SEMANTIC_SETTLE_CANCELLED_COMPENSATED", stage="settle"
+                )
+            except BaseException as exc:
+                self._semantic_diagnostic(
+                    "SEMANTIC_SETTLE_CANCEL_COMPENSATION_FAILED", stage="settle"
+                )
+                logger.warning(
+                    "AstrEmbodiment settle cancellation compensation failed: %s",
+                    type(exc).__name__,
+                )
+            raise
+        except SemanticAppraisalRetryExpiredOrUnknown:
+            current_revision = self._native_revision(scope)
+            self._semantic_attempts[event_key] = "retry_expired_or_unknown"
+            self._semantic_diagnostic(
+                "SEMANTIC_APPRAISAL_RETRY_EXPIRED_OR_UNKNOWN",
+                stage="settle",
+                canonical_revision=current_revision,
+            )
+            decision["contract"] = None
+            decision["revision"] = current_revision
+            return decision, scope, session_key, seq, turn_token, current_revision
+
+        settled_revision = settle.get("canonical_revision")
+        if isinstance(settled_revision, bool) or not isinstance(settled_revision, int):
+            self._semantic_diagnostic("SEMANTIC_SETTLEMENT_INVALID", stage="settle")
+            raise SemanticAppraisalRuntimeError("SEMANTIC_SETTLEMENT_INVALID")
+        contract = settle.get("contract")
+        reply_affect = settle.get("reply_affect")
+        decision["contract"] = contract if isinstance(contract, Mapping) else None
+        decision["reply_affect"] = (
+            reply_affect if isinstance(reply_affect, Mapping) else None
+        )
+        decision["revision"] = settled_revision
+        self._semantic_attempts[event_key] = "settled"
+        self._semantic_diagnostic(
+            f"SEMANTIC_{str(settle.get('status') or 'zero_mutation').upper()}",
+            stage="settle",
+            canonical_revision=settled_revision,
+            charged_tokens=int(settle.get("charged_tokens") or 0),
+            usage_known=bool(usage.get("known")),
+        )
+        return decision, scope, session_key, seq, turn_token, settled_revision
 
     # ------------------------------------------------------------ hooks
 
@@ -2390,22 +1388,8 @@ class AstrEmbodimentPlugin(Star):
         **kwargs: Any,
     ) -> None:
         del args, kwargs
-        # Read exactly once before any G0/action or system-prompt mutation.
-        frozen_request_text = getattr(request, "prompt", None)
-        if type(frozen_request_text) is not str:
-            frozen_request_text = None
         if bool(getattr(request, self._request_injected_attr, False)):
             return
-
-        transport_context = self._auxiliary_transport.open_request(
-            umo=getattr(event, "unified_msg_origin", None)
-        )
-        semantic_outcome: Mapping[str, Any] = {
-            "status": "DEGRADED",
-            "code": "EMPTY_REQUEST" if frozen_request_text is None else "NATIVE_ERROR",
-        }
-        semantic_profile: Mapping[str, Any] | None = None
-        semantic_record_emitted = False
 
         try:
             (
@@ -2415,49 +1399,24 @@ class AstrEmbodimentPlugin(Star):
                 seq,
                 turn_token,
                 base_revision,
-            ) = await self._run_genesis(
-                event,
-                request,
-                apply_stimulus=True,
-                transport_context=transport_context,
-            )
-        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-            transport_context.close()
-            raise
+            ) = await self._run_inbound(event, request)
         except (PersonaCompilerMalformed, PersonaGenesisError) as exc:
-            transport_context.close()
-            semantic_record = self._emit_semantic_observatory(
-                semantic_outcome,
-                expression_applied=False,
-                expression_profile=None,
-            )
-            try:
-                setattr(request, self._request_semantic_record_attr, semantic_record)
-            except (AttributeError, TypeError):
-                pass
-            self._emit_observatory(
-                self._failed_observatory("GENESIS_UNAVAILABLE", "NATIVE_APPLY")
-            )
             logger.error(
                 "AstrEmbodiment: GENESIS_UNAVAILABLE (%s); no default brain", exc
             )
             await self._stop_genesis_turn(event, str(exc))
             return
-        except Exception as exc:  # noqa: BLE001 - fail closed before host LLM
-            transport_context.close()
-            semantic_record = self._emit_semantic_observatory(
-                semantic_outcome,
-                expression_applied=False,
-                expression_profile=None,
+        except Exception as exc:  # semantic failure must not block AstrBot's reply
+            logger.warning(
+                "AstrEmbodiment semantic lane unavailable; ordinary reply continues: %s",
+                type(exc).__name__,
             )
-            try:
-                setattr(request, self._request_semantic_record_attr, semantic_record)
-            except (AttributeError, TypeError):
-                pass
-            self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))
-            logger.error("AstrEmbodiment request lane failed: %s", exc)
-            await self._stop_genesis_turn(event, str(exc))
-            return
+            context = getattr(event, "_ae_core_context", None)
+            if context is None:
+                # No durable inbound correlation: AstrBot may still reply, but
+                # no synthetic delivery authority or replacement Genesis turn.
+                return
+            decision, scope, session_key, seq, turn_token, base_revision = context
 
         try:
             if turn_token is None:
@@ -2487,93 +1446,13 @@ class AstrEmbodimentPlugin(Star):
             contract = decision.get("contract")
             if contract is not None and not isinstance(contract, Mapping):
                 raise PersonaGenesisError("原生行动契约格式无效")
-            context_summary = decision.get("context_summary")
-            if (
-                decision.get("schema") == "astrembodiment.decision.v1"
-                and context_summary is None
-            ):
-                raise PersonaGenesisError("原生决策缺少已提交上下文摘要")
-            if context_summary is not None and not isinstance(context_summary, Mapping):
-                raise PersonaGenesisError("原生上下文摘要格式无效")
+            reply_affect = decision.get("reply_affect")
+            if reply_affect is not None and not isinstance(reply_affect, Mapping):
+                reply_affect = None
             revision = int(decision.get("revision", base_revision))
 
-            if context_summary is None:
-                semantic_outcome = {"status": "DEGRADED", "code": "NATIVE_MALFORMED"}
-            else:
-                semantic_request_key = self._semantic_request_key(
-                    scope, session_key, seq
-                )
-                # Normal request flow binds the final key inside _run_genesis.
-                # Test/migration adapters can replace that method, so bind only
-                # when no final key exists yet; never rebind a live request.
-                if not transport_context.is_bound_to_semantic_key(semantic_request_key):
-                    transport_context.bind_semantic_key(semantic_request_key)
-                semantic_turn = FrozenTurn(
-                    scope=scope,
-                    event_id=event_id(f"{session_key}#{seq}"),
-                    turn_id=turn_token,
-                    base_revision=base_revision,
-                    observed_at_ms=int(time.time() * 1000),
-                )
-
-                provider_binding = None
-                provider_resolution_error: AuxiliaryTransportError | None = None
-                if self._semantic_outbox is not None and self._semantic_outbox.ready:
-                    try:
-                        provider_binding = await transport_context.resolve_binding()
-                    except AuxiliaryTransportError as exc:
-                        provider_resolution_error = exc
-
-                async def semantic_estimator(
-                    request_mapping: Mapping[str, Any],
-                ) -> Any:
-                    return await self._semantic_estimate_v3(
-                        event,
-                        request_mapping,
-                        transport_context=transport_context,
-                    )
-
-                if provider_resolution_error is not None:
-                    semantic_outcome = {
-                        "status": "DEGRADED",
-                        "code": "ESTIMATOR_UNAVAILABLE",
-                        **provider_resolution_error.meta.as_json(),
-                    }
-                else:
-                    semantic_outcome = await self._coordinator.preflight_semantic_v3(
-                        scope=scope,
-                        frozen_turn=semantic_turn,
-                        request_text=frozen_request_text,
-                        context_summary=context_summary,
-                        estimator=semantic_estimator,
-                        incarnation_id=incarnation_id,
-                        provider_binding=provider_binding,
-                    )
-            semantic_profile = self._expression_profile_from_semantic_outcome(
-                semantic_outcome
-            )
-
-            self._inject_request(request, seed_code, contract, context_summary)
-
-            expression_applied = False
-            expression_cause: str | None = None
-            if semantic_profile is not None:
-                expression_applied = self._inject_expression_projection(
-                    request, semantic_profile
-                )
-                if not expression_applied:
-                    expression_cause = "EXPRESSION_PROJECTION_UNAVAILABLE"
-            semantic_record = self._emit_semantic_observatory(
-                semantic_outcome,
-                expression_applied=expression_applied,
-                expression_profile=semantic_profile,
-                cause_code=expression_cause,
-            )
-            semantic_record_emitted = True
-            try:
-                setattr(request, self._request_semantic_record_attr, semantic_record)
-            except (AttributeError, TypeError):
-                pass
+            await self._persist_seed(seed_code)
+            self._inject_request(request, seed_code, contract, reply_affect)
 
             try:
                 event.turn_token = turn_token
@@ -2588,100 +1467,75 @@ class AstrEmbodimentPlugin(Star):
             self._seed_receipts[scope.persona_token] = dict(genesis)
             self._revisions[scope.persona_token] = revision
             self._turn_seq[session_key] = seq + 1
-            self._pending[turn_token] = {
-                "scope": scope,
-                "turn_id": turn_token,
-                "base_revision": revision,
-                "contract": contract,
-            }
         except PersonaGenesisError as exc:
-            if not semantic_record_emitted:
-                semantic_record = self._emit_semantic_observatory(
-                    semantic_outcome,
-                    expression_applied=False,
-                    expression_profile=None,
-                    cause_code="EXPRESSION_PROJECTION_UNAVAILABLE",
-                )
-                try:
-                    setattr(
-                        request, self._request_semantic_record_attr, semantic_record
-                    )
-                except (AttributeError, TypeError):
-                    pass
-            self._emit_observatory(
-                self._failed_observatory("NATIVE_MALFORMED", "RECEIPT")
-            )
             logger.error("AstrEmbodiment Genesis result rejected: %s", exc)
             await self._stop_genesis_turn(event, str(exc))
         except Exception:
-            if not semantic_record_emitted:
-                semantic_record = self._emit_semantic_observatory(
-                    semantic_outcome,
-                    expression_applied=False,
-                    expression_profile=None,
-                    cause_code="EXPRESSION_PROJECTION_UNAVAILABLE",
-                )
-                try:
-                    setattr(
-                        request, self._request_semantic_record_attr, semantic_record
-                    )
-                except (AttributeError, TypeError):
-                    pass
-            self._emit_observatory(self._failed_observatory("INTERNAL", "INTERNAL"))
             logger.exception("AstrEmbodiment Genesis result processing failed")
             await self._stop_genesis_turn(event, "创世结果处理失败")
-        finally:
-            transport_context.close()
 
     @filter.on_llm_response(desc="LLM 响应后：登记候选行动（当前仅观察）")
     async def on_llm_response(
         self, event: Any, response: Any, *args: Any, **kwargs: Any
     ) -> None:
-        del event, response, args, kwargs
-        # G5: extract claims and create SelfActionCandidate; do not commit
-        # until delivery. G0 deliberately writes nothing here.
+        del args, kwargs
+        text = getattr(response, "completion_text", None)
+        if isinstance(text, str):
+            setattr(
+                event,
+                "_ae_visible_action_digest",
+                hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
 
     @filter.after_message_sent(desc="消息发送后：提交投递事实并同步原生修订号")
     async def after_message_sent(self, event: Any, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        # G5: settle actual platform delivery using the frozen turn token.
-        # G0 records the delivery fact only: zero residual authority.
+        del args
         turn_token = getattr(event, "turn_token", None)
-        frozen = self._pending.pop(turn_token, None) if turn_token else None
+        frozen = self._pending.get(turn_token) if turn_token else None
         if frozen is None:
             return
-        scope: ScopeTokens = frozen["scope"]
-        session_key = scope.session_token
-        seq = self._turn_seq.get(session_key, 1) - 1
-        delivery = build_delivery_outcome_json(
-            scope=scope,
-            event_id=event_id(f"{session_key}#delivery-{seq}"),
-            turn_id=frozen["turn_id"],
-            base_revision=int(frozen["base_revision"]),
-            delivered=True,
-            visible_action_digest="00" * 32,
-            delivered_at_ms=int(time.time() * 1000),
-        )
         try:
-            result = await self._coordinator.apply_delivery(
-                scope=scope,
-                event_id=delivery["payload"]["event_id"],
-                turn_id=frozen["turn_id"],
-                base_revision=int(frozen["base_revision"]),
-                delivered=True,
-                visible_action_digest="00" * 32,
-                delivered_at_ms=int(time.time() * 1000),
+            scope = frozen["scope"]
+            async with self._persona_locks.setdefault(
+                self._semantic_lock_key(scope), asyncio.Lock()
+            ):
+                if self._pending.get(turn_token) is not frozen:
+                    return
+                request = {
+                    "schema_version": 1,
+                    "operation_id": frozen["delivery_operation_id"],
+                    "scope": persona_scope(scope),
+                    "turn_id": frozen["turn_id"],
+                    "inbound_operation_id": frozen["inbound_operation_id"],
+                    "delivered": kwargs.get("delivered", True) is True,
+                    "observed_at_utc_ms": int(time.time() * 1000),
+                    "visible_action_digest": getattr(
+                        event,
+                        "_ae_visible_action_digest",
+                        frozen["visible_action_digest"],
+                    ),
+                }
+                result = self._bridge.commit_core_delivery_outcome_v1(request)
+                receipt = result["receipt"]
+                if (
+                    result["commit_status"] not in {"committed", "existing"}
+                    or receipt["operation_id"] != request["operation_id"]
+                    or receipt["scope"] != request["scope"]
+                    or receipt["turn_id"] != request["turn_id"]
+                ):
+                    raise SemanticAppraisalRuntimeError("CORE_DELIVERY_RECEIPT_INVALID")
+                self._revisions[scope.persona_token] = receipt["transition"][
+                    "next_revision"
+                ]
+        except Exception as exc:
+            self._record_delivery_diagnostic(
+                event_id_value=frozen.get("delivery_operation_id"),
+                turn_id_value=turn_token,
+                base_revision=None,
+                error_code=str(getattr(exc, "code", type(exc).__name__)),
             )
-            if not isinstance(result, Mapping):
-                raise PersonaGenesisError("原生交付回执格式无效")
-            revision = result.get("revision")
-            if isinstance(revision, bool) or not isinstance(revision, int):
-                raise PersonaGenesisError("原生交付回执版本无效")
-            if revision < int(frozen["base_revision"]):
-                raise PersonaGenesisError("原生交付回执版本倒退")
-            self._revisions[scope.persona_token] = revision
-        except Exception as exc:  # noqa: BLE001 - delivery fact, log only
-            self._emit_observatory(
-                self._failed_observatory("NATIVE_ERROR", "NATIVE_APPLY")
+            logger.warning(
+                "AstrEmbodiment delivery lane failed: %s", type(exc).__name__
             )
-            logger.warning("AstrEmbodiment delivery lane failed: %s", exc)
+        finally:
+            self._clear_pending_delivery_if_same(turn_token, frozen)

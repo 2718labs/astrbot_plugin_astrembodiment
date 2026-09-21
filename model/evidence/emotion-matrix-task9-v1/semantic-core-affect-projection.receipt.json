@@ -1,0 +1,66 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task9-v1-semantic-core-affect-projection",
+  "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+  "command": "cargo test --locked --offline -p ae-semantic-core --test affect_projection --jobs 1 potential_projection_reduces_exact_fixed_regions_without_node_output -- --exact --nocapture",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-semantic-core",
+    "--test",
+    "affect_projection",
+    "--jobs",
+    "1",
+    "potential_projection_reduces_exact_fixed_regions_without_node_output",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t9-evidence-c663f1d",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 0
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task9-v1/semantic-core-affect-projection.stdout.log",
+      "sha256": "87438365d2731a8245469e83b250b772deff24a75bfe5836ebeacb73bdc259bf"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task9-v1/semantic-core-affect-projection.stderr.log",
+      "sha256": "8ec776821b9884f4f76e39919fd6fd0f243dfc2c9644da3b6f9f3953240cd254"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "crates/ae-semantic-core/src/affect_projection.rs",
+      "sha256": "879f71756a44b529fda9878f1f75355907304bb76181931ec769eeffd8909560"
+    },
+    {
+      "path": "crates/ae-semantic-core/tests/affect_projection.rs",
+      "sha256": "16195c4b7174ebbcade8b1f29167ff5449a00ee4d6467f50f39c9be4231bc251"
+    }
+  ]
+}

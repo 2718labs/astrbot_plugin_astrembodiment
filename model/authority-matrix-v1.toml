@@ -35,6 +35,13 @@ allow = []
 
 [time_advance]
 allow = []
+derived_allow = [
+  "temporal_state",
+  "sleep_state",
+  "workspace_projection",
+  "operational_intention",
+  "wake_schedule",
+]
 
 [admin_action]
 allow = [

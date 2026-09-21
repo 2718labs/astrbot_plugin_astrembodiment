@@ -1,0 +1,56 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task8-v1-workspace-check",
+  "target_commit": "49b3866eb6698b5700f53651c3fb6983d19bb405",
+  "command": "cargo check --locked --offline --workspace --jobs 1",
+  "argv": [
+    "check",
+    "--locked",
+    "--offline",
+    "--workspace",
+    "--jobs",
+    "1"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t8-evidence-49b3866",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "exit_code": 0
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task8-v1/workspace-check.stdout.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task8-v1/workspace-check.stderr.log",
+      "sha256": "99f11fb7771e1f73adce6c0bdd10e89e028db96cd9bc6fdc6b7c54644ccf42be"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "f6c840552aa97f04f535bb92f1cdd52bb36e70dfa61fda0562d56217d1954531"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5708e225a0e63e77786c2f60c41b0ef9d00cdacb86dcff8ea47b6285d34e920a"
+    }
+  ]
+}

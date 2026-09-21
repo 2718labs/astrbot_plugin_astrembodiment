@@ -1,0 +1,6 @@
+
+running 1 test
+test backup_package_requires_exact_real_regular_file_members ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 2.71s
+

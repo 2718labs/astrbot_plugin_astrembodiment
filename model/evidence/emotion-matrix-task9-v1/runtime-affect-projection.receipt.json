@@ -1,0 +1,85 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task9-v1-runtime-affect-projection",
+  "target_commit": "c663f1d7630dc2879c17cd433c45040f03445a17",
+  "command": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_projection --jobs 1 -- --nocapture",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-runtime",
+    "--test",
+    "emotion_matrix_projection",
+    "--jobs",
+    "1",
+    "--",
+    "--nocapture"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t9-evidence-c663f1d",
+    "cargo_term_color": "never",
+    "jobs": 1
+  },
+  "observed_result": {
+    "passed": 4,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 0
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task9-v1/runtime-affect-projection.stdout.log",
+      "sha256": "dd3b9048a231e9058793155b834b176c4f04a2a298f56df3201e8486c174eef5"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task9-v1/runtime-affect-projection.stderr.log",
+      "sha256": "c40bb0e1c6f11ab89500ef088d8db103f84e0e9ae616480142946ff04ea0fdb6"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "64e4cd78299209c491c7dcfc8469ef9ad3f4a149edcc1bc045a7f49582530fb8"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5708e225a0e63e77786c2f60c41b0ef9d00cdacb86dcff8ea47b6285d34e920a"
+    },
+    {
+      "path": "crates/ae-contracts/src/alpha3.rs",
+      "sha256": "7b15921084e497b57e789c10562fdce26758a959439d240fabbbe4e25e827375"
+    },
+    {
+      "path": "crates/ae-runtime/src/semantic.rs",
+      "sha256": "8ac7a6a7eb002465c5b9137640ba05122d2f3d9918a06af8c6bad7a25dd7d345"
+    },
+    {
+      "path": "crates/ae-runtime/tests/emotion_matrix_projection.rs",
+      "sha256": "ba32a67bc377e48904989dbf71403f557166e17d3872964e6ba22b437ed383bd"
+    },
+    {
+      "path": "crates/ae-store/src/alpha3/projection.rs",
+      "sha256": "03cbf145f0e1ff63c347d4b5836b2ffed6faa8c35dee88ca167475f62cb6f52b"
+    },
+    {
+      "path": "crates/ae-store/src/semantic.rs",
+      "sha256": "9dedf1184464caac966d785e45dfb45c6e27ce6f854cb7d8629746d77c4c6b65"
+    }
+  ],
+  "scope_note": "Consumer evidence for the already mapped node-observability-v2 capability; this receipt maps no new capability."
+}

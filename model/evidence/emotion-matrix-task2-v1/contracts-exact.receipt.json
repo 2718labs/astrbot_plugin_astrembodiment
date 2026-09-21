@@ -1,0 +1,64 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task2-contracts-exact",
+  "target_commit": "4bda9664b70da29ab36f222bb3ea32c79c2763c0",
+  "command": "cargo test --locked --offline -p ae-contracts --test emotion_matrix_contract all_fifteen_dimensions_have_frozen_order_and_routes -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-contracts",
+    "--test",
+    "emotion_matrix_contract",
+    "all_fifteen_dimensions_have_frozen_order_and_routes",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-target",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task2-v1/contracts-exact.stdout.log",
+      "sha256": "b1fd4b709954be9de2a078bc2f7f87fbb37af1e143d1a3f6dfaeda5bf41eddbc"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task2-v1/contracts-exact.stderr.log",
+      "sha256": "2806d967b314bf45b5de4b662139e1464405bb0b7748c48e05ac25ad60f90370"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "2d11b0e4ffdd7654c7aef301a658ecbc3622a595a17066de7ff2acec4a5989b0"
+    },
+    {
+      "path": "crates/ae-contracts/src/emotion_matrix.rs",
+      "sha256": "87f240ce7eab378b351d1852df361004e1a87d45d2896b5352e86d1fb7cd3191"
+    },
+    {
+      "path": "crates/ae-contracts/src/lib.rs",
+      "sha256": "ad7e8ae1967736d4504b7d4e9f4453b48958204e397baa8869793c1c8a72e69c"
+    },
+    {
+      "path": "crates/ae-contracts/tests/emotion_matrix_contract.rs",
+      "sha256": "02f514d885a2e8667245dde37f3b84410aa8d9b63ebf9e560de7469df238ecb4"
+    }
+  ]
+}

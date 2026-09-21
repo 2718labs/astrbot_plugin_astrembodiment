@@ -1,0 +1,3 @@
+   Compiling ae-store v1.1.0-alpha3 (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-worktree\crates\ae-store)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.22s
+     Running tests\emotion_matrix_migration_v2.rs (G:\AstrEmbodiment\.codex-task-temp\astrembodiment-headless-body-alpha3-task06-evidence-target\debug\deps\emotion_matrix_migration_v2-33b5525f3e3a32b7.exe)

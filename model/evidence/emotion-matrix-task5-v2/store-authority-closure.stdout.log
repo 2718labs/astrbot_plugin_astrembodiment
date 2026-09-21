@@ -1,0 +1,6 @@
+
+running 1 test
+test authority_constructs_finite_migration_and_closes_all_history_sets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 15.86s
+

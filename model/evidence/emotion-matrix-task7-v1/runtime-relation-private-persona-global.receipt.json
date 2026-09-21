@@ -1,0 +1,114 @@
+{
+  "schema": "ae.local-reproducible-execution-receipt.v1",
+  "evidence_class": "LOCAL_REPRODUCIBLE",
+  "authority_claim": "LOCAL_REPRODUCIBLE_EVIDENCE_ONLY",
+  "receipt_id": "emotion-matrix-task7-v1-runtime-relation-private-persona-global",
+  "target_commit": "eb09cbf4aabf1a13cfebec85024d07d045de59cf",
+  "command": "cargo test --locked --offline -p ae-runtime --test emotion_matrix_event_lane --jobs 1 relation_evidence_is_private_while_persona_mood_is_continuous -- --exact",
+  "argv": [
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "ae-runtime",
+    "--test",
+    "emotion_matrix_event_lane",
+    "--jobs",
+    "1",
+    "relation_evidence_is_private_while_persona_mood_is_continuous",
+    "--",
+    "--exact"
+  ],
+  "cwd": "G:\\AstrEmbodiment\\.codex-task-temp\\astrembodiment-headless-body-alpha3-worktree",
+  "execution": {
+    "exit_code": 0,
+    "locked": true,
+    "offline": true,
+    "cargo_target_dir": "D:\\CodexTemp\\ae-t7-evidence",
+    "cargo_term_color": "never"
+  },
+  "toolchain": {
+    "cargo": "cargo 1.97.0 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "rustc_commit_hash": "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3",
+    "host": "x86_64-pc-windows-msvc",
+    "llvm": "22.1.6"
+  },
+  "logs": {
+    "normalization": "utf8-lf",
+    "stdout": {
+      "path": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.stdout.log",
+      "sha256": "da8e34fd25c45e4588b6e8f7a554187150e268e800634187d58c50fbfb80dcc8"
+    },
+    "stderr": {
+      "path": "model/evidence/emotion-matrix-task7-v1/runtime-relation-private-persona-global.stderr.log",
+      "sha256": "ac78ac59f15c1f97cbdbdbdc6ff2067ebd8f45b370c0bb3fc28f837a171c3e38"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "Cargo.lock",
+      "sha256": "283785721f19a451c741a3515c9d540765bfaaf8510dec11de8122c94a0192c7"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "5708e225a0e63e77786c2f60c41b0ef9d00cdacb86dcff8ea47b6285d34e920a"
+    },
+    {
+      "path": "crates/ae-contracts/src/emotion_matrix.rs",
+      "sha256": "300233d62589cab536b33d153f7b97e5a419336cd14a57e153b60612b97e5708"
+    },
+    {
+      "path": "crates/ae-semantic-core/Cargo.toml",
+      "sha256": "7e88edf3ddb1e6bee50bafe3969fcc0ed393e4f2bc0c0dc274b56fd18ce78028"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/lib.rs",
+      "sha256": "57869e5e4ddfebaf1fef8d3cb7b6243eb545f0e26b61c07181e5af4f7ac39db5"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/codec.rs",
+      "sha256": "fb70cf4f10a47a3be45a3dcebcf9809220a854d604fea1c3160f606a45f5ad03"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/semantic_dynamics_v2.rs",
+      "sha256": "4f07236d1f1898c64ae532aacc2db956635d1406ae25ff215031073efe6e71e7"
+    },
+    {
+      "path": "crates/ae-semantic-core/src/semantic_telemetry_v1.rs",
+      "sha256": "2d326138833646ca2bbd7189daf253f094498f4526cb4ea27b380b3302e2e9cc"
+    },
+    {
+      "path": "crates/ae-runtime/Cargo.toml",
+      "sha256": "57993a1645ff8aebcbeb9d13d2ff2b966dd0058a90996a7713e4ed777259b838"
+    },
+    {
+      "path": "crates/ae-runtime/src/lib.rs",
+      "sha256": "a42cad572b759c45892ac4be58a6f665936d2d887c968e23708ac34635f5f697"
+    },
+    {
+      "path": "crates/ae-runtime/src/semantic.rs",
+      "sha256": "18f6375dc0dd1e1b8baaa7396b2134fd6d514250087c679a8b89f490cc814448"
+    },
+    {
+      "path": "crates/ae-store/Cargo.toml",
+      "sha256": "75f2827bf7ebc92d820796cb405e4cb96677d58629a11950e2ecf0741bba57ec"
+    },
+    {
+      "path": "crates/ae-store/src/lib.rs",
+      "sha256": "c52d956582f86a44c9e5276f5461dcea3399ff485370d9ca7eaa945473f4b724"
+    },
+    {
+      "path": "crates/ae-store/src/semantic.rs",
+      "sha256": "f1289ff79c47bbd856be439099479658d1d6096000ded64a9a7519a9d170f81b"
+    },
+    {
+      "path": "crates/ae-store/src/semantic_field_attestation.rs",
+      "sha256": "758c77032c9f9b0c044e4ab752d246ba354856e3e0086410b566c91abb3b7f5c"
+    },
+    {
+      "path": "crates/ae-runtime/tests/emotion_matrix_event_lane.rs",
+      "sha256": "f9331476e33ecc0362f7701308f4fcc2e12f8e28dd1f787f17545b6461c9d99e"
+    }
+  ]
+}

@@ -1,12 +1,12 @@
 use ae_contracts::{
-    wire, CanonicalEvent, CommitStatus, Digest, InvariantResiduals, ScopeRef, TimeAdvance,
+    wire, AdminAction, CanonicalEvent, CommitStatus, Digest, InvariantResiduals, ScopeRef,
     TransitionReceipt,
 };
 use ae_store::Store;
 use rusqlite::{params, Connection, Transaction};
 
 fn time_advance(event_id: u8, bot: u8, persona: u8) -> CanonicalEvent {
-    CanonicalEvent::TimeAdvance(TimeAdvance {
+    CanonicalEvent::AdminAction(AdminAction {
         event_id: [event_id; 16],
         scope: ScopeRef {
             bot_token: [bot; 16],
@@ -14,7 +14,8 @@ fn time_advance(event_id: u8, bot: u8, persona: u8) -> CanonicalEvent {
             relation_token: None,
             session_token: [event_id; 16],
         },
-        elapsed_ms: u64::from(event_id),
+        operation: "journal_test".into(),
+        nonce_digest: [event_id; 32],
     })
 }
 
@@ -129,7 +130,7 @@ fn write_legacy_journal_row(
     let chain_digest = ae_continuum::chain_link(chain_seed, &event_bytes, &receipt_bytes);
 
     tx.execute(
-        "INSERT INTO journal (scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1, ?2, 'time_advance', ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO journal (scope_digest, base_revision, event_kind, event_bytes, event_digest, receipt_bytes, chain_digest, committed_at_ms) VALUES (?1, ?2, 'admin_action', ?3, ?4, ?5, ?6, ?7)",
         params![
             scope_digest.to_vec(),
             base_revision as i64,

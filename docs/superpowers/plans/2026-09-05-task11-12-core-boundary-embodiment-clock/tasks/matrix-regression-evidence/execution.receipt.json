@@ -1,0 +1,67 @@
+{
+  "schema": "ae.core-matrix-regression.execution.v1",
+  "baseline_commit": "71cbd4eefd44e827111e3a194a58edbf9d246b92",
+  "cwd": "G:/AstrEmbodiment/.codex-task-temp/astrembodiment-headless-body-alpha3-worktree/",
+  "source_scope": "Production source unchanged from baseline; new runtime test only. Recorded runtime source hash is post-run rustfmt-only equivalent formatting. No release artifact claim.",
+  "environment": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "PYO3_NO_PYTHON": "1",
+    "features": "default; no legacy-semantic-test-api",
+    "jobs": 1
+  },
+  "runs": [
+    {
+      "id": "runtime",
+      "command": "cargo test --locked --offline -p ae-runtime --test core_matrix_regression -j 1 -- --test-threads=1",
+      "exit_code": 0,
+      "passed": 3,
+      "log_path": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/runtime.log",
+      "log_sha256": "1a8d4c69b8581c7457f9d4dad74b54ea1b7bbdacace8a0280bfb0e2378c7f89c"
+    },
+    {
+      "id": "numerical",
+      "command": "cargo test --locked --offline -p ae-semantic-core --test matrix_time -p ae-contracts --test emotion_matrix_contract -p ae-attention --test emotion_matrix_route -p ae-runtime --test emotion_matrix_dynamics -p ae-neurofield --test deterministic_graph_development -j 1 -- --test-threads=1",
+      "exit_code": 0,
+      "passed": 16,
+      "log_path": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/numerical.log",
+      "log_sha256": "c2b3042bc454eceac5bd336b85fe06298b09bca165225e98092ef2e9f1684550"
+    },
+    {
+      "id": "surface",
+      "command": "python -m pytest -q tests/test_core_boundary_surface.py::test_manifest_goldens_and_counts tests/test_core_boundary_surface.py::test_source_surface_is_exact_and_host_has_no_retired_callables",
+      "exit_code": 0,
+      "passed": 2,
+      "log_path": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/surface.log",
+      "log_sha256": "0a1758615458078b785c4e73b19da5a28f239bd74f4aede907686be45bf0daff"
+    },
+    {
+      "id": "workspace-check",
+      "command": "cargo check --locked --offline --workspace -j 1",
+      "exit_code": 0,
+      "passed": null,
+      "log_path": "docs/superpowers/plans/2026-09-05-task11-12-core-boundary-embodiment-clock/tasks/matrix-regression-evidence/workspace-check.log",
+      "log_sha256": "b49cb6627facc17bd7da0062e4f72ac1e02fc1cac24b6189a55a3aba930e97d6"
+    }
+  ],
+  "source_files": [
+    {
+      "path": "crates/ae-runtime/tests/core_matrix_regression.rs",
+      "sha256": "5ff0f7e63078040b4d65b0a97c8c9eda6ee2877d40a2e1fef8cac3282e9592b6"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "9dbe9ea2f68460431dbafc734bfa7b5a28dcbe46398cc61c3e2c1f314636b0cd"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "6051c9d0a62f63b76f416d04819b6c76a9f7ffb680b33c526f3a49465626b485"
+    }
+  ],
+  "historical_receipts_verified": 20,
+  "pending_artifacts": [
+    "windows-native-export",
+    "linux-native-export",
+    "universal-package-members"
+  ]
+}

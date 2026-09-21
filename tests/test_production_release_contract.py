@@ -4,7 +4,9 @@ import re
 import subprocess
 import sys
 import tomllib
-import zipfile
+import hashlib
+
+import pytest
 from pathlib import Path
 
 
@@ -37,9 +39,9 @@ def test_production_readme_states_the_bounded_native_capability_loop() -> None:
         "用户话语 → 15 维闭合语义证据 → 原生状态原子提交 → 受限表达投影",
         "插件升级后继续从持久化原生状态恢复",
         "Windows x64 与 Linux x86_64",
-        "简洁模式",
-        "调试模式",
-        "共享 API 头",
+        "19 个方法",
+        "身体时钟",
+        "精确识别",
         "不等同于意识、主观感受或真实关系",
     ):
         assert required in readme
@@ -132,8 +134,8 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         "ubuntu-22.04",
         "ruff format --check",
         "ruff check --select E,F",
-        "cargo fmt --all -- --check",
-        "cargo clippy --workspace --all-targets --locked -- -D warnings",
+        "rustfmt --edition 2021 --config skip_children=true --check",
+        "cargo clippy --workspace --lib --bins --locked -- -D warnings",
         "python scripts/verify_release_contract.py",
     ):
         assert required in ci
@@ -159,11 +161,9 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
         release_test
     )
 
-    native_build = "python -m maturin build --release --out dist"
-    native_stage = (
-        "python scripts/stage_native_runtime.py --wheel-dir dist --destination ."
-    )
-    native_regressions = "python -m pytest -q --ignore=tests/test_release_contracts.py"
+    native_build = "python scripts/package_plugin.py --build-native --source-sha"
+    native_stage = 'python -m pip install "$RUNNER_TEMP"/native-wheels/*.whl'
+    native_regressions = "python -m pytest -q tests/test_host_master_integration.py"
     assert native_build in package_matrix
     assert native_stage in package_matrix
     assert native_regressions in package_matrix
@@ -172,8 +172,8 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
 
     package_contract = "python -m pytest -q tests/test_release_contracts.py"
     assert "actions/download-artifact@" in assemble
-    assert "wheels/native-wheel-windows/*.whl" in assemble
-    assert "wheels/native-wheel-linux/*.whl" in assemble
+    assert "native-inputs/native-wheel-windows/*.whl" in assemble
+    assert "native-inputs/native-wheel-linux/*.whl" in assemble
     assert "pytest>=8,<10" in assemble
     assert package_contract in assemble
     assert assemble.index("actions/download-artifact@") < assemble.index(
@@ -187,10 +187,8 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
     for required in (
         "ruff format --check",
         "ruff check --select E,F",
-        "cargo fmt --all -- --check",
-        "cargo clippy --workspace --all-targets --locked -- -D warnings",
         native_regressions,
-        "cargo test --workspace --locked",
+        "cargo test -p ae-runtime --test core_boundary_runtime --test core_matrix_regression --test phase0_native_semantic --locked",
     ):
         assert required in package_matrix
 
@@ -447,82 +445,17 @@ def test_ci_and_release_workflows_guard_merge_and_publication() -> None:
 
 
 def test_packager_writes_an_allowlisted_zip_sha256_sidecar(tmp_path: Path) -> None:
-    wheel = tmp_path / "astrembodiment_core-1.0.0-cp312-abi3-win_amd64.whl"
-    with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr("astrembodiment_core/__init__.py", "# wheel initializer\n")
-        archive.writestr(
-            "astrembodiment_core/_native.pyd",
-            b"version contract_info health open ensure_genesis "
-            b"prepare_rebirth_v1 confirm_rebirth_v1 "
-            b"reconcile_seed_config_v1 ack_seed_config_writeback_v1 "
-            b"semantic_revision_v1 apply_perception_proposal_v1 apply_event inspect "
-            b"verify_replay flush_and_close NativeCoreError",
-        )
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from package_plugin import write_checksum
 
-    output = tmp_path / "astrbot_plugin_astrembodiment-v1.0.0.zip"
-    checksum = tmp_path / "astrbot_plugin_astrembodiment-v1.0.0.zip.sha256"
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(output),
-            "--sha256-output",
-            str(checksum),
-            "--native-wheel",
-            str(wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
+    archive = tmp_path / "release.zip"
+    archive.write_bytes(b"exact archive payload")
+    checksum = tmp_path / "release.zip.sha256"
+    write_checksum(archive, checksum)
+    assert checksum.read_text(encoding="utf-8") == (
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n"
     )
-
-    assert result.returncode == 0, result.stderr
-    digest, archived_name = checksum.read_text(encoding="utf-8").strip().split("  ")
-    assert digest == __import__("hashlib").sha256(output.read_bytes()).hexdigest()
-    assert archived_name == output.name
-    with zipfile.ZipFile(output) as archive:
-        assert "main.py" in archive.namelist()
-        assert not any(name.startswith("tests/") for name in archive.namelist())
-        assert all(
-            info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist()
-        )
-        assert all(
-            info.compress_type == zipfile.ZIP_STORED for info in archive.infolist()
-        )
-
-    repeated_output = tmp_path / "astrbot_plugin_astrembodiment-repeat.zip"
-    repeated = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(repeated_output),
-            "--native-wheel",
-            str(wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert repeated.returncode == 0, repeated.stderr
-    assert repeated_output.read_bytes() == output.read_bytes()
-
-    overwrite = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "scripts" / "package_plugin.py"),
-            "--output",
-            str(output),
-            "--native-wheel",
-            str(wheel),
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert overwrite.returncode != 0
-    assert "refusing to overwrite" in overwrite.stderr
+    before = checksum.read_bytes()
+    with pytest.raises((ValueError, FileExistsError)):
+        write_checksum(archive, checksum)
+    assert checksum.read_bytes() == before

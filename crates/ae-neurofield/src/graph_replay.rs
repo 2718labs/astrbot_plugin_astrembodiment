@@ -5,19 +5,55 @@
 //! Reopening never falls back to Genesis: any formula, revision, digest, or
 //! canonical-byte disagreement is rejected before a graph is returned.
 
+use std::fmt;
+
 use ae_contracts::Digest;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{DeserializeSeed, Error as _, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 
 use crate::{
-    apply_delta, graph_digest, DeltaError, SparseGraph, StructuralDeltaV1, Synapse, EDGE_CAPACITY,
-    NEURON_SLOTS,
+    graph_digest, structural_delta::apply_delta_with_rule_digest, DeltaError, SparseGraph,
+    StructuralDeltaV1, Synapse, EDGE_CAPACITY, NEURON_SLOTS,
 };
 
 /// The only graph replay formula supported by this implementation.
 pub const GRAPH_REPLAY_FORMULA_V1: u16 = 1;
 
+/// Maximum deltas admitted between authoritative v1 graph snapshots.
+///
+/// A writer must compact and seal a fresh snapshot before appending delta 65.
+/// Combined with crate::MAX_OPERATIONS_PER_DELTA_V1, a replay interval can
+/// describe at most 262,144 operations: one complete canonical v1 graph scale.
+pub const MAX_REPLAY_DELTAS_V1: usize = 64;
+
+/// Exact largest canonical encoding admitted for a v1 graph snapshot.
+///
+/// The layout is the row-count word, 16,385 row offsets, the edge-count
+/// word, and 524,288 canonical 16-byte synapses.
+pub const MAX_SNAPSHOT_CANONICAL_BYTES_V1: usize = 8_454_156;
+
+/// Version of the closed replay/delta admission policy layered over formula v1.
+pub const GRAPH_ADMISSION_PROFILE_VERSION_V1: u16 = 1;
+
+/// Domain separator for the closed admission-policy digest.
+pub const GRAPH_ADMISSION_DOMAIN_V1: &str = "ae.neurofield.graph-admission.v1";
+
 const V1_OPERATOR_TYPE_COUNT: u8 = 4;
 const V1_DELAY_CLASS_COUNT: u8 = 8;
+
+/// Persisted admission identity for graph replay histories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GraphAdmissionProfileV1 {
+    /// Immutable-source wire data without an admission-profile field. It may
+    /// only be consumed through explicit migration.
+    #[serde(rename = "LegacySourceV1")]
+    LegacySourceV1,
+    /// Closed profile with bounded snapshots, histories, and deltas.
+    #[serde(rename = "ClosedV1")]
+    ClosedV1,
+}
 
 /// A complete, canonical graph checkpoint.
 ///
@@ -25,26 +61,190 @@ const V1_DELAY_CLASS_COUNT: u8 = 8;
 /// persisted together. `canonical_bytes` is exactly
 /// [`SparseGraph::canonical_bytes`], rather than a serde representation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphSnapshotV1 {
     pub formula_version: u16,
     pub revision: u64,
     pub graph_digest: Digest,
+    #[serde(deserialize_with = "deserialize_canonical_bytes_v1")]
     pub canonical_bytes: Vec<u8>,
 }
 
 /// A sealed graph history suitable for persistence and later reopening.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphReplayV1 {
     pub anchor: GraphSnapshotV1,
     pub deltas: Vec<StructuralDeltaV1>,
     pub authoritative: GraphSnapshotV1,
+    pub admission_profile: GraphAdmissionProfileV1,
+    pub admission_profile_digest: Digest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphReplayWireV1 {
+    anchor: GraphSnapshotV1,
+    #[serde(deserialize_with = "deserialize_deltas_v1")]
+    deltas: Vec<StructuralDeltaV1>,
+    authoritative: GraphSnapshotV1,
+    #[serde(default)]
+    admission_profile: Option<GraphAdmissionProfileV1>,
+    #[serde(default)]
+    admission_profile_digest: Option<Digest>,
+}
+
+impl<'de> Deserialize<'de> for GraphReplayV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = GraphReplayWireV1::deserialize(deserializer)?;
+        let (admission_profile, admission_profile_digest) =
+            match (wire.admission_profile, wire.admission_profile_digest) {
+                (None, None) => (
+                    GraphAdmissionProfileV1::LegacySourceV1,
+                    legacy_graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1).map_err(|_| {
+                        D::Error::custom("legacy v1 graph formula digest is unavailable")
+                    })?,
+                ),
+                (Some(profile), Some(digest)) => (profile, digest),
+                _ => {
+                    return Err(D::Error::custom(
+                        "v1 admission profile and digest must be persisted together",
+                    ));
+                }
+            };
+        Ok(Self {
+            anchor: wire.anchor,
+            deltas: wire.deltas,
+            authoritative: wire.authoritative,
+            admission_profile,
+            admission_profile_digest,
+        })
+    }
+}
+
+fn deserialize_canonical_bytes_v1<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct CanonicalBytesVisitor;
+    struct CanonicalByteSeed {
+        admitted: bool,
+    }
+
+    impl<'de> DeserializeSeed<'de> for CanonicalByteSeed {
+        type Value = u8;
+
+        fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            if !self.admitted {
+                return Err(D::Error::custom(
+                    "v1 snapshot canonical bytes exceed admission limit",
+                ));
+            }
+            u8::deserialize(deserializer)
+        }
+    }
+
+    impl<'de> Visitor<'de> for CanonicalBytesVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_SNAPSHOT_CANONICAL_BYTES_V1} canonical v1 snapshot bytes"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let size_hint = sequence.size_hint().unwrap_or(0);
+            if size_hint > MAX_SNAPSHOT_CANONICAL_BYTES_V1 {
+                return Err(A::Error::custom(
+                    "v1 snapshot canonical bytes exceed admission limit",
+                ));
+            }
+
+            let mut bytes = Vec::with_capacity(size_hint.min(MAX_SNAPSHOT_CANONICAL_BYTES_V1));
+            loop {
+                let next_count = bytes.len().checked_add(1).ok_or_else(|| {
+                    A::Error::custom("v1 snapshot canonical bytes exceed admission limit")
+                })?;
+                match sequence.next_element_seed(CanonicalByteSeed {
+                    admitted: next_count <= MAX_SNAPSHOT_CANONICAL_BYTES_V1,
+                })? {
+                    Some(byte) if next_count <= MAX_SNAPSHOT_CANONICAL_BYTES_V1 => bytes.push(byte),
+                    Some(_) => {
+                        return Err(A::Error::custom(
+                            "v1 snapshot canonical bytes exceed admission limit",
+                        ));
+                    }
+                    None => return Ok(bytes),
+                }
+            }
+        }
+    }
+
+    deserializer.deserialize_seq(CanonicalBytesVisitor)
+}
+
+fn deserialize_deltas_v1<'de, D>(deserializer: D) -> Result<Vec<StructuralDeltaV1>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct DeltasVisitor;
+
+    impl<'de> Visitor<'de> for DeltasVisitor {
+        type Value = Vec<StructuralDeltaV1>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_REPLAY_DELTAS_V1} deltas before v1 snapshot compaction"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let size_hint = sequence.size_hint().unwrap_or(0);
+            if size_hint > MAX_REPLAY_DELTAS_V1 {
+                return Err(A::Error::custom(
+                    "v1 graph replay requires snapshot compaction",
+                ));
+            }
+
+            let mut deltas = Vec::with_capacity(size_hint.min(MAX_REPLAY_DELTAS_V1));
+            while let Some(delta) = sequence.next_element()? {
+                if deltas.len() == MAX_REPLAY_DELTAS_V1 {
+                    return Err(A::Error::custom(
+                        "v1 graph replay requires snapshot compaction",
+                    ));
+                }
+                deltas.push(delta);
+            }
+            Ok(deltas)
+        }
+    }
+
+    deserializer.deserialize_seq(DeltasVisitor)
 }
 
 /// Public, non-sensitive rejection classifications for graph replay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphReplayError {
+    TooManyDeltas,
+    SnapshotCanonicalBytesTooLarge,
     UnsupportedFormulaVersion,
     RuleDescriptorMismatch,
+    AdmissionProfileMismatch,
+    LegacyAdmissionProfileRequiresMigration,
     CanonicalEncodingMismatch,
     SnapshotDigestMismatch,
     RevisionDiscontinuity,
@@ -55,11 +255,11 @@ pub enum GraphReplayError {
     AuthoritativeSnapshotMismatch,
 }
 
-/// Returns the canonical rule descriptor that every v1 replay delta binds to.
+/// Returns the frozen source formula descriptor for v1 graph transitions.
 ///
-/// This descriptor deliberately names the versioned validation and transition
-/// rules enforced by [`GraphSnapshotV1`] and [`apply_delta`].  It is the
-/// single preimage for the persisted `StructuralDeltaV1::rule_digest`.
+/// This descriptor's digest no longer serves as the admission identity for
+/// newly sealed histories. [`graph_admission_profile_descriptor`] layers the
+/// closed resource and schema policy over these unchanged formula semantics.
 pub fn graph_replay_rule_descriptor(formula_version: u16) -> Result<String, GraphReplayError> {
     if formula_version != GRAPH_REPLAY_FORMULA_V1 {
         return Err(GraphReplayError::UnsupportedFormulaVersion);
@@ -104,12 +304,65 @@ pub fn graph_replay_rule_digest_for_descriptor(
     Ok(sha256_digest(canonical.as_bytes()))
 }
 
-/// Binds a structural delta to the authoritative graph replay rule contract.
+/// Returns the immutable-source formula digest used by historical v1 deltas.
+pub fn legacy_graph_replay_rule_digest(formula_version: u16) -> Result<Digest, GraphReplayError> {
+    graph_replay_rule_digest(formula_version)
+}
+
+/// Returns the canonical descriptor for a persisted replay admission profile.
+pub fn graph_admission_profile_descriptor(
+    profile: GraphAdmissionProfileV1,
+) -> Result<String, GraphReplayError> {
+    match profile {
+        GraphAdmissionProfileV1::LegacySourceV1 => {
+            graph_replay_rule_descriptor(GRAPH_REPLAY_FORMULA_V1)
+        }
+        GraphAdmissionProfileV1::ClosedV1 => {
+            let formula_digest = legacy_graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1)?;
+            Ok(format!(
+                concat!(
+                    "ae-neurofield-graph-admission-profile-v1;",
+                    "domain={};",
+                    "profile_version={};",
+                    "formula_version={};",
+                    "formula_rule_sha256={};",
+                    "max_snapshot_canonical_bytes={};",
+                    "max_replay_deltas={};",
+                    "max_operations_per_delta={};",
+                    "unknown_fields=deny-GraphSnapshotV1-GraphReplayV1-StructuralDeltaV1-EdgeOperationV1-Synapse;",
+                    "legacy_source_v1=explicit-migration-required"
+                ),
+                GRAPH_ADMISSION_DOMAIN_V1,
+                GRAPH_ADMISSION_PROFILE_VERSION_V1,
+                GRAPH_REPLAY_FORMULA_V1,
+                digest_hex(&formula_digest),
+                MAX_SNAPSHOT_CANONICAL_BYTES_V1,
+                MAX_REPLAY_DELTAS_V1,
+                crate::MAX_OPERATIONS_PER_DELTA_V1,
+            ))
+        }
+    }
+}
+
+/// Derives the domain-separated digest persisted by replay envelopes and
+/// every newly bound structural delta.
+pub fn graph_admission_profile_digest(
+    profile: GraphAdmissionProfileV1,
+) -> Result<Digest, GraphReplayError> {
+    Ok(sha256_digest(
+        graph_admission_profile_descriptor(profile)?.as_bytes(),
+    ))
+}
+
+/// Binds a structural delta to the current closed replay admission profile.
 pub fn bind_delta_to_graph_replay_rule(
     formula_version: u16,
     delta: &mut StructuralDeltaV1,
 ) -> Result<(), GraphReplayError> {
-    delta.rule_digest = graph_replay_rule_digest(formula_version)?;
+    if formula_version != GRAPH_REPLAY_FORMULA_V1 {
+        return Err(GraphReplayError::UnsupportedFormulaVersion);
+    }
+    delta.rule_digest = graph_admission_profile_digest(GraphAdmissionProfileV1::ClosedV1)?;
     Ok(())
 }
 
@@ -127,11 +380,15 @@ impl GraphSnapshotV1 {
             return Err(GraphReplayError::CanonicalEncodingMismatch);
         }
 
+        let canonical_bytes = graph.canonical_bytes();
+        if canonical_bytes.len() > MAX_SNAPSHOT_CANONICAL_BYTES_V1 {
+            return Err(GraphReplayError::SnapshotCanonicalBytesTooLarge);
+        }
         let snapshot = Self {
             formula_version,
             revision,
             graph_digest: graph_digest(graph),
-            canonical_bytes: graph.canonical_bytes(),
+            canonical_bytes,
         };
         let restored = snapshot.restore()?;
         if restored.canonical_bytes() != snapshot.canonical_bytes {
@@ -145,6 +402,9 @@ impl GraphSnapshotV1 {
     pub fn restore(&self) -> Result<SparseGraph, GraphReplayError> {
         if self.formula_version != GRAPH_REPLAY_FORMULA_V1 {
             return Err(GraphReplayError::UnsupportedFormulaVersion);
+        }
+        if self.canonical_bytes.len() > MAX_SNAPSHOT_CANONICAL_BYTES_V1 {
+            return Err(GraphReplayError::SnapshotCanonicalBytesTooLarge);
         }
 
         let graph = decode_canonical_graph(&self.canonical_bytes)
@@ -166,18 +426,63 @@ impl GraphReplayV1 {
         anchor: GraphSnapshotV1,
         deltas: Vec<StructuralDeltaV1>,
     ) -> Result<Self, GraphReplayError> {
-        let authoritative = replay_snapshot(&anchor, &deltas)?;
+        if deltas.len() > MAX_REPLAY_DELTAS_V1 {
+            return Err(GraphReplayError::TooManyDeltas);
+        }
+        let admission_profile = GraphAdmissionProfileV1::ClosedV1;
+        let admission_profile_digest = graph_admission_profile_digest(admission_profile)?;
+        let authoritative = replay_snapshot(&anchor, &deltas, &admission_profile_digest)?;
         Ok(Self {
             anchor,
             deltas,
             authoritative,
+            admission_profile,
+            admission_profile_digest,
         })
     }
 
     /// Reopens the authority graph only after every persisted transition and
     /// final checkpoint agree. There is intentionally no Genesis fallback.
     pub fn reopen(&self) -> Result<(u64, SparseGraph), GraphReplayError> {
-        let replayed = replay_snapshot(&self.anchor, &self.deltas)?;
+        if self.admission_profile == GraphAdmissionProfileV1::LegacySourceV1 {
+            return Err(GraphReplayError::LegacyAdmissionProfileRequiresMigration);
+        }
+        let expected = graph_admission_profile_digest(GraphAdmissionProfileV1::ClosedV1)?;
+        if self.admission_profile != GraphAdmissionProfileV1::ClosedV1
+            || self.admission_profile_digest != expected
+        {
+            return Err(GraphReplayError::AdmissionProfileMismatch);
+        }
+        self.reopen_with_rule_digest(&expected)
+    }
+
+    /// Validates an immutable-source history under its historical rule digest,
+    /// then explicitly rebinds it to the closed admission profile.
+    pub fn migrate_legacy_source_v1(mut self) -> Result<Self, GraphReplayError> {
+        if self.admission_profile != GraphAdmissionProfileV1::LegacySourceV1 {
+            return Err(GraphReplayError::AdmissionProfileMismatch);
+        }
+        let legacy = legacy_graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1)?;
+        if self.admission_profile_digest != legacy {
+            return Err(GraphReplayError::AdmissionProfileMismatch);
+        }
+        self.reopen_with_rule_digest(&legacy)?;
+
+        let closed = graph_admission_profile_digest(GraphAdmissionProfileV1::ClosedV1)?;
+        for delta in &mut self.deltas {
+            delta.rule_digest = closed;
+        }
+        self.admission_profile = GraphAdmissionProfileV1::ClosedV1;
+        self.admission_profile_digest = closed;
+        self.reopen()?;
+        Ok(self)
+    }
+
+    fn reopen_with_rule_digest(
+        &self,
+        rule_digest: &Digest,
+    ) -> Result<(u64, SparseGraph), GraphReplayError> {
+        let replayed = replay_snapshot(&self.anchor, &self.deltas, rule_digest)?;
         let authoritative = self.authoritative.restore()?;
         if replayed.formula_version != self.authoritative.formula_version
             || replayed.revision != self.authoritative.revision
@@ -194,15 +499,17 @@ impl GraphReplayV1 {
 fn replay_snapshot(
     anchor: &GraphSnapshotV1,
     deltas: &[StructuralDeltaV1],
+    rule_digest: &Digest,
 ) -> Result<GraphSnapshotV1, GraphReplayError> {
+    if deltas.len() > MAX_REPLAY_DELTAS_V1 {
+        return Err(GraphReplayError::TooManyDeltas);
+    }
     let mut graph = anchor.restore()?;
     let mut revision = anchor.revision;
     let mut digest = anchor.graph_digest;
     let mut expected_delta_sequence = 1u64;
-    let rule_digest = graph_replay_rule_digest(GRAPH_REPLAY_FORMULA_V1)?;
-
     for delta in deltas {
-        if delta.rule_digest != rule_digest {
+        if delta.rule_digest != *rule_digest {
             return Err(GraphReplayError::DeltaRejected);
         }
         if delta.base_revision != revision {
@@ -215,13 +522,15 @@ fn replay_snapshot(
             return Err(GraphReplayError::BeforeDigestMismatch);
         }
 
-        let next = apply_delta(revision, &digest, revision, &graph, delta).map_err(|error| {
-            if error == DeltaError::AfterGraphDigestMismatch {
-                GraphReplayError::AfterDigestMismatch
-            } else {
-                GraphReplayError::DeltaRejected
-            }
-        })?;
+        let next =
+            apply_delta_with_rule_digest(revision, &digest, revision, &graph, delta, rule_digest)
+                .map_err(|error| {
+                if error == DeltaError::AfterGraphDigestMismatch {
+                    GraphReplayError::AfterDigestMismatch
+                } else {
+                    GraphReplayError::DeltaRejected
+                }
+            })?;
         let next_revision = revision
             .checked_add(1)
             .ok_or(GraphReplayError::RevisionDiscontinuity)?;
@@ -286,6 +595,10 @@ fn decode_canonical_graph(bytes: &[u8]) -> Option<SparseGraph> {
 
     let graph = SparseGraph { row_offsets, edges };
     graph_is_replay_valid(&graph).then_some(graph)
+}
+
+fn digest_hex(value: &Digest) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn sha256_digest(input: &[u8]) -> Digest {
@@ -425,5 +738,93 @@ impl<'a> ByteReader<'a> {
 
     fn finished(&self) -> bool {
         self.position == self.bytes.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use serde::de::{self, DeserializeSeed, SeqAccess, Visitor};
+
+    use super::{deserialize_canonical_bytes_v1, MAX_SNAPSHOT_CANONICAL_BYTES_V1};
+
+    struct HugeDeclaredBinarySequence<'a> {
+        element_requested: &'a Cell<bool>,
+    }
+
+    struct HugeSequenceAccess<'a> {
+        element_requested: &'a Cell<bool>,
+    }
+
+    impl<'de> de::Deserializer<'de> for HugeDeclaredBinarySequence<'_> {
+        type Error = de::value::Error;
+
+        fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            Err(<Self::Error as de::Error>::custom(
+                "expected bounded sequence decoding",
+            ))
+        }
+
+        fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            visitor.visit_seq(HugeSequenceAccess {
+                element_requested: self.element_requested,
+            })
+        }
+
+        fn deserialize_byte_buf<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            panic!("byte-buffer decoding can allocate before the v1 admission bound is checked")
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes option unit unit_struct newtype_struct tuple tuple_struct map struct enum
+            identifier ignored_any
+        }
+    }
+
+    impl<'de> SeqAccess<'de> for HugeSequenceAccess<'_> {
+        type Error = de::value::Error;
+
+        fn next_element_seed<T>(&mut self, _seed: T) -> Result<Option<T::Value>, Self::Error>
+        where
+            T: DeserializeSeed<'de>,
+        {
+            self.element_requested.set(true);
+            Err(<Self::Error as de::Error>::custom(
+                "an element was requested before rejecting the declared length",
+            ))
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            Some(MAX_SNAPSHOT_CANONICAL_BYTES_V1 + 1)
+        }
+    }
+
+    #[test]
+    fn oversized_binary_length_hint_rejects_before_requesting_elements() {
+        let element_requested = Cell::new(false);
+        let error = deserialize_canonical_bytes_v1(HugeDeclaredBinarySequence {
+            element_requested: &element_requested,
+        })
+        .expect_err("an oversized declared sequence must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "v1 snapshot canonical bytes exceed admission limit"
+        );
+        assert!(
+            !element_requested.get(),
+            "the bounded visitor must reject the size hint before requesting bytes"
+        );
     }
 }

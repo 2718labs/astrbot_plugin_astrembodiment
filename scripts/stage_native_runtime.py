@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage one fresh native wheel in the runtime loader's bundled layout."""
+"""Retired staging entrypoint: require real-host wheel verification and installation."""
 
 from __future__ import annotations
 
@@ -9,11 +9,15 @@ import json
 import sys
 from pathlib import Path, PurePosixPath
 
-from package_plugin import (
-    NATIVE_MANIFEST,
-    NATIVE_MANIFEST_SCHEMA,
-    NATIVE_PACKAGE,
-    native_package_entries,
+NATIVE_PACKAGE = "astrembodiment_core"
+NATIVE_MANIFEST = f"{NATIVE_PACKAGE}/_bundled/manifest.json"
+NATIVE_MANIFEST_SCHEMA = "astrembodiment-native-bundle-v1"
+STAGING_RETIRED = (
+    "STAGING_RETIRED: single-wheel staging cannot establish universal release identity. "
+    "On the matching platform, use python scripts/package_plugin.py --verify-wheel "
+    "<exact-wheel.whl> --output <new-import-receipt.json>, then python -m pip install "
+    "--no-deps --force-reinstall <exact-wheel.whl> in an isolated environment. "
+    "Universal packaging requires both platforms' verified wheels and import receipts."
 )
 
 
@@ -111,10 +115,8 @@ def _verify_staged_runtime(destination: Path) -> Path:
 
 
 def stage_native_runtime(wheel_dir: Path, destination: Path) -> Path:
-    """Validate one wheel and write the package entries consumed by the loader."""
-    wheel_path = _single_wheel(wheel_dir)
-    _stage_entries(destination, native_package_entries([wheel_path]))
-    return _verify_staged_runtime(destination)
+    """Fail before reading or writing paths; the old staging contract is retired."""
+    raise ValueError(STAGING_RETIRED)
 
 
 def main() -> None:
